@@ -48,6 +48,7 @@
         "(Param (LowerFieldName) @variable.parameter)",
         "(BlockLetDecl (LowerIdent) @variable)",
         "(BlockLetDecl (LowerFieldName) @variable)",
+        "(BlockProofConstDecl (PascalIdent) @type)",
         "(BlockLetTail (LowerIdent) @variable)",
         "(TopLetDecl (LowerIdent) @variable)",
         "(TopLetDecl (LowerFieldName) @variable)",
