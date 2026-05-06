@@ -1,0 +1,23 @@
+module prelude.core;
+
+// Core contracts are ordinary Shovel type functions. They are intentionally
+// small so fragments can be concatenated or imported without compiler magic.
+
+type fn eq(T: type) {
+  let Expected = fn(a: T, b: T) -> bool;
+  @require(@type_has_member(T, #eql), "Eq requires eql");
+  @require(@type_member_type(T, #eql) == Expected, "Eq.eql has wrong type");
+}
+
+type fn copyable(T: type) -> type {
+  T
+}
+
+type fn droppable(T: type) -> type {
+  T
+}
+
+type fn scalar_i32() {
+  let ScalarI32 = [value: i32];
+  struct(ScalarI32)
+}

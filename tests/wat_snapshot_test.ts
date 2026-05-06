@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assert, assertEquals } from "jsr:@std/assert@1";
 import { watFromSource } from "../src/mod.ts";
 
 Deno.test("golden WAT for arithmetic main", async () => {
@@ -134,4 +134,25 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
   )
 )`,
   );
+});
+
+Deno.test("WAT specializes perf array const dictionary dispatch", async () => {
+  const wat = await watFromSource(`
+    type fn scalar_box() { let ScalarBox = [value: i32]; struct(ScalarBox) }
+    type fn map4(T: type) { let Map4 = [apply: fn(x: T) -> T]; struct(Map4) }
+    fn add1_box(x: scalar_box) -> scalar_box { [value: x.value + 1] }
+    const scalar_map4: map4(scalar_box) = [apply: add1_box];
+    fn apply_tile(const ops: map4(scalar_box), x: scalar_box) -> scalar_box {
+      ops.apply(ops.apply(ops.apply(ops.apply(x))))
+    }
+    pub fn main() -> scalar_box { apply_tile(scalar_map4, [value: 1]) }
+  `);
+
+  assert(wat.includes("(func $apply_tile__scalar_map4 (param $x i32) (result i32)"));
+  assertEquals(wat.match(/call \$add1_box/g)?.length, 4);
+  assert(!wat.includes("(func $apply_tile "));
+
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(main.includes("call $apply_tile__scalar_map4"));
+  assert(!main.includes("call $apply_tile\n"));
 });

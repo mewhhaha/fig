@@ -23,7 +23,6 @@
         { "node": "TypeParamsDecl", "capture": "type.parameter" },
         { "node": "TypeShapeRepeat", "capture": "number" },
         { "node": "CountRepeat", "capture": "number" },
-        { "node": "LowerIdentRepeat", "capture": "number" },
         { "node": "PascalIdentRepeat", "capture": "number" },
         { "node": "TypeRepeatPrefix", "capture": "number" },
         { "node": "String", "capture": "string" },
@@ -61,6 +60,7 @@
       "defaults": {
         "suppress": [
           { "node": "LowerIdent" },
+          { "node": "LowerIdentRepeat" },
           { "node": "PascalIdent" },
           { "node": "LowerFieldName" }
         ]

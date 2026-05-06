@@ -20,3 +20,20 @@ Type functions currently cover several compile-time concepts:
 
 See `examples/type_fn_memory.shovel` for a checked memory-management sketch that ties these pieces
 together without adding runtime proof parameters.
+
+## Performance Layout Sketches
+
+The `examples/perf_*.shovel` files are checked catalog modules for comparing static performance
+layout styles under the current language surface:
+
+- `examples/perf_arrays.shovel` is the canonical static-kernel sketch. It uses counted inline
+  layouts, fixed lane/tile aliases, and const dictionary specialization to show source-level static
+  dispatch.
+- `examples/perf_array_dsl.shovel` is a Futhark/Dex-inspired array API shape. It keeps regular
+  lane, tile, and tensor helpers explicit while making map-style code easier to read.
+- `examples/perf_schedule_dsl.shovel` is a Halide-inspired schedule vocabulary. It records tile,
+  vectorize, and unroll intent as static contracts and metadata.
+
+These examples do not add compiler prelude imports, source-module imports, memory-backed arrays, or
+real WebAssembly SIMD emission. Today they are standalone checked modules users can copy from until
+Shovel has module imports and prelude support.

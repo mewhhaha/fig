@@ -14,7 +14,9 @@ skip Comment = /\/\/[^\n]*/ ;
 
 Program = ModuleDecl? ImportDecl* Decl* ;
 ModuleDecl = "module" Path ";" ;
-ImportDecl = "import" "capability" ImportName Type EffectRow? ";" ;
+ImportDecl = "import" (CapabilityImportTail | SourceImportTail) ;
+CapabilityImportTail = "capability" ImportName Type EffectRow? ";" ;
+SourceImportTail = "module" Path ";" ;
 Decl = TypeFnDecl | ConstDecl | FnDecl | TopLetDecl ;
 TypeFnDecl = "type" "fn" LowerIdent "(" TypeParamsDecl? ")" ReturnSig? TypeBlock ;
 TypeBlock = "{" TypeBlockItem* "}" ;

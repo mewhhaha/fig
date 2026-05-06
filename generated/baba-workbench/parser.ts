@@ -9,7 +9,7 @@ export interface LiteralParseNode { kind: "literal"; value: string; text: string
 export interface ParseDiagnostic { message: string; span?: { start: number; end: number }; token?: Token; }
 export interface ParseResult { ok: boolean; tree: RuleParseNode | null; ast: AstNode | null; diagnostics: ParseDiagnostic[]; tokens: Token[]; }
 
-export type AstNode = ProgramAstNode | ModuleDeclAstNode | ImportDeclAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | MatchExprAstNode | ArmAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | RangeAstNode | ShapeInitAstNode | ShapeValueSlotAstNode | PatternAstNode | PatternIdentAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeSlotAstNode | ShapeSlotBodyAstNode | TypeShapeAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | ImportNameAstNode | ParamNameAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | PathAstNode | OpAstNode | TypeOpAstNode;
+export type AstNode = ProgramAstNode | ModuleDeclAstNode | ImportDeclAstNode | CapabilityImportTailAstNode | SourceImportTailAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | MatchExprAstNode | ArmAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | RangeAstNode | ShapeInitAstNode | ShapeValueSlotAstNode | PatternAstNode | PatternIdentAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeSlotAstNode | ShapeSlotBodyAstNode | TypeShapeAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | ImportNameAstNode | ParamNameAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | PathAstNode | OpAstNode | TypeOpAstNode;
 
 export interface ProgramAstNode {
   kind: "Program";
@@ -28,6 +28,20 @@ export interface ModuleDeclAstNode {
 export interface ImportDeclAstNode {
   kind: "ImportDecl";
   type: "ImportDecl";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CapabilityImportTailAstNode {
+  kind: "CapabilityImportTail";
+  type: "CapabilityImportTail";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface SourceImportTailAstNode {
+  kind: "SourceImportTail";
+  type: "SourceImportTail";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -577,7 +591,9 @@ type Expression =
 const rules: Record<string, Expression> = {
   "Program": { kind: "sequence", items: [{ kind: "optional", expression: { kind: "ref", name: "ModuleDecl" } }, { kind: "repeat", expression: { kind: "ref", name: "ImportDecl" } }, { kind: "repeat", expression: { kind: "ref", name: "Decl" } }] },
   "ModuleDecl": { kind: "sequence", items: [{ kind: "literal", value: "module" }, { kind: "ref", name: "Path" }, { kind: "literal", value: ";" }] },
-  "ImportDecl": { kind: "sequence", items: [{ kind: "literal", value: "import" }, { kind: "literal", value: "capability" }, { kind: "ref", name: "ImportName" }, { kind: "ref", name: "Type" }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }, { kind: "literal", value: ";" }] },
+  "ImportDecl": { kind: "sequence", items: [{ kind: "literal", value: "import" }, { kind: "choice", options: [{ kind: "ref", name: "CapabilityImportTail" }, { kind: "ref", name: "SourceImportTail" }] }] },
+  "CapabilityImportTail": { kind: "sequence", items: [{ kind: "literal", value: "capability" }, { kind: "ref", name: "ImportName" }, { kind: "ref", name: "Type" }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }, { kind: "literal", value: ";" }] },
+  "SourceImportTail": { kind: "sequence", items: [{ kind: "literal", value: "module" }, { kind: "ref", name: "Path" }, { kind: "literal", value: ";" }] },
   "Decl": { kind: "choice", options: [{ kind: "ref", name: "TypeFnDecl" }, { kind: "ref", name: "ConstDecl" }, { kind: "ref", name: "FnDecl" }, { kind: "ref", name: "TopLetDecl" }] },
   "TypeFnDecl": { kind: "sequence", items: [{ kind: "literal", value: "type" }, { kind: "literal", value: "fn" }, { kind: "ref", name: "LowerIdent" }, { kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "TypeParamsDecl" } }, { kind: "literal", value: ")" }, { kind: "optional", expression: { kind: "ref", name: "ReturnSig" } }, { kind: "ref", name: "TypeBlock" }] },
   "TypeBlock": { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "repeat", expression: { kind: "ref", name: "TypeBlockItem" } }, { kind: "literal", value: "}" }] },
@@ -699,6 +715,20 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "ImportDecl",
         type: "ImportDecl",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CapabilityImportTail":
+      return {
+        kind: "CapabilityImportTail",
+        type: "CapabilityImportTail",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "SourceImportTail":
+      return {
+        kind: "SourceImportTail",
+        type: "SourceImportTail",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };

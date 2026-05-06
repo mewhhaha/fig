@@ -1,0 +1,27 @@
+module prelude.layout;
+
+import module prelude.core;
+
+// Static inline layouts. These are value layouts today, not memory-backed arrays.
+
+type fn inline_array(N: count, A: type) {
+  let InlineArray = [N*A];
+  struct(InlineArray)
+}
+
+type fn lane4_i32() -> type {
+  inline_array(4, i32)
+}
+
+type fn lane4_scalar_i32() -> type {
+  inline_array(4, scalar_i32)
+}
+
+type fn tile2x4_i32() -> type {
+  inline_array(2, lane4_i32)
+}
+
+type fn view_i32_8x2() {
+  let ViewI32x8x2 = [base: inline_array(8, i32), len: i32, stride: i32];
+  struct(ViewI32x8x2)
+}

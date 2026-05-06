@@ -1,0 +1,18 @@
+module demo.prelude_array_static;
+
+import module prelude.array_static;
+
+fn inc(x: i32) -> i32 {
+  x + 1
+}
+
+fn add(a: i32, b: i32) -> i32 {
+  a + b
+}
+
+pub fn main() -> i32 {
+  let xs: lane4_i32 = [1, 2, 3, 4];
+  let ys = map4_i32(inc, xs);
+  let zs = zip_with4_i32(add, [1, 2, 3, 4], ys);
+  fold4_i32(add, 0, zs)
+}

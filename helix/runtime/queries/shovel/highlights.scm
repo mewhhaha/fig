@@ -37,7 +37,6 @@
 (TypeParamsDecl) @type.parameter
 (TypeShapeRepeat) @number
 (CountRepeat) @number
-(LowerIdentRepeat) @number
 (PascalIdentRepeat) @number
 (TypeRepeatPrefix) @number
 (String) @string

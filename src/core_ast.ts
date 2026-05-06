@@ -1,6 +1,7 @@
 export interface Program {
   moduleName?: string;
   imports: CapabilityImport[];
+  sourceImports?: SourceImport[];
   declarations: Declaration[];
 }
 
@@ -11,6 +12,11 @@ export interface CapabilityImport {
   name: string;
   type: string;
   effects: string[];
+}
+
+export interface SourceImport {
+  kind: "source_import";
+  module: string;
 }
 
 export interface FnDecl {

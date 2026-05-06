@@ -1,0 +1,30 @@
+module prelude.schedule;
+
+// Static schedule metadata. No backend lowering consumes these contracts yet.
+
+type fn tile(M: count, N: count) {
+  let Tile = [rows: i32, cols: i32];
+  struct(Tile)
+}
+
+type fn vectorize(Lanes: count) {
+  let Vectorize = [lanes: i32];
+  struct(Vectorize)
+}
+
+type fn unroll(Factor: count) {
+  let Unroll = [factor: i32];
+  struct(Unroll)
+}
+
+type fn tile2x4() -> type {
+  tile(2, 4)
+}
+
+type fn vectorize4() -> type {
+  vectorize(4)
+}
+
+type fn unroll4() -> type {
+  unroll(4)
+}

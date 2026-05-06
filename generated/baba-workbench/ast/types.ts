@@ -6,7 +6,7 @@ export interface SyntaxNodeLike {
   childForFieldName?(name: string): SyntaxNodeLike | null;
 }
 
-export type AstNode = ProgramAstNode | ModuleDeclAstNode | ImportDeclAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | MatchExprAstNode | ArmAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | RangeAstNode | ShapeInitAstNode | ShapeValueSlotAstNode | PatternAstNode | PatternIdentAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeSlotAstNode | ShapeSlotBodyAstNode | TypeShapeAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | ImportNameAstNode | ParamNameAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | PathAstNode | OpAstNode | TypeOpAstNode;
+export type AstNode = ProgramAstNode | ModuleDeclAstNode | ImportDeclAstNode | CapabilityImportTailAstNode | SourceImportTailAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | MatchExprAstNode | ArmAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | RangeAstNode | ShapeInitAstNode | ShapeValueSlotAstNode | PatternAstNode | PatternIdentAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeSlotAstNode | ShapeSlotBodyAstNode | TypeShapeAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | ImportNameAstNode | ParamNameAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | PathAstNode | OpAstNode | TypeOpAstNode;
 
 export interface ProgramAstNode {
   kind: "Program";
@@ -25,6 +25,20 @@ export interface ModuleDeclAstNode {
 export interface ImportDeclAstNode {
   kind: "ImportDecl";
   type: "ImportDecl";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CapabilityImportTailAstNode {
+  kind: "CapabilityImportTail";
+  type: "CapabilityImportTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface SourceImportTailAstNode {
+  kind: "SourceImportTail";
+  type: "SourceImportTail";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }

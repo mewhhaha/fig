@@ -11,6 +11,7 @@ import type {
   Program,
   ProofConstDecl,
   ShapeType,
+  SourceImport,
   TypeBlock,
   TypeCountExpr,
   TypeDecl,
@@ -40,16 +41,28 @@ export function lowerProgram(root: Node): Program {
   declarations.push(...lowerInlineTypeMemberFns(declarations));
   return {
     moduleName: moduleDecl ? pathText(only(moduleDecl, "Path")) : undefined,
-    imports: children.filter(is("ImportDecl")).map(lowerImport),
+    imports: children.filter(is("ImportDecl")).map(lowerImport).filter((
+      item,
+    ): item is CapabilityImport => item.kind === "import"),
+    sourceImports: children.filter(is("ImportDecl")).map(lowerImport).filter((
+      item,
+    ): item is SourceImport => item.kind === "source_import"),
     declarations,
   };
 }
 
-function lowerImport(node: Node): CapabilityImport {
-  const importName = only(node, "ImportName");
-  const type = only(node, "Type").text;
-  const effects = optional(node, "EffectRow")
-    ? named(only(node, "EffectRow")).filter(isIdentifier).map((id) => id.text)
+function lowerImport(node: Node): CapabilityImport | SourceImport {
+  const decl =
+    named(node).find((child) =>
+      child.type === "CapabilityImportTail" || child.type === "SourceImportTail"
+    ) ?? node;
+  if (decl.type === "SourceImportTail") {
+    return { kind: "source_import", module: pathText(only(decl, "Path")) };
+  }
+  const importName = only(decl, "ImportName");
+  const type = only(decl, "Type").text;
+  const effects = optional(decl, "EffectRow")
+    ? named(only(decl, "EffectRow")).filter(isIdentifier).map((id) => id.text)
     : [];
   return { kind: "import", name: bindingName(named(importName)[0]), type, effects };
 }

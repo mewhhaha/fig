@@ -1,0 +1,37 @@
+module demo.prelude_functional;
+
+import module prelude.function;
+
+type fn box(A: type) -> type {
+  let Box = [value: A];
+  struct(Box)
+}
+
+fn box.map(v: box(A), const f: fn(x: A) -> B) -> box(B) {
+  Box [value: f(v.value)]
+}
+
+fn box.bind(v: box(A), const f: fn(x: A) -> box(B)) -> box(B) {
+  f(v.value)
+}
+
+fn inc(x: i32) -> i32 {
+  x + 1
+}
+
+fn wrap(x: i32) -> box(i32) {
+  Box [value: x + 10]
+}
+
+fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
+  T.map(v, f)
+}
+
+fn binder(v: T(A), const f: fn(x: A) -> T(B), const _proof: monad(T)) -> T(B) {
+  T.bind(v, f)
+}
+
+pub fn main() -> i32 {
+  let mapped = mapper(Box [value: 1], inc, functor(box));
+  binder(mapped, wrap, monad(box)).value
+}

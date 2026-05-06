@@ -1,0 +1,63 @@
+module demo.perf_schedule_dsl;
+
+// Halide-inspired static schedule vocabulary. These contracts document intent
+// while the current backend still emits ordinary scalar code.
+
+type fn inline_array(N: count, A: type) -> type {
+  let InlineArray = [N*A];
+  struct(InlineArray)
+}
+
+type fn lane4_i32() -> type {
+  inline_array(4, i32)
+}
+
+type fn tile2x4_i32() -> type {
+  inline_array(2, lane4_i32)
+}
+
+type fn tile_schedule(Tile: type) -> type {
+  @require(@type_is_product(Tile), "tile schedule expects an inline product layout");
+  let TileSchedule = [tile_rows: i32, tile_cols: i32];
+  struct(TileSchedule)
+}
+
+type fn vector_schedule(Lane: type) -> type {
+  @require(@type_is_product(Lane), "vector schedule expects an inline lane layout");
+  let VectorSchedule = [lanes: i32];
+  struct(VectorSchedule)
+}
+
+type fn unroll_schedule(Body: type) -> type {
+  @require(@type_is_product(Body), "unroll schedule expects a concrete body layout");
+  let UnrollSchedule = [factor: i32];
+  struct(UnrollSchedule)
+}
+
+type fn scheduled_tile(Tile: type) -> type {
+  let ScheduledTile = [
+    data: Tile,
+    tile: tile_schedule(Tile),
+    vector: vector_schedule(lane4_i32),
+    unroll: unroll_schedule(Tile)
+  ];
+  struct(ScheduledTile)
+}
+
+fn make_schedule(data: tile2x4_i32) -> scheduled_tile(tile2x4_i32) {
+  [
+    data: data,
+    tile: [tile_rows: 2, tile_cols: 4],
+    vector: [lanes: 4],
+    unroll: [factor: 2]
+  ]
+}
+
+fn consume_schedule(plan: scheduled_tile(tile2x4_i32)) -> i32 {
+  plan.data[0][0] + plan.data[1][3] + plan.tile.tile_rows + plan.tile.tile_cols + plan.vector.lanes + plan.unroll.factor
+}
+
+pub fn main() -> i32 {
+  let data: tile2x4_i32 = [[1, 2, 3, 4], [5, 6, 7, 8]];
+  consume_schedule(make_schedule(data))
+}

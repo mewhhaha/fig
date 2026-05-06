@@ -1,0 +1,26 @@
+module prelude.function;
+
+type fn functor(T: type fn(A: type) -> type) -> type {
+  let Expected = fn(v: T(A), const f: fn(x: A) -> B) -> T(B);
+  @require(@type_has_member(T, #map), "Functor requires map");
+  @require(@type_member_type(T, #map) == Expected, "Functor.map has wrong type");
+  T
+}
+
+type fn applicative(T: type fn(A: type) -> type) -> type {
+  let Pure = fn(value: A) -> T(A);
+  let Apply = fn(v: T(fn(x: A) -> B), x: T(A)) -> T(B);
+  @require(@type_has_member(T, #pure), "Applicative requires pure");
+  @require(@type_has_member(T, #apply), "Applicative requires apply");
+  @require(@type_member_type(T, #pure) == Pure, "Applicative.pure has wrong type");
+  @require(@type_member_type(T, #apply) == Apply, "Applicative.apply has wrong type");
+  T
+}
+
+type fn monad(T: type fn(A: type) -> type) -> type {
+  let Bind = fn(v: T(A), const f: fn(x: A) -> T(B)) -> T(B);
+  @require(functor(T), "Monad requires functor");
+  @require(@type_has_member(T, #bind), "Monad requires bind");
+  @require(@type_member_type(T, #bind) == Bind, "Monad.bind has wrong type");
+  T
+}
