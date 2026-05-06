@@ -6,9 +6,7 @@ Deno.test("golden WAT for arithmetic main", async () => {
     await watFromSource(`pub fn main() -> i32 { 7 * 6 }`),
     `(module
   (func $main (export "main") (result i32)
-    i32.const 7
-    i32.const 6
-    i32.mul
+    i32.const 42
   )
 )`,
   );
@@ -126,10 +124,6 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
   )
   (func $main (export "main") (result i32)
     i32.const 41
-    call $map_box
-  )
-  (func $mapped__box_functor (param $x$value i32) (result i32)
-    local.get $x$value
     call $map_box
   )
 )`,

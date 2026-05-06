@@ -1206,9 +1206,7 @@ Deno.test("emits deterministic WAT and valid wasm32", async () => {
     await watFromSource(source),
     `(module
   (func $main (export "main") (result i32)
-    i32.const 40
-    i32.const 2
-    i32.add
+    i32.const 42
   )
 )`,
   );

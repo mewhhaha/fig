@@ -20,6 +20,11 @@ try {
   } else if (cmd === "run") {
     const wasm = await wasmFromSource(source, options);
     const module = new WebAssembly.Module(wasm);
+    const imports = WebAssembly.Module.imports(module);
+    if (imports.length) {
+      const names = imports.map((item) => `${item.module}.${item.name}`).join(", ");
+      throw new Error(`host imports required: ${names}`);
+    }
     const instance = new WebAssembly.Instance(module);
     const main = instance.exports.main;
     if (typeof main !== "function") throw new Error("missing exported main");
