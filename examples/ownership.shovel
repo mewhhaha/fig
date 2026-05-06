@@ -1,0 +1,12 @@
+module demo.ownership;
+
+fn sink(x: i32) -> i32 {
+  x
+}
+
+pub fn main() -> i32 {
+  let x = 10;
+  let forked, y = fork(x);
+  let sunk = sink(y);
+  forked + sunk
+}

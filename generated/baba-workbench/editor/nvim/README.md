@@ -1,0 +1,3 @@
+# Neovim scaffold for shovel
+
+Copy the generated `queries/` directory into your Neovim tree-sitter runtime path for this language.

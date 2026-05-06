@@ -1,0 +1,5 @@
+module demo.hello;
+
+pub fn main() -> i32 {
+  42
+}

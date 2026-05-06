@@ -1,0 +1,22 @@
+{
+  "name": "shovel-language",
+  "displayName": "shovel language",
+  "version": "0.0.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "shovel",
+        "aliases": [
+          "shovel"
+        ],
+        "extensions": [
+          ".shovel"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  }
+}

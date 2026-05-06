@@ -1,0 +1,10 @@
+[[language]]
+name = "shovel"
+scope = "source.shovel"
+file-types = ["shovel"]
+roots = []
+comment-token = "//"
+
+[[grammar]]
+name = "shovel"
+source = { path = "../.." }

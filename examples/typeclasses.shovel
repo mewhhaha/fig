@@ -1,0 +1,56 @@
+module demo.typeclasses;
+
+fn eql_point(a: point, b: point) -> bool {
+  a.x == b.x
+}
+
+fn neq_point(a: point, b: point) -> bool {
+  a.x != b.x
+}
+
+type fn point() {
+  let Point = [x: i32, y: i32];
+  struct(Point)
+}
+
+type fn eq(T: type) {
+  let Expected = fn(a: T, b: T) -> bool;
+  @require(@type_has_member(T, #eql), "Eq requires eql");
+  @require(@type_member_type(T, #eql) == Expected, "Eq.eql has wrong type");
+}
+
+type fn box(A: type) -> type {
+  let Box = [value: A];
+  struct(Box)
+}
+
+fn box.map(v: box(A), const f: fn(x: A) -> B) -> box(B) {
+  Box [value: f(v.value)]
+}
+
+type fn functor(T: type fn(A: type) -> type) -> type {
+  let Expected = fn(v: T(A), const f: fn(x: A) -> B) -> T(B);
+  @require(@type_has_member(T, #map), "Functor requires map");
+  @require(@type_member_type(T, #map) == Expected, "Functor.map has wrong type");
+  T
+}
+
+fn inc(x: i32) -> i32 {
+  x + 1
+}
+
+fn same(const T, const _proof: eq(T), a: T, b: T) -> i32 {
+  match T.eql(A, B) {
+    true => 1,
+    false => 0,
+  }
+}
+
+fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
+  T.map(v, f)
+}
+
+pub fn main() -> i32 {
+  let mapped = mapper(Box [value: 1], inc, functor(box));
+  same(point, eq(point), Point [x: 1, y: 2], Point [x: 1, y: 2]) + mapped.value
+}

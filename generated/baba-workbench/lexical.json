@@ -1,0 +1,104 @@
+{
+  "keywords": [
+    "_",
+    "capability",
+    "const",
+    "count",
+    "false",
+    "fn",
+    "fork",
+    "import",
+    "let",
+    "match",
+    "module",
+    "pub",
+    "true",
+    "type",
+    "zip"
+  ],
+  "symbols": [
+    "->",
+    "!=",
+    "..",
+    "{}",
+    "<=",
+    "==",
+    "=>",
+    ">=",
+    "-",
+    ",",
+    ";",
+    ":",
+    "!",
+    ".",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    "@",
+    "*",
+    "/",
+    "+",
+    "<",
+    "=",
+    ">"
+  ],
+  "tokens": [
+    {
+      "name": "CountRepeat",
+      "pattern": "[0-9]+\\*"
+    },
+    {
+      "name": "Number",
+      "pattern": "[0-9]+(\\.[0-9]+)?(i32|u32|i64|u64|f32|f64)?"
+    },
+    {
+      "name": "Char",
+      "pattern": "'([^'\\\\]|\\\\.)'"
+    },
+    {
+      "name": "String",
+      "pattern": "\"([^\"\\\\]|\\\\.)*\""
+    },
+    {
+      "name": "LiteralType",
+      "pattern": "#([a-z_][a-z0-9_]*|[A-Z][A-Za-z0-9]*)"
+    },
+    {
+      "name": "LowerFieldName",
+      "pattern": "[a-z_][a-z0-9_]*\\s*:"
+    },
+    {
+      "name": "LowerIdentRepeat",
+      "pattern": "[a-z_][a-z0-9_]*\\*"
+    },
+    {
+      "name": "PascalIdentRepeat",
+      "pattern": "[A-Z][A-Za-z0-9]*\\*"
+    },
+    {
+      "name": "TypeRepeatPrefix",
+      "pattern": "([A-Z][A-Za-z0-9]*|[0-9]+)\\*(\\s*[0-9]+\\*)*"
+    },
+    {
+      "name": "LowerIdent",
+      "pattern": "[a-z_][a-z0-9_]*"
+    },
+    {
+      "name": "PascalIdent",
+      "pattern": "[A-Z][A-Za-z0-9]*"
+    }
+  ],
+  "skips": [
+    {
+      "name": "Whitespace",
+      "pattern": "[ \\t\\r\\n]+"
+    },
+    {
+      "name": "Comment",
+      "pattern": "\\/\\/[^\\n]*"
+    }
+  ]
+}

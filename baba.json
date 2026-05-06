@@ -1,0 +1,95 @@
+{
+  "language": {
+    "scope": "source.shovel",
+    "fileTypes": ["shovel"],
+    "comment": "//"
+  },
+  "word": "LowerIdent",
+  "supertypes": ["Decl", "Expr", "Literal"],
+  "conflicts": [["Primary"]],
+  "queries": {
+    "highlights": {
+      "entries": [
+        { "literal": "module", "capture": "keyword" },
+        { "literal": "import", "capture": "keyword.control.import" },
+        { "literal": "capability", "capture": "keyword" },
+        { "literal": "type", "capture": "keyword.type" },
+        { "literal": "const", "capture": "keyword" },
+        { "literal": "fn", "capture": "keyword.function" },
+        { "literal": "let", "capture": "keyword" },
+        { "literal": "fork", "capture": "function.builtin" },
+        { "literal": "match", "capture": "keyword.control" },
+        { "node": "Visibility", "capture": "keyword" },
+        { "node": "TypeParamsDecl", "capture": "type.parameter" },
+        { "node": "TypeShapeRepeat", "capture": "number" },
+        { "node": "CountRepeat", "capture": "number" },
+        { "node": "LowerIdentRepeat", "capture": "number" },
+        { "node": "PascalIdentRepeat", "capture": "number" },
+        { "node": "TypeRepeatPrefix", "capture": "number" },
+        { "node": "String", "capture": "string" },
+        { "node": "Number", "capture": "number" },
+        { "node": "Bool", "capture": "constant.builtin" }
+      ],
+      "patterns": [
+        "(FnDecl (FnName (LowerIdent) @function))",
+        "(Primary (LowerIdent) @variable)",
+        "(Call (Primary (LowerIdent) @function.call) \"(\")",
+        "(Call (Primary (ForkBuiltin) @function.builtin) \"(\")",
+        "(Type (LowerIdent) @type)",
+        "(Type (PascalIdent) @type.parameter)",
+        "(TypePrimary (LowerIdent) @type)",
+        "(TypePrimary (PascalIdent) @type.parameter)",
+        "(TypeFnDecl (LowerIdent) @type.definition)",
+        "(TypeLetDecl (PascalIdent) @type)",
+        "(ConstDecl (LowerIdent) @variable)",
+        "(ConstDecl (LowerFieldName) @variable)",
+        "(Param (PatternIdent (LowerIdent) @variable.parameter))",
+        "(Param (PatternIdent (PascalIdent) @constructor))",
+        "(Param (LowerFieldName) @variable.parameter)",
+        "(BlockLetDecl (LowerIdent) @variable)",
+        "(BlockLetDecl (LowerFieldName) @variable)",
+        "(BlockLetTail (LowerIdent) @variable)",
+        "(TopLetDecl (LowerIdent) @variable)",
+        "(TopLetDecl (LowerFieldName) @variable)",
+        "(ShapeValueSlot (LowerFieldName) @variable.other.member)",
+        "(TypeShapeSlot (LowerFieldName) @variable.other.member)",
+        "(ShapeSlot (LowerFieldName) @variable.other.member)",
+        "(Call \".\" (LowerIdent) @variable.other.member)",
+        "(Primary (PascalIdent) @constructor)"
+      ],
+      "defaults": {
+        "suppress": [
+          { "node": "LowerIdent" },
+          { "node": "PascalIdent" },
+          { "node": "LowerFieldName" }
+        ]
+      }
+    },
+    "folds": [
+      { "node": "Block", "capture": "fold" }
+    ],
+    "tags": [
+      { "node": "FnDecl", "capture": "tag.definition" },
+      { "node": "TypeFnDecl", "capture": "tag.definition" }
+    ],
+    "textobjects": [
+      { "node": "FnDecl", "capture": "function.around" },
+      { "node": "Block", "capture": "function.inside" },
+      { "node": "TypeFnDecl", "capture": "class.around" },
+      { "node": "TypeBlock", "capture": "class.inside" },
+      { "node": "Param", "capture": "parameter.around" },
+      { "node": "TypeParamsDecl", "capture": "parameter.around" }
+    ]
+  },
+  "formatter": {
+    "blocks": ["Block"],
+    "spacing": {
+      "(": "tight",
+      "[": "tight"
+    }
+  },
+  "lsp": {
+    "documentSymbols": ["FnDecl", "TypeFnDecl", "ConstDecl"],
+    "diagnostics": ["Program"]
+  }
+}
