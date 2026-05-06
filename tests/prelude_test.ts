@@ -69,6 +69,18 @@ Deno.test("map4 const function lowers to four direct scalar calls", async () => 
   assert(!wat.includes("(func $map4_scalar_i32 "));
 });
 
+Deno.test("lane4_i32 lowers to four scalar Wasm results", async () => {
+  const wat = await watFromSource(`
+    import module prelude.array_static;
+    fn inc(x: i32) -> i32 { x + 1 }
+    pub fn main() -> lane4_i32 { map4_i32(inc, [1, 2, 3, 4]) }
+  `, { resolveModule });
+
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(main.includes("(result i32) (result i32) (result i32) (result i32)"));
+  assertEquals(wat.match(/call \$inc/g)?.length, 4);
+});
+
 Deno.test("zip_with4 const function lowers without a runtime operation parameter", async () => {
   const wat = await watFromSource(
     `

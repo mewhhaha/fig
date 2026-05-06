@@ -119,8 +119,8 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
       pub fn main() -> box { mapped(box_functor, [value: 41]) }
     `),
     `(module
-  (func $map_box (param $x i32) (result i32)
-    local.get $x
+  (func $map_box (param $x$value i32) (result i32)
+    local.get $x$value
     i32.const 1
     i32.add
   )
@@ -128,8 +128,8 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
     i32.const 41
     call $map_box
   )
-  (func $mapped__box_functor (param $x i32) (result i32)
-    local.get $x
+  (func $mapped__box_functor (param $x$value i32) (result i32)
+    local.get $x$value
     call $map_box
   )
 )`,
@@ -148,7 +148,7 @@ Deno.test("WAT specializes perf array const dictionary dispatch", async () => {
     pub fn main() -> scalar_box { apply_tile(scalar_map4, [value: 1]) }
   `);
 
-  assert(wat.includes("(func $apply_tile__scalar_map4 (param $x i32) (result i32)"));
+  assert(wat.includes("(func $apply_tile__scalar_map4 (param $x$value i32) (result i32)"));
   assertEquals(wat.match(/call \$add1_box/g)?.length, 4);
   assert(!wat.includes("(func $apply_tile "));
 
