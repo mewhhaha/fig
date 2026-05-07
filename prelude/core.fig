@@ -1,0 +1,94 @@
+// Core contracts are ordinary Fig type functions. They are intentionally
+// small so fragments can be concatenated or imported without compiler magic.
+
+type fn eq(T: type) {
+  let Expected = fn(a: T, b: T) -> bool;
+  @require(@type_has_member(T, #eql), "Eq requires eql");
+  @require(@type_member_type(T, #eql) == Expected, "Eq.eql has wrong type");
+}
+
+type fn semigroup(T: type) -> type {
+  let Expected = fn(a: T, b: T) -> T;
+  @require(@type_has_member(T, #append), "Semigroup requires append");
+  @require(@type_member_type(T, #append) == Expected, "Semigroup.append has wrong type");
+  T
+}
+
+type fn monoid(T: type) -> type {
+  let Append = fn(a: T, b: T) -> T;
+  let Empty = fn() -> T;
+  @require(@type_has_member(T, #append), "Monoid requires append");
+  @require(@type_member_type(T, #append) == Append, "Monoid.append has wrong type");
+  @require(@type_has_member(T, #empty), "Monoid requires empty");
+  @require(@type_member_type(T, #empty) == Empty, "Monoid.empty has wrong type");
+  T
+}
+
+fn append(const T, const _proof: semigroup(T), a: T, b: T) -> T {
+  T.append(a, b)
+}
+
+fn empty(const T, const _proof: monoid(T)) -> T {
+  T.empty()
+}
+
+type fn copyable(T: type) -> type {
+  T
+}
+
+type fn option(A: type) -> union {
+  let None = [];
+  let Some = [value: A];
+  union(None, Some)
+}
+
+type fn result(A: type, E: type) -> union {
+  let Ok = [value: A];
+  let Err = [error: E];
+  union(Ok, Err)
+}
+
+type fn pair(A: type, B: type) -> type {
+  let Pair = [first: A, second: B];
+  struct(Pair)
+}
+
+type fn tuple2(A: type, B: type) -> type {
+  pair(A, B)
+}
+
+type fn tuple3(A: type, B: type, C: type) -> type {
+  let Tuple3 = [first: A, second: B, third: C];
+  struct(Tuple3)
+}
+
+type fn index(N: count) -> type {
+  i32
+}
+
+type fn droppable(T: type) -> type {
+  T
+}
+
+type fn scalar_i32() {
+  let ScalarI32 = [value: i32];
+  struct(ScalarI32)
+}
+
+type fn ptr(A: type) -> type {
+  let Ptr = [addr: i32];
+  struct(Ptr)
+}
+
+fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
+  @memory_load_i32(mem, p)
+}
+fn memory.store_i32(mem: memory, p: ptr(i32), value: i32) -> memory {
+  @memory_store_i32(mem, p, value)
+}
+fn ptr.from_i32(addr: i32) -> ptr(A) {
+  @ptr_from_i32(addr)
+}
+fn ptr.add(p: ptr(A), bytes: i32) -> ptr(A) {
+  @ptr_add(p, bytes)
+}

@@ -1,5 +1,3 @@
-module demo.perf_arrays;
-
 // This example shows static layout and static dispatch with today's backend.
 // It does not claim WebAssembly SIMD lowering yet.
 

@@ -1,7 +1,4 @@
-module demo.prelude_perf_pipeline;
-
-import module prelude.array_static;
-import module prelude.schedule;
+const merge = @import("prelude.std");
 
 fn add(a: i32, b: i32) -> i32 {
   a + b

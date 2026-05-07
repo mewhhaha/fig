@@ -1,0 +1,3 @@
+const array = @import("prelude.array_static");
+const fun = @import("prelude.function");
+const schedule = @import("prelude.schedule");

@@ -1,5 +1,3 @@
-module demo.perf_schedule_dsl;
-
 // Halide-inspired static schedule vocabulary. These contracts document intent
 // while the current backend still emits ordinary scalar code.
 

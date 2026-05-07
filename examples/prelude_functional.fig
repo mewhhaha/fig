@@ -1,6 +1,4 @@
-module demo.prelude_functional;
-
-import module prelude.function;
+const merge = @import("prelude.std");
 
 type fn box(A: type) -> type {
   let Box = [value: A];
@@ -32,6 +30,6 @@ fn binder(v: T(A), const f: fn(x: A) -> T(B), const _proof: monad(T)) -> T(B) {
 }
 
 pub fn main() -> i32 {
-  let mapped = mapper(Box [value: 1], inc, functor(box));
-  binder(mapped, wrap, monad(box)).value
+  let mapped = fmap(Box [value: 1], inc, functor(box));
+  bind(mapped, wrap, monad(box)).value
 }

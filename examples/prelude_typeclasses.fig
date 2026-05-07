@@ -1,0 +1,41 @@
+const merge = @import("prelude.std");
+
+type fn point() -> type {
+  let Point = [x: i32, y: i32];
+  struct(Point)
+}
+
+fn point.eql(a: point, b: point) -> bool {
+  a.x == b.x
+}
+
+fn point.append(a: point, b: point) -> point {
+  Point [x: a.x + b.x, y: a.y + b.y]
+}
+
+type fn box(A: type) -> type {
+  let Box = [value: A];
+  struct(Box)
+}
+
+fn box.map(v: box(A), const f: fn(x: A) -> B) -> box(B) {
+  Box [value: f(v.value)]
+}
+
+fn box.bind(v: box(A), const f: fn(x: A) -> box(B)) -> box(B) {
+  f(v.value)
+}
+
+fn inc(x: i32) -> i32 {
+  x + 1
+}
+
+fn wrap(x: i32) -> box(i32) {
+  Box [value: x + 10]
+}
+
+pub fn main() -> i32 {
+  let point_total = append(point, semigroup(point), Point [x: 1, y: 2], Point [x: 3, y: 4]);
+  let boxed = bind(fmap(Box [value: 1], inc, functor(box)), wrap, monad(box));
+  point_total.x + point_total.y + boxed.value
+}

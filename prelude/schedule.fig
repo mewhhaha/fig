@@ -1,5 +1,3 @@
-module prelude.schedule;
-
 // Static schedule metadata. No backend lowering consumes these contracts yet.
 
 type fn tile(M: count, N: count) {

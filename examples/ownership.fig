@@ -1,5 +1,3 @@
-module demo.ownership;
-
 fn sink(x: i32) -> i32 {
   x
 }

@@ -1,10 +1,10 @@
 [[language]]
-name = "shovel"
-scope = "source.shovel"
-file-types = ["shovel"]
+name = "fig"
+scope = "source.fig"
+file-types = ["fig"]
 roots = []
 comment-token = "//"
 
 [[grammar]]
-name = "shovel"
+name = "fig"
 source = { path = "../.." }

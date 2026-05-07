@@ -1,0 +1,17 @@
+const merge = @import("prelude.std");
+
+fn inc(x: i32) -> i32 {
+  x + 1
+}
+
+fn ok(value: i32) -> result(i32, i32) {
+  value
+}
+
+pub fn main() -> i32 {
+  let dims: pair(i32, i32) = Pair [first: 4, second: 4];
+  let result_value: result(i32, i32) = ok(
+    lane4_dot_i32(lane4_add_i32(map4_i32(inc, [1, 2, 3, 4]), [1, 1, 1, 1]), [1, 1, 1, 1])
+  );
+  dims.first + dims.second + 1
+}

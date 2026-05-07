@@ -6,7 +6,6 @@ import {
 import { fail, type Span } from "./diagnostics.ts";
 
 export type GeneratedTokenKind =
-  | "module"
   | "import"
   | "capability"
   | "type"

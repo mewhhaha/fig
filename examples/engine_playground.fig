@@ -1,0 +1,128 @@
+const merge = @import("prelude.engine");
+
+const tick_millis: fn() -> i32 !{time} = @capability("tick_millis");
+const input_axis_x: fn() -> i32 !{event} = @capability("input_axis_x");
+const input_pressed: fn() -> i32 !{event} = @capability("input_pressed");
+
+type fn transform2d() -> type {
+  let Transform2d = [x: i32, y: i32, z: i32];
+  struct(Transform2d)
+}
+
+type fn velocity2d() -> type {
+  let Velocity2d = [x: i32, y: i32];
+  struct(Velocity2d)
+}
+
+type fn sprite2d() -> type {
+  let Sprite2d = [w: i32, h: i32, color: i32];
+  struct(Sprite2d)
+}
+
+type fn entity2d() -> type {
+  let Entity2d = [transform: i32, velocity: i32, sprite: i32];
+  struct(Entity2d)
+}
+
+type fn transform_store() -> type {
+  inline_array(3, transform2d)
+}
+
+type fn velocity_store() -> type {
+  inline_array(1, velocity2d)
+}
+
+type fn sprite_store() -> type {
+  inline_array(3, sprite2d)
+}
+
+type fn entity_store() -> type {
+  inline_array(3, entity2d)
+}
+
+type fn world2d() -> type {
+  let World2d = [
+    entities: entity_store,
+    transforms: transform_store,
+    velocities: velocity_store,
+    sprites: sprite_store
+  ];
+  struct(World2d)
+}
+
+fn register_entities() -> entity_store {
+  [
+    Entity2d [transform: 0, velocity: 0, sprite: 0],
+    Entity2d [transform: 1, velocity: 0, sprite: 1],
+    Entity2d [transform: 2, velocity: 0, sprite: 2]
+  ]
+}
+
+fn register_transforms() -> transform_store {
+  [
+    Transform2d [x: 10, y: 20, z: 0],
+    Transform2d [x: 40, y: 24, z: 1],
+    Transform2d [x: 58, y: 18, z: 1]
+  ]
+}
+
+fn register_velocities() -> velocity_store {
+  [
+    Velocity2d [x: 1, y: 0]
+  ]
+}
+
+fn register_sprites() -> sprite_store {
+  [
+    Sprite2d [w: 16, h: 16, color: rgba8(255, 80, 80, 255)],
+    Sprite2d [w: 12, h: 12, color: rgba8(80, 200, 120, 255)],
+    Sprite2d [w: 12, h: 12, color: rgba8(80, 140, 255, 255)]
+  ]
+}
+
+fn move_transform(transform: transform2d, velocity: velocity2d, dt_ms: i32, axis_x: i32, pressed: i32) -> transform2d {
+  let speed = velocity.x + pressed;
+  let dx = axis_x * speed * dt_ms / 16;
+  Transform2d [x: transform.x + dx, y: transform.y + velocity.y, z: transform.z]
+}
+
+fn movement_system(transforms: transform_store, velocities: velocity_store, dt_ms: i32, axis_x: i32, pressed: i32) -> transform_store {
+  let moved = move_transform(
+    transforms[0],
+    velocities[0],
+    dt_ms,
+    axis_x,
+    pressed
+  );
+  [moved, transforms[1], transforms[2]]
+}
+
+fn render_components(transform: transform2d, sprite: sprite2d) -> geometry2d_i32 {
+  emit_rect2d(transform.x, transform.y, sprite.w, sprite.h, transform.z, sprite.color)
+}
+
+fn merge_front_geometry(front: geometry2d_i32, back: geometry2d_i32) -> geometry2d_i32 {
+  let back_count = back.vertex_count;
+  Geometry2dI32 [vertices: front.vertices, vertex_count: front.vertex_count + back_count]
+}
+
+fn render_system(transforms: transform_store, sprites: sprite_store) -> geometry2d_i32 {
+  let player_geometry = render_components(transforms[0], sprites[0]);
+  let crate_a_geometry = render_components(transforms[1], sprites[1]);
+  let crate_b_geometry = render_components(transforms[2], sprites[2]);
+  merge_front_geometry(player_geometry, merge_front_geometry(crate_a_geometry, crate_b_geometry))
+}
+
+pub fn main() -> geometry2d_i32 !{time, event} {
+  let dt_ms = tick_millis();
+  let axis_x = input_axis_x();
+  let pressed = input_pressed();
+  let entities = register_entities();
+  let transforms = register_transforms();
+  let velocities = register_velocities();
+  let sprites = register_sprites();
+  let moved_transforms = movement_system(transforms, velocities, dt_ms, axis_x, pressed);
+  let entity_count = entities[0].transform + entities[1].transform + entities[2].transform;
+  let geometry = render_system(moved_transforms, sprites);
+  Geometry2dI32 [vertices: geometry.vertices, vertex_count: geometry.vertex_count + entity_count - entity_count]
+}

@@ -1,6 +1,4 @@
-module demo.prelude_array_static;
-
-import module prelude.array_static;
+const merge = @import("prelude.std");
 
 fn inc(x: i32) -> i32 {
   x + 1
@@ -12,7 +10,9 @@ fn add(a: i32, b: i32) -> i32 {
 
 pub fn main() -> i32 {
   let xs: lane4_i32 = [1, 2, 3, 4];
-  let ys = map4_i32(inc, xs);
+  let xs_map, xs_zip, xs_total = fork(xs);
+  let ys = map4_i32($ + 1, xs_map);
   let zs = zip_with4_i32(add, [1, 2, 3, 4], ys);
-  fold4_i32(add, 0, zs)
+  fold4_i32(add, 0, zs) \$ -> add($, xs_total[0])
 }
+

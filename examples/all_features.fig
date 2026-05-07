@@ -1,7 +1,5 @@
-module demo.all_features;
-
-import capability clock: fn() -> i64 !{time};
-import capability random: fn() -> i32 !{entropy};
+const clock: fn() -> i64 !{time} = @capability("clock");
+const random: fn() -> i32 !{entropy} = @capability("random");
 
 type fn id() { i32 }
 type fn pair(A: type) { let Pair = [fst: A, snd: A]; struct(Pair) }
@@ -133,7 +131,7 @@ pub fn main() -> i32 !{time, entropy} {
   let xs: buffer(i32) = [1, 2, 3, 4];
   let pair: pair(i32) = [fst: 1, snd: 2];
   let weird: weird = [fst: 1, 2, 3, 4, 5, 6];
-  let label = "shovel";
+  let label = "fig";
   let letter = 's';
   let text = ```multi
 line```;

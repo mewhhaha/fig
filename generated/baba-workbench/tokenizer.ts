@@ -18,10 +18,11 @@ const keywords = new Set<string>([
   "import",
   "let",
   "match",
-  "module",
   "pub",
+  "struct",
   "true",
   "type",
+  "union",
   "zip",
 ]);
 const symbols: string[] = [
@@ -48,10 +49,12 @@ const symbols: string[] = [
   "@",
   "*",
   "/",
+  "\\",
   "+",
   "<",
   "=",
   ">",
+  "$",
 ];
 const skipPatterns: Array<{ kind: string; pattern: RegExp }> = [
   { kind: "Whitespace", pattern: new RegExp("[ \\t\\r\\n]+", "y") },

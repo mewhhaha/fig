@@ -1,7 +1,7 @@
 {
   "language": {
-    "scope": "source.shovel",
-    "fileTypes": ["shovel"],
+    "scope": "source.fig",
+    "fileTypes": ["fig"],
     "comment": "//"
   },
   "word": "LowerIdent",
@@ -10,7 +10,6 @@
   "queries": {
     "highlights": {
       "entries": [
-        { "literal": "module", "capture": "keyword" },
         { "literal": "import", "capture": "keyword.control.import" },
         { "literal": "capability", "capture": "keyword" },
         { "literal": "type", "capture": "keyword.type" },
@@ -27,10 +26,11 @@
         { "node": "TypeRepeatPrefix", "capture": "number" },
         { "node": "String", "capture": "string" },
         { "node": "Number", "capture": "number" },
-        { "node": "Bool", "capture": "constant.builtin" }
+        { "node": "Bool", "capture": "constant.builtin" },
+        { "node": "Placeholder", "capture": "operator" }
       ],
       "patterns": [
-        "(FnDecl (FnName (LowerIdent) @function))",
+        "(FnDecl (FnTail (FnName (LowerIdent) @function)))",
         "(Primary (LowerIdent) @variable)",
         "(Call (Primary (LowerIdent) @function.call) \"(\")",
         "(Call (Primary (ForkBuiltin) @function.builtin) \"(\")",

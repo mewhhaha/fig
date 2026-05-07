@@ -6,39 +6,11 @@ export interface SyntaxNodeLike {
   childForFieldName?(name: string): SyntaxNodeLike | null;
 }
 
-export type AstNode = ProgramAstNode | ModuleDeclAstNode | ImportDeclAstNode | CapabilityImportTailAstNode | SourceImportTailAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | MatchExprAstNode | ArmAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | RangeAstNode | ShapeInitAstNode | ShapeValueSlotAstNode | PatternAstNode | PatternIdentAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeSlotAstNode | ShapeSlotBodyAstNode | TypeShapeAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | ImportNameAstNode | ParamNameAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | PathAstNode | OpAstNode | TypeOpAstNode;
+export type AstNode = ProgramAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | PipeBindAstNode | PipeBindAtomAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | RangeAstNode | ShapeInitAstNode | ShapeValueSlotAstNode | PatternAstNode | PatternIdentAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeSlotAstNode | ShapeSlotBodyAstNode | TypeShapeAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | ImportNameAstNode | ParamNameAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | PathAstNode | OpAstNode | TypeOpAstNode;
 
 export interface ProgramAstNode {
   kind: "Program";
   type: "Program";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface ModuleDeclAstNode {
-  kind: "ModuleDecl";
-  type: "ModuleDecl";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface ImportDeclAstNode {
-  kind: "ImportDecl";
-  type: "ImportDecl";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface CapabilityImportTailAstNode {
-  kind: "CapabilityImportTail";
-  type: "CapabilityImportTail";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface SourceImportTailAstNode {
-  kind: "SourceImportTail";
-  type: "SourceImportTail";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -127,6 +99,20 @@ export interface TypePrimaryAstNode {
   fields: Record<string, never>;
 }
 
+export interface TypeQualifiedTailAstNode {
+  kind: "TypeQualifiedTail";
+  type: "TypeQualifiedTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeBuilderNameAstNode {
+  kind: "TypeBuilderName";
+  type: "TypeBuilderName";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface StaticBuiltinAstNode {
   kind: "StaticBuiltin";
   type: "StaticBuiltin";
@@ -158,6 +144,13 @@ export interface TypeExprArgsAstNode {
 export interface FnDeclAstNode {
   kind: "FnDecl";
   type: "FnDecl";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface FnTailAstNode {
+  kind: "FnTail";
+  type: "FnTail";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -246,6 +239,20 @@ export interface ExprAstNode {
   fields: Record<string, never>;
 }
 
+export interface PipeBindAstNode {
+  kind: "PipeBind";
+  type: "PipeBind";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface PipeBindAtomAstNode {
+  kind: "PipeBindAtom";
+  type: "PipeBindAtom";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface MatchExprAstNode {
   kind: "MatchExpr";
   type: "MatchExpr";
@@ -256,6 +263,13 @@ export interface MatchExprAstNode {
 export interface ArmAstNode {
   kind: "Arm";
   type: "Arm";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface PipeBindNameAstNode {
+  kind: "PipeBindName";
+  type: "PipeBindName";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -277,6 +291,13 @@ export interface CallAstNode {
 export interface PrimaryAstNode {
   kind: "Primary";
   type: "Primary";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface PlaceholderAstNode {
+  kind: "Placeholder";
+  type: "Placeholder";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -431,6 +452,20 @@ export interface TypeKindTailAstNode {
 export interface TypeConstructorTailAstNode {
   kind: "TypeConstructorTail";
   type: "TypeConstructorTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeResultSigAstNode {
+  kind: "TypeResultSig";
+  type: "TypeResultSig";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeResultKindAstNode {
+  kind: "TypeResultKind";
+  type: "TypeResultKind";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }

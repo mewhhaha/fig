@@ -2,6 +2,7 @@ import type {
   CapabilityImport,
   ConstDecl,
   Declaration,
+  DestructureLetDecl,
   Expr,
   FnDecl,
   ForkLetDecl,
@@ -19,6 +20,7 @@ import type {
   TypeMemberExpr,
   TypeParam,
   TypePattern,
+  TypeResultKind,
   TypeShape,
 } from "./core_ast.ts";
 import { fail, type Span } from "./diagnostics.ts";
@@ -36,35 +38,50 @@ type Node = SyntaxNodeLike & {
 export function lowerProgram(root: Node): Program {
   projectNode({ type: "Program", text: root.text });
   const children = named(root);
-  const moduleDecl = children.find((child) => child.type === "ModuleDecl");
-  const declarations = children.filter(is("Decl")).map(lowerDecl);
+  const decls = children.filter(is("Decl"));
+  const sourceImportConsts = decls.map(unwrap).filter(isSourceImportConst).map(
+    lowerSourceImportConst,
+  );
+  const capabilityConstImports = decls.map(unwrap).filter(isCapabilityConst).map(
+    lowerCapabilityConst,
+  );
+  const declarations = decls.filter((decl) => {
+    const unwrapped = unwrap(decl);
+    return !isSourceImportConst(unwrapped) && !isCapabilityConst(unwrapped);
+  }).map(lowerDecl);
   declarations.push(...lowerInlineTypeMemberFns(declarations));
   return {
-    moduleName: moduleDecl ? pathText(only(moduleDecl, "Path")) : undefined,
-    imports: children.filter(is("ImportDecl")).map(lowerImport).filter((
-      item,
-    ): item is CapabilityImport => item.kind === "import"),
-    sourceImports: children.filter(is("ImportDecl")).map(lowerImport).filter((
-      item,
-    ): item is SourceImport => item.kind === "source_import"),
+    moduleName: undefined,
+    imports: capabilityConstImports,
+    sourceImports: sourceImportConsts,
     declarations,
   };
 }
 
-function lowerImport(node: Node): CapabilityImport | SourceImport {
-  const decl =
-    named(node).find((child) =>
-      child.type === "CapabilityImportTail" || child.type === "SourceImportTail"
-    ) ?? node;
-  if (decl.type === "SourceImportTail") {
-    return { kind: "source_import", module: pathText(only(decl, "Path")) };
-  }
-  const importName = only(decl, "ImportName");
-  const type = only(decl, "Type").text;
-  const effects = optional(decl, "EffectRow")
-    ? named(only(decl, "EffectRow")).filter(isIdentifier).map((id) => id.text)
+function lowerCapabilityConst(node: Node): CapabilityImport {
+  const nameNode = named(node).find((child) => isIdentifier(child) || isFieldName(child));
+  const name = bindingName(nameNode);
+  const type = only(node, "Type").text;
+  const effects = optional(node, "EffectRow")
+    ? named(only(node, "EffectRow")).filter(isIdentifier).map((id) => id.text)
     : [];
-  return { kind: "import", name: bindingName(named(importName)[0]), type, effects };
+  return { kind: "import", name, type, effects };
+}
+
+function lowerSourceImportConst(node: Node): SourceImport {
+  const alias = text(first(node, "LowerIdent"), "import alias");
+  const match = node.text.match(/@\s*import\s*\(\s*("([^"\\]|\\.)*")\s*\)/);
+  if (!match) fail("parse.lower", 'source import requires @import("specifier")', spanFor(node));
+  const specifier = JSON.parse(match[1]);
+  return { kind: "source_import", module: specifier, alias };
+}
+
+function isSourceImportConst(node: Node): boolean {
+  return node.type === "ConstDecl" && /@\s*import\s*\(/.test(node.text);
+}
+
+function isCapabilityConst(node: Node): boolean {
+  return node.type === "ConstDecl" && /@\s*capability\s*\(/.test(node.text);
 }
 
 function lowerDecl(node: Node): Declaration {
@@ -78,8 +95,12 @@ function lowerDecl(node: Node): Declaration {
       return lowerFn(decl);
     case "TopLetDecl": {
       const lowered = lowerLet(decl);
-      if (lowered.kind === "fork_let") {
-        fail("parse.lower", "fork let is only valid inside function bodies", spanFor(decl));
+      if (lowered.kind === "fork_let" || lowered.kind === "destructure_let") {
+        fail(
+          "parse.lower",
+          "multi-binding let is only valid inside function bodies",
+          spanFor(decl),
+        );
       }
       return lowered;
     }
@@ -102,33 +123,44 @@ function lowerConst(node: Node): ConstDecl | TypeDecl {
 }
 
 function lowerFn(node: Node): FnDecl {
+  const fn = optional(node, "FnTail") ?? node;
   const loweredName = optional(node, "FnName")
     ? lowerFnName(only(node, "FnName"))
-    : { name: text(firstIdentifier(node), "function name") };
+    : lowerFnName(only(fn, "FnName"));
+  const returnType = optional(fn, "ReturnSig")
+    ? named(only(fn, "ReturnSig")).find(is("Type"))?.text
+    : undefined;
+  if (returnType === "struct" || returnType === "union") {
+    fail(
+      "parse.lower",
+      `${returnType} is only valid as a type-function result kind`,
+      spanFor(only(fn, "ReturnSig")),
+    );
+  }
   return {
     kind: "fn",
     public: named(node).some(is("Visibility")),
     name: loweredName.name,
     ...(loweredName.memberOf ? { memberOf: loweredName.memberOf } : {}),
-    params: optional(node, "Params")
-      ? named(only(node, "Params")).filter(is("Param")).map(lowerParam)
+    params: optional(fn, "Params")
+      ? named(only(fn, "Params")).filter(is("Param")).map(lowerParam)
       : [],
-    returnType: optional(node, "ReturnSig")
-      ? named(only(node, "ReturnSig")).find(is("Type"))?.text
-      : undefined,
-    effects: optional(node, "EffectRow")
-      ? named(only(node, "EffectRow")).filter(isIdentifier).map((id) => id.text)
+    returnType,
+    effects: optional(fn, "EffectRow")
+      ? named(only(fn, "EffectRow")).filter(isIdentifier).map((id) => id.text)
       : [],
-    body: lowerBlock(only(node, "Block")),
+    body: lowerBlock(only(fn, "Block")),
   };
 }
 
 function lowerFnName(node: Node): { name: string; memberOf?: { owner: string; member: string } } {
   const ids = named(node).filter(isIdentifier);
-  const owner = text(ids[0], "function name");
-  const member = ids[1]?.text;
-  if (!member) return { name: owner };
-  return { name: `${owner}.${member}`, memberOf: { owner, member } };
+  const parts = ids.map((id) => id.text);
+  const name = parts.join(".");
+  if (parts.length < 2) return { name };
+  const member = parts[parts.length - 1];
+  const owner = parts.slice(0, -1).join(".");
+  return { name, memberOf: { owner, member } };
 }
 
 function lowerTypeDecl(node: Node): TypeDecl {
@@ -144,6 +176,7 @@ function lowerTypeDecl(node: Node): TypeDecl {
     kind: "type",
     name,
     params,
+    resultKind: lowerTypeResultKind(optional(node, "TypeResultSig")),
     ...(paramPatterns.some((pattern, index) =>
         pattern.kind !== "binding" || pattern.name !== params[index]?.name
       )
@@ -151,6 +184,12 @@ function lowerTypeDecl(node: Node): TypeDecl {
       : {}),
     body: lowerTypeBlock(only(node, "TypeBlock")),
   };
+}
+
+function lowerTypeResultKind(node: Node | undefined): TypeResultKind {
+  if (!node) return "type";
+  const kind = optional(node, "TypeResultKind")?.text.trim();
+  return kind === "struct" || kind === "union" ? kind : "type";
 }
 
 function lowerTypeParam(node: Node): TypeParam {
@@ -286,6 +325,20 @@ function lowerTypeExpr(node: Node): TypeExpr {
       return { kind: "type_static_ref", name: text(firstIdentifier(expr), "static builtin") };
     case "TypeShape":
       return { kind: "type_shape", shape: lowerTypeShape(expr) };
+    case "TypeBuilderName":
+      return { kind: "type_ref", name: expr.text };
+    case "TypePrimary":
+      if (optional(expr, "TypeQualifiedTail")) {
+        return { kind: "type_ref", name: expr.text.replace(/\s+/g, "") };
+      }
+      return lowerTypeExpr(named(expr)[0]);
+    case "Type":
+      if (optional(expr, "TypeQualifiedTail")) {
+        return { kind: "type_ref", name: expr.text.replace(/\s+/g, "") };
+      }
+      return lowerTypeExpr(named(expr)[0]);
+    case "QualifiedTypeName":
+      return { kind: "type_ref", name: expr.text.replace(/\s+/g, "") };
     case "LowerIdent":
     case "PascalIdent":
       return { kind: "type_ref", name: expr.text };
@@ -360,6 +413,9 @@ function lowerTypeLiteral(node: Node): TypeExpr {
   const literal = named(node)[0] ?? node;
   if (literal.type === "Bool") return { kind: "type_bool", value: literal.text === "true" };
   if (literal.type === "String") return { kind: "type_string", value: JSON.parse(literal.text) };
+  if (literal.type === "Multiline" || literal.type === "fenced_text") {
+    return { kind: "type_string", value: multilineContents(literal.text) };
+  }
   if (literal.type === "Number") return { kind: "type_number", value: literal.text };
   if (literal.type === "LiteralType") return { kind: "type_literal", value: literal.text.slice(1) };
   return unreachable(literal, "type literal");
@@ -480,7 +536,8 @@ function paramBindingName(pattern: ParamPattern, fallback: Node | undefined): st
 }
 
 function knownTypeName(name: string): boolean {
-  return ["type", "bool", "string", "i32", "u32", "i64", "u64", "f32", "f64"].includes(name);
+  return ["type", "bool", "string", "i32", "u32", "i64", "u64", "f32", "f64"].includes(name) ||
+    /^u([1-9]|[1-5][0-9]|6[0-4])$/.test(name);
 }
 
 function hashText(source: string): number {
@@ -489,26 +546,20 @@ function hashText(source: string): number {
   return hash;
 }
 
-function lowerLet(node: Node): LetDecl | ForkLetDecl {
+function lowerLet(node: Node): LetDecl | ForkLetDecl | DestructureLetDecl {
   const ids = named(node).filter((child) => isIdentifier(child) || isFieldName(child));
   const tail = optional(node, "TopLetTail") ?? optional(node, "BlockLetTail") ?? node;
-  const destructuredRight = named(tail).find(isIdentifier);
-  if (destructuredRight) {
+  const tailIds = named(tail).filter(isIdentifier);
+  const names = [...ids, ...tailIds].map(bindingName);
+  if (names.length > 1) {
     const expr = lowerExpr(only(tail, "Expr"));
-    if (
-      expr.kind !== "call" || expr.callee.kind !== "var" || expr.callee.name !== "fork"
-    ) {
-      fail("parse.lower", "only fork(...) can bind two local names", spanFor(node));
+    if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "fork") {
+      if (expr.args.length !== 1 || expr.args[0].kind !== "var") {
+        fail("parse.lower", "fork(...) source must be a binding name", spanFor(node));
+      }
+      return { kind: "fork_let", names, source: expr.args[0].name };
     }
-    if (expr.args.length !== 1 || expr.args[0].kind !== "var") {
-      fail("parse.lower", "fork(...) source must be a binding name", spanFor(node));
-    }
-    return {
-      kind: "fork_let",
-      left: bindingName(ids[0]),
-      right: bindingName(destructuredRight),
-      source: expr.args[0].name,
-    };
+    return { kind: "destructure_let", names, value: expr };
   }
   return {
     kind: "let",
@@ -528,7 +579,7 @@ function lowerProofConst(node: Node): ProofConstDecl {
 }
 
 function lowerBlock(node: Node): Extract<Expr, { kind: "block" }> {
-  const statements: Array<LetDecl | ForkLetDecl | ProofConstDecl> = [];
+  const statements: Array<LetDecl | ForkLetDecl | DestructureLetDecl | ProofConstDecl> = [];
   let expr: Expr | undefined;
   for (const child of named(node)) {
     if (child.type === "BlockLetDecl") {
@@ -557,6 +608,10 @@ function lowerExpr(node: Node): Expr {
       });
       return { kind: "match", value: lowerExpr(value), arms };
     }
+    case "PipeBind":
+      return lowerPipeBind(expr);
+    case "PipeBindAtom":
+      return lowerExpr(named(expr)[0]);
     case "Binary":
       return lowerBinary(expr);
     case "Call":
@@ -586,22 +641,142 @@ function lowerBinary(node: Node): Expr {
   return left;
 }
 
+function lowerPipeBind(node: Node): Expr {
+  const children = named(node);
+  let current = lowerExpr(first(node, "PipeBindAtom"));
+  for (let index = 0; index < children.length; index++) {
+    const name = children[index];
+    if (name.type !== "PipeBindName") continue;
+    const body = children.slice(index + 1).find(is("PipeBindAtom"));
+    if (!body) return current;
+    const bindName = text(named(name)[0] ?? name, "pipe bind name");
+    current = {
+      kind: "pipe_bind",
+      value: current,
+      name: bindName,
+      body: lowerPipeBindBody(body, bindName),
+    };
+  }
+  return current;
+}
+
+function lowerPipeBindBody(node: Node, bindName: string): Expr {
+  const body = lowerExpr(node);
+  return bindName === "$" ? bindDollarPlaceholders(body) : body;
+}
+
+function bindDollarPlaceholders(expr: Expr): Expr {
+  if (expr.kind === "placeholder") return { kind: "var", name: "$" };
+  switch (expr.kind) {
+    case "call":
+      return {
+        ...expr,
+        callee: bindDollarPlaceholders(expr.callee),
+        args: expr.args.map(bindDollarPlaceholders),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: bindDollarPlaceholders(expr.target),
+        index: bindDollarPlaceholders(expr.index),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: bindDollarPlaceholders(expr.left),
+        right: bindDollarPlaceholders(expr.right),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: bindDollarPlaceholders(expr.value),
+        body: expr.name === "$" ? expr.body : bindDollarPlaceholders(expr.body),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: bindDollarPlaceholders(expr.value),
+        arms: expr.arms.map((arm) => ({ ...arm, value: bindDollarPlaceholders(arm.value) })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({ ...slot, value: bindDollarPlaceholders(slot.value) })),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: bindDollarPlaceholders(expr.start),
+        end: bindDollarPlaceholders(expr.end),
+      };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? { ...stmt, value: bindDollarPlaceholders(stmt.value) }
+            : stmt
+        ),
+        expr: expr.expr ? bindDollarPlaceholders(expr.expr) : undefined,
+      };
+    case "literal":
+    case "var":
+      return expr;
+  }
+}
+
 function lowerCall(node: Node): Expr {
   const children = named(node);
   let expr = lowerPrimary(children[0]);
   if (!children.some(is("Args")) && /\)\s*$/.test(node.text)) {
     return { kind: "call", callee: expr, args: [] };
   }
+  let pendingMember: { receiver: Expr; member: string } | undefined;
   for (let i = 1; i < children.length; i++) {
     const child = children[i];
     if (child.type === "Args") {
-      expr = { kind: "call", callee: expr, args: lowerArgs(child) };
+      if (pendingMember) {
+        expr = {
+          kind: "call",
+          callee: {
+            kind: "var",
+            name: receiverMemberName(pendingMember.receiver, pendingMember.member),
+          },
+          args: [pendingMember.receiver, ...lowerArgs(child)],
+        };
+        pendingMember = undefined;
+      } else {
+        expr = { kind: "call", callee: expr, args: lowerArgs(child) };
+      }
     } else if (
       child.type === "LowerIdent" || child.type === "PascalIdent" || child.type === "Ident"
     ) {
-      expr = { kind: "var", name: `${nameOf(expr)}.${child.text}` };
-    } else if (child.type === "Number") {
-      expr = { kind: "var", name: `${nameOf(expr)}[${child.text}]` };
+      if (
+        (expr.kind === "call" || expr.kind === "range" || isPipelineReceiver(expr)) &&
+        (nextNamedCallChild(children, i)?.type === "Args" || children[i + 1]?.type === "(")
+      ) {
+        pendingMember = { receiver: expr, member: child.text };
+      } else {
+        expr = { kind: "var", name: `${nameOf(expr)}.${child.text}` };
+      }
+    } else if (child.type === ")" && pendingMember) {
+      expr = {
+        kind: "call",
+        callee: {
+          kind: "var",
+          name: receiverMemberName(pendingMember.receiver, pendingMember.member),
+        },
+        args: [pendingMember.receiver],
+      };
+      pendingMember = undefined;
+    } else if (child.type === "Expr") {
+      const index = lowerExpr(child);
+      if (index.kind === "literal" && index.literalKind === "number") {
+        expr = { kind: "var", name: `${nameOf(expr)}[${index.value}]` };
+      } else {
+        expr = { kind: "index", target: expr, index };
+      }
     } else if (child.type === "ShapeValue") {
       if (expr.kind !== "var") {
         fail("parse.lower", "product constructor requires a named constructor", spanFor(child));
@@ -614,6 +789,39 @@ function lowerCall(node: Node): Expr {
   return expr;
 }
 
+function isPipelineReceiver(expr: Expr): boolean {
+  return expr.kind === "placeholder" || (expr.kind === "var" && expr.name === "$");
+}
+
+function nextNamedCallChild(children: readonly Node[], index: number): Node | undefined {
+  return children.slice(index + 1).find((child) => !isCallPunctuation(child));
+}
+
+function isCallPunctuation(node: Node): boolean {
+  return ["(", ")", ".", ","].includes(node.type);
+}
+
+function receiverMemberName(receiver: Expr, member: string): string {
+  if (isPipelineReceiver(receiver)) return `iter.${member}`;
+  if (receiver.kind === "range") return `range_i32.${member}`;
+  if (receiver.kind === "call" && receiver.callee.kind === "var") {
+    const owner = iteratorReceiverOwner(receiver.callee.name);
+    if (owner) return `${owner}.${member}`;
+  }
+  return member;
+}
+
+function iteratorReceiverOwner(callee: string): string | undefined {
+  if (callee.endsWith(".layout.inline_array.iter")) {
+    return `${callee.slice(0, -".layout.inline_array.iter".length)}.iter`;
+  }
+  if (callee === "inline_array.iter" || callee.startsWith("iter.")) return "iter";
+  if (callee === "layout.inline_array.iter") return "iter";
+  if (callee === "compact_array.iter" || callee.startsWith("compact_iter.")) return "compact_iter";
+  if (callee === "range_i32.iter" || callee.startsWith("range_iter.")) return "range_iter";
+  return undefined;
+}
+
 function lowerPrimary(node: Node): Expr {
   const child = named(node)[0];
   if (!child) {
@@ -622,6 +830,8 @@ function lowerPrimary(node: Node): Expr {
   switch (child.type) {
     case "Literal":
       return lowerLiteral(child);
+    case "Placeholder":
+      return { kind: "placeholder" };
     case "ForkBuiltin":
       return { kind: "var", name: "fork" };
     case "StaticBuiltin":
@@ -678,7 +888,16 @@ function lowerLiteral(node: Node): Expr {
     : literal.type === "Multiline" || literal.type === "fenced_text"
     ? "multiline"
     : "literalType";
-  return { kind: "literal", value: literal.text, literalKind };
+  return {
+    kind: "literal",
+    value: literalKind === "multiline" ? multilineContents(literal.text) : literal.text,
+    literalKind,
+  };
+}
+
+function multilineContents(source: string): string {
+  const match = source.match(/^```[A-Za-z0-9_-]*\r?\n?([\s\S]*?)```$/);
+  return match ? match[1] : source;
 }
 
 function lowerArgs(node: Node): Expr[] {

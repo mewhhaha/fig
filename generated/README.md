@@ -4,7 +4,7 @@ Everything in this directory is generated and should not be edited by hand.
 
 Edit these source files instead:
 
-- `grammar.ebnf` for the Shovel grammar
+- `grammar.ebnf` for the Fig grammar
 - `baba.json` for baba editor/workbench metadata
 - `scripts/generate_grammar.ts` for generation policy and post-processing
 

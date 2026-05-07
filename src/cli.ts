@@ -14,8 +14,17 @@ try {
     console.log(await watFromSource(source, options));
   } else if (cmd === "build") {
     const outFlag = rest.indexOf("--out");
-    const out = outFlag >= 0 ? rest[outFlag + 1] : file.replace(/\.shovel$/, ".wasm");
+    const manifestFlag = rest.indexOf("--shader-manifest");
+    const out = outFlag >= 0 ? rest[outFlag + 1] : file.replace(/\.fig$/, ".wasm");
+    const manifestOut = manifestFlag >= 0 ? rest[manifestFlag + 1] : undefined;
     await Deno.writeFile(out, await wasmFromSource(source, options));
+    if (manifestOut) {
+      const checked = await checkSource(source, options);
+      await Deno.writeTextFile(
+        manifestOut,
+        `${JSON.stringify(checked.shaderManifest, null, 2)}\n`,
+      );
+    }
     console.log(out);
   } else if (cmd === "run") {
     const wasm = await wasmFromSource(source, options);
@@ -39,7 +48,9 @@ try {
 }
 
 function usage(): never {
-  console.error("usage: shovel <check|wat|build|run> <file> [--out module.wasm]");
+  console.error(
+    "usage: fig <check|wat|build|run> <file> [--out module.wasm] [--shader-manifest manifest.json]",
+  );
   Deno.exit(2);
 }
 
@@ -57,10 +68,13 @@ function moduleResolver(entryFile: string) {
 }
 
 function candidateModulePaths(entryFile: string, moduleName: string): string[] {
-  const relative = `${moduleName.replaceAll(".", "/")}.shovel`;
-  const dotted = `${moduleName}.shovel`;
   const entryUrl = new URL(entryFile, `file://${Deno.cwd()}/`);
   const entryDir = new URL(".", entryUrl);
+  if (moduleName.startsWith("./") || moduleName.startsWith("../")) {
+    return [new URL(moduleName, entryDir).pathname];
+  }
+  const relative = `${moduleName.replaceAll(".", "/")}.fig`;
+  const dotted = `${moduleName}.fig`;
   const candidates = [
     new URL(relative, entryDir).pathname,
     new URL(dotted, entryDir).pathname,

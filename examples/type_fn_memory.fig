@@ -1,5 +1,3 @@
-module demo.type_fn_memory;
-
 type fn owned(A: type) -> type {
   let Owned = [value: A];
   struct(Owned)

@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import {
   checkSource,
   optimizeProgram,
@@ -10,10 +10,20 @@ import {
 import { CompileError } from "../src/diagnostics.ts";
 import type { Expr, FnDecl, Program, TypeDecl } from "../src/core_ast.ts";
 
+Deno.test("grammar metadata uses fig identity", async () => {
+  const metadata = JSON.parse(await Deno.readTextFile("baba.json"));
+  assertEquals(metadata.language.scope, "source.fig");
+  assertEquals(metadata.language.fileTypes, ["fig"]);
+
+  const packageJson = JSON.parse(await Deno.readTextFile("generated/baba-workbench/package.json"));
+  assertEquals(packageJson.name, "tree-sitter-fig");
+  assertEquals(packageJson["tree-sitter"][0].scope, "source.fig");
+  assertEquals(packageJson["tree-sitter"][0]["file-types"], ["fig"]);
+});
+
 Deno.test("parses language surface declarations and literals", async () => {
   const program = await parse(`
-    module demo.all;
-    import capability clock: fn() -> i64 !{time};
+    const clock: fn() -> i64 !{time} = @capability("clock");
     type fn id() { i32 }
     type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
     type fn maybe(A: type) { let Nothing = []; let Some = [value: A]; union(Nothing, Some) }
@@ -31,7 +41,7 @@ world\`\`\`;
       match 1 { _ => 2, }
     }
   `);
-  assertEquals(program.moduleName, "demo.all");
+  assertEquals(program.moduleName, undefined);
   assertEquals(program.imports[0].effects, ["time"]);
   assert(program.declarations.length >= 5);
 });
@@ -64,6 +74,7 @@ Deno.test("normalizes type function declarations", async () => {
     kind: "type",
     name: "id",
     params: [],
+    resultKind: "type",
     body: {
       kind: "type_block",
       statements: [],
@@ -111,6 +122,37 @@ Deno.test("normalizes type function declarations", async () => {
     {
       A: "count",
     },
+  );
+});
+
+Deno.test("checks type function result kinds", async () => {
+  await checkSource(`
+    type fn point() -> struct { let Point = [x: i32]; struct(Point) }
+    type fn option(A: type) -> union { let None = []; let Some = [value: A]; union(None, Some) }
+    type fn id() -> type { i32 }
+  `);
+  await assertThrowsCompile(
+    "type fn bad() -> struct { i32 }",
+    "type.result_kind",
+  );
+  await assertThrowsCompile(
+    "type fn bad() -> struct { let None = []; union(None) }",
+    "type.result_kind",
+  );
+  await assertThrowsCompile(
+    "type fn bad() -> union { let Point = [x: i32]; struct(Point) }",
+    "type.result_kind",
+  );
+  await assertThrowsCompile(
+    `
+      type fn choose(i32: type) -> struct { let Box = [value: i32]; struct(Box) }
+      type fn choose(bool: type) -> union { let None = []; union(None) }
+    `,
+    "type.clause_result_kind",
+  );
+  await assertThrowsCompile(
+    "fn main() -> struct { 1 }",
+    "parse.syntax",
   );
 });
 
@@ -198,7 +240,7 @@ Deno.test("reports type function diagnostics", async () => {
   );
   await assertThrowsCompile(
     `
-    import capability host: fn() -> bool !{io};
+    const host: fn() -> bool !{io} = @capability("host");
     fn calls_host(T) -> bool !{io} { host() }
     type fn bad(T: type) { match calls_host(T) { true => i32, false => bool } }
     fn f(x: bad(i32)) -> i32 { 1 }
@@ -333,10 +375,181 @@ Deno.test("rejects public functions without return signatures", async () => {
   );
 });
 
+Deno.test("compiler intrinsic wrappers typecheck and stay out of runtime output", async () => {
+  const checked = await checkSource(`
+    fn prim_add_ptr(x: i32, y: i32) -> i32 { @ptr_add(x, y) }
+    fn use_it(x: i32) -> i32 { prim_add_ptr(x, 4) }
+  `);
+  const wrapper = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "prim_add_ptr"
+  );
+  assertEquals(wrapper?.primitiveId, undefined);
+
+  const wat = await watFromSource(`
+    fn prim_add_ptr(x: i32, y: i32) -> i32 { @ptr_add(x, y) }
+    pub fn main() -> i32 { 1 }
+  `);
+  assert(!wat.includes("(func $prim_add_ptr"));
+
+  await assertThrowsCompile(
+    "fn nope(x: i32) -> i32 { @ptr_not_a_primitive(x) }",
+    "primitive.unknown",
+  );
+  await assertThrowsCompile(
+    `fn old_add_ptr(x: i32, y: i32) -> i32 { @wasm_${"ptr"}_add(x, y) }`,
+    "primitive.unknown",
+  );
+  await assertThrowsCompile(
+    `
+      fn a(x: i32) -> i32 { @ptr_add(x, 1) }
+      fn b(x: i32) -> i32 { @ptr_add(x, 1) }
+    `,
+    "primitive.duplicate",
+  );
+  await assertThrowsCompile(
+    `primitive fn old_add_ptr(x: i32, y: i32) -> i32 = #ptr_add;`,
+    "parse.syntax",
+  );
+  await assertThrowsCompile(
+    `import module prelude.std; pub fn main() -> i32 { 1 }`,
+    "parse.syntax",
+  );
+  await assertThrowsCompile(
+    `import capability clock: fn() -> i32 !{time}; pub fn main() -> i32 !{time} { clock() }`,
+    "parse.syntax",
+  );
+});
+
+Deno.test("namespace source imports qualify values and types", async () => {
+  const modules = new Map([
+    [
+      "prelude.std",
+      `
+        type fn lane4_i32() { [4*i32] }
+        type fn pair(A: type, B: type) { [fst: A, snd: B] }
+        fn inc_local(x: i32) -> i32 { x + 1 }
+        pub fn inc(x: i32) -> i32 { inc_local(x) }
+        pub fn map4_i32(f: fn(x: i32) -> i32, xs: lane4_i32) -> lane4_i32 {
+          [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
+        }
+      `,
+    ],
+    [
+      "./local_module.fig",
+      `
+        fn helper(x: i32) -> i32 { x + 2 }
+        pub fn use_helper(x: i32) -> i32 { helper(x) }
+      `,
+    ],
+  ]);
+  const seen: string[] = [];
+  const resolveModule = (specifier: string) => {
+    seen.push(specifier);
+    return modules.get(specifier);
+  };
+
+  const checked = await checkSource(
+    `
+      const std = @import("prelude.std");
+      const local = @import("./local_module.fig");
+      pub fn main() -> std.lane4_i32 { std.map4_i32(std.inc, [1, 2, 3, 4]) }
+      fn pair_value() -> std.pair(i32, i32) { [1, 2] }
+      fn local_value() -> i32 { local.use_helper(1) }
+    `,
+    { resolveModule },
+  );
+
+  assertEquals(seen, ["prelude.std", "./local_module.fig"]);
+  assert(checked.program.declarations.some((decl) => decl.name === "std.map4_i32"));
+  assert(checked.program.declarations.some((decl) => decl.name === "std.inc_local"));
+  assert(!checked.program.declarations.some((decl) => decl.name === "std"));
+
+  assert(!checked.program.declarations.some((decl) => decl.name === "map4_i32"));
+  await assertThrowsCompile(
+    `
+      const std = @import("prelude.std");
+      const std = @import("./local_module.fig");
+      pub fn main() -> i32 { 1 }
+    `,
+    "module.duplicate_alias",
+    { resolveModule },
+  );
+});
+
+Deno.test("namespace source imports support nested qualified references", async () => {
+  const modules = new Map([
+    [
+      "prelude.layout",
+      `
+        type fn lane4_i32() -> type { [4*i32] }
+      `,
+    ],
+    [
+      "prelude.array",
+      `
+        const layout = @import("prelude.layout");
+        pub fn map4_i32(f: fn(x: i32) -> i32, xs: layout.lane4_i32) -> layout.lane4_i32 {
+          [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
+        }
+      `,
+    ],
+    [
+      "prelude.std",
+      `
+        const array = @import("prelude.array");
+      `,
+    ],
+  ]);
+  const resolveModule = (specifier: string) => modules.get(specifier);
+
+  await checkSource(
+    `
+      const std = @import("prelude.std");
+      fn inc(x: i32) -> i32 { x + 1 }
+      pub fn main() -> std.array.layout.lane4_i32 {
+        std.array.map4_i32(inc, [1, 2, 3, 4])
+      }
+    `,
+    { resolveModule },
+  );
+});
+
+Deno.test("merge source import alias is ordinary namespace alias", async () => {
+  const modules = new Map([
+    [
+      "prelude.array",
+      `
+        type fn lane4_i32() -> type { [4*i32] }
+        pub fn map4_i32(x: i32) -> i32 { x + 1 }
+      `,
+    ],
+  ]);
+  const resolveModule = (specifier: string) => modules.get(specifier);
+
+  const checked = await checkSource(
+    `
+      const merge = @import("prelude.array");
+      pub fn main() -> i32 { merge.map4_i32(1) }
+    `,
+    { resolveModule },
+  );
+  assert(checked.program.declarations.some((decl) => decl.name === "merge.map4_i32"));
+  assert(!checked.program.declarations.some((decl) => decl.name === "map4_i32"));
+  await assertThrowsCompile(
+    `
+      const merge = @import("prelude.array");
+      const merge = @import("prelude.array");
+      pub fn main() -> i32 { 1 }
+    `,
+    "module.duplicate_alias",
+    { resolveModule },
+  );
+});
+
 Deno.test("rejects pure calls to effectful host capabilities", async () => {
   await assertThrowsCompile(
     `
-    import capability clock: fn() -> i64 !{time};
+    const clock: fn() -> i64 !{time} = @capability("clock");
     pub fn main() -> i32 { clock() }
   `,
     "effect.pure_host_call",
@@ -345,7 +558,7 @@ Deno.test("rejects pure calls to effectful host capabilities", async () => {
 
 Deno.test("accepts explicit effect rows for host capabilities", async () => {
   await checkSource(`
-    import capability clock: fn() -> i32 !{time};
+    const clock: fn() -> i32 !{time} = @capability("clock");
     pub fn main() -> i32 !{time} { clock() }
   `);
 });
@@ -456,7 +669,7 @@ Deno.test("allows fork let local reuse and rejects unknown fork source", async (
       x
     }
   `,
-    "parse.lower",
+    "type.destructure_non_multi",
   );
   await assertThrowsCompile(
     `
@@ -467,6 +680,189 @@ Deno.test("allows fork let local reuse and rejects unknown fork source", async (
     }
   `,
     "parse.lower",
+  );
+});
+
+Deno.test("pipe bind syntax lowers through scoped bind bodies", async () => {
+  const wat = await watFromSource(`
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn add(a: i32, b: i32) -> i32 { a + b }
+    fn mul(a: i32, b: i32) -> i32 { a * b }
+    pub fn main() -> i32 {
+      1 \\$ -> inc($) \\y -> add(1, y) \\z -> mul(z, 2)
+    }
+  `);
+  assertStringIncludes(wat, "call $inc");
+  assertStringIncludes(wat, "call $add");
+  assertStringIncludes(wat, "call $mul");
+  await assertThrowsCompile(
+    "pub fn main() -> i32 { \\x -> x + 1 }",
+    "parse.syntax",
+  );
+  await assertThrowsCompile(
+    "fn map4_i32(const f: fn(x: i32) -> i32, xs: i32) -> i32 { xs } pub fn main() -> i32 { map4_i32(\\x -> x + 1, 1) }",
+    "parse.syntax",
+  );
+  await assertThrowsCompile(
+    `
+    fn add(a: i32, b: i32) -> i32 { a + b }
+    pub fn main() -> i32 { 1 |> add(1) }
+  `,
+    "parse.syntax",
+  );
+  await assertThrowsCompile(
+    `
+    fn add(a: i32, b: i32) -> i32 { a + b }
+    pub fn main() -> i32 { 1 |> add($, $) }
+  `,
+    "parse.syntax",
+  );
+});
+
+Deno.test("pipe bind evaluates left once and binds flattened products", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+    type fn pair() { let Pair = [left: i32, right: i32]; struct(Pair) }
+    fn make_pair(x: i32) -> pair { Pair [left: x, right: x + 1] }
+    pub fn main() -> i32 {
+      make_pair(4) \\p -> p.left + p.right
+    }
+  `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 9);
+});
+
+Deno.test("$ const function helper sugar is unary and rejects runtime captures", async () => {
+  const wat = await watFromSource(`
+    type fn lane4_i32() { let Lane4I32 = [4*i32]; struct(Lane4I32) }
+    fn map4_i32(const f: fn(x: i32) -> i32, xs: lane4_i32) -> lane4_i32 {
+      [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
+    }
+    pub fn main() -> lane4_i32 { map4_i32($ + 1, [1, 2, 3, 4]) }
+  `);
+  assertStringIncludes(wat, "(func $__dollar");
+  assertStringIncludes(wat, "call $__dollar");
+  await assertThrowsCompile(
+    "pub fn main() -> i32 { $ + 1 }",
+    "const.placeholder_context",
+  );
+  await assertThrowsCompile(
+    `
+    type fn lane4_i32() { let Lane4I32 = [4*i32]; struct(Lane4I32) }
+    fn map4_i32(const f: fn(x: i32) -> i32, xs: lane4_i32) -> lane4_i32 {
+      [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
+    }
+    pub fn main() -> lane4_i32 {
+      let bump = 1;
+      map4_i32($ + bump, [1, 2, 3, 4])
+    }
+  `,
+    "const.placeholder_capture",
+  );
+});
+
+Deno.test("n-way fork and product result destructuring bind local result slots", async () => {
+  const wat = await watFromSource(`
+    type fn pair() { let Pair = [first: i32, second: i32]; struct(Pair) }
+    fn make_pair() -> pair { [2, 3] }
+    fn sink(x: i32) -> i32 { x }
+    pub fn main() -> i32 {
+      let x = 1;
+      let a, b, c = fork(x);
+      let used = sink(c);
+      let first, second = make_pair();
+      a + b + used + first + second
+    }
+  `);
+  assertStringIncludes(wat, "(func $make_pair (result i32) (result i32)");
+  assertStringIncludes(wat, "(local $first i32)");
+  assertStringIncludes(wat, "(local $second i32)");
+  await assertThrowsCompile(
+    `
+    pub fn main() -> i32 {
+      let x = 1;
+      let a, b, c = fork(x);
+      x
+    }
+  `,
+    "ownership.use_after_move",
+  );
+  await assertThrowsCompile(
+    `
+    pub fn make_one() -> i32 { 1 }
+    pub fn main() -> i32 {
+      let a, b = make_one();
+      a
+    }
+  `,
+    "type.destructure_non_multi",
+  );
+  await assertThrowsCompile(
+    `
+    type fn pair() { let Pair = [first: i32, second: i32]; struct(Pair) }
+    fn make_pair() -> pair { [2, 3] }
+    pub fn main() -> i32 {
+      let a, b, c = make_pair();
+      a
+    }
+  `,
+    "type.destructure_arity",
+  );
+});
+
+Deno.test("memory load intrinsics borrow memory but stores consume memory tokens", async () => {
+  await checkSource(`
+    type fn ptr(A: type) -> type {
+      let Ptr = [addr: i32];
+      struct(Ptr)
+    }
+    fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
+  @memory_load_i32(mem, p)
+}
+    fn memory.store_i32(mem: memory, p: ptr(i32), value: i32) -> memory {
+  @memory_store_i32(mem, p, value)
+}
+    fn ptr.from_i32(addr: i32) -> ptr(A) {
+  @ptr_from_i32(addr)
+}
+    fn ptr.add(p: ptr(A), bytes: i32) -> ptr(A) {
+  @ptr_add(p, bytes)
+}
+    pub fn main(mem0: memory, p: i32) -> i32 {
+      let base: ptr(i32) = ptr.from_i32(p);
+      let p0, p1 = fork(base);
+      memory.load_i32(mem0, p0) + memory.load_i32(mem0, p1)
+    }
+  `);
+
+  await assertThrowsCompile(
+    `
+    type fn ptr(A: type) -> type {
+      let Ptr = [addr: i32];
+      struct(Ptr)
+    }
+    fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
+  @memory_load_i32(mem, p)
+}
+    fn memory.store_i32(mem: memory, p: ptr(i32), value: i32) -> memory {
+  @memory_store_i32(mem, p, value)
+}
+    fn ptr.from_i32(addr: i32) -> ptr(A) {
+  @ptr_from_i32(addr)
+}
+    fn ptr.add(p: ptr(A), bytes: i32) -> ptr(A) {
+  @ptr_add(p, bytes)
+}
+    pub fn main(mem0: memory, p: i32) -> memory {
+      let base: ptr(i32) = ptr.from_i32(p);
+      let p0, p1 = fork(base);
+      let mem1: memory = memory.store_i32(mem0, p0, 1);
+      memory.store_i32(mem0, p1, 2)
+    }
+  `,
+    "ownership.use_after_move",
   );
 });
 
@@ -793,6 +1189,24 @@ Deno.test("specializes functor constraints over type constructors", async () => 
       type fn concrete() { let Concrete = [value: i32]; struct(Concrete) }
       type fn functor(T: type fn(A: type) -> type) -> type { T }
       fn bad(const _proof: functor(concrete)) -> i32 { 0 }
+    `,
+    "type.param_kind",
+  );
+  await checkSource(`
+    type fn box(A: type) -> struct { let Box = [value: A]; struct(Box) }
+    type fn functor(T: type fn(A: type) -> struct) -> type { T }
+    fn ok(const _proof: functor(box)) -> i32 { 0 }
+  `);
+  await checkSource(`
+    type fn box(A: type) -> struct { let Box = [value: A]; struct(Box) }
+    type fn broad(T: type fn(A: type) -> type) -> type { T }
+    fn ok(const _proof: broad(box)) -> i32 { 0 }
+  `);
+  await assertThrowsCompile(
+    `
+      type fn option(A: type) -> union { let None = []; let Some = [value: A]; union(None, Some) }
+      type fn functor(T: type fn(A: type) -> struct) -> type { T }
+      fn bad(const _proof: functor(option)) -> i32 { 0 }
     `,
     "type.param_kind",
   );
@@ -1239,9 +1653,104 @@ Deno.test("defaults unsuffixed integer literals in i32 contexts", async () => {
   await checkSource("pub fn main() -> i32 { 40i32 }");
 });
 
-async function assertThrowsCompile(source: string, code: string) {
+Deno.test("checks bounded inline array indexing", async () => {
+  const header = `
+    type fn inline_array(N: count, A: type) {
+      let InlineArray = [N*A];
+      struct(InlineArray)
+    }
+    type fn lane4_i32() -> type { inline_array(4, i32) }
+    fn memory.load_lane4_i32(mem: memory, p: ptr(lane4_i32)) -> lane4_i32 {
+  @memory_load_lane4_i32(mem, p)
+}
+    fn memory.store_lane4_i32(mem: memory, p: ptr(lane4_i32), value: lane4_i32) -> memory {
+  @memory_store_lane4_i32(mem, p, value)
+}
+    type fn lane8_i32() -> type { inline_array(8, i32) }
+    type fn lane8_alias() -> type { lane8_i32 }
+    type fn option(A: type) -> union {
+      let None = [];
+      let Some = [value: A];
+      union(None, Some)
+    }
+    fn get(xs: lane4_i32, i: i32) -> option(i32) { 0 }
+  `;
+  await checkSource(`${header} fn ok(xs: lane4_i32) -> i32 { xs[0] }`);
+  await assertThrowsCompile(
+    `${header} fn bad(xs: lane4_i32) -> i32 { xs[4] }`,
+    "index.out_of_bounds",
+  );
+  await checkSource(`${header} fn ok(xs: lane4_i32, i: index(4)) -> i32 { xs[i] }`);
+  await checkSource(`${header} fn ok(xs: lane8_alias, i: index(8)) -> i32 { xs[i] }`);
+  await checkSource(`${header} fn checked(xs: lane4_i32, i: i32) -> option(i32) { get(xs, i) }`);
+  await assertThrowsCompile(
+    `${header} fn bad(xs: lane4_i32, i: i32) -> i32 { xs[i] }`,
+    "index.requires_proof",
+  );
+  await assertThrowsCompile(
+    `${header} fn bad(xs: lane8_alias, i: index(4)) -> i32 { xs[i] }`,
+    "index.requires_proof",
+  );
+});
+
+Deno.test("supports arbitrary unsigned integer widths with storage-lane packing", async () => {
+  await checkSource(`
+    pub fn one(x: u1) -> u1 { x }
+    pub fn seven(x: u7) -> u7 { x }
+    pub fn eight(x: u8) -> u8 { x }
+    pub fn sixteen(x: u16) -> u16 { x }
+    pub fn thirty_one(x: u31) -> u31 { x }
+    pub fn thirty_two(x: u32) -> u32 { x }
+    pub fn sixty_four(x: u64) -> u64 { x }
+  `);
+
+  await assertThrowsCompile("pub fn bad(x: u0) -> u0 { x }", "type.unknown_type");
+  await assertThrowsCompile("pub fn bad(x: u65) -> u65 { x }", "type.unknown_type");
+
+  const packedByte = await watFromSource(`
+    type fn pair() { let Pair = [a: u1, b: u7]; struct(Pair) }
+    pub fn main(p: pair) -> u7 { p.b }
+  `);
+  assertStringIncludes(packedByte, `(param $p$a$b i32)`);
+  assertStringIncludes(packedByte, `i32.shr_u`);
+  assertStringIncludes(packedByte, `i32.const 127`);
+  assertStringIncludes(packedByte, `i32.and`);
+
+  const packedNibbles = await watFromSource(`
+    type fn pair() { let Pair = [a: u4, b: u4]; struct(Pair) }
+    pub fn main(p: pair) -> pair { p }
+  `);
+  assertStringIncludes(packedNibbles, `(param $p$a$b i32)`);
+  assertStringIncludes(packedNibbles, `(result i32)`);
+
+  const separateByteLanes = await watFromSource(`
+    type fn pair() { let Pair = [a: u7, b: u7]; struct(Pair) }
+    pub fn main(p: pair) -> pair { p }
+  `);
+  assertStringIncludes(separateByteLanes, `(param $p$a i32) (param $p$b i32)`);
+  assertStringIncludes(separateByteLanes, `(result i32) (result i32)`);
+
+  const arrayLanes = await watFromSource(`
+    type fn lane4_u7() -> type { let Lane = [4*u7]; struct(Lane) }
+    pub fn main(xs: lane4_u7) -> lane4_u7 { xs }
+  `);
+  assertStringIncludes(
+    arrayLanes,
+    `(param $xs$0 i32) (param $xs$1 i32) (param $xs$2 i32) (param $xs$3 i32)`,
+  );
+  assertStringIncludes(arrayLanes, `(result i32) (result i32) (result i32) (result i32)`);
+
+  const publicAbi = await watFromSource(`pub fn main(x: u7, y: u64) -> u7 { x }`);
+  assertStringIncludes(publicAbi, `(param $x i32) (param $y i64) (result i32)`);
+});
+
+async function assertThrowsCompile(
+  source: string,
+  code: string,
+  options?: Parameters<typeof checkSource>[1],
+) {
   try {
-    await checkSource(source);
+    await checkSource(source, options);
   } catch (error) {
     if (error instanceof CompileError) {
       assert(
@@ -1290,6 +1799,10 @@ function countExprCalls(expr: Expr, counts: Map<string, number>) {
       countExprCalls(expr.callee, counts);
       for (const arg of expr.args) countExprCalls(arg, counts);
       return;
+    case "index":
+      countExprCalls(expr.target, counts);
+      countExprCalls(expr.index, counts);
+      return;
     case "binary":
       countExprCalls(expr.left, counts);
       countExprCalls(expr.right, counts);
@@ -1313,6 +1826,7 @@ function countExprCalls(expr: Expr, counts: Map<string, number>) {
       return;
     case "literal":
     case "var":
+    case "placeholder":
       return;
   }
 }

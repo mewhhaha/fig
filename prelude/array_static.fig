@@ -1,0 +1,242 @@
+const layout = @import("prelude.layout");
+
+// Futhark-style SOAC names for fixed inline layouts. Work/span comments describe
+// intent only; the current backend proves parsing, checking, specialization, and
+// scalar direct calls after optimization.
+
+fn map4_i32(const f: fn(x: i32) -> i32, xs: layout.lane4_i32) -> layout.lane4_i32 {
+  [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
+}
+
+fn zip_with4_i32(const f: fn(a: i32, b: i32) -> i32, xs: layout.lane4_i32, ys: layout.lane4_i32) -> layout.lane4_i32 {
+  [f(xs[0], ys[0]), f(xs[1], ys[1]), f(xs[2], ys[2]), f(xs[3], ys[3])]
+}
+
+fn fold4_i32(const f: fn(acc: i32, x: i32) -> i32, init: i32, xs: layout.lane4_i32) -> i32 {
+  f(f(f(f(init, xs[0]), xs[1]), xs[2]), xs[3])
+}
+
+fn reduce4_i32(const f: fn(a: i32, b: i32) -> i32, xs: layout.lane4_i32) -> i32 {
+  f(f(xs[0], xs[1]), f(xs[2], xs[3]))
+}
+
+fn lane4_add_i32(xs: layout.lane4_i32, ys: layout.lane4_i32) -> layout.lane4_i32 {
+  [xs[0] + ys[0], xs[1] + ys[1], xs[2] + ys[2], xs[3] + ys[3]]
+}
+
+fn lane4_mul_i32(xs: layout.lane4_i32, ys: layout.lane4_i32) -> layout.lane4_i32 {
+  [xs[0] * ys[0], xs[1] * ys[1], xs[2] * ys[2], xs[3] * ys[3]]
+}
+
+fn lane4_dot_i32(xs: layout.lane4_i32, ys: layout.lane4_i32) -> i32 {
+  xs[0] * ys[0] + xs[1] * ys[1] + xs[2] * ys[2] + xs[3] * ys[3]
+}
+
+fn mat4_rows_i32(
+  r0: layout.lane4_i32,
+  r1: layout.lane4_i32,
+  r2: layout.lane4_i32,
+  r3: layout.lane4_i32
+) -> layout.mat4_i32 {
+  [r0, r1, r2, r3]
+}
+
+fn capacity(xs: layout.lane4_i32) -> i32 {
+  4
+}
+
+fn in_bounds(xs: layout.lane4_i32, i: i32) -> i32 {
+  i
+}
+
+fn get(xs: layout.lane4_i32, i: i32) -> layout.core.option(i32) {
+  0
+}
+
+type fn runtime_view(A: type) {
+  let RuntimeView = [base: A, len: i32, stride: i32];
+  struct(RuntimeView)
+}
+
+type fn runtime_range() {
+  let RuntimeRange = [start: i32, end: i32, step: i32];
+  struct(RuntimeRange)
+}
+
+type fn range_i32() {
+  let RangeI32 = [start: i32, end: i32];
+  struct(RangeI32)
+}
+
+type fn iter() {
+  let Iter = [items: layout.lane4_i32, keep: layout.lane4_bool];
+  struct(Iter)
+}
+
+type fn compact_array() {
+  let CompactArray = [items: layout.lane4_i32, len: i32];
+  struct(CompactArray)
+}
+
+type fn compact_iter() {
+  let CompactIter = [source: compact_array];
+  struct(CompactIter)
+}
+
+type fn range_iter() {
+  let RangeIter = [source: range_i32];
+  struct(RangeIter)
+}
+
+fn layout.inline_array.iter(xs: layout.lane4_i32) -> iter {
+  Iter [items: xs, keep: [true, true, true, true]]
+}
+
+fn range_i32.iter(r: range_i32) -> range_iter {
+  RangeIter [source: r]
+}
+
+fn iter.map(xs: iter, const f: fn(x: i32) -> i32) -> iter {
+  Iter [items: [f(xs.items[0]), f(xs.items[1]), f(xs.items[2]), f(xs.items[3])], keep: xs.keep]
+}
+
+fn iter.filter(xs: iter, const pred: fn(x: i32) -> bool) -> iter {
+  Iter [
+    items: xs.items,
+    keep: [
+      match xs.keep[0] { true => pred(xs.items[0]), false => false },
+      match xs.keep[1] { true => pred(xs.items[1]), false => false },
+      match xs.keep[2] { true => pred(xs.items[2]), false => false },
+      match xs.keep[3] { true => pred(xs.items[3]), false => false }
+    ]
+  ]
+}
+
+fn iter.reverse(xs: iter) -> iter {
+  Iter [
+    items: [xs.items[3], xs.items[2], xs.items[1], xs.items[0]],
+    keep: [xs.keep[3], xs.keep[2], xs.keep[1], xs.keep[0]]
+  ]
+}
+
+fn iter.take2(xs: iter) -> iter {
+  Iter [items: xs.items, keep: [xs.keep[0], xs.keep[1], false, false]]
+}
+
+fn iter.drop1(xs: iter) -> iter {
+  Iter [items: xs.items, keep: [false, xs.keep[1], xs.keep[2], xs.keep[3]]]
+}
+
+fn iter.fold(xs: iter, init: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
+  let init_then, init_else = fork(init);
+  let acc0 = match xs.keep[0] { true => f(init_then, xs.items[0]), false => init_else };
+  let acc0_then, acc0_else = fork(acc0);
+  let acc1 = match xs.keep[1] { true => f(acc0_then, xs.items[1]), false => acc0_else };
+  let acc1_then, acc1_else = fork(acc1);
+  let acc2 = match xs.keep[2] { true => f(acc1_then, xs.items[2]), false => acc1_else };
+  let acc2_then, acc2_else = fork(acc2);
+  match xs.keep[3] { true => f(acc2_then, xs.items[3]), false => acc2_else }
+}
+
+fn iter.reduce(xs: iter, const f: fn(a: i32, b: i32) -> i32) -> i32 {
+  iter.fold(iter.drop1(xs), xs.items[0], f)
+}
+
+fn iter.collect(xs: iter) -> compact_array {
+  let len0 = match xs.keep[0] { true => 1, false => 0 };
+  let i0 = match xs.keep[0] { true => xs.items[0], false => 0 };
+
+  let len0_for_i0, len0_for_i1, len0_for_len = fork(len0);
+  let i0_for_i0, i0_for_i1 = fork(i0);
+  let i0_after1 = match xs.keep[1] {
+    true => match len0_for_i0 { 0 => xs.items[1], _ => i0_for_i0 },
+    false => i0_for_i1,
+  };
+  let i1_after1 = match xs.keep[1] {
+    true => match len0_for_i1 { 0 => 0, _ => xs.items[1] },
+    false => 0,
+  };
+  let len1 = match xs.keep[1] { true => len0_for_len + 1, false => len0_for_len };
+
+  let len1_for_i0, len1_for_i1, len1_for_i2, len1_for_len = fork(len1);
+  let i0_after1_for_i0, i0_after1_for_i1 = fork(i0_after1);
+  let i1_after1_for_i1, i1_after1_for_i2 = fork(i1_after1);
+  let i0_after2 = match xs.keep[2] {
+    true => match len1_for_i0 { 0 => xs.items[2], _ => i0_after1_for_i0 },
+    false => i0_after1_for_i1,
+  };
+  let i1_after2 = match xs.keep[2] {
+    true => match len1_for_i1 {
+      0 => 0,
+      1 => xs.items[2],
+      _ => i1_after1_for_i1,
+    },
+    false => i1_after1_for_i2,
+  };
+  let i2_after2 = match xs.keep[2] {
+    true => match len1_for_i2 { 2 => xs.items[2], _ => 0 },
+    false => 0,
+  };
+  let len2 = match xs.keep[2] { true => len1_for_len + 1, false => len1_for_len };
+
+  let len2_for_i0, len2_for_i1, len2_for_i2, len2_for_i3, len2_for_len = fork(len2);
+  let i0_after2_for_i0, i0_after2_for_final = fork(i0_after2);
+  let i1_after2_for_i1, i1_after2_for_final = fork(i1_after2);
+  let i2_after2_for_i2, i2_after2_for_final = fork(i2_after2);
+  let i0_final = match xs.keep[3] {
+    true => match len2_for_i0 { 0 => xs.items[3], _ => i0_after2_for_i0 },
+    false => i0_after2_for_final,
+  };
+  let i1_final = match xs.keep[3] {
+    true => match len2_for_i1 {
+      0 => 0,
+      1 => xs.items[3],
+      _ => i1_after2_for_i1,
+    },
+    false => i1_after2_for_final,
+  };
+  let i2_final = match xs.keep[3] {
+    true => match len2_for_i2 {
+      2 => xs.items[3],
+      _ => i2_after2_for_i2,
+    },
+    false => i2_after2_for_final,
+  };
+  let i3_final = match xs.keep[3] {
+    true => match len2_for_i3 { 3 => xs.items[3], _ => 0 },
+    false => 0,
+  };
+  let len_final = match xs.keep[3] { true => len2_for_len + 1, false => len2_for_len };
+  CompactArray [items: [i0_final, i1_final, i2_final, i3_final], len: len_final]
+}
+
+fn compact_array.iter(xs: compact_array) -> compact_iter {
+  CompactIter [source: xs]
+}
+
+fn range_iter.fold_loop(i: i32, end: i32, acc: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
+  let acc_then, acc_else = fork(acc);
+  match i < end {
+    true => range_iter.fold_loop(i + 1, end, f(acc_then, i), f),
+    false => acc_else,
+  }
+}
+
+fn range_iter.fold(xs: range_iter, init: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
+  range_iter.fold_loop(xs.source.start, xs.source.end, init, f)
+}
+
+fn map4_scalar_i32(const f: fn(x: layout.core.scalar_i32) -> layout.core.scalar_i32, x: layout.core.scalar_i32) -> layout.core.scalar_i32 {
+  f(f(f(f(x))))
+}
+
+fn zip_with4_scalar_i32(
+  const f: fn(a: layout.core.scalar_i32, b: layout.core.scalar_i32) -> layout.core.scalar_i32,
+  x: layout.core.scalar_i32,
+  y0: layout.core.scalar_i32,
+  y1: layout.core.scalar_i32,
+  y2: layout.core.scalar_i32,
+  y3: layout.core.scalar_i32
+) -> layout.core.scalar_i32 {
+  f(f(f(f(x, y0), y1), y2), y3)
+}

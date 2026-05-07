@@ -17,6 +17,7 @@ export interface CapabilityImport {
 export interface SourceImport {
   kind: "source_import";
   module: string;
+  alias?: string;
 }
 
 export interface FnDecl {
@@ -32,6 +33,8 @@ export interface FnDecl {
   effects: string[];
   body: BlockExpr;
   generated?: boolean;
+  generatedInlineable?: boolean;
+  primitiveId?: string;
 }
 
 export interface LetDecl {
@@ -51,8 +54,15 @@ export interface ConstDecl {
 export interface ForkLetDecl {
   kind: "fork_let";
   source: string;
-  left: string;
-  right: string;
+  names: string[];
+  sourceType?: string;
+}
+
+export interface DestructureLetDecl {
+  kind: "destructure_let";
+  names: string[];
+  value: Expr;
+  slotTypes?: string[];
 }
 
 export interface ProofConstDecl {
@@ -65,6 +75,7 @@ export interface TypeDecl {
   kind: "type";
   name: string;
   params: TypeParam[];
+  resultKind: TypeResultKind;
   paramPatterns?: ParamPattern[];
   body: TypeBlock;
   normalized?: TypeBody;
@@ -72,7 +83,19 @@ export interface TypeDecl {
   clauses?: TypeDecl[];
 }
 
-export type TypeParamKind = "type" | "count" | string;
+export type TypeResultKind = "type" | "struct" | "union";
+
+export type TypeParamKind =
+  | "type"
+  | "count"
+  | "bool"
+  | "i32"
+  | "numeric"
+  | "string"
+  | "char"
+  | "multiline"
+  | "literal"
+  | string;
 
 export interface TypeParam {
   name: string;
@@ -191,7 +214,7 @@ export interface BlockExpr {
   expr?: Expr;
 }
 
-export type Statement = LetDecl | ForkLetDecl | ProofConstDecl;
+export type Statement = LetDecl | ForkLetDecl | DestructureLetDecl | ProofConstDecl;
 
 export type Expr =
   | {
@@ -201,7 +224,10 @@ export type Expr =
     inferredType?: string;
   }
   | { kind: "var"; name: string }
+  | { kind: "placeholder" }
+  | { kind: "pipe_bind"; value: Expr; name: string; body: Expr }
   | { kind: "call"; callee: Expr; args: Expr[] }
+  | { kind: "index"; target: Expr; index: Expr }
   | { kind: "binary"; op: string; left: Expr; right: Expr }
   | { kind: "match"; value: Expr; arms: { pattern: string; value: Expr }[] }
   | { kind: "shape"; slots: { label?: string; value: Expr }[] }

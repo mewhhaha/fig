@@ -10,10 +10,11 @@
     "import",
     "let",
     "match",
-    "module",
     "pub",
+    "struct",
     "true",
     "type",
+    "union",
     "zip"
   ],
   "symbols": [
@@ -40,10 +41,12 @@
     "@",
     "*",
     "/",
+    "\\",
     "+",
     "<",
     "=",
-    ">"
+    ">",
+    "$"
   ],
   "tokens": [
     {

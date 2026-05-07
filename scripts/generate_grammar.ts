@@ -4,7 +4,7 @@ const grammarSource = await Deno.readTextFile("grammar.ebnf");
 const metadataSource = await Deno.readTextFile("baba.json");
 const grammar = parseGrammar(grammarSource);
 const metadata = parseMetadata(metadataSource);
-const bundle = generate(grammar, { name: "shovel", metadata, preset: "workbench" });
+const bundle = generate(grammar, { name: "fig", metadata, preset: "workbench" });
 
 await Deno.remove("generated/baba-workbench", { recursive: true }).catch(() => {});
 await Deno.mkdir("generated/baba-workbench", { recursive: true });
@@ -19,8 +19,17 @@ for (const file of bundle.files) {
   await Deno.writeTextFile(path, content);
 }
 
+await Deno.remove("helix/runtime/queries/fig", { recursive: true }).catch(() => {});
+await Deno.mkdir("helix/runtime/queries/fig", { recursive: true });
+for await (const entry of Deno.readDir("generated/baba-workbench/queries")) {
+  if (!entry.isFile || !entry.name.endsWith(".scm")) continue;
+  await Deno.copyFile(
+    `generated/baba-workbench/queries/${entry.name}`,
+    `helix/runtime/queries/fig/${entry.name}`,
+  );
+}
+
 const tokenKinds = [
-  "module",
   "import",
   "capability",
   "type",

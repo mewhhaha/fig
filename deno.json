@@ -1,5 +1,5 @@
 {
-  "name": "@mewhhaha/shovel",
+  "name": "@mewhhaha/fig",
   "version": "0.1.0",
   "exports": {
     ".": "./src/mod.ts"
@@ -16,8 +16,8 @@
     "test": "deno test --allow-read --allow-write --allow-run",
     "bench:const": "deno run --allow-read scripts/bench_const_params.ts",
     "snapshots": "deno test --allow-read --allow-write tests/wat_snapshot_test.ts",
-    "smoke": "deno run --allow-read --allow-write src/cli.ts run examples/hello.shovel",
-    "helix": "deno run --allow-read --allow-write --allow-run scripts/build_helix_parser.ts && env XDG_CONFIG_HOME=$PWD/helix/config HELIX_RUNTIME=$PWD/helix/runtime hx --health shovel"
+    "smoke": "deno run --allow-read --allow-write src/cli.ts run examples/hello.fig",
+    "helix": "deno run --allow-read --allow-write --allow-run scripts/build_helix_parser.ts && env XDG_CONFIG_HOME=$PWD/helix/config HELIX_RUNTIME=$PWD/helix/runtime hx --health fig"
   },
   "fmt": {
     "lineWidth": 100,

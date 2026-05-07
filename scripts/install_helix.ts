@@ -3,45 +3,45 @@ const home = Deno.env.get("HOME");
 if (!home) throw new Error("HOME is not set");
 
 const configRoot = Deno.env.get("XDG_CONFIG_HOME") ?? `${home}/.config`;
-const helixConfig = Deno.env.get("SHOVEL_HELIX_CONFIG") ?? `${configRoot}/helix`;
-const helixRuntime = Deno.env.get("SHOVEL_HELIX_RUNTIME") ?? `${helixConfig}/runtime`;
+const helixConfig = Deno.env.get("FIG_HELIX_CONFIG") ?? `${configRoot}/helix`;
+const helixRuntime = Deno.env.get("FIG_HELIX_RUNTIME") ?? `${helixConfig}/runtime`;
 
 const languagesPath = `${helixConfig}/languages.toml`;
-const grammarOut = `${helixRuntime}/grammars/shovel.so`;
-const queryOut = `${helixRuntime}/queries/shovel`;
+const grammarOut = `${helixRuntime}/grammars/fig.so`;
+const queryOut = `${helixRuntime}/queries/fig`;
 
 await Deno.mkdir(`${helixRuntime}/grammars`, { recursive: true });
 await Deno.mkdir(queryOut, { recursive: true });
 await Deno.mkdir(helixConfig, { recursive: true });
 
-await Deno.copyFile(`${root}/helix/runtime/grammars/shovel.so`, grammarOut);
+await Deno.copyFile(`${root}/helix/runtime/grammars/fig.so`, grammarOut);
 
-for await (const entry of Deno.readDir(`${root}/helix/runtime/queries/shovel`)) {
+for await (const entry of Deno.readDir(`${root}/helix/runtime/queries/fig`)) {
   if (!entry.isFile) continue;
   await Deno.copyFile(
-    `${root}/helix/runtime/queries/shovel/${entry.name}`,
+    `${root}/helix/runtime/queries/fig/${entry.name}`,
     `${queryOut}/${entry.name}`,
   );
 }
 
-const block = `# BEGIN shovel managed
+const block = `# BEGIN fig managed
 [[language]]
-name = "shovel"
-scope = "source.shovel"
-file-types = ["shovel"]
-grammar = "shovel"
+name = "fig"
+scope = "source.fig"
+file-types = ["fig"]
+grammar = "fig"
 roots = ["deno.json", "grammar.ebnf"]
 comment-token = "//"
 indent = { tab-width = 2, unit = "  " }
 
 [[grammar]]
-name = "shovel"
+name = "fig"
 source = { path = "${root}/generated/baba-workbench" }
-# END shovel managed
+# END fig managed
 `;
 
-const begin = "# BEGIN shovel managed";
-const end = "# END shovel managed";
+const begin = "# BEGIN fig managed";
+const end = "# END fig managed";
 let existing = await Deno.readTextFile(languagesPath).catch(() => "");
 const start = existing.indexOf(begin);
 const stop = existing.indexOf(end);

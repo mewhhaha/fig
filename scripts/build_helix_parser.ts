@@ -1,9 +1,9 @@
 const root = new URL("../", import.meta.url).pathname;
 const parser = `${root}generated/baba-workbench/src/parser.c`;
-const object = `${root}helix/runtime/grammars/shovel.o`;
-const output = `${root}helix/runtime/grammars/shovel.so`;
+const object = `${root}helix/runtime/grammars/fig.o`;
+const output = `${root}helix/runtime/grammars/fig.so`;
 const generatedQueries = `${root}generated/baba-workbench/queries`;
-const helixQueries = `${root}helix/runtime/queries/shovel`;
+const helixQueries = `${root}helix/runtime/queries/fig`;
 
 await Deno.mkdir(`${root}helix/runtime/grammars`, { recursive: true });
 await Deno.remove(helixQueries, { recursive: true }).catch(() => {});

@@ -1,6 +1,6 @@
 {
-  "name": "shovel-language",
-  "displayName": "shovel language",
+  "name": "fig-language",
+  "displayName": "fig language",
   "version": "0.0.0",
   "engines": {
     "vscode": "^1.90.0"
@@ -8,12 +8,12 @@
   "contributes": {
     "languages": [
       {
-        "id": "shovel",
+        "id": "fig",
         "aliases": [
-          "shovel"
+          "fig"
         ],
         "extensions": [
-          ".shovel"
+          ".fig"
         ],
         "configuration": "./language-configuration.json"
       }

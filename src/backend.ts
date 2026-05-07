@@ -8,11 +8,14 @@ import type {
   Statement,
   TypeDecl,
 } from "./core_ast.ts";
+import { CompileError } from "./diagnostics.ts";
 import { optimizeProgram } from "./optimize.ts";
+import { intrinsicCallId, intrinsicIdsByFunctionName, intrinsicWrapperId, isIntrinsicWrapper } from "./primitives.ts";
 
 interface BackendModule {
   imports: BackendImport[];
   functions: BackendFunction[];
+  memory: boolean;
 }
 
 interface BackendImport {
@@ -42,12 +45,21 @@ type Instr =
   | { op: "local.get"; name: string }
   | { op: "local.set"; name: string }
   | { op: "call"; name: string }
+  | { op: "return_call"; name: string }
   | { op: "binary"; wasm: string }
-  | { op: "simd"; wasm: SimdOp; lane?: number }
+  | { op: "simd"; wasm: SimdOp; lane?: number; lanes?: number[] }
+  | { op: "load"; type: ValueType; align: number; offset: number }
+  | { op: "store"; type: ValueType; align: number; offset: number }
   | { op: "drop" }
-  | { op: "if"; results: ValueType[]; thenBody: Instr[]; elseBody: Instr[] };
+  | { op: "unreachable" }
+  | { op: "if"; results: ValueType[]; thenBody: Instr[]; elseBody: Instr[] }
+  | { op: "block"; body: Instr[]; results?: ValueType[] }
+  | { op: "loop"; body: Instr[]; results?: ValueType[] }
+  | { op: "br"; depth: number }
+  | { op: "br_if"; depth: number };
 
 type SimdOp =
+  | "i8x16.shuffle"
   | "i32x4.splat"
   | "i32x4.extract_lane"
   | "i32x4.replace_lane"
@@ -65,33 +77,48 @@ interface LowerContext {
   layouts: LayoutEnv;
   functions: Map<string, FnDecl>;
   signatures: Map<string, FnDecl>;
+  intrinsicIdsByName: Map<string, string>;
   tempIndex: number;
   tempLocals: BackendLocal[];
+  tailCallMode?: TailCallMode;
 }
 
-export function emitWat(program: Program): string {
-  return backendModuleToWat(lowerBackendModule(program));
+export type TailCallMode = "opcode";
+
+export interface BackendOptions {
+  tailCallMode?: TailCallMode;
 }
 
-export function emitWasm(program: Program): Uint8Array<ArrayBuffer> {
-  return backendModuleToWasm(lowerBackendModule(program));
+export function emitWat(program: Program, options: BackendOptions = {}): string {
+  return backendModuleToWat(lowerBackendModule(program, options));
 }
 
-function lowerBackendModule(program: Program): BackendModule {
+export function emitWasm(
+  program: Program,
+  options: BackendOptions = {},
+): Uint8Array<ArrayBuffer> {
+  return backendModuleToWasm(lowerBackendModule(program, options));
+}
+
+function lowerBackendModule(program: Program, options: BackendOptions = {}): BackendModule {
   const optimized = optimizeProgram(program);
   const layouts = createLayoutEnv(optimized);
   const imports = optimized.imports.map((item) => importAsFn(item));
   const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
-    decl.kind === "fn" && !decl.params.some((param) => param.const) && Boolean(decl.returnType)
+    decl.kind === "fn" && !decl.primitiveId && !isIntrinsicWrapper(decl) && !decl.params.some((param) => param.const) &&
+    Boolean(decl.returnType)
   );
   const functions = removeUnreachablePrivateFunctions(runtimeFns);
+  const allFns = optimized.declarations.filter((decl): decl is FnDecl => decl.kind === "fn" && Boolean(decl.returnType));
   const signatures = new Map([...imports, ...functions].map((fn) => [fn.name, fn]));
   const ctx: LowerContext = {
     layouts,
-    functions: signatures,
+    functions: new Map([...imports, ...allFns].map((fn) => [fn.name, fn])),
     signatures,
+    intrinsicIdsByName: intrinsicIdsByFunctionName(optimized.declarations),
     tempIndex: 0,
     tempLocals: [],
+    tailCallMode: options.tailCallMode,
   };
 
   return {
@@ -103,6 +130,7 @@ function lowerBackendModule(program: Program): BackendModule {
       results: flattenType(fn.returnType, layouts).map((slot) => slot.wat),
     })),
     functions: functions.map((fn) => lowerFunction(fn, ctx)),
+    memory: functions.some((fn) => usesMemoryIntrinsic(fn.body, ctx.functions)),
   };
 }
 
@@ -113,13 +141,29 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
       type: slot.wat,
     }))
   );
-  const localNames = new Set(params.map((param) => param.name));
+  const paramNames = new Set(params.map((param) => param.name));
+  const localNames = new Set(paramNames);
   const fnCtx: LowerContext = { ...ctx, tempIndex: 0, tempLocals: [] };
-  const body = lowerBlock(fn.body, fnCtx, localNames, fn.returnType);
+  const tailCalls = analyzeTailCalls(fn);
+  if (
+    ctx.tailCallMode === "opcode" && tailCalls.hasDirectSelfCall &&
+    !tailCalls.hasOnlyTailDirectSelfCalls
+  ) {
+    throw new CompileError([{
+      code: "backend.tail_call_ineligible",
+      message: `function ${fn.name} is not eligible for tail-call opcode lowering`,
+    }]);
+  }
+  const body = ctx.tailCallMode === "opcode" && tailCalls.hasOnlyTailDirectSelfCalls
+    ? lowerTailOpcodeBlock(fn.body, fn, fnCtx, localNames)
+    : tailCalls.hasOnlyTailDirectSelfCalls
+    ? lowerTailLoopBlock(fn.body, fn, fnCtx, localNames)
+    : lowerBlock(fn.body, fnCtx, localNames, fn.returnType);
   const locals = [...collectIrLocals(fn.body, fnCtx), ...fnCtx.tempLocals].filter((local) =>
-    (!localNames.has(local.name) &&
+    (!paramNames.has(local.name) &&
       usedNames(fn.body).has(local.name.split("$")[0] ?? local.name)) ||
-    local.name.startsWith("__simd_tmp")
+    local.name.startsWith("__simd_tmp") ||
+    local.name.startsWith("__tail_tmp")
   );
   return {
     name: fn.name,
@@ -146,18 +190,21 @@ function collectBlockLocals(block: BlockExpr, locals: BackendLocal[], ctx: Lower
   for (const stmt of block.statements) {
     if (stmt.kind === "let") {
       if (usedNames(block).has(stmt.name) || hasRuntimeEffect(stmt.value, ctx.functions)) {
-        locals.push(
-          ...flattenBinding(
-            stmt.name,
-            stmt.type ?? exprType(stmt.value, ctx.functions),
-            ctx.layouts,
-          )
-            .map((slot) => ({ name: slot.name, type: slot.wat })),
-        );
+        locals.push(...statementLocalBindings(stmt, ctx));
       }
       collectExprLocals(stmt.value, locals, ctx);
+    } else if (stmt.kind === "destructure_let") {
+      for (const binding of statementLocalBindings(stmt, ctx)) locals.push(binding);
+      collectExprLocals(stmt.value, locals, ctx);
     } else if (stmt.kind === "fork_let") {
-      locals.push({ name: stmt.left, type: "i32" }, { name: stmt.right, type: "i32" });
+      for (const name of stmt.names) {
+        locals.push(
+          ...flattenBinding(name, stmt.sourceType, ctx.layouts).map((slot) => ({
+            name: slot.name,
+            type: slot.wat,
+          })),
+        );
+      }
     }
   }
   if (block.expr) collectExprLocals(block.expr, locals, ctx);
@@ -172,9 +219,22 @@ function collectExprLocals(expr: Expr, locals: BackendLocal[], ctx: LowerContext
       collectExprLocals(expr.callee, locals, ctx);
       for (const arg of expr.args) collectExprLocals(arg, locals, ctx);
       return;
+    case "index":
+      collectExprLocals(expr.target, locals, ctx);
+      collectExprLocals(expr.index, locals, ctx);
+      return;
     case "binary":
       collectExprLocals(expr.left, locals, ctx);
       collectExprLocals(expr.right, locals, ctx);
+      return;
+    case "pipe_bind":
+      for (
+        const slot of flattenBinding(expr.name, exprType(expr.value, ctx.functions), ctx.layouts)
+      ) {
+        locals.push({ name: slot.name, type: slot.wat });
+      }
+      collectExprLocals(expr.value, locals, ctx);
+      collectExprLocals(expr.body, locals, ctx);
       return;
     case "match":
       collectExprLocals(expr.value, locals, ctx);
@@ -190,6 +250,7 @@ function collectExprLocals(expr: Expr, locals: BackendLocal[], ctx: LowerContext
       return;
     case "literal":
     case "var":
+    case "placeholder":
       return;
   }
 }
@@ -222,19 +283,33 @@ function lowerStatement(
 ): Instr[] {
   if (stmt.kind === "proof_const") return [];
   if (stmt.kind === "fork_let") {
+    const sourceSlots = flattenBinding(baseName(stmt.source), stmt.sourceType, ctx.layouts);
+    return stmt.names.flatMap((name) => {
+      const targetSlots = flattenBinding(name, stmt.sourceType, ctx.layouts);
+      return sourceSlots.flatMap((source, index) => {
+        const target = targetSlots[index]?.name ?? name;
+        locals.add(target);
+        return [
+          { op: "local.get", name: source.name } as Instr,
+          { op: "local.set", name: target } as Instr,
+        ];
+      });
+    });
+  }
+  if (stmt.kind === "destructure_let") {
+    const bindings = statementLocalBindings(stmt, ctx);
+    for (const target of bindings.map((slot) => slot.name)) locals.add(target);
     return [
-      { op: "local.get", name: baseName(stmt.source) },
-      { op: "local.set", name: stmt.left },
-      { op: "local.get", name: baseName(stmt.source) },
-      { op: "local.set", name: stmt.right },
+      ...lowerExpr(stmt.value, ctx, locals),
+      ...bindings.map((binding) => binding.name).toReversed().map((name): Instr => ({
+        op: "local.set",
+        name,
+      })),
     ];
   }
   if (!usedLater.has(stmt.name) && !hasRuntimeEffect(stmt.value, ctx.functions)) return [];
-  const targets = flattenBinding(
-    stmt.name,
-    stmt.type ?? exprType(stmt.value, ctx.functions),
-    ctx.layouts,
-  ).map((slot) => slot.name);
+  const bindings = statementLocalBindings(stmt, ctx);
+  const targets = bindings.map((slot) => slot.name);
   for (const target of targets) locals.add(target);
   const value = lowerExpr(stmt.value, ctx, locals, stmt.type);
   if (!usedLater.has(stmt.name)) {
@@ -251,6 +326,142 @@ function lowerStatement(
   ];
 }
 
+function lowerTailOpcodeBlock(
+  block: BlockExpr,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  return [
+    ...lowerBlock({ kind: "block", statements: block.statements }, ctx, locals, fn.returnType),
+    ...(block.expr ? lowerTailOpcodeExpr(block.expr, fn, ctx, locals) : []),
+  ];
+}
+
+function lowerTailOpcodeExpr(
+  expr: Expr,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === fn.name) {
+    const callee = ctx.signatures.get(expr.callee.name);
+    const argOffset = Math.max(0, expr.args.length - (callee?.params.length ?? expr.args.length));
+    return [
+      ...expr.args.flatMap((arg, index) =>
+        index < argOffset
+          ? []
+          : lowerExpr(arg, ctx, locals, callee?.params[index - argOffset]?.type)
+      ),
+      { op: "return_call", name: expr.callee.name },
+    ];
+  }
+  if (expr.kind === "match") {
+    return lowerTailOpcodeMatch(expr, fn, ctx, locals);
+  }
+  return lowerExpr(expr, ctx, locals, fn.returnType);
+}
+
+function lowerTailOpcodeMatch(
+  expr: Extract<Expr, { kind: "match" }>,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const [arm, ...rest] = expr.arms;
+  if (!arm) return [{ op: "const", type: "i32", value: 0 }];
+  if (arm.pattern === "_" || rest.length === 0) {
+    return lowerTailOpcodeExpr(arm.value, fn, ctx, locals);
+  }
+  return [
+    ...lowerExpr(expr.value, ctx, locals),
+    ...lowerPatternTest(arm.pattern),
+    {
+      op: "if",
+      results: flattenType(fn.returnType, ctx.layouts).map((slot) => slot.wat),
+      thenBody: lowerTailOpcodeExpr(arm.value, fn, ctx, locals),
+      elseBody: lowerTailOpcodeMatch({ ...expr, arms: rest }, fn, ctx, locals),
+    },
+  ];
+}
+
+function lowerTailLoopBlock(
+  block: BlockExpr,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  return [{
+    op: "block",
+    results: flattenType(fn.returnType, ctx.layouts).map((slot) => slot.wat),
+    body: [{
+      op: "loop",
+      body: [
+        ...lowerBlock({ kind: "block", statements: block.statements }, ctx, locals, fn.returnType),
+        ...(block.expr ? lowerTailLoopExpr(block.expr, fn, ctx, locals, 0, 1) : []),
+      ],
+    }, { op: "unreachable" }],
+  }];
+}
+
+function lowerTailLoopExpr(
+  expr: Expr,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+  continueDepth: number,
+  exitDepth: number,
+): Instr[] {
+  if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === fn.name) {
+    const callee = ctx.signatures.get(expr.callee.name);
+    const argOffset = Math.max(0, expr.args.length - (callee?.params.length ?? expr.args.length));
+    const runtimeArgs = expr.args.slice(argOffset);
+    const flatParams = fn.params.flatMap((param) => flattenBinding(param.name, param.type, ctx.layouts));
+    const temps = flatParams.map((param) => {
+      const name = `__tail_tmp${ctx.tempIndex++}`;
+      ctx.tempLocals.push({ name, type: param.wat });
+      locals.add(name);
+      return name;
+    });
+    return [
+      ...runtimeArgs.flatMap((arg, index) => lowerExpr(arg, ctx, locals, callee?.params[index]?.type)),
+      ...temps.toReversed().map((name): Instr => ({ op: "local.set", name })),
+      ...flatParams.map((param, index): Instr[] => [
+        { op: "local.get", name: temps[index] },
+        { op: "local.set", name: param.name },
+      ]).flat(),
+      { op: "br", depth: continueDepth },
+    ];
+  }
+  if (expr.kind === "match") return lowerTailLoopMatch(expr, fn, ctx, locals, continueDepth, exitDepth);
+  return [...lowerExpr(expr, ctx, locals, fn.returnType), { op: "br", depth: exitDepth }];
+}
+
+function lowerTailLoopMatch(
+  expr: Extract<Expr, { kind: "match" }>,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+  continueDepth: number,
+  exitDepth: number,
+): Instr[] {
+  const [arm, ...rest] = expr.arms;
+  if (!arm) return [{ op: "br", depth: exitDepth }];
+  if (arm.pattern === "_" || rest.length === 0) {
+    return lowerTailLoopExpr(arm.value, fn, ctx, locals, continueDepth, exitDepth);
+  }
+  return [
+    ...lowerExpr(expr.value, ctx, locals),
+    ...lowerPatternTest(arm.pattern),
+    {
+      op: "if",
+      results: [],
+      thenBody: lowerTailLoopExpr(arm.value, fn, ctx, locals, continueDepth + 1, exitDepth + 1),
+      elseBody: lowerTailLoopMatch({ ...expr, arms: rest }, fn, ctx, locals, continueDepth + 1, exitDepth + 1),
+    },
+  ];
+}
+
 function lowerExpr(
   expr: Expr,
   ctx: LowerContext,
@@ -264,8 +475,17 @@ function lowerExpr(
       return lowerLiteral(expr);
     case "var":
       return lowerVar(expr.name, ctx.layouts, locals, expectedType);
+    case "placeholder":
+      throw new Error("backend cannot lower unresolved $ placeholder");
     case "call": {
-      if (expr.callee.kind !== "var") throw new Error("backend only supports direct calls");
+      if (expr.callee.kind !== "var") {
+        if (expr.args.length === 0) return lowerExpr(expr.callee, ctx, locals, expectedType);
+        throw new Error("backend only supports direct calls");
+      }
+      const memory = lowerMemoryIntrinsic(expr, ctx, locals);
+      if (memory) return memory;
+      const pointer = lowerPointerPrimitive(expr, ctx, locals);
+      if (pointer) return pointer;
       const callee = ctx.signatures.get(expr.callee.name);
       if (!callee) {
         if (!hasRuntimeEffect(expr, ctx.functions)) return [{ op: "const", type: "i32", value: 0 }];
@@ -281,12 +501,20 @@ function lowerExpr(
         { op: "call", name: expr.callee.name },
       ];
     }
+    case "index":
+      return lowerIndex(expr, ctx, locals, expectedType);
     case "binary":
+      {
+        const dot = lowerDot4I32(expr, ctx, locals);
+        if (dot) return dot;
+      }
       return [
         ...lowerExpr(expr.left, ctx, locals),
         ...lowerExpr(expr.right, ctx, locals),
         { op: "binary", wasm: binaryOp(expr.op) },
       ];
+    case "pipe_bind":
+      return lowerPipeBind(expr, ctx, locals, expectedType);
     case "match":
       return lowerMatchArms(expr.value, expr.arms, ctx, locals);
     case "shape":
@@ -295,17 +523,56 @@ function lowerExpr(
         if (vector) return extractLane4I32(vector, ctx);
       }
       if (expr.slots.length === 0) return [{ op: "const", type: "i32", value: 0 }];
-      return expr.slots.flatMap((slot, index) =>
-        lowerExpr(slot.value, ctx, locals, shapeSlotTypes(expectedType, ctx.layouts)[index])
-      );
+      return lowerShapeStorage(expr.slots, expectedType, ctx, locals);
     case "product_constructor":
       if (expr.slots.length === 0) return [{ op: "const", type: "i32", value: 0 }];
-      return expr.slots.flatMap((slot) => lowerExpr(slot.value, ctx, locals));
+      return lowerShapeStorage(expr.slots, expectedType, ctx, locals);
     case "range":
-      return [];
+      return [
+        ...lowerExpr(expr.start, ctx, locals),
+        ...lowerExpr(expr.end, ctx, locals),
+      ];
     case "block":
       return lowerBlock(expr, ctx, locals, expectedType);
   }
+}
+
+function lowerPointerPrimitive(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var") return undefined;
+  const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
+  if (id === "ptr_from_i32") {
+    return lowerExpr(expr.args[0] ?? { kind: "literal", literalKind: "number", value: "0" }, ctx, locals, "i32");
+  }
+  if (id === "ptr_add") {
+    return [
+      ...lowerExpr(expr.args[0] ?? { kind: "literal", literalKind: "number", value: "0" }, ctx, locals, "i32"),
+      ...lowerExpr(expr.args[1] ?? { kind: "literal", literalKind: "number", value: "0" }, ctx, locals, "i32"),
+      { op: "binary", wasm: "i32.add" },
+    ];
+  }
+  return undefined;
+}
+
+function lowerPipeBind(
+  expr: Extract<Expr, { kind: "pipe_bind" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] {
+  const bindings = flattenBinding(expr.name, exprType(expr.value, ctx.functions), ctx.layouts);
+  for (const binding of bindings) locals.add(binding.name);
+  return [
+    ...lowerExpr(expr.value, ctx, locals),
+    ...bindings.map((binding) => binding.name).toReversed().map((name): Instr => ({
+      op: "local.set",
+      name,
+    })),
+    ...lowerExpr(expr.body, ctx, locals, expectedType),
+  ];
 }
 
 function constFold(expr: Expr): Expr {
@@ -370,6 +637,18 @@ function lowerLiteral(expr: Extract<Expr, { kind: "literal" }>): Instr[] {
   throw new Error(`backend does not support ${expr.literalKind} literals yet`);
 }
 
+function lowerIndex(
+  expr: Extract<Expr, { kind: "index" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] {
+  if (expr.target.kind === "var" && expr.index.kind === "literal") {
+    return lowerVar(`${expr.target.name}[${expr.index.value}]`, ctx.layouts, locals, expectedType);
+  }
+  throw new Error("backend only supports specialized direct indexing");
+}
+
 function lowerVar(
   name: string,
   layouts: LayoutEnv,
@@ -381,6 +660,8 @@ function lowerVar(
   if (projection) {
     const direct = `${base}$${projection}`;
     if (locals.has(direct)) return [{ op: "local.get", name: direct }];
+    const packed = packedProjection(base, projection, layouts, locals);
+    if (packed) return packed;
     const projected = flattenType(expectedType, layouts).map((slot) =>
       slot.suffix ? `${direct}$${slot.suffix}` : direct
     ).filter((slot) => locals.has(slot));
@@ -394,6 +675,76 @@ function lowerVar(
   );
   const present = slots.filter((slot) => locals.has(slot));
   return (present.length ? present : [base]).map((slot) => ({ op: "local.get", name: slot }));
+}
+
+function lowerShapeStorage(
+  slots: { label?: string; value: Expr }[],
+  expectedType: string | undefined,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const layout = flattenType(expectedType, ctx.layouts);
+  if (!layout.some((slot) => slot.fields && slot.fields.length > 1)) {
+    return slots.flatMap((slot, index) =>
+      lowerExpr(slot.value, ctx, locals, shapeSlotTypes(expectedType, ctx.layouts)[index])
+    );
+  }
+  return layout.flatMap((lane) => {
+    if (!lane.fields?.length) return [];
+    if (lane.fields.length === 1) {
+      const field = lane.fields[0];
+      const slot = slots.find((item, index) => (item.label ?? String(index)) === field.name);
+      return slot ? lowerExpr(slot.value, ctx, locals, field.type) : [];
+    }
+    const wat = lane.wat;
+    return lane.fields.flatMap((field, index) => {
+      const slot = slots.find((item, itemIndex) =>
+        (item.label ?? String(itemIndex)) === field.name
+      );
+      if (!slot) return [];
+      const value = lowerExpr(slot.value, ctx, locals, field.type);
+      const shifted = field.offset === 0 ? maskValue(value, wat, field.width) : [
+        ...maskValue(value, wat, field.width),
+        { op: "const", type: wat, value: field.offset } as Instr,
+        { op: "binary", wasm: `${wat}.shl` } as Instr,
+      ];
+      return index === 0 ? shifted : [...shifted, { op: "binary", wasm: `${wat}.or` } as Instr];
+    });
+  });
+}
+
+function maskValue(value: Instr[], wat: ValueType, width: number): Instr[] {
+  if ((wat === "i32" && width >= 32) || (wat === "i64" && width >= 64)) return value;
+  return [
+    ...value,
+    { op: "const", type: wat, value: 2 ** width - 1 },
+    { op: "binary", wasm: `${wat}.and` } as Instr,
+  ];
+}
+
+function packedProjection(
+  base: string,
+  projection: string,
+  layouts: LayoutEnv,
+  locals: Set<string>,
+): Instr[] | undefined {
+  for (const decl of layouts.types.values()) {
+    if (decl.normalized?.kind !== "product") continue;
+    for (const lane of flattenType(decl.name, layouts)) {
+      const field = lane.fields?.find((item) => item.name === projection);
+      if (!field) continue;
+      const local = `${base}$${lane.suffix}`;
+      if (!locals.has(local)) continue;
+      const value: Instr[] = [{ op: "local.get", name: local }];
+      const shifted = field.offset === 0 ? value : [
+        ...value,
+        { op: "const", type: lane.wat, value: field.offset } as Instr,
+        { op: "binary", wasm: `${lane.wat}.shr_u` } as Instr,
+      ];
+      return maskValue(shifted, lane.wat, field.width);
+    }
+  }
+  return undefined;
 }
 
 function lowerMatchArms(
@@ -443,6 +794,83 @@ function removeUnreachablePrivateFunctions(functions: FnDecl[]): FnDecl[] {
   return functions.filter((fn) => fn.public || reachable.has(fn.name));
 }
 
+interface TailCallAnalysis {
+  hasDirectSelfCall: boolean;
+  hasOnlyTailDirectSelfCalls: boolean;
+}
+
+function analyzeTailCalls(fn: FnDecl): TailCallAnalysis {
+  const hasDirectSelfCall = hasSelfCall(fn.body, fn.name);
+  return {
+    hasDirectSelfCall,
+    hasOnlyTailDirectSelfCalls: hasDirectSelfCall &&
+      blockHasOnlyTailSelfCalls(fn.body, fn.name),
+  };
+}
+
+function blockHasOnlyTailSelfCalls(block: BlockExpr, name: string): boolean {
+  for (const stmt of block.statements) {
+    if (statementHasSelfCall(stmt, name)) return false;
+  }
+  return block.expr ? exprHasOnlyTailSelfCalls(block.expr, name) : true;
+}
+
+function exprHasOnlyTailSelfCalls(expr: Expr, name: string): boolean {
+  if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === name) {
+    return !expr.args.some((arg) => exprHasSelfCall(arg, name));
+  }
+  if (expr.kind === "match") {
+    return !exprHasSelfCall(expr.value, name) &&
+      expr.arms.every((arm) => exprHasOnlyTailSelfCalls(arm.value, name));
+  }
+  return !exprHasSelfCall(expr, name);
+}
+
+function hasSelfCall(block: BlockExpr, name: string): boolean {
+  return block.statements.some((stmt) => statementHasSelfCall(stmt, name)) ||
+    (block.expr ? exprHasSelfCall(block.expr, name) : false);
+}
+
+function statementHasSelfCall(stmt: Statement, name: string): boolean {
+  switch (stmt.kind) {
+    case "let":
+    case "destructure_let":
+      return exprHasSelfCall(stmt.value, name);
+    case "proof_const":
+    case "fork_let":
+      return false;
+  }
+}
+
+function exprHasSelfCall(expr: Expr, name: string): boolean {
+  switch (expr.kind) {
+    case "call":
+      return (expr.callee.kind === "var" && expr.callee.name === name) ||
+        exprHasSelfCall(expr.callee, name) ||
+        expr.args.some((arg) => exprHasSelfCall(arg, name));
+    case "index":
+      return exprHasSelfCall(expr.target, name) || exprHasSelfCall(expr.index, name);
+    case "binary":
+      return exprHasSelfCall(expr.left, name) || exprHasSelfCall(expr.right, name);
+    case "pipe_bind":
+      return exprHasSelfCall(expr.value, name) || exprHasSelfCall(expr.body, name);
+    case "match":
+      return exprHasSelfCall(expr.value, name) ||
+        expr.arms.some((arm) => exprHasSelfCall(arm.value, name));
+    case "shape":
+    case "product_constructor":
+      return expr.slots.some((slot) => exprHasSelfCall(slot.value, name));
+    case "range":
+      return exprHasSelfCall(expr.start, name) || exprHasSelfCall(expr.end, name);
+    case "block":
+      return hasSelfCall(expr, name);
+    case "literal":
+    case "var":
+    case "placeholder":
+      return false;
+  }
+}
+
 function calledFunctions(expr: Expr | BlockExpr): Set<string> {
   const calls = new Set<string>();
   const visit = (item: Expr | Statement | undefined) => {
@@ -451,19 +879,31 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
       case "let":
         visit(item.value);
         return;
+      case "destructure_let":
+        visit(item.value);
+        return;
       case "fork_let":
       case "proof_const":
       case "literal":
       case "var":
+      case "placeholder":
         return;
       case "call":
         if (item.callee.kind === "var") calls.add(item.callee.name);
         visit(item.callee);
         for (const arg of item.args) visit(arg);
         return;
+      case "index":
+        visit(item.target);
+        visit(item.index);
+        return;
       case "binary":
         visit(item.left);
         visit(item.right);
+        return;
+      case "pipe_bind":
+        visit(item.value);
+        visit(item.body);
         return;
       case "match":
         visit(item.value);
@@ -489,8 +929,9 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
 
 function backendModuleToWat(module: BackendModule): string {
   const imports = module.imports.map((item) => emitImportWat(item));
+  const memory = module.memory ? [`  (memory (export "memory") 1)`] : [];
   const functions = module.functions.map((fn) => emitFunctionWat(fn));
-  return `(module\n${[...imports, ...functions].join("\n")}\n)`;
+  return `(module\n${[...imports, ...memory, ...functions].join("\n")}\n)`;
 }
 
 function emitImportWat(item: BackendImport): string {
@@ -534,12 +975,28 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
       return [`${prefix}local.set $${watName(instr.name)}`];
     case "call":
       return [`${prefix}call $${watName(instr.name)}`];
+    case "return_call":
+      return [`${prefix}return_call $${watName(instr.name)}`];
     case "binary":
       return [`${prefix}${instr.wasm}`];
     case "simd":
-      return [`${prefix}${instr.wasm}${instr.lane === undefined ? "" : ` ${instr.lane}`}`];
+      return [
+        `${prefix}${instr.wasm}${
+          instr.lanes
+            ? ` ${instr.lanes.join(" ")}`
+            : instr.lane === undefined
+            ? ""
+            : ` ${instr.lane}`
+        }`,
+      ];
+    case "load":
+      return [`${prefix}${instr.type}.load align=${instr.align} offset=${instr.offset}`];
+    case "store":
+      return [`${prefix}${instr.type}.store align=${instr.align} offset=${instr.offset}`];
     case "drop":
       return [`${prefix}drop`];
+    case "unreachable":
+      return [`${prefix}unreachable`];
     case "if":
       return [
         `${prefix}if${instr.results.map((result) => ` (result ${result})`).join("")}`,
@@ -548,6 +1005,22 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
         ...emitInstrsWat(instr.elseBody, indent + 2),
         `${prefix}end`,
       ];
+    case "block":
+      return [
+        `${prefix}block${(instr.results ?? []).map((result) => ` (result ${result})`).join("")}`,
+        ...emitInstrsWat(instr.body, indent + 2),
+        `${prefix}end`,
+      ];
+    case "loop":
+      return [
+        `${prefix}loop${(instr.results ?? []).map((result) => ` (result ${result})`).join("")}`,
+        ...emitInstrsWat(instr.body, indent + 2),
+        `${prefix}end`,
+      ];
+    case "br":
+      return [`${prefix}br ${instr.depth}`];
+    case "br_if":
+      return [`${prefix}br_if ${instr.depth}`];
   }
 }
 
@@ -595,11 +1068,15 @@ function backendModuleToWasm(module: BackendModule): Uint8Array<ArrayBuffer> {
       vecItems(module.functions.map((_, index) => uleb(typeIndex[index + module.imports.length]))),
     );
   }
+  if (module.memory) {
+    section(bytes, 5, vecItems([[0x00, ...uleb(1)]]));
+  }
   const exports = module.functions.filter((fn) => fn.exportName).map((fn) => [
     ...nameBytes(fn.exportName ?? fn.name),
     0x00,
     ...uleb(funcIndex.get(fn.name) ?? 0),
   ]);
+  if (module.memory) exports.unshift([...nameBytes("memory"), 0x02, ...uleb(0)]);
   if (exports.length) section(bytes, 7, vecItems(exports));
   if (module.functions.length) {
     section(
@@ -651,12 +1128,23 @@ function encodeInstr(
       if (index === undefined) throw new Error(`backend missing lowered callable: ${instr.name}`);
       return [0x10, ...uleb(index)];
     }
+    case "return_call": {
+      const index = funcIndex.get(instr.name);
+      if (index === undefined) throw new Error(`backend missing lowered callable: ${instr.name}`);
+      return [0x12, ...uleb(index)];
+    }
     case "binary":
       return [wasmBinaryOp(instr.wasm)];
     case "simd":
-      return simdImmediate(instr.wasm, instr.lane);
+      return simdImmediate(instr.wasm, instr.lane, instr.lanes);
+    case "load":
+      return [...wasmLoadOp(instr.type), ...memarg(instr.align, instr.offset)];
+    case "store":
+      return [...wasmStoreOp(instr.type), ...memarg(instr.align, instr.offset)];
     case "drop":
       return [0x1a];
+    case "unreachable":
+      return [0x00];
     case "if":
       return [
         0x04,
@@ -666,6 +1154,14 @@ function encodeInstr(
         ...encodeInstrs(instr.elseBody, locals, funcIndex),
         0x0b,
       ];
+    case "block":
+      return [0x02, blockType(instr.results), ...encodeInstrs(instr.body, locals, funcIndex), 0x0b];
+    case "loop":
+      return [0x03, blockType(instr.results), ...encodeInstrs(instr.body, locals, funcIndex), 0x0b];
+    case "br":
+      return [0x0c, ...uleb(instr.depth)];
+    case "br_if":
+      return [0x0d, ...uleb(instr.depth)];
   }
 }
 
@@ -713,11 +1209,22 @@ function lowerLane4I32Shape(
   const op = laneBinaryOp(pattern.op);
   if (!op) return undefined;
   return [
-    ...packProjectedLane4I32(pattern.base),
+    ...packProjectedLane4I32(pattern.base, locals),
     ...lowerExpr(pattern.rhs, ctx, locals, "i32"),
     { op: "simd", wasm: "i32x4.splat" },
     { op: "simd", wasm: op },
   ];
+}
+
+function lowerLane4I32Value(expr: Expr, ctx: LowerContext, locals: Set<string>): Instr[] {
+  if (expr.kind === "var" && locals.has(expr.name)) return [{ op: "local.get", name: expr.name }];
+  if (expr.kind === "var" && locals.has(`${expr.name}$0`)) {
+    return packProjectedLane4I32(expr.name, locals);
+  }
+  if (expr.kind === "shape" && expr.slots.length === 4) {
+    return packLane4I32(expr.slots.map((slot) => slot.value), ctx, locals);
+  }
+  return lowerExpr(expr, ctx, locals);
 }
 
 function packLane4I32(exprs: Expr[], ctx: LowerContext, locals: Set<string>): Instr[] {
@@ -731,7 +1238,8 @@ function packLane4I32(exprs: Expr[], ctx: LowerContext, locals: Set<string>): In
   ];
 }
 
-function packProjectedLane4I32(base: string): Instr[] {
+function packProjectedLane4I32(base: string, locals: Set<string>): Instr[] {
+  if (locals.has(base)) return [{ op: "local.get", name: base }];
   return [
     { op: "local.get", name: `${base}$0` },
     { op: "simd", wasm: "i32x4.splat" },
@@ -779,6 +1287,182 @@ function laneMapPattern(exprs: Expr[]): { base: string; op: string; rhs: Expr } 
   return base && op && rhs ? { base, op, rhs } : undefined;
 }
 
+function lowerDot4I32(
+  expr: Extract<Expr, { kind: "binary" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  const pattern = dot4I32Pattern(expr);
+  if (!pattern) return undefined;
+  const name = `__simd_tmp${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name, type: "v128" });
+  return [
+    ...packProjectedLane4I32(pattern.left, locals),
+    ...packProjectedLane4I32(pattern.right, locals),
+    { op: "simd", wasm: "i32x4.mul" },
+    { op: "local.set", name },
+    { op: "local.get", name },
+    { op: "local.get", name },
+    { op: "local.get", name },
+    { op: "simd", wasm: "i8x16.shuffle", lanes: shuffleI32Lanes([2, 3, 0, 1]) },
+    { op: "simd", wasm: "i32x4.add" },
+    { op: "local.set", name },
+    { op: "local.get", name },
+    { op: "local.get", name },
+    { op: "local.get", name },
+    { op: "simd", wasm: "i8x16.shuffle", lanes: shuffleI32Lanes([1, 0, 3, 2]) },
+    { op: "simd", wasm: "i32x4.add" },
+    { op: "simd", wasm: "i32x4.extract_lane", lane: 0 },
+  ];
+}
+
+function shuffleI32Lanes(lanes: number[]): number[] {
+  return lanes.flatMap((lane) => [0, 1, 2, 3].map((byte) => lane * 4 + byte));
+}
+
+function lowerMemoryIntrinsic(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var") return undefined;
+  const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
+  if (id === "memory_load_lane4_i32") {
+    const ptr = expr.args.length === 1 ? expr.args[0] : expr.args[1];
+    return [
+      ...lowerExpr(
+        ptr ?? { kind: "literal", literalKind: "number", value: "0" },
+        ctx,
+        locals,
+        "i32",
+      ),
+      { op: "load", type: "v128", align: 16, offset: 0 },
+    ];
+  }
+  if (id === "memory_load_i32") {
+    const ptr = expr.args.length === 1 ? expr.args[0] : expr.args[1];
+    return [
+      ...lowerExpr(
+        ptr ?? { kind: "literal", literalKind: "number", value: "0" },
+        ctx,
+        locals,
+        "i32",
+      ),
+      { op: "load", type: "i32", align: 4, offset: 0 },
+    ];
+  }
+  if (id === "memory_store_i32") {
+    const ptr = expr.args.length === 2 ? expr.args[0] : expr.args[1];
+    const value = expr.args.length === 2 ? expr.args[1] : expr.args[2];
+    return [
+      ...lowerExpr(
+        ptr ?? { kind: "literal", literalKind: "number", value: "0" },
+        ctx,
+        locals,
+        "i32",
+      ),
+      ...lowerExpr(
+        value ?? { kind: "literal", literalKind: "number", value: "0" },
+        ctx,
+        locals,
+        "i32",
+      ),
+      { op: "store", type: "i32", align: 4, offset: 0 },
+    ];
+  }
+  if (id === "memory_store_lane4_i32") {
+    const ptr = expr.args.length === 3 ? expr.args[1] : expr.args[0];
+    const value = expr.args.length === 3 ? expr.args[2] : expr.args[1];
+    return [
+      ...lowerExpr(
+        ptr ?? { kind: "literal", literalKind: "number", value: "0" },
+        ctx,
+        locals,
+        "i32",
+      ),
+      ...lowerLane4I32Value(
+        value ?? { kind: "literal", literalKind: "number", value: "0" },
+        ctx,
+        locals,
+      ),
+      { op: "store", type: "v128", align: 16, offset: 0 },
+    ];
+  }
+  return undefined;
+}
+
+function compilerCallId(name: string, intrinsicIdsByName: Map<string, string>): string | undefined {
+  return name.startsWith("@") ? name.slice(1) : intrinsicCallId(name, intrinsicIdsByName);
+}
+
+function dot4I32Pattern(expr: Expr): { left: string; right: string } | undefined {
+  const terms = collectDotTerms(expr);
+  if (terms.length !== 4) return undefined;
+  const seen = new Set<number>();
+  let leftBase: string | undefined;
+  let rightBase: string | undefined;
+  for (const product of terms) {
+    if (seen.has(product.lane)) return undefined;
+    seen.add(product.lane);
+    leftBase ??= product.left;
+    rightBase ??= product.right;
+    if (leftBase !== product.left || rightBase !== product.right) return undefined;
+  }
+  return seen.size === 4 && leftBase && rightBase
+    ? { left: leftBase, right: rightBase }
+    : undefined;
+}
+
+function collectDotTerms(expr: Expr): { left: string; right: string; lane: number }[] {
+  const explicit = collectAddTerms(expr).map(laneProduct);
+  if (explicit.every((term) => term !== undefined)) {
+    return explicit as { left: string; right: string; lane: number }[];
+  }
+  return mixedPrecedenceDotTerms(expr) ?? [];
+}
+
+function collectAddTerms(expr: Expr): Expr[] {
+  if (expr.kind === "binary" && expr.op === "+") {
+    return [...collectAddTerms(expr.left), ...collectAddTerms(expr.right)];
+  }
+  return [expr];
+}
+
+function laneProduct(expr: Expr): { left: string; right: string; lane: number } | undefined {
+  if (expr.kind !== "binary" || expr.op !== "*") return undefined;
+  if (expr.left.kind !== "var" || expr.right.kind !== "var") return undefined;
+  const leftLane = laneProjection(expr.left.name);
+  const rightLane = laneProjection(expr.right.name);
+  if (!leftLane || !rightLane || leftLane.lane !== rightLane.lane) return undefined;
+  return { left: leftLane.base, right: rightLane.base, lane: leftLane.lane };
+}
+
+function mixedPrecedenceDotTerms(
+  expr: Expr,
+): { left: string; right: string; lane: number }[] | undefined {
+  if (expr.kind !== "binary" || expr.op !== "*") return undefined;
+  if (expr.left.kind === "var") {
+    const left = laneProjection(expr.left.name);
+    const right = expr.right.kind === "var" ? laneProjection(expr.right.name) : undefined;
+    return left && right && left.lane === right.lane
+      ? [{ left: left.base, right: right.base, lane: left.lane }]
+      : undefined;
+  }
+  if (expr.left.kind !== "binary" || expr.left.op !== "+") return undefined;
+  if (expr.left.right.kind !== "var" || expr.right.kind !== "var") return undefined;
+  const previous = mixedPrecedenceDotTerms(expr.left.left);
+  const left = laneProjection(expr.left.right.name);
+  const right = laneProjection(expr.right.name);
+  if (!previous || !left || !right || left.lane !== right.lane) return undefined;
+  return [...previous, { left: left.base, right: right.base, lane: left.lane }];
+}
+
+function laneProjection(name: string): { base: string; lane: number } | undefined {
+  const projection = projectionSuffix(name);
+  if (!projection || !/^[0-3]$/.test(projection)) return undefined;
+  return { base: baseName(name), lane: Number.parseInt(projection, 10) };
+}
+
 function stableExprKey(expr: Expr): string {
   switch (expr.kind) {
     case "literal":
@@ -813,7 +1497,9 @@ function isLane4I32(type: string | undefined, layouts: LayoutEnv): boolean {
 
 function watType(type: string | Param | undefined): ValueType {
   const source = typeof type === "string" || type === undefined ? type : type.type;
-  if (source === "i64") return "i64";
+  if (source === "i64" || source === "u64" || (unsignedBitWidth(source ?? "") ?? 0) > 32) {
+    return "i64";
+  }
   if (source === "f32") return "f32";
   if (source === "f64") return "f64";
   return "i32";
@@ -828,6 +1514,14 @@ interface LayoutSlot {
   suffix: string;
   type: string;
   wat: ValueType;
+  fields?: PackedField[];
+}
+
+interface PackedField {
+  name: string;
+  type: string;
+  width: number;
+  offset: number;
 }
 
 interface LayoutEnv {
@@ -852,9 +1546,37 @@ function flattenBinding(name: string, type: string | undefined, layouts: LayoutE
   }));
 }
 
+function statementLocalBindings(stmt: Statement, ctx: LowerContext): BackendLocal[] {
+  if (stmt.kind === "destructure_let") {
+    return stmt.names.flatMap((name, index) =>
+      flattenBinding(name, stmt.slotTypes?.[index], ctx.layouts).map((slot) => ({
+        name: slot.name,
+        type: slot.wat,
+      }))
+    );
+  }
+  if (stmt.kind !== "let") return [];
+  const type = stmt.type ?? exprType(stmt.value, ctx.functions);
+  if (isLane4I32(type, ctx.layouts) && isMemoryLane4Load(stmt.value, ctx.functions)) {
+    return [{ name: stmt.name, type: "v128" }];
+  }
+  return flattenBinding(stmt.name, type, ctx.layouts).map((slot) => ({
+    name: slot.name,
+    type: slot.wat,
+  }));
+}
+
+function isMemoryLane4Load(expr: Expr, functions: Map<string, FnDecl>): boolean {
+  const fn = expr.kind === "call" && expr.callee.kind === "var" ? functions.get(expr.callee.name) : undefined;
+  return expr.kind === "call" && expr.callee.kind === "var" &&
+    fn !== undefined && intrinsicWrapperId(fn) === "memory_load_lane4_i32";
+}
+
 function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[] {
   const resolved = resolveAlias(type, layouts);
   if (!resolved) return [{ suffix: "", type: "i32", wat: "i32" }];
+  if (resolved === "memory") return [];
+  if (isPtrType(resolved)) return [{ suffix: "", type: resolved, wat: "i32" }];
   if (isPrimitiveType(resolved)) return [{ suffix: "", type: resolved, wat: watType(resolved) }];
   if (resolved.startsWith("inline_array(")) {
     const args = splitTypeArgs(resolved.slice("inline_array(".length, -1));
@@ -871,11 +1593,42 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
 
 function flattenShape(slots: ShapeTypeSlot[], layouts: LayoutEnv): LayoutSlot[] {
   const flattened: LayoutSlot[] = [];
+  const flushPacked = (group: PackedField[], laneWidth: number) => {
+    if (!group.length) return;
+    const suffix = group.map((field) => field.name).join("$");
+    flattened.push({
+      suffix,
+      type: `u${laneWidth}`,
+      wat: laneWidth > 32 ? "i64" : "i32",
+      fields: group,
+    });
+  };
+  let group: PackedField[] = [];
+  let groupWidth = 0;
+  let laneWidth = 0;
   slots.forEach((slot, index) => {
     const repeat = slot.repeat ? Number.parseInt(slot.repeat, 10) : 1;
     const prefix = slot.label ?? String(index);
     for (let item = 0; item < repeat; item++) {
       const itemPrefix = repeat === 1 ? prefix : String(flattened.length);
+      const bitWidth = unsignedBitWidth(slot.type);
+      const storageWidth = bitWidth ? storageLaneWidth(bitWidth) : undefined;
+      if (repeat === 1 && bitWidth && storageWidth && bitWidth <= 32) {
+        if (!group.length) laneWidth = storageWidth;
+        if (group.length && (storageWidth !== laneWidth || groupWidth + bitWidth > laneWidth)) {
+          flushPacked(group, laneWidth);
+          group = [];
+          groupWidth = 0;
+          laneWidth = storageWidth;
+        }
+        group.push({ name: itemPrefix, type: slot.type, width: bitWidth, offset: groupWidth });
+        groupWidth += bitWidth;
+        continue;
+      }
+      flushPacked(group, laneWidth);
+      group = [];
+      groupWidth = 0;
+      laneWidth = 0;
       for (const child of flattenType(slot.type, layouts)) {
         flattened.push({
           ...child,
@@ -884,6 +1637,7 @@ function flattenShape(slots: ShapeTypeSlot[], layouts: LayoutEnv): LayoutSlot[] 
       }
     }
   });
+  flushPacked(group, laneWidth);
   return flattened.length ? flattened : [{ suffix: "", type: "i32", wat: "i32" }];
 }
 
@@ -898,6 +1652,10 @@ function repeatSlots(count: number, itemType: string, layouts: LayoutEnv): Layou
     }
   }
   return slots;
+}
+
+function isPtrType(type: string): boolean {
+  return typeName(type) === "ptr" && type.includes("(");
 }
 
 function resolveAlias(type: string | undefined, layouts: LayoutEnv): string | undefined {
@@ -941,12 +1699,29 @@ function exprType(expr: Expr, functions: Map<string, FnDecl>): string | undefine
   if (expr.kind === "call" && expr.callee.kind === "var") {
     return functions.get(expr.callee.name)?.returnType;
   }
+  if (expr.kind === "pipe_bind") return exprType(expr.body, functions);
+  if (expr.kind === "range") return "range_i32";
   if (expr.kind === "literal") return expr.inferredType;
   return undefined;
 }
 
 function isPrimitiveType(type: string): boolean {
-  return ["i32", "u32", "i64", "u64", "f32", "f64", "bool"].includes(type);
+  return ["i32", "u32", "i64", "u64", "f32", "f64", "bool"].includes(type) ||
+    unsignedBitWidth(type) !== undefined;
+}
+
+function unsignedBitWidth(type: string): number | undefined {
+  const match = type.match(/^u([1-9][0-9]*)$/);
+  if (!match) return undefined;
+  const width = Number.parseInt(match[1], 10);
+  return width >= 1 && width <= 64 ? width : undefined;
+}
+
+function storageLaneWidth(width: number): number {
+  if (width <= 8) return 8;
+  if (width <= 16) return 16;
+  if (width <= 32) return 32;
+  return 64;
 }
 
 function typeName(type: string): string {
@@ -1021,10 +1796,13 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
       case "let":
         visit(item.value);
         return;
+      case "destructure_let":
+        visit(item.value);
+        for (const name of item.names) names.add(name);
+        return;
       case "fork_let":
         names.add(baseName(item.source));
-        names.add(item.left);
-        names.add(item.right);
+        for (const name of item.names) names.add(name);
         return;
       case "proof_const":
         return;
@@ -1035,9 +1813,17 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
         visit(item.callee);
         for (const arg of item.args) visit(arg);
         return;
+      case "index":
+        visit(item.target);
+        visit(item.index);
+        return;
       case "binary":
         visit(item.left);
         visit(item.right);
+        return;
+      case "pipe_bind":
+        visit(item.value);
+        visit(item.body);
         return;
       case "match":
         visit(item.value);
@@ -1056,6 +1842,7 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
         visit(item.expr);
         return;
       case "literal":
+      case "placeholder":
         return;
     }
   };
@@ -1066,11 +1853,20 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
 function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
   switch (expr.kind) {
     case "call":
+      if (
+        expr.callee.kind === "var" &&
+        isMemoryStoreIntrinsic(expr.callee.name, functions)
+      ) return true;
       return (expr.callee.kind === "var" &&
         (functions.get(expr.callee.name)?.effects.length ?? 0) > 0) ||
+        hasRuntimeEffect(expr.callee, functions) ||
         expr.args.some((arg) => hasRuntimeEffect(arg, functions));
+    case "index":
+      return hasRuntimeEffect(expr.target, functions) || hasRuntimeEffect(expr.index, functions);
     case "binary":
       return hasRuntimeEffect(expr.left, functions) || hasRuntimeEffect(expr.right, functions);
+    case "pipe_bind":
+      return hasRuntimeEffect(expr.value, functions) || hasRuntimeEffect(expr.body, functions);
     case "match":
       return hasRuntimeEffect(expr.value, functions) ||
         expr.arms.some((arm) => hasRuntimeEffect(arm.value, functions));
@@ -1081,12 +1877,66 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
       return hasRuntimeEffect(expr.start, functions) || hasRuntimeEffect(expr.end, functions);
     case "block":
       return expr.statements.some((stmt) =>
-        stmt.kind === "let" && hasRuntimeEffect(stmt.value, functions)
+        (stmt.kind === "let" || stmt.kind === "destructure_let") &&
+        hasRuntimeEffect(stmt.value, functions)
       ) ||
         (expr.expr ? hasRuntimeEffect(expr.expr, functions) : false);
+    case "placeholder":
+      return false;
     default:
       return false;
   }
+}
+
+function usesMemoryIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {
+  const visit = (item: Expr | Statement | undefined): boolean => {
+    if (!item) return false;
+    switch (item.kind) {
+      case "let":
+        return visit(item.value);
+      case "destructure_let":
+        return visit(item.value);
+      case "fork_let":
+      case "proof_const":
+      case "literal":
+      case "var":
+      case "placeholder":
+        return false;
+      case "call":
+        return (item.callee.kind === "var" &&
+          isMemoryIntrinsic(item.callee.name, functions)) ||
+          visit(item.callee) || item.args.some(visit);
+      case "index":
+        return visit(item.target) || visit(item.index);
+      case "binary":
+        return visit(item.left) || visit(item.right);
+      case "pipe_bind":
+        return visit(item.value) || visit(item.body);
+      case "match":
+        return visit(item.value) || item.arms.some((arm) => visit(arm.value));
+      case "shape":
+      case "product_constructor":
+        return item.slots.some((slot) => visit(slot.value));
+      case "range":
+        return visit(item.start) || visit(item.end);
+      case "block":
+        return item.statements.some(visit) || visit(item.expr);
+    }
+  };
+  return visit(expr);
+}
+
+function isMemoryStoreIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
+  const fn = functions.get(name);
+  const id = fn ? intrinsicWrapperId(fn) : undefined;
+  return id === "memory_store_i32" || id === "memory_store_lane4_i32";
+}
+
+function isMemoryIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
+  const fn = functions.get(name);
+  const id = fn ? intrinsicWrapperId(fn) : undefined;
+  return id === "memory_load_i32" || id === "memory_store_i32" ||
+    id === "memory_load_lane4_i32" || id === "memory_store_lane4_i32";
 }
 
 function localDecls(locals: BackendLocal[]): number[] {
@@ -1100,6 +1950,14 @@ function wasmBinaryOp(op: string): number {
     "i32.mul": 0x6c,
     "i32.div_s": 0x6d,
     "i32.rem_s": 0x6f,
+    "i32.and": 0x71,
+    "i32.or": 0x72,
+    "i32.shl": 0x74,
+    "i32.shr_u": 0x76,
+    "i64.and": 0x83,
+    "i64.or": 0x84,
+    "i64.shl": 0x86,
+    "i64.shr_u": 0x88,
     "i32.eq": 0x46,
     "i32.ne": 0x47,
     "i32.lt_s": 0x48,
@@ -1110,8 +1968,9 @@ function wasmBinaryOp(op: string): number {
   } as Record<string, number>)[op] ?? 0x6a;
 }
 
-function simdImmediate(op: SimdOp, lane: number | undefined): number[] {
+function simdImmediate(op: SimdOp, lane: number | undefined, lanes?: number[]): number[] {
   const opcode = ({
+    "i8x16.shuffle": 0x0d,
     "i32x4.splat": 0x11,
     "i32x4.extract_lane": 0x1b,
     "i32x4.replace_lane": 0x1c,
@@ -1125,8 +1984,28 @@ function simdImmediate(op: SimdOp, lane: number | undefined): number[] {
     "i32x4.sub": 0xb1,
     "i32x4.mul": 0xb5,
   } as Record<SimdOp, number>)[op];
-  const immediates = op === "i32x4.extract_lane" || op === "i32x4.replace_lane" ? [lane ?? 0] : [];
+  const immediates = op === "i8x16.shuffle"
+    ? lanes ?? Array.from({ length: 16 }, (_, index) => index)
+    : op === "i32x4.extract_lane" || op === "i32x4.replace_lane"
+    ? [lane ?? 0]
+    : [];
   return [0xfd, ...uleb(opcode), ...immediates];
+}
+
+function wasmLoadOp(type: ValueType): number[] {
+  if (type === "v128") return [0xfd, ...uleb(0x00)];
+  if (type !== "i32") throw new Error(`unsupported load type ${type}`);
+  return [0x28];
+}
+
+function wasmStoreOp(type: ValueType): number[] {
+  if (type === "v128") return [0xfd, ...uleb(0x0b)];
+  if (type !== "i32") throw new Error(`unsupported store type ${type}`);
+  return [0x36];
+}
+
+function memarg(align: number, offset: number): number[] {
+  return [...uleb(Math.log2(align)), ...uleb(offset)];
 }
 
 function wasmType(wat: ValueType): number {
@@ -1135,6 +2014,10 @@ function wasmType(wat: ValueType): number {
   if (wat === "f32") return 0x7d;
   if (wat === "f64") return 0x7c;
   return 0x7f;
+}
+
+function blockType(results: ValueType[] | undefined): number {
+  return results?.length === 1 ? wasmType(results[0]) : 0x40;
 }
 
 function section(bytes: number[], id: number, payload: number[]) {

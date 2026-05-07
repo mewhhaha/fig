@@ -1,4 +1,4 @@
-(FnDecl (FnName (LowerIdent) @function))
+(FnDecl (FnTail (FnName (LowerIdent) @function)))
 (Primary (LowerIdent) @variable)
 (Call (Primary (LowerIdent) @function.call) "(")
 (Call (Primary (ForkBuiltin) @function.builtin) "(")
@@ -24,7 +24,6 @@
 (ShapeSlot (LowerFieldName) @variable.other.member)
 (Call "." (LowerIdent) @variable.other.member)
 (Primary (PascalIdent) @constructor)
-"module" @keyword
 "import" @keyword.control.import
 "capability" @keyword
 "type" @keyword.type
@@ -42,6 +41,7 @@
 (String) @string
 (Number) @number
 (Bool) @constant.builtin
+(Placeholder) @operator
 "_" @keyword
 "count" @keyword
 "!" @operator
@@ -56,6 +56,7 @@
 "=>" @operator
 "@" @operator
 "[" @punctuation.bracket
+"\\" @operator
 "]" @punctuation.bracket
 "{" @punctuation.bracket
 "{}" @operator

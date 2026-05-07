@@ -1,0 +1,35 @@
+const merge = @import("prelude.std");
+
+fn add(acc: i32, x: i32) -> i32 {
+  acc + x
+}
+
+fn double(x: i32) -> i32 {
+  x * 2
+}
+
+fn inc(x: i32) -> i32 {
+  x + 1
+}
+
+fn square(x: i32) -> i32 {
+  x * x
+}
+
+fn above_four(x: i32) -> bool {
+  x > 4
+}
+
+fn below_nine(x: i32) -> bool {
+  x < 9
+}
+
+pub fn main() -> i32 {
+  let folded = inline_array.iter([1, 2, 3, 4]) \$ ->
+    $.map(double).filter(above_four).map(inc).reverse().filter(below_nine).map(square).fold(10, add);
+
+  let compact: compact_array = inline_array.iter([1, 2, 3, 4]) \$ ->
+    $.map(double).filter(above_four).map(inc).collect();
+
+  folded + compact.len + compact.items[0] + compact.items[1]
+}

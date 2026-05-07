@@ -1,5 +1,5 @@
 {
-  "name": "tree-sitter-shovel",
+  "name": "tree-sitter-fig",
   "version": "0.0.0",
   "type": "module",
   "main": "grammar.js",
@@ -10,9 +10,9 @@
   ],
   "tree-sitter": [
     {
-      "scope": "source.shovel",
+      "scope": "source.fig",
       "file-types": [
-        "shovel"
+        "fig"
       ]
     }
   ]

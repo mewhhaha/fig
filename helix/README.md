@@ -1,6 +1,6 @@
 # Helix Support
 
-This directory contains Shovel language configuration and runtime queries for Helix.
+This directory contains Fig language configuration and runtime queries for Helix.
 
 For local testing from the repository root:
 
@@ -18,7 +18,7 @@ To install manually, merge `helix/languages.toml` into your Helix `languages.tom
 symlink:
 
 ```text
-helix/runtime/queries/shovel
+helix/runtime/queries/fig
 ```
 
 into your Helix runtime query directory.

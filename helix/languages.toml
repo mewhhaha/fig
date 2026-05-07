@@ -1,12 +1,12 @@
 [[language]]
-name = "shovel"
-scope = "source.shovel"
-file-types = ["shovel"]
-grammar = "shovel"
+name = "fig"
+scope = "source.fig"
+file-types = ["fig"]
+grammar = "fig"
 roots = ["deno.json", "grammar.ebnf"]
 comment-token = "//"
 indent = { tab-width = 2, unit = "  " }
 
 [[grammar]]
-name = "shovel"
+name = "fig"
 source = { path = "generated/baba-workbench" }

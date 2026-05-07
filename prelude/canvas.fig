@@ -1,0 +1,80 @@
+const core = @import("prelude.core");
+
+const canvas_init: fn(target: i32, width: i32, height: i32) -> i32 !{canvas} = @capability("canvas_init");
+const gpu_create_shader: fn(shader_id: i32) -> i32 !{gpu} = @capability("gpu_create_shader");
+const gpu_create_pipeline: fn(shader: i32, layout: i32) -> i32 !{gpu} = @capability("gpu_create_pipeline");
+const gpu_upload_vertices: fn(buffer: i32, ptr: i32, byte_len: i32) -> i32 !{gpu} = @capability("gpu_upload_vertices");
+const gpu_draw_quads: fn(pipeline: i32, vertices: i32, quad_count: i32) -> i32 !{gpu} = @capability("gpu_draw_quads");
+const gpu_present: fn(canvas: i32) -> i32 !{canvas, gpu} = @capability("gpu_present");
+const event_poll: fn(ptr: i32, capacity: i32) -> i32 !{event} = @capability("event_poll");
+
+type fn shader_source(Source: string) -> type {
+  string
+}
+
+type fn shader_layout(Source: string) -> type {
+  @wgsl_bindings(Source)
+}
+
+fn shader_id(const Source: string) -> i32 {
+  @wgsl_shader_id(Source)
+}
+
+type fn event_record() -> type {
+  let EventRecord = [
+    kind: i32,
+    target: i32,
+    code: i32,
+    x: i32,
+    y: i32,
+    delta_x: i32,
+    delta_y: i32,
+    flags: i32
+  ];
+  struct(EventRecord)
+}
+
+const event_key_down: i32 = 1;
+const event_key_up: i32 = 2;
+const event_pointer_move: i32 = 3;
+const event_pointer_down: i32 = 4;
+const event_pointer_up: i32 = 5;
+const event_wheel: i32 = 6;
+const event_resize: i32 = 7;
+const event_record_size: i32 = 32;
+
+fn event_record_addr(base: i32, index: i32) -> core.ptr(event_record) {
+  core.ptr.from_i32(base + index * event_record_size)
+}
+
+fn event_kind(mem: memory, base: i32, index: i32) -> i32 {
+  memory.load_i32(mem, event_record_addr(base, index))
+}
+
+fn event_target(mem: memory, base: i32, index: i32) -> i32 {
+  memory.load_i32(mem, core.ptr.add(event_record_addr(base, index), 4))
+}
+
+fn event_code(mem: memory, base: i32, index: i32) -> i32 {
+  memory.load_i32(mem, core.ptr.add(event_record_addr(base, index), 8))
+}
+
+fn event_x(mem: memory, base: i32, index: i32) -> i32 {
+  memory.load_i32(mem, core.ptr.add(event_record_addr(base, index), 12))
+}
+
+fn event_y(mem: memory, base: i32, index: i32) -> i32 {
+  memory.load_i32(mem, core.ptr.add(event_record_addr(base, index), 16))
+}
+
+fn event_delta_x(mem: memory, base: i32, index: i32) -> i32 {
+  memory.load_i32(mem, core.ptr.add(event_record_addr(base, index), 20))
+}
+
+fn event_delta_y(mem: memory, base: i32, index: i32) -> i32 {
+  memory.load_i32(mem, core.ptr.add(event_record_addr(base, index), 24))
+}
+
+fn event_flags(mem: memory, base: i32, index: i32) -> i32 {
+  memory.load_i32(mem, core.ptr.add(event_record_addr(base, index), 28))
+}
