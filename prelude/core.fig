@@ -66,6 +66,31 @@ type fn index(N: count) -> type {
   i32
 }
 
+type fn iter_step(State: type, Item: type) -> union {
+  let Done = [];
+  let Yield = [item: Item, next: State];
+  union(Done, Yield)
+}
+
+type fn iterator(State: type, Item: type) -> type {
+  let Next = fn(state: State) -> iter_step(State, Item);
+  @require(@type_has_member(State, #next), "Iterator requires next");
+  @require(@type_member_type(State, #next) == Next, "Iterator.next has wrong type");
+  State
+}
+
+type fn index_cursor(N: count) -> type {
+  i32
+}
+
+fn index_cursor.start(const n: count) -> index_cursor(n) {
+  0
+}
+
+fn index_cursor.next(const n: count, cursor: index_cursor(n)) -> iter_step(index_cursor(n), index(n)) {
+  @index_cursor_next(n, cursor)
+}
+
 type fn droppable(T: type) -> type {
   T
 }

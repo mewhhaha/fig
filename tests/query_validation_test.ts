@@ -1,25 +1,17 @@
 import { assertEquals } from "jsr:@std/assert@1";
 
-type NodeType = {
-  type: string;
-  named: boolean;
-  subtypes?: Array<{ type: string; named: boolean }>;
+type Grammar = {
+  rules: Record<string, unknown>;
 };
 
 const root = new URL("../", import.meta.url);
-const nodeTypesUrl = new URL("generated/baba-workbench/src/node-types.json", root);
+const grammarUrl = new URL("generated/baba-workbench/src/grammar.json", root);
 const queriesUrl = new URL("generated/baba-workbench/queries/", root);
 const queryBuiltins = new Set(["ERROR", "MISSING"]);
 
 Deno.test("generated tree-sitter queries only reference generated nodes", async () => {
-  const nodeTypes = JSON.parse(await Deno.readTextFile(nodeTypesUrl)) as NodeType[];
-  const generatedNodes = new Set<string>();
-  for (const nodeType of nodeTypes) {
-    if (nodeType.named) generatedNodes.add(nodeType.type);
-    for (const subtype of nodeType.subtypes ?? []) {
-      if (subtype.named) generatedNodes.add(subtype.type);
-    }
-  }
+  const grammar = JSON.parse(await Deno.readTextFile(grammarUrl)) as Grammar;
+  const generatedNodes = new Set(Object.keys(grammar.rules));
 
   const unknownReferences: string[] = [];
   for await (const entry of Deno.readDir(queriesUrl)) {

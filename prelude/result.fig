@@ -1,0 +1,33 @@
+const core = @import("prelude.core");
+
+fn ok(value: A) -> core.result(A, E) {
+  value
+}
+
+fn err(error: E) -> core.result(A, E) {
+  error
+}
+
+fn result_is_ok(value: core.result(A, E)) -> bool {
+  match value { Ok => true, Err => false }
+}
+
+fn result_is_err(value: core.result(A, E)) -> bool {
+  match value { Ok => false, Err => true }
+}
+
+fn result_unwrap_or(value: core.result(A, E), fallback: A) -> A {
+  match value { Ok(inner) => inner, Err => fallback }
+}
+
+fn result_map(value: core.result(A, E), const f: fn(x: A) -> B) -> core.result(B, E) {
+  match value { Ok(inner) => ok(f(inner)), Err(error) => err(error) }
+}
+
+fn result_map_err(value: core.result(A, E), const f: fn(x: E) -> F) -> core.result(A, F) {
+  match value { Ok(inner) => ok(inner), Err(error) => err(f(error)) }
+}
+
+fn result_and_then(value: core.result(A, E), const f: fn(x: A) -> core.result(B, E)) -> core.result(B, E) {
+  match value { Ok(inner) => f(inner), Err(error) => err(error) }
+}

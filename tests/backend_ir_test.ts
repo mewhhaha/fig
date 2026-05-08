@@ -25,6 +25,23 @@ Deno.test("backend folds scalar literal arithmetic", async () => {
   assert(!wat.includes("i32.add"));
 });
 
+Deno.test("backend lowers runtime inline-array indexing with branches", async () => {
+  const wat = await watFromSource(`
+    type fn inline_array(N: count, A: type) -> type {
+      let InlineArray = [N*A];
+      struct(InlineArray)
+    }
+    fn get(xs: inline_array(3, i32), index: i32) -> i32 {
+      xs[index]
+    }
+    pub fn main() -> i32 {
+      get([4, 5, 6], 1)
+    }
+  `);
+  assertStringIncludes(wat, "if (result i32)");
+  assertStringIncludes(wat, "local.get $xs$1");
+});
+
 Deno.test("backend does not allocate unused pure locals", async () => {
   const wat = await watFromSource(`
     pub fn main() -> i32 {
@@ -73,6 +90,101 @@ Deno.test("tail-recursive self calls lower to loops by default", async () => {
 
   const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
   assertEquals((instance.exports.main as CallableFunction)(), 5050);
+});
+
+Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
+  const source = `
+    type fn inline_array(N: count, A: type) -> type {
+      let InlineArray = [N*A];
+      struct(InlineArray)
+    }
+    fn fold_loop(xs: inline_array(3, i32), index: i32, acc: i32) -> i32 {
+      let xs_for_get, xs_for_next = fork(xs);
+      match index < 3 {
+        true => fold_loop(xs_for_next, index + 1, acc + xs_for_get[index]),
+        false => acc,
+      }
+    }
+    pub fn main() -> i32 {
+      fold_loop([1, 2, 3], 0, 0)
+    }
+  `;
+  const wat = await watFromSource(source);
+  const fold = wat.match(/\(func \$fold_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(fold, "loop");
+  assert(!fold.includes("call $fold_loop"));
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 6);
+});
+
+Deno.test("index cursor Yield item proves inline-array indexing and lowers inline", async () => {
+  const source = `
+    const core = @import("prelude.core");
+    type fn inline_array(N: count, A: type) -> type {
+      let InlineArray = [N*A];
+      struct(InlineArray)
+    }
+    fn sum_loop(xs: inline_array(3, i32), cursor: core.index_cursor(3), acc: i32) -> i32 {
+      let xs_for_get, xs_for_next = fork(xs);
+      match core.index_cursor.next(3, cursor) {
+        Yield(i, next) => sum_loop(xs_for_next, next, acc + xs_for_get[i]),
+        Done => acc,
+      }
+    }
+    pub fn main() -> i32 {
+      sum_loop([10, 20, 12], core.index_cursor.start(3), 0)
+    }
+  `;
+  const wat = await watFromSource(source);
+  const sum = wat.match(/\(func \$sum_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(sum, "loop");
+  assert(!sum.includes("index_cursor.next"));
+  assert(!sum.includes("call $sum_loop"));
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 42);
+});
+
+Deno.test("inline array builder primitives lower without runtime calls", async () => {
+  const wat = await watFromSource(`
+    type fn index(N: count) -> type { i32 }
+    type fn inline_array(N: count, A: type) -> type {
+      let InlineArray = [N*A];
+      struct(InlineArray)
+    }
+    type fn inline_array_builder(N: count, A: type) -> type {
+      let Builder = [N*A];
+      struct(Builder)
+    }
+    fn inline_array_builder.start(const n: count, const a: type) -> inline_array_builder(n, a) {
+      @inline_array_builder_start(n, a)
+    }
+    fn inline_array_builder.push(
+      const n: count,
+      const a: type,
+      builder: inline_array_builder(n, a),
+      i: index(n),
+      value: a
+    ) -> inline_array_builder(n, a) {
+      @inline_array_builder_push(n, a, builder, i, value)
+    }
+    fn inline_array_builder.finish(const n: count, const a: type, builder: inline_array_builder(n, a)) -> inline_array(n, a) {
+      @inline_array_builder_finish(n, a, builder)
+    }
+    pub fn main() -> i32 {
+      let b0 = inline_array_builder.start(2, i32);
+      let b1 = inline_array_builder.push(2, i32, b0, 0, 10);
+      let b2 = inline_array_builder.push(2, i32, b1, 1, 20);
+      let xs = inline_array_builder.finish(2, i32, b2);
+      xs[0] + xs[1]
+    }
+  `);
+
+  assert(!wat.includes("inline_array_builder.start"));
+  assert(!wat.includes("inline_array_builder.push"));
+  assert(!wat.includes("inline_array_builder.finish"));
+  assert(!wat.includes("call $inline_array_builder"));
 });
 
 Deno.test("direct self-tail body lowers to a loop by default", async () => {

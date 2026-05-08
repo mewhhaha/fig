@@ -7,6 +7,266 @@ type fn inline_array(N: count, A: type) {
   struct(InlineArray)
 }
 
+type fn inline_array_builder(N: count, A: type) -> type {
+  let Builder = [N*A];
+  struct(Builder)
+}
+
+fn inline_array_builder.start(const n: count, const a: type) -> inline_array_builder(n, a) {
+  @inline_array_builder_start(n, a)
+}
+
+fn inline_array_builder.push(
+  const n: count,
+  const a: type,
+  builder: inline_array_builder(n, a),
+  i: core.index(n),
+  value: a
+) -> inline_array_builder(n, a) {
+  @inline_array_builder_push(n, a, builder, i, value)
+}
+
+fn inline_array_builder.finish(const n: count, const a: type, builder: inline_array_builder(n, a)) -> inline_array(n, a) {
+  @inline_array_builder_finish(n, a, builder)
+}
+
+fn inline_array.tabulate(const n: count, const a: type, const f: fn(i: core.index(n)) -> a) -> inline_array(n, a) {
+  inline_array.tabulate_loop(n, a, core.index_cursor.start(n), inline_array_builder.start(n, a), f)
+}
+
+fn inline_array.tabulate_loop(
+  const n: count,
+  const a: type,
+  cursor: core.index_cursor(n),
+  builder: inline_array_builder(n, a),
+  const f: fn(i: core.index(n)) -> a
+) -> inline_array(n, a) {
+  let builder_then, builder_else = fork(builder);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => inline_array.tabulate_loop(n, a, next, inline_array_builder.push(n, a, builder_then, i, f(i)), f),
+    Done => inline_array_builder.finish(n, a, builder_else),
+  }
+}
+
+fn inline_array.tabulate_with(
+  const n: count,
+  const a: type,
+  const state: type,
+  state_value: state,
+  const f: fn(i: core.index(n), state_value: state) -> a
+) -> inline_array(n, a) {
+  inline_array.tabulate_with_loop(n, a, state, core.index_cursor.start(n), inline_array_builder.start(n, a), state_value, f)
+}
+
+fn inline_array.tabulate_with_loop(
+  const n: count,
+  const a: type,
+  const state: type,
+  cursor: core.index_cursor(n),
+  builder: inline_array_builder(n, a),
+  state_value: state,
+  const f: fn(i: core.index(n), state_value: state) -> a
+) -> inline_array(n, a) {
+  let builder_then, builder_else = fork(builder);
+  let state_then, state_else = fork(state_value);
+  let state_call, state_next = fork(state_then);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => inline_array.tabulate_with_loop(n, a, state, next, inline_array_builder.push(n, a, builder_then, i, f(i, state_call)), state_next, f),
+    Done => inline_array_builder.finish(n, a, builder_else),
+  }
+}
+
+fn inline_array.fill(const n: count, const a: type, value: a) -> inline_array(n, a) {
+  inline_array.fill_loop(n, a, core.index_cursor.start(n), inline_array_builder.start(n, a), value)
+}
+
+fn inline_array.fill_loop(
+  const n: count,
+  const a: type,
+  cursor: core.index_cursor(n),
+  builder: inline_array_builder(n, a),
+  value: a
+) -> inline_array(n, a) {
+  let builder_then, builder_else = fork(builder);
+  let value_then, value_else = fork(value);
+  let value_push, value_next = fork(value_then);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => inline_array.fill_loop(n, a, next, inline_array_builder.push(n, a, builder_then, i, value_push), value_next),
+    Done => inline_array_builder.finish(n, a, builder_else),
+  }
+}
+
+fn inline_array.map(
+  const n: count,
+  const a: type,
+  const b: type,
+  xs: inline_array(n, a),
+  const f: fn(x: a) -> b
+) -> inline_array(n, b) {
+  inline_array.map_loop(n, a, b, core.index_cursor.start(n), inline_array_builder.start(n, b), xs, f)
+}
+
+fn inline_array.map_loop(
+  const n: count,
+  const a: type,
+  const b: type,
+  cursor: core.index_cursor(n),
+  builder: inline_array_builder(n, b),
+  xs: inline_array(n, a),
+  const f: fn(x: a) -> b
+) -> inline_array(n, b) {
+  let builder_then, builder_else = fork(builder);
+  let xs_then, xs_else = fork(xs);
+  let xs_current, xs_next = fork(xs_then);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => inline_array.map_loop(n, a, b, next, inline_array_builder.push(n, b, builder_then, i, f(xs_current[i])), xs_next, f),
+    Done => inline_array_builder.finish(n, b, builder_else),
+  }
+}
+
+fn inline_array.imap(
+  const n: count,
+  const a: type,
+  const b: type,
+  xs: inline_array(n, a),
+  const f: fn(i: core.index(n), x: a) -> b
+) -> inline_array(n, b) {
+  inline_array.imap_loop(n, a, b, core.index_cursor.start(n), inline_array_builder.start(n, b), xs, f)
+}
+
+fn inline_array.imap_loop(
+  const n: count,
+  const a: type,
+  const b: type,
+  cursor: core.index_cursor(n),
+  builder: inline_array_builder(n, b),
+  xs: inline_array(n, a),
+  const f: fn(i: core.index(n), x: a) -> b
+) -> inline_array(n, b) {
+  let builder_then, builder_else = fork(builder);
+  let xs_then, xs_else = fork(xs);
+  let xs_current, xs_next = fork(xs_then);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => inline_array.imap_loop(n, a, b, next, inline_array_builder.push(n, b, builder_then, i, f(i, xs_current[i])), xs_next, f),
+    Done => inline_array_builder.finish(n, b, builder_else),
+  }
+}
+
+fn inline_array.imap_with_state(
+  const n: count,
+  const a: type,
+  const b: type,
+  const state: type,
+  xs: inline_array(n, a),
+  state_value: state,
+  const f: fn(i: core.index(n), x: a, state_value: state) -> b
+) -> inline_array(n, b) {
+  inline_array.imap_with_state_loop(n, a, b, state, core.index_cursor.start(n), inline_array_builder.start(n, b), xs, state_value, f)
+}
+
+fn inline_array.imap_with_state_loop(
+  const n: count,
+  const a: type,
+  const b: type,
+  const state: type,
+  cursor: core.index_cursor(n),
+  builder: inline_array_builder(n, b),
+  xs: inline_array(n, a),
+  state_value: state,
+  const f: fn(i: core.index(n), x: a, state_value: state) -> b
+) -> inline_array(n, b) {
+  let builder_then, builder_else = fork(builder);
+  let xs_then, xs_else = fork(xs);
+  let state_then, state_else = fork(state_value);
+  let xs_current, xs_next = fork(xs_then);
+  let state_call, state_next = fork(state_then);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => inline_array.imap_with_state_loop(n, a, b, state, next, inline_array_builder.push(n, b, builder_then, i, f(i, xs_current[i], state_call)), xs_next, state_next, f),
+    Done => inline_array_builder.finish(n, b, builder_else),
+  }
+}
+
+fn inline_array.set(const n: count, const a: type, xs: inline_array(n, a), index: core.index(n), value: a) -> inline_array(n, a) {
+  inline_array.set_loop(n, a, core.index_cursor.start(n), inline_array_builder.start(n, a), xs, index, value)
+}
+
+fn inline_array.set_loop(
+  const n: count,
+  const a: type,
+  cursor: core.index_cursor(n),
+  builder: inline_array_builder(n, a),
+  xs: inline_array(n, a),
+  index: core.index(n),
+  value: a
+) -> inline_array(n, a) {
+  let builder_then, builder_else = fork(builder);
+  let xs_then, xs_else = fork(xs);
+  let value_then, value_else = fork(value);
+  let builder_true, builder_false = fork(builder_then);
+  let xs_current, xs_next = fork(xs_then);
+  let xs_true_next, xs_false_next = fork(xs_next);
+  let value_current, value_next = fork(value_then);
+  let value_true_next, value_false_next = fork(value_next);
+  let index_test, index_next = fork(index);
+  let index_true_next, index_false_next = fork(index_next);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => match i == index_test {
+      true => inline_array.set_loop(n, a, next, inline_array_builder.push(n, a, builder_true, i, value_current), xs_true_next, index_true_next, value_true_next),
+      false => inline_array.set_loop(n, a, next, inline_array_builder.push(n, a, builder_false, i, xs_current[i]), xs_false_next, index_false_next, value_false_next),
+    },
+    Done => inline_array_builder.finish(n, a, builder_else),
+  }
+}
+
+fn inline_array.update(
+  const n: count,
+  const a: type,
+  xs: inline_array(n, a),
+  index: core.index(n),
+  const f: fn(x: a) -> a
+) -> inline_array(n, a) {
+  inline_array.update_loop(n, a, core.index_cursor.start(n), inline_array_builder.start(n, a), xs, index, f)
+}
+
+fn inline_array.update_loop(
+  const n: count,
+  const a: type,
+  cursor: core.index_cursor(n),
+  builder: inline_array_builder(n, a),
+  xs: inline_array(n, a),
+  index: core.index(n),
+  const f: fn(x: a) -> a
+) -> inline_array(n, a) {
+  let builder_then, builder_else = fork(builder);
+  let xs_then, xs_else = fork(xs);
+  let builder_true, builder_false = fork(builder_then);
+  let xs_current, xs_next = fork(xs_then);
+  let xs_update, xs_false_next = fork(xs_next);
+  let index_test, index_next = fork(index);
+  let index_true_next, index_false_next = fork(index_next);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => match i == index_test {
+      true => inline_array.update_loop(n, a, next, inline_array_builder.push(n, a, builder_true, i, f(xs_current[i])), xs_update, index_true_next, f),
+      false => inline_array.update_loop(n, a, next, inline_array_builder.push(n, a, builder_false, i, xs_current[i]), xs_false_next, index_false_next, f),
+    },
+    Done => inline_array_builder.finish(n, a, builder_else),
+  }
+}
+
+fn inline_array.fold_indices(
+  const n: count,
+  const acc_type: type,
+  cursor: core.index_cursor(n),
+  acc: acc_type,
+  const f: fn(acc: acc_type, i: core.index(n)) -> acc_type
+) -> acc_type {
+  let acc_then, acc_else = fork(acc);
+  match core.index_cursor.next(n, cursor) {
+    Yield(i, next) => inline_array.fold_indices(n, acc_type, next, f(acc_then, i), f),
+    Done => acc_else,
+  }
+}
+
 type fn lane4_i32() -> type {
   inline_array(4, i32)
 }

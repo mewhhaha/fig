@@ -9,9 +9,5 @@ fn inc(x: i32) -> i32 {
 }
 
 pub fn main() -> i32 {
-  let schedule_tile: tile2x4 = [rows: 2, cols: 4];
-  let schedule_vector: vectorize4 = [lanes: 4];
-  let schedule_unroll: unroll4 = [factor: 4];
-  let lanes = map4_i32(inc, [1, 2, 3, 4]);
-  fold4_i32(add, schedule_tile.rows + schedule_vector.lanes + schedule_unroll.factor, lanes)
+  fold4_i32(add, 2 + 4 + 4, map4_i32(inc, [1, 2, 3, 4]))
 }

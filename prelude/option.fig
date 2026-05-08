@@ -1,0 +1,37 @@
+const core = @import("prelude.core");
+
+fn some(value: A) -> core.option(A) {
+  value
+}
+
+fn none() -> core.option(A) {
+  0
+}
+
+fn option_is_some(value: core.option(A)) -> bool {
+  match value { Some => true, None => false }
+}
+
+fn option_is_none(value: core.option(A)) -> bool {
+  match value { Some => false, None => true }
+}
+
+fn option_unwrap_or(value: core.option(A), fallback: A) -> A {
+  match value { Some(inner) => inner, None => fallback }
+}
+
+fn option_map(value: core.option(A), const f: fn(x: A) -> B) -> core.option(B) {
+  match value { Some(inner) => f(inner), None => none() }
+}
+
+fn option_and_then(value: core.option(A), const f: fn(x: A) -> core.option(B)) -> core.option(B) {
+  match value { Some(inner) => f(inner), None => none() }
+}
+
+fn option_or(value: core.option(A), fallback: core.option(A)) -> core.option(A) {
+  match value { Some => value, None => fallback }
+}
+
+fn option_or_else(value: core.option(A), const fallback: fn() -> core.option(A)) -> core.option(A) {
+  match value { Some => value, None => fallback() }
+}

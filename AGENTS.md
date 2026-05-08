@@ -9,3 +9,8 @@
   behavior.
 - When implementing, testing, or documenting backend behavior, treat the browser + Deno supported
   subset as the default portability target.
+
+## Fig Syntax
+
+- Fig does not support `|>` pipeline syntax. Continue value-flow segments with pipe-bind syntax such
+  as `expr \x -> next_expr`, or `expr \$ -> use($)` when using the placeholder form.

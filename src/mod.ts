@@ -1,5 +1,5 @@
 import { parse } from "./parser.ts";
-import { checkProgram } from "./check.ts";
+import { checkProgram, checkProgramForAnalysis } from "./check.ts";
 import { type BackendOptions, emitWasm, emitWat } from "./backend.ts";
 import type {
   ConstDecl,
@@ -11,6 +11,7 @@ import type {
   Program,
   ShapeType,
   SourceImport,
+  StaticForSource,
   TypeBlock,
   TypeCountExpr,
   TypeDecl,
@@ -20,17 +21,34 @@ import type {
   TypeShape,
 } from "./core_ast.ts";
 import { CompileError, type Diagnostic } from "./diagnostics.ts";
+import { copyAstMetadata, hideAstMetadata } from "./ast_meta.ts";
+
+export interface ModuleSource {
+  text: string;
+  sourceId?: string;
+}
 
 export interface CheckSourceOptions {
-  resolveModule?: (moduleName: string) => string | undefined | Promise<string | undefined>;
+  sourceId?: string;
+  resolveModule?: (
+    moduleName: string,
+  ) => string | ModuleSource | undefined | Promise<string | ModuleSource | undefined>;
 }
 
 export interface CompileSourceOptions extends CheckSourceOptions, BackendOptions {}
 
 export async function checkSource(source: string, options: CheckSourceOptions = {}) {
-  const program = await parse(source);
+  const program = await parse(source, { sourceId: options.sourceId });
   if (!options.resolveModule) return checkProgram(program);
   return checkProgram(
+    await resolveSourceImports(program, { resolveModule: options.resolveModule }),
+  );
+}
+
+export async function checkSourceForAnalysis(source: string, options: CheckSourceOptions = {}) {
+  const program = await parse(source, { sourceId: options.sourceId });
+  if (!options.resolveModule) return checkProgramForAnalysis(program);
+  return checkProgramForAnalysis(
     await resolveSourceImports(program, { resolveModule: options.resolveModule }),
   );
 }
@@ -50,6 +68,7 @@ export async function wasmFromSource(
 }
 
 export { parse } from "./parser.ts";
+export { formatSource, isFormatted } from "./format.ts";
 export { tokenize } from "./tokenize.ts";
 export { optimizeProgram } from "./optimize.ts";
 export { CompileError, formatDiagnostic } from "./diagnostics.ts";
@@ -62,7 +81,10 @@ async function resolveSourceImports(
   const visiting: string[] = [];
   const resolved = new Map<string, Program>();
 
-  async function load(moduleName: string): Promise<Program | undefined> {
+  async function load(
+    moduleName: string,
+    requestedAt?: SourceImport,
+  ): Promise<Program | undefined> {
     if (resolved.has(moduleName)) return resolved.get(moduleName);
     const cycleStart = visiting.indexOf(moduleName);
     if (cycleStart >= 0) {
@@ -78,11 +100,12 @@ async function resolveSourceImports(
       diagnostics.push({
         code: "module.not_found",
         message: `cannot resolve module ${moduleName}`,
+        span: requestedAt?.span,
       });
       visiting.pop();
       return undefined;
     }
-    const parsed = await parse(source);
+    const parsed = await parseModuleSource(source, moduleName);
     const merged = await mergeImports(parsed);
     resolved.set(moduleName, merged);
     visiting.pop();
@@ -101,12 +124,13 @@ async function resolveSourceImports(
           diagnostics.push({
             code: "module.duplicate_alias",
             message: `source import alias ${item.alias} conflicts with another declaration`,
+            span: item.nameSpan ?? item.span,
           });
           continue;
         }
         aliases.add(item.alias);
       }
-      const imported = await load(item.module);
+      const imported = await load(item.module, item);
       if (!imported) continue;
       if (item.alias) aliasedImports.push({ alias: item.alias, program: imported });
       else importedPrograms.push(imported);
@@ -138,6 +162,7 @@ function mergePrograms(
       diagnostics.push({
         code: "module.duplicate_import",
         message: `imported declaration ${name} conflicts with another declaration`,
+        span: decl.nameSpan ?? decl.span,
       });
       continue;
     }
@@ -145,7 +170,7 @@ function mergePrograms(
     declarations.push(decl);
   }
   declarations.push(...program.declarations);
-  return {
+  return hideAstMetadata({
     moduleName: program.moduleName,
     imports: [
       ...imports.flatMap((item) => item.imports),
@@ -154,7 +179,16 @@ function mergePrograms(
     ],
     sourceImports: [],
     declarations,
-  };
+  });
+}
+
+async function parseModuleSource(
+  source: string | ModuleSource,
+  moduleName: string,
+): Promise<Program> {
+  return typeof source === "string"
+    ? await parse(source, { sourceId: moduleName })
+    : await parse(source.text, { sourceId: source.sourceId ?? moduleName });
 }
 
 function declarationName(decl: Declaration): string {
@@ -162,17 +196,27 @@ function declarationName(decl: Declaration): string {
 }
 
 function qualifyImportedDeclarations(declarations: Declaration[], alias: string): Declaration[] {
-  const names = new Set(declarations.map((decl) => decl.name));
+  const names = new Set(declarations.flatMap(collectDeclarationNames));
   return declarations.map((decl) => qualifyDeclaration(decl, alias, names));
+}
+
+function collectDeclarationNames(decl: Declaration): string[] {
+  if (decl.kind !== "type") return [decl.name];
+  return [decl.name, ...collectTypeBlockNames(decl.body), ...(decl.clauses ?? []).flatMap(collectDeclarationNames)];
+}
+
+function collectTypeBlockNames(block: TypeBlock): string[] {
+  return block.statements.map((stmt) => stmt.name);
 }
 
 function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>): Declaration {
   if (decl.kind === "fn") {
-    return {
+    return withMeta(decl, {
       ...decl,
       name: qualifyName(decl.name, alias),
       memberOf: decl.memberOf
         ? {
+          ...decl.memberOf,
           owner: qualifyReference(decl.memberOf.owner, alias, names),
           member: decl.memberOf.member,
         }
@@ -184,16 +228,16 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
       })),
       returnType: decl.returnType ? qualifyTypeSource(decl.returnType, alias, names) : undefined,
       body: qualifyExpr(decl.body, alias, names) as FnDecl["body"],
-    };
+    });
   }
   if (decl.kind === "type") return qualifyTypeDecl(decl, alias, names);
   if (decl.kind === "const") return qualifyConstLike(decl, alias, names);
-  return {
+  return withMeta(decl, {
     ...decl,
     name: qualifyName(decl.name, alias),
     type: decl.type ? qualifyTypeSource(decl.type, alias, names) : undefined,
     value: qualifyExpr(decl.value, alias, names),
-  };
+  });
 }
 
 function qualifyConstLike<T extends ConstDecl | LetDecl>(
@@ -201,108 +245,143 @@ function qualifyConstLike<T extends ConstDecl | LetDecl>(
   alias: string,
   names: Set<string>,
 ): T {
-  return {
+  return withMeta(decl, {
     ...decl,
     name: qualifyName(decl.name, alias),
     type: decl.type ? qualifyTypeSource(decl.type, alias, names) : undefined,
     value: qualifyExpr(decl.value, alias, names),
-  };
+  });
 }
 
 function qualifyTypeDecl(decl: TypeDecl, alias: string, names: Set<string>): TypeDecl {
-  return {
+  return withMeta(decl, {
     ...decl,
     name: qualifyName(decl.name, alias),
     paramPatterns: decl.paramPatterns?.map((pattern) => qualifyParamPattern(pattern, alias, names)),
     body: qualifyTypeBlock(decl.body, alias, names),
     normalized: undefined,
     clauses: decl.clauses?.map((clause) => qualifyTypeDecl(clause, alias, names)),
-  };
+  });
 }
 
 function qualifyTypeBlock(block: TypeBlock, alias: string, names: Set<string>): TypeBlock {
-  return {
+  return withMeta(block, {
     kind: "type_block",
-    statements: block.statements.map((stmt) => ({
+    statements: block.statements.map((stmt) => withMeta(stmt, {
       ...stmt,
+      name: qualifyName(stmt.name, alias),
       value: qualifyTypeExpr(stmt.value, alias, names),
     })),
     expr: block.expr ? qualifyTypeExpr(block.expr, alias, names) : undefined,
-  };
+  });
 }
 
 function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
   switch (expr.kind) {
     case "var":
-      return { ...expr, name: qualifyReference(expr.name, alias, names) };
+      return withMeta(expr, { ...expr, name: qualifyReference(expr.name, alias, names) });
     case "call":
-      return {
+      return withMeta(expr, {
         ...expr,
         callee: qualifyExpr(expr.callee, alias, names),
         args: expr.args.map((arg) => qualifyExpr(arg, alias, names)),
-      };
+      });
     case "index":
-      return {
+      return withMeta(expr, {
         ...expr,
         target: qualifyExpr(expr.target, alias, names),
         index: qualifyExpr(expr.index, alias, names),
-      };
+      });
     case "binary":
-      return {
+      return withMeta(expr, {
         ...expr,
         left: qualifyExpr(expr.left, alias, names),
         right: qualifyExpr(expr.right, alias, names),
-      };
+      });
     case "pipe_bind":
-      return {
+      return withMeta(expr, {
         ...expr,
         value: qualifyExpr(expr.value, alias, names),
         body: qualifyExpr(expr.body, alias, names),
-      };
+      });
     case "match":
-      return {
+      return withMeta(expr, {
         ...expr,
         value: qualifyExpr(expr.value, alias, names),
-        arms: expr.arms.map((arm) => ({ ...arm, value: qualifyExpr(arm.value, alias, names) })),
-      };
+        arms: expr.arms.map((arm) => withMeta(arm, { ...arm, value: qualifyExpr(arm.value, alias, names) })),
+      });
     case "shape":
-      return {
+      return withMeta(expr, {
         ...expr,
-        slots: expr.slots.map((slot) => ({
+        slots: expr.slots.map((slot) => withMeta(slot, {
           ...slot,
           value: qualifyExpr(slot.value, alias, names),
         })),
-      };
+      });
+    case "static_for_slots":
+      return withMeta(expr, {
+        ...expr,
+        source: qualifyStaticForSource(expr.source, alias, names),
+        value: qualifyExpr(expr.value, alias, names),
+      });
     case "product_constructor":
-      return {
+      return withMeta(expr, {
         ...expr,
         constructor: qualifyReference(expr.constructor, alias, names),
-        slots: expr.slots.map((slot) => ({
+        slots: expr.slots.map((slot) => withMeta(slot, {
           ...slot,
           value: qualifyExpr(slot.value, alias, names),
         })),
-      };
+      });
     case "range":
-      return {
+      return withMeta(expr, {
         ...expr,
         start: qualifyExpr(expr.start, alias, names),
         end: qualifyExpr(expr.end, alias, names),
-      };
+      });
+    case "field":
+      return withMeta(expr, {
+        ...expr,
+        value: qualifyExpr(expr.value, alias, names),
+        key: qualifyExpr(expr.key, alias, names),
+      });
     case "block":
-      return {
+      return withMeta(expr, {
         ...expr,
         statements: expr.statements.map((stmt) => {
-          if (stmt.kind === "let") return qualifyConstLike(stmt, alias, names);
+          if (stmt.kind === "let") {
+            return withMeta(stmt, {
+              ...stmt,
+              type: stmt.type ? qualifyTypeSource(stmt.type, alias, names) : undefined,
+              value: qualifyExpr(stmt.value, alias, names),
+            });
+          }
           if (stmt.kind === "destructure_let") {
-            return { ...stmt, value: qualifyExpr(stmt.value, alias, names) };
+            return withMeta(stmt, { ...stmt, value: qualifyExpr(stmt.value, alias, names) });
           }
           if (stmt.kind === "fork_let") {
-            return { ...stmt, source: qualifyReference(stmt.source, alias, names) };
+            return withMeta(stmt, { ...stmt, source: qualifyReference(stmt.source, alias, names) });
           }
-          return { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) };
+          if (stmt.kind === "static_for") {
+            return withMeta(stmt, {
+              ...stmt,
+              source: qualifyStaticForSource(stmt.source, alias, names),
+              body: stmt.body.map((inner) =>
+                inner.kind === "let" || inner.kind === "destructure_let"
+                  ? withMeta(inner, { ...inner, value: qualifyExpr(inner.value, alias, names) })
+                  : inner.kind === "proof_const"
+                  ? withMeta(inner, { ...inner, value: qualifyTypeExpr(inner.value, alias, names) })
+                  : inner
+              ),
+            });
+          }
+          if (stmt.kind === "proof_const") {
+            return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
+          }
+          return stmt;
         }),
         expr: expr.expr ? qualifyExpr(expr.expr, alias, names) : undefined,
-      };
+      });
     case "literal":
     case "placeholder":
       return expr;
@@ -312,32 +391,40 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
 function qualifyTypeExpr(expr: TypeExpr, alias: string, names: Set<string>): TypeExpr {
   switch (expr.kind) {
     case "type_ref":
-      return { ...expr, name: qualifyReference(expr.name, alias, names) };
+      return withMeta(expr, { ...expr, name: qualifyReference(expr.name, alias, names) });
     case "type_call":
-      return {
+      return withMeta(expr, {
         ...expr,
         callee: qualifyTypeExpr(expr.callee, alias, names),
         args: expr.args.map((arg) => qualifyTypeExpr(arg, alias, names)),
-      };
+      });
     case "type_shape":
-      return { ...expr, shape: qualifyTypeShape(expr.shape, alias, names) };
+      return withMeta(expr, { ...expr, shape: qualifyTypeShape(expr.shape, alias, names) });
     case "type_match":
-      return {
+      return withMeta(expr, {
         ...expr,
         value: qualifyTypeExpr(expr.value, alias, names),
-        arms: expr.arms.map((arm) => ({
+        arms: expr.arms.map((arm) => withMeta(arm, {
           pattern: qualifyTypePattern(arm.pattern, alias, names),
           value: qualifyTypeExpr(arm.value, alias, names),
         })),
-      };
+      });
     case "type_binary":
-      return {
+      return withMeta(expr, {
         ...expr,
         left: qualifyTypeExpr(expr.left, alias, names),
         right: qualifyTypeExpr(expr.right, alias, names),
-      };
+      });
+    case "type_operator":
+      return withMeta(expr, {
+        ...expr,
+        descriptor: {
+          ...expr.descriptor,
+          target: qualifyReference(expr.descriptor.target, alias, names),
+        },
+      });
     case "type_fn":
-      return { ...expr, source: qualifyTypeSource(expr.source, alias, names) };
+      return withMeta(expr, { ...expr, source: qualifyTypeSource(expr.source, alias, names) });
     case "type_static_ref":
     case "type_bool":
     case "type_number":
@@ -347,15 +434,29 @@ function qualifyTypeExpr(expr: TypeExpr, alias: string, names: Set<string>): Typ
   }
 }
 
+function qualifyStaticForSource(
+  source: StaticForSource,
+  alias: string,
+  names: Set<string>,
+): StaticForSource {
+  return source.kind === "range"
+    ? withMeta(source, {
+      ...source,
+      start: qualifyExpr(source.start, alias, names),
+      end: qualifyExpr(source.end, alias, names),
+    })
+    : withMeta(source, { ...source, shape: qualifyExpr(source.shape, alias, names) });
+}
+
 function qualifyTypeShape(shape: TypeShape, alias: string, names: Set<string>): TypeShape {
-  return {
-    slots: shape.slots.map((slot) => ({
+  return withMeta(shape, {
+    slots: shape.slots.map((slot) => withMeta(slot, {
       ...slot,
       type: qualifyTypeExpr(slot.type, alias, names),
       repeat: slot.repeat ? qualifyTypeCountExpr(slot.repeat, alias, names) : undefined,
     })),
     members: shape.members?.map((member) => qualifyTypeMember(member, alias, names)),
-  };
+  });
 }
 
 function qualifyTypeMember(
@@ -363,14 +464,14 @@ function qualifyTypeMember(
   alias: string,
   names: Set<string>,
 ): TypeMemberExpr {
-  return {
+  return withMeta(member, {
     ...member,
     type: qualifyTypeSource(member.type, alias, names),
     target: qualifyReference(member.target, alias, names),
     inlineFn: member.inlineFn
       ? qualifyDeclaration(member.inlineFn, alias, names) as FnDecl
       : undefined,
-  };
+  });
 }
 
 function qualifyTypeCountExpr(
@@ -379,14 +480,14 @@ function qualifyTypeCountExpr(
   names: Set<string>,
 ): TypeCountExpr {
   if (expr.kind === "count_ref") {
-    return { ...expr, name: qualifyReference(expr.name, alias, names) };
+    return withMeta(expr, { ...expr, name: qualifyReference(expr.name, alias, names) });
   }
   if (expr.kind === "count_mul") {
-    return {
+    return withMeta(expr, {
       ...expr,
       left: qualifyTypeCountExpr(expr.left, alias, names),
       right: qualifyTypeCountExpr(expr.right, alias, names),
-    };
+    });
   }
   return expr;
 }
@@ -398,20 +499,24 @@ function qualifyParamPattern(
 ): ParamPattern {
   if (pattern.kind === "constructor" || pattern.kind === "type") {
     return pattern.kind === "constructor"
-      ? {
+      ? withMeta(pattern, {
         ...pattern,
         name: qualifyReference(pattern.name, alias, names),
         args: pattern.args.map((arg) => qualifyParamPattern(arg, alias, names)),
-      }
-      : { ...pattern, name: qualifyReference(pattern.name, alias, names) };
+      })
+      : withMeta(pattern, { ...pattern, name: qualifyReference(pattern.name, alias, names) });
   }
   return pattern;
 }
 
 function qualifyTypePattern(pattern: TypePattern, alias: string, names: Set<string>): TypePattern {
   return pattern.kind === "type"
-    ? { ...pattern, name: qualifyReference(pattern.name, alias, names) }
+    ? withMeta(pattern, { ...pattern, name: qualifyReference(pattern.name, alias, names) })
     : pattern;
+}
+
+function withMeta<T extends object>(source: unknown, target: T): T {
+  return copyAstMetadata(target, source);
 }
 
 function qualifyTypeSource(source: string, alias: string, names: Set<string>): string {
@@ -426,9 +531,11 @@ function qualifyTypeSource(source: string, alias: string, names: Set<string>): s
 }
 
 function qualifyReference(name: string, alias: string, names: Set<string>): string {
-  const head = name.split(/[.(\[]/, 1)[0] ?? name;
-  if (!names.has(head)) return name;
-  return `${qualifyName(head, alias)}${name.slice(head.length)}`;
+  const match = [...names]
+    .filter((candidate) => name === candidate || name.startsWith(`${candidate}.`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!match) return name;
+  return `${qualifyName(match, alias)}${name.slice(match.length)}`;
 }
 
 function qualifyName(name: string, alias: string): string {

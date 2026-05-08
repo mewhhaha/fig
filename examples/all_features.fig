@@ -1,46 +1,75 @@
 const clock: fn() -> i64 !{time} = @capability("clock");
 const random: fn() -> i32 !{entropy} = @capability("random");
+type fn id() {
+  i32
+}
 
-type fn id() { i32 }
-type fn pair(A: type) { let Pair = [fst: A, snd: A]; struct(Pair) }
-type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-type fn box() { let Box = [value: i32]; struct(Box) }
-type fn buffer(N: count) { let Buffer = [N*i32]; struct(Buffer) }
-type fn weird() { let Weird = [fst: i32, 4*i32, 1*i32]; struct(Weird) }
-type fn thunk() { fn() -> i32 }
+type fn pair(A: type) {
+  let Pair = [fst: A, snd: A];
+  struct(Pair)
+}
 
-type fn option(A: type) { let None = []; let Some = [value: A]; union(None, Some) }
-type fn result(A: type) { let Ok = [value: A]; let Err = [message: string]; union(Ok, Err) }
+type fn point() {
+  let Point = [x: i32, y: i32];
+  struct(Point)
+}
+
+type fn box() {
+  let Box = [value: i32];
+  struct(Box)
+}
+
+type fn buffer(N: count) {
+  let Buffer = [N*i32];
+  struct(Buffer)
+}
+
+type fn weird() {
+  let Weird = [fst: i32, 4*i32, 1*i32];
+  struct(Weird)
+}
+
+type fn thunk() {
+  fn() -> i32
+}
+
+type fn option(A: type) {
+  let None = [];
+  let Some = [value: A];
+  union(None, Some)
+}
+
+type fn result(A: type) {
+  let Ok = [value: A];
+  let Err = [message: string];
+  union(Ok, Err)
+}
 
 type fn eq(T: type) {
   let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool];
   match @type_is_product(T) {
-    true => struct(Eq),
-    false => @compile_error("eq requires a product type"),
+    true => struct(Eq), false => @compile_error("eq requires a product type"),
   }
 }
 
 type fn functor(F: type) {
   let Functor = [map: fn(x: F) -> F];
   match @type_has_slot(F, #value) {
-    true => struct(Functor),
-    false => @compile_error("functor requires value slot"),
+    true => struct(Functor), false => @compile_error("functor requires value slot"),
   }
 }
 
 type fn applicative(F: type) {
   let Applicative = [pure: fn(x: i32) -> F, apply: fn(f: F, x: F) -> F];
   match @type_slot_type(F, #value) {
-    i32 => struct(Applicative),
-    _ => @compile_error("applicative requires i32 value"),
+    i32 => struct(Applicative), _ => @compile_error("applicative requires i32 value"),
   }
 }
 
 type fn monad(F: type) {
   let Monad = [bind: fn(x: F) -> F];
   match @type_is_product(F) {
-    true => struct(Monad),
-    false => @compile_error("monad requires product type"),
+    true => struct(Monad), false => @compile_error("monad requires product type"),
   }
 }
 
@@ -72,9 +101,7 @@ const point_eq: eq(point) = [eql: eql_point, neq: neq_point];
 const box_functor: functor(box) = [map: map_box];
 const box_applicative: applicative(box) = [pure: pure_box, apply: apply_box];
 const box_monad: monad(box) = [bind: bind_box];
-
 let module_tag = #Demo;
-
 fn sink(x: i32) -> i32 {
   x
 }
@@ -93,8 +120,7 @@ fn shape_first(weird: weird) -> i32 {
 
 fn same(dict: eq(point), a: point, b: point) -> i32 {
   match dict.eql(a, b) {
-    true => 1,
-    false => 0,
+    true => 1, false => 0,
   }
 }
 
@@ -112,16 +138,13 @@ fn bound(dict: monad(box), x: box) -> i32 {
 
 fn choose(flag: bool) -> i32 {
   match flag {
-    true => 1,
-    false => 0,
+    true => 1, false => 0,
   }
 }
 
 fn classify(x: i32) -> i32 {
   match x {
-    0 => 0,
-    Some(1) => 1,
-    _ => 2,
+    0 => 0, Some(1) => 1, _ => 2,
   }
 }
 

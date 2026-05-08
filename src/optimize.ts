@@ -1,4 +1,4 @@
-import type { BlockExpr, Declaration, Expr, FnDecl, Program, Statement } from "./core_ast.ts";
+import type { BlockExpr, Declaration, Expr, FnDecl, Program, StaticForSource, Statement } from "./core_ast.ts";
 
 export function optimizeProgram(program: Program): Program {
   const optimized = structuredClone(program) as Program;
@@ -146,11 +146,23 @@ function optimizeExpr(expr: Expr, forwarding: Map<string, string>, functions: Ma
         ...expr,
         slots: expr.slots.map((slot) => ({ ...slot, value: optimizeExpr(slot.value, forwarding, functions) })),
       };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: optimizeStaticForSource(expr.source, forwarding, functions),
+        value: optimizeExpr(expr.value, forwarding, functions),
+      };
     case "range":
       return {
         ...expr,
         start: optimizeExpr(expr.start, forwarding, functions),
         end: optimizeExpr(expr.end, forwarding, functions),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: optimizeExpr(expr.value, forwarding, functions),
+        key: optimizeExpr(expr.key, forwarding, functions),
       };
     case "block":
       return optimizeBlock(expr, forwarding, functions);
@@ -168,23 +180,64 @@ function inlineGeneratedCall(
 ): Expr | undefined {
   const fn = functions.get(name);
   if (!fn?.generated || !fn.generatedInlineable || fn.public || fn.params.length !== args.length) return undefined;
-  const statements: Statement[] = fn.params.map((param, index) => ({
-    kind: "let",
-    name: param.name,
-    type: param.type,
-    value: args[index],
-  }));
+  const statements: Statement[] = [];
+  let body = structuredClone(fn.body) as FnDecl["body"];
+  fn.params.forEach((param, index) => {
+    const arg = args[index];
+    if (arg?.kind === "var") {
+      body = substituteVar(body, param.name, arg) as FnDecl["body"];
+      return;
+    }
+    statements.push({
+      kind: "let",
+      name: param.name,
+      type: param.type,
+      value: arg,
+    });
+  });
   return {
     kind: "block",
-    statements: [...statements, ...fn.body.statements],
-    expr: fn.body.expr,
+    statements: [...statements, ...body.statements],
+    expr: body.expr,
   };
+}
+
+function optimizeStaticForSource(
+  source: StaticForSource,
+  forwarding: Map<string, string>,
+  functions: Map<string, FnDecl>,
+): StaticForSource {
+  return source.kind === "range"
+    ? {
+      ...source,
+      start: optimizeExpr(source.start, forwarding, functions),
+      end: optimizeExpr(source.end, forwarding, functions),
+    }
+    : { ...source, shape: optimizeExpr(source.shape, forwarding, functions) };
+}
+
+function substituteStaticForSource(
+  source: StaticForSource,
+  name: string,
+  value: Expr,
+): StaticForSource {
+  return source.kind === "range"
+    ? {
+      ...source,
+      start: substituteVar(source.start, name, value),
+      end: substituteVar(source.end, name, value),
+    }
+    : { ...source, shape: substituteVar(source.shape, name, value) };
 }
 
 function substituteVar(expr: Expr, name: string, value: Expr): Expr {
   switch (expr.kind) {
     case "var":
-      return expr.name === name ? value : expr;
+      if (expr.name === name) return value;
+      if (value.kind === "var" && (expr.name.startsWith(`${name}.`) || expr.name.startsWith(`${name}[`))) {
+        return { kind: "var", name: `${value.name}${expr.name.slice(name.length)}` };
+      }
+      return expr;
     case "call":
       return {
         ...expr,
@@ -215,11 +268,29 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
         ...expr,
         slots: expr.slots.map((slot) => ({ ...slot, value: substituteVar(slot.value, name, value) })),
       };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: substituteStaticForSource(expr.source, name, value),
+        value: substituteVar(expr.value, name, value),
+      };
     case "range":
       return {
         ...expr,
         start: substituteVar(expr.start, name, value),
         end: substituteVar(expr.end, name, value),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: substituteStaticForSource(expr.source, name, value),
+        value: substituteVar(expr.value, name, value),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: substituteVar(expr.value, name, value),
+        key: substituteVar(expr.key, name, value),
       };
     case "pipe_bind":
       return expr.name === name

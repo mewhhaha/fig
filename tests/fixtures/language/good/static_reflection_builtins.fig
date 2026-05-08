@@ -1,0 +1,32 @@
+type fn point() -> struct {
+  let Point = [x: i32, y: i32];
+  struct(Point)
+}
+
+type fn option(A: type) -> union {
+  let None = [];
+  let Some = [value: A];
+  union(None, Some)
+}
+
+fn point.eql(a: point, b: point) -> bool { a.x == b.x }
+
+type fn reflected(T: type) -> type {
+  let Expected = fn(a: point, b: point) -> bool;
+  @require(@type_is_product(point), "point is product");
+  @require(@type_is_sum(option(i32)), "option is sum");
+  @require(@type_has_slot(point, #x), "point has x");
+  @require(@type_slot_type(point, #x) == i32, "x is i32");
+  @require(@type_has_member(point, #eql), "point has eql");
+  @require(@type_member_type(point, #eql) == Expected, "eql type");
+  @require(@type_has_variant(option(i32), #Some), "option has Some");
+  @require(@type_variant_has_slot(option(i32), #Some, #value), "Some has value");
+  let Slots = @type_slots(point);
+  let Variants = @type_variants(option(i32));
+  let SomeSlots = @type_variant_slots(option(i32), #Some);
+  let Count = @type_slot_count(point);
+  let Out = [Count*@shape_slot(Slots, #x), value: @shape_slot(SomeSlots, #value)];
+  struct(Out)
+}
+
+pub fn main(value: reflected(i32)) -> i32 { value.value }

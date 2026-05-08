@@ -22,12 +22,12 @@ type fn box(A: type) -> type {
   struct(Box)
 }
 
-fn box.map(v: box(A), const f: fn(x: A) -> B) -> box(B) {
+fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
   Box [value: f(v.value)]
 }
 
 type fn functor(T: type fn(A: type) -> type) -> type {
-  let Expected = fn(v: T(A), const f: fn(x: A) -> B) -> T(B);
+  let Expected = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
   @require(@type_has_member(T, #map), "Functor requires map");
   @require(@type_member_type(T, #map) == Expected, "Functor.map has wrong type");
   T
@@ -45,7 +45,7 @@ fn same(const T, const _proof: eq(T), a: T, b: T) -> i32 {
 }
 
 fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
-  T.map(v, f)
+  T.map(f, v)
 }
 
 pub fn main() -> i32 {

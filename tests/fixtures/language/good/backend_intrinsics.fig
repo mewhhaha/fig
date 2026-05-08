@@ -1,0 +1,23 @@
+type fn ptr(A: type) -> struct {
+  let Ptr = [addr: i32];
+  struct(Ptr)
+}
+
+type fn lane4_i32() -> struct {
+  let Lane4I32 = [4*i32];
+  struct(Lane4I32)
+}
+
+fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 { @memory_load_i32(mem, p) }
+fn memory.store_i32(mem: memory, p: ptr(i32), value: i32) -> memory { @memory_store_i32(mem, p, value) }
+fn memory.load_lane4_i32(mem: memory, p: ptr(lane4_i32)) -> lane4_i32 { @memory_load_lane4_i32(mem, p) }
+fn memory.store_lane4_i32(mem: memory, p: ptr(lane4_i32), value: lane4_i32) -> memory { @memory_store_lane4_i32(mem, p, value) }
+fn ptr.from_i32(addr: i32) -> ptr(A) { @ptr_from_i32(addr) }
+fn ptr.add(p: ptr(A), bytes: i32) -> ptr(A) { @ptr_add(p, bytes) }
+
+pub fn main(mem: memory, addr: i32) -> i32 {
+  let base: ptr(i32) = ptr.from_i32(addr);
+  let p0, p1 = fork(base);
+  let next = ptr.add(p1, 4);
+  memory.load_i32(mem, p0) + memory.load_i32(mem, next)
+}

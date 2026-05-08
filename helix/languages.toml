@@ -1,3 +1,7 @@
+[language-server.fig-lsp]
+command = "deno"
+args = ["task", "--cwd", "/home/mewhhaha/src/shovel", "lsp"]
+
 [[language]]
 name = "fig"
 scope = "source.fig"
@@ -6,6 +10,9 @@ grammar = "fig"
 roots = ["deno.json", "grammar.ebnf"]
 comment-token = "//"
 indent = { tab-width = 2, unit = "  " }
+language-servers = ["fig-lsp"]
+formatter = { command = "deno", args = ["run", "--allow-read", "/home/mewhhaha/src/shovel/src/cli.ts", "fmt", "-"] }
+auto-format = true
 
 [[grammar]]
 name = "fig"

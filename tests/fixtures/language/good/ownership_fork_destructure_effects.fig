@@ -1,0 +1,17 @@
+const clock: fn() -> i32 !{time} = @capability("clock");
+
+type fn pair() -> struct {
+  let Pair = [first: i32, second: i32];
+  struct(Pair)
+}
+
+fn make_pair() -> pair { Pair [first: 2, second: 3] }
+fn sink(x: i32) -> i32 { x }
+
+pub fn main() -> i32 !{time} {
+  let x = clock();
+  let a, b = fork(x);
+  let moved = sink(b);
+  let first, second = make_pair();
+  a + moved + first + second
+}

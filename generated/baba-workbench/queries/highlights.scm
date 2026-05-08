@@ -9,19 +9,19 @@
 (TypeFnDecl (LowerIdent) @type.definition)
 (TypeLetDecl (PascalIdent) @type)
 (ConstDecl (LowerIdent) @variable)
-(ConstDecl (LowerFieldName) @variable)
+(ConstDecl (FieldName) @variable)
 (Param (PatternIdent (LowerIdent) @variable.parameter))
 (Param (PatternIdent (PascalIdent) @constructor))
-(Param (LowerFieldName) @variable.parameter)
+(Param (FieldName) @variable.parameter)
 (BlockLetDecl (LowerIdent) @variable)
-(BlockLetDecl (LowerFieldName) @variable)
+(BlockLetDecl (FieldName) @variable)
 (BlockProofConstDecl (PascalIdent) @type)
 (BlockLetTail (LowerIdent) @variable)
 (TopLetDecl (LowerIdent) @variable)
-(TopLetDecl (LowerFieldName) @variable)
-(ShapeValueSlot (LowerFieldName) @variable.other.member)
-(TypeShapeSlot (LowerFieldName) @variable.other.member)
-(ShapeSlot (LowerFieldName) @variable.other.member)
+(TopLetDecl (FieldName) @variable)
+(ShapeValueSlot (FieldName) @variable.other.member)
+(TypeShapeSlot (FieldName) @variable.other.member)
+(ShapeSlot (FieldName) @variable.other.member)
 (Call "." (LowerIdent) @variable.other.member)
 (Primary (PascalIdent) @constructor)
 "import" @keyword.control.import
@@ -41,9 +41,12 @@
 (String) @string
 (Number) @number
 (Bool) @constant.builtin
+(Comment) @comment
 (Placeholder) @operator
 "_" @keyword
-"count" @keyword
+"for" @keyword
+"in" @keyword
+"static" @keyword
 "!" @operator
 "(" @punctuation.bracket
 ")" @punctuation.bracket

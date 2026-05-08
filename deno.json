@@ -14,10 +14,11 @@
     "codegen": "deno task grammar && deno task parser",
     "check": "deno check src/**/*.ts tests/**/*.ts scripts/**/*.ts",
     "test": "deno test --allow-read --allow-write --allow-run",
+    "lsp": "deno run --allow-read src/lsp/main.ts",
     "bench:const": "deno run --allow-read scripts/bench_const_params.ts",
     "snapshots": "deno test --allow-read --allow-write tests/wat_snapshot_test.ts",
     "smoke": "deno run --allow-read --allow-write src/cli.ts run examples/hello.fig",
-    "helix": "deno run --allow-read --allow-write --allow-run scripts/build_helix_parser.ts && env XDG_CONFIG_HOME=$PWD/helix/config HELIX_RUNTIME=$PWD/helix/runtime hx --health fig"
+    "helix": "deno run --allow-read --allow-write --allow-run scripts/build_helix_parser.ts && env FIG_HELIX_CONFIG=$PWD/helix/config/helix FIG_HELIX_RUNTIME=$PWD/helix/runtime deno run --allow-read --allow-write --allow-env scripts/install_helix.ts && env XDG_CONFIG_HOME=$PWD/helix/config HELIX_RUNTIME=$PWD/helix/runtime hx --health fig"
   },
   "fmt": {
     "lineWidth": 100,

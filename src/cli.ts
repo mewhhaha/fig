@@ -1,18 +1,63 @@
-import { checkSource, wasmFromSource, watFromSource } from "./mod.ts";
+import { checkSource, formatSource, wasmFromSource, watFromSource } from "./mod.ts";
 import { CompileError, formatDiagnostic } from "./diagnostics.ts";
 
-const [cmd, file, ...rest] = Deno.args;
+const [cmd, ...args] = Deno.args;
 
 try {
+  const fileIndex = args.findIndex((arg) => arg === "-" || !arg.startsWith("--"));
+  const singleFile = fileIndex >= 0 ? args[fileIndex] : undefined;
+  const commandRest = args.filter((_, index) => index !== fileIndex);
+  const files = args.filter((arg) => arg === "-" || !arg.startsWith("--"));
+  const rest = args.filter((arg) => arg !== "-" && arg.startsWith("--"));
+  const file = singleFile;
   if (!cmd || !file) usage();
-  const source = await Deno.readTextFile(file);
-  const options = { resolveModule: moduleResolver(file) };
-  if (cmd === "check") {
+  if (cmd === "fmt") {
+    if (files.includes("-") && (files.length > 1 || rest.includes("--write") || rest.includes("--check"))) {
+      usage();
+    }
+    if (rest.includes("--write") && rest.includes("--check")) usage();
+    if (file === "-") {
+      const source = await new Response(Deno.stdin.readable).text();
+      const formatted = formatSource(source);
+      console.log(formatted.trimEnd());
+      Deno.exit(0);
+    }
+    if (rest.includes("--check")) {
+      let failed = false;
+      for (const item of files) {
+        const source = await Deno.readTextFile(item);
+        const formatted = formatSource(source);
+        if (formatted !== source) {
+          console.error(`${item} is not formatted`);
+          failed = true;
+        }
+      }
+      Deno.exit(failed ? 1 : 0);
+    }
+    for (const item of files) {
+      const source = await Deno.readTextFile(item);
+      const formatted = formatSource(source);
+      if (rest.includes("--write")) {
+        if (formatted !== source) await Deno.writeTextFile(item, formatted);
+        continue;
+      }
+      console.log(formatted.trimEnd());
+    }
+  } else if (cmd === "check") {
+    const rest = commandRest;
+    const source = await Deno.readTextFile(file);
+    const options = { resolveModule: moduleResolver(file) };
     await checkSource(source, options);
     console.log("ok");
   } else if (cmd === "wat") {
+    const rest = commandRest;
+    const source = await Deno.readTextFile(file);
+    const options = { resolveModule: moduleResolver(file) };
     console.log(await watFromSource(source, options));
   } else if (cmd === "build") {
+    const rest = commandRest;
+    const source = await Deno.readTextFile(file);
+    const options = { resolveModule: moduleResolver(file) };
     const outFlag = rest.indexOf("--out");
     const manifestFlag = rest.indexOf("--shader-manifest");
     const out = outFlag >= 0 ? rest[outFlag + 1] : file.replace(/\.fig$/, ".wasm");
@@ -27,6 +72,9 @@ try {
     }
     console.log(out);
   } else if (cmd === "run") {
+    const rest = commandRest;
+    const source = await Deno.readTextFile(file);
+    const options = { resolveModule: moduleResolver(file) };
     const wasm = await wasmFromSource(source, options);
     const module = new WebAssembly.Module(wasm);
     const imports = WebAssembly.Module.imports(module);
@@ -49,7 +97,7 @@ try {
 
 function usage(): never {
   console.error(
-    "usage: fig <check|wat|build|run> <file> [--out module.wasm] [--shader-manifest manifest.json]",
+    "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--out module.wasm] [--shader-manifest manifest.json]",
   );
   Deno.exit(2);
 }
@@ -80,6 +128,9 @@ function candidateModulePaths(entryFile: string, moduleName: string): string[] {
     new URL(dotted, entryDir).pathname,
   ];
   if (moduleName.startsWith("prelude.")) {
+    candidates.push(new URL(`../${relative}`, import.meta.url).pathname);
+  }
+  if (moduleName.startsWith("engine.") || moduleName.startsWith("web.")) {
     candidates.push(new URL(`../${relative}`, import.meta.url).pathname);
   }
   return candidates;

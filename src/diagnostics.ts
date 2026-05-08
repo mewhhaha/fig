@@ -3,6 +3,7 @@ export interface Span {
   end: number;
   line: number;
   column: number;
+  sourceId?: string;
 }
 
 export interface Diagnostic {

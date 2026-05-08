@@ -56,12 +56,16 @@ fn vertex2d(pos: vec3_i32, uv: vec2_i32, color: i32) -> vertex2d_i32 {
 fn quad2d_rect(x: i32, y: i32, w: i32, h: i32, z: i32, color: i32) -> quad2d_i32 {
   let x0, x_for_w = fork(x);
   let y0, y_for_h = fork(y);
-  let x1 = x_for_w + w;
-  let y1 = y_for_h + h;
+  let x_for_w_a, x_for_w_b = fork(x_for_w);
+  let w_a, w_b = fork(w);
+  let y_for_h_a, y_for_h_b = fork(y_for_h);
+  let h_a, h_b = fork(h);
   let x00, x03 = fork(x0);
-  let x11, x12 = fork(x1);
+  let x11 = x_for_w_a + w_a;
+  let x12 = x_for_w_b + w_b;
   let y00, y01 = fork(y0);
-  let y12, y13 = fork(y1);
+  let y12 = y_for_h_a + h_a;
+  let y13 = y_for_h_b + h_b;
   let z01, z23 = fork(z);
   let z0, z1 = fork(z01);
   let z2, z3 = fork(z23);
@@ -87,6 +91,28 @@ fn quad2d_translate(q: quad2d_i32, dx: i32, dy: i32, dz: i32) -> quad2d_i32 {
 
 fn emit_quad2d(q: quad2d_i32) -> geometry2d_i32 {
   Geometry2dI32 [vertices: q, vertex_count: 4]
+}
+
+fn empty_geometry2d() -> geometry2d_i32 {
+  Geometry2dI32 [
+    vertices: [
+      Vertex2dI32 [x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0],
+      Vertex2dI32 [x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0],
+      Vertex2dI32 [x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0],
+      Vertex2dI32 [x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0]
+    ],
+    vertex_count: 0
+  ]
+}
+
+fn append_geometry2d(front: geometry2d_i32, back: geometry2d_i32) -> geometry2d_i32 {
+  let front_for_vertices, front_for_count = fork(front);
+  let back_for_vertices, back_for_count = fork(back);
+  let vertices = match front_for_vertices.vertex_count == 0 {
+    true => back_for_vertices.vertices,
+    false => front_for_vertices.vertices,
+  };
+  Geometry2dI32 [vertices: vertices, vertex_count: front_for_count.vertex_count + back_for_count.vertex_count]
 }
 
 fn emit_rect2d(x: i32, y: i32, w: i32, h: i32, z: i32, color: i32) -> geometry2d_i32 {

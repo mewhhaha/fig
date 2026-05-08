@@ -1,0 +1,6 @@
+// expect: type.constructor_unknown_slot
+type fn box() -> struct {
+  let Box = [value: i32];
+  struct(Box)
+}
+fn make(x: i32) -> box { Box [value: x, other: x] }

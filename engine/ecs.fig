@@ -1,0 +1,331 @@
+type fn inline_array(N: count, Component: type) -> type {
+  let InlineArray = [N*Component];
+  struct(InlineArray)
+}
+
+type fn component_store(N: count, Component: type) -> type {
+  inline_array(N, Component)
+}
+
+type fn component_store_for(Spec: const) -> type {
+  inline_array(Spec.count, Spec.component)
+}
+
+type fn component_cursor_for(_: const) -> type {
+  i32
+}
+
+type fn component_ref_for(_: const) -> type {
+  i32
+}
+
+type fn component_value_for(Spec: const) -> type {
+  Spec.component
+}
+
+type fn world2d(EC: count, Components: const, E: type) -> type {
+  let ComponentNext = @shape_map(Components, component_cursor_for);
+  let Base = [
+    next_entity_id: i32,
+    component_next: struct(ComponentNext),
+    entities: component_store(EC, E)
+  ];
+  let Stores = @shape_map(Components, component_store_for);
+  let World2d = @shape_concat(Base, Stores);
+  struct(World2d)
+}
+
+type fn component_refs(Selected: const) -> type {
+  let ComponentRefs = @shape_map(Selected, component_ref_for);
+  struct(ComponentRefs)
+}
+
+type fn component_values(Selected: const) -> type {
+  let ComponentValues = @shape_map(Selected, component_value_for);
+  struct(ComponentValues)
+}
+
+type fn query_row(E: type, Selected: const) -> type {
+  let QueryRow = @shape_concat([entity: E], @shape_map(Selected, component_value_for));
+  struct(QueryRow)
+}
+
+type fn iter(N: count, Item: type) -> type {
+  let Iter = [keep: component_store(N, bool), items: component_store(N, Item)];
+  struct(Iter)
+}
+
+fn component_store.get(store: component_store(N, Component), index: i32) -> Component {
+  store[index]
+}
+
+fn component_store.set(store: component_store(3, Component), index: i32, value: Component) -> component_store(3, Component) {
+  [
+    match index == 0 { true => value, false => store[0] },
+    match index == 1 { true => value, false => store[1] },
+    match index == 2 { true => value, false => store[2] }
+  ]
+}
+
+fn component_store.update(
+  store: component_store(N, Component),
+  index: i32,
+  const f: fn(value: Component) -> Component
+) -> component_store(N, Component) {
+  let store_for_get, store_for_set = fork(store);
+  let index_for_get, index_for_set = fork(index);
+  component_store.set(store_for_set, index_for_set, f(component_store.get(store_for_get, index_for_get)))
+}
+
+fn world2d.empty(
+  const entity_count: count,
+  const components,
+  default_entity: E,
+  default_components: component_values(components)
+) -> world2d(entity_count, components, E) {
+  [
+    next_entity_id: 0,
+    component_next: [for Key, Spec in (components): 0],
+    entities: [for I in 0 .. (entity_count): default_entity],
+    for Key, Spec in (components): [for I in 0 .. (Spec.count): @field(default_components, Key)]
+  ]
+}
+
+type fn command(W: type, A: type) -> type {
+  let Command = [world: W, value: A];
+  struct(Command)
+}
+
+fn command.pure(world: W, value: A) -> command(W, A) {
+  Command [world: world, value: value]
+}
+
+fn command.map(cmd: command(W, A), const f: fn(value: A) -> B) -> command(W, B) {
+  Command [world: cmd.world, value: f(cmd.value)]
+}
+
+fn command.bind(cmd: command(W, A), const f: fn(world: W, value: A) -> command(W, B)) -> command(W, B) {
+  f(cmd.world, cmd.value)
+}
+
+type fn query(W: type, Selected: const) -> type {
+  let WorldSlots = @type_slots(W);
+  let SelectedStores = @shape_map(Selected, component_store_for);
+  let Matched = @shape_intersect(WorldSlots, SelectedStores);
+  let StoreCountOk = @require(
+    @shape_count(Matched) == @shape_count(SelectedStores),
+    "query selected store is missing from world"
+  );
+  let StoreTypesOk = @require(
+    Matched == SelectedStores,
+    "query selected stores must match world store types and order"
+  );
+  let Query = [];
+  struct(Query)
+}
+
+type fn query2() -> type {
+  i32
+}
+
+type fn query2_row(E: type, A: type, B: type) -> type {
+  let Query2Row = [entity: E, a: A, b: B];
+  struct(Query2Row)
+}
+
+type fn iter3(Item: type) -> type {
+  let Iter3 = [keep: component_store(3, bool), items: component_store(3, Item)];
+  struct(Iter3)
+}
+
+fn query2.iter3(
+  _query: query(W, Selected),
+  entities: component_store(3, E),
+  a_store: component_store(3, A),
+  b_store: component_store(3, B),
+  const a_index: fn(entity: E) -> i32,
+  const b_index: fn(entity: E) -> i32
+) -> iter3(query2_row(E, A, B)) {
+  Iter3 [
+    keep: [true, true, true],
+    items: [
+      Query2Row [entity: entities[0], a: a_store[a_index(entities[0])], b: b_store[b_index(entities[0])]],
+      Query2Row [entity: entities[1], a: a_store[a_index(entities[1])], b: b_store[b_index(entities[1])]],
+      Query2Row [entity: entities[2], a: a_store[a_index(entities[2])], b: b_store[b_index(entities[2])]]
+    ]
+  ]
+}
+
+fn iter3.map(xs: iter3(Item), const f: fn(row: Item) -> Out) -> iter3(Out) {
+  Iter3 [
+    keep: xs.keep,
+    items: [f(xs.items[0]), f(xs.items[1]), f(xs.items[2])]
+  ]
+}
+
+fn iter3.filter(xs: iter3(Item), const pred: fn(row: Item) -> bool) -> iter3(Item) {
+  Iter3 [
+    keep: [
+      match xs.keep[0] { true => pred(xs.items[0]), false => false },
+      match xs.keep[1] { true => pred(xs.items[1]), false => false },
+      match xs.keep[2] { true => pred(xs.items[2]), false => false }
+    ],
+    items: [xs.items[0], xs.items[1], xs.items[2]]
+  ]
+}
+
+fn iter3.fold(xs: iter3(Item), init: Acc, const f: fn(acc: Acc, row: Item) -> Acc) -> Acc {
+  let init_then, init_else = fork(init);
+  let acc0 = match xs.keep[0] {
+    true => f(init_then, xs.items[0]),
+    false => init_else,
+  };
+  let acc0_then, acc0_else = fork(acc0);
+  let acc1 = match xs.keep[1] {
+    true => f(acc0_then, xs.items[1]),
+    false => acc0_else,
+  };
+  let acc1_then, acc1_else = fork(acc1);
+  match xs.keep[2] {
+    true => f(acc1_then, xs.items[2]),
+    false => acc1_else,
+  }
+}
+
+fn command.add_entity(
+  world: world2d(EC, Components, E),
+  const selected,
+  values: component_values(selected),
+  const make_entity: fn(refs: component_refs(Components)) -> E
+) -> command(world2d(EC, Components, E), E) {
+  let refs = [
+    for Key, Spec in (Components): @field(world.component_next, Key)
+  ];
+  let entity = make_entity(refs);
+  Command [
+    world: [
+      next_entity_id: world.next_entity_id + 1,
+      component_next: [
+        for Key, Spec in (Components): match @shape_has_slot(selected, Key) {
+          true => @field(world.component_next, Key) + 1,
+          false => @field(world.component_next, Key)
+        }
+      ],
+      entities: component_store.set(world.entities, world.next_entity_id, entity),
+      for Key, Spec in (Components): match @shape_has_slot(selected, Key) {
+        true => component_store.set(@field(world, Key), @field(world.component_next, Key), @field(values, Key)),
+        false => @field(world, Key)
+      }
+    ],
+    value: entity
+  ]
+}
+
+fn query.iter(
+  const _query: query(world2d(EC, Components, E), Selected),
+  world: world2d(EC, Components, E),
+  select_refs: Selectors
+) -> iter(EC, query_row(E, Selected)) {
+  Iter [
+    keep: [for I in 0 .. (EC): I < world.next_entity_id],
+    items: [for I in 0 .. (EC): [
+      entity: world.entities[I],
+      for Key, Spec in (Selected): @field(world, Key)[@field(select_refs, Key)(world.entities[I])]
+    ]]
+  ]
+}
+
+fn iter.map(xs: iter(N, Item), const f: fn(row: Item) -> Out) -> iter(N, Out) {
+  Iter [
+    keep: xs.keep,
+    items: [for I in 0 .. (N): f(xs.items[I])]
+  ]
+}
+
+fn iter.filter(xs: iter(N, Item), const pred: fn(row: Item) -> bool) -> iter(N, Item) {
+  Iter [
+    keep: [for I in 0 .. (N): match xs.keep[I] { true => pred(xs.items[I]), false => false }],
+    items: xs.items
+  ]
+}
+
+fn iter.fold_loop(xs: iter(N, Item), index: i32, acc: Acc, const f: fn(acc: Acc, row: Item) -> Acc) -> Acc {
+  let xs_for_current, xs_for_next = fork(xs);
+  let acc_then, acc_else = fork(acc);
+  match index < N {
+    true => iter.fold_loop(
+      xs_for_next,
+      index + 1,
+      match xs_for_current.keep[index] {
+        true => f(acc_then, xs_for_current.items[index]),
+        false => acc_else,
+      },
+      f
+    ),
+    false => acc_else,
+  }
+}
+
+fn iter.fold(xs: iter(N, Item), init: Acc, const f: fn(acc: Acc, row: Item) -> Acc) -> Acc {
+  iter.fold_loop(xs, 0, init, f)
+}
+
+fn iter.fold_map(
+  xs: iter(N, Item),
+  init: Acc,
+  const map_row: fn(row: Item) -> Mapped,
+  const fold_row: fn(acc: Acc, row: Mapped) -> Acc
+) -> Acc {
+  iter.fold(iter.map(xs, map_row), init, fold_row)
+}
+
+fn query.update(
+  world: world2d(EC, Components, E),
+  const _query: query(world2d(EC, Components, E), Selected),
+  select_refs: Selectors,
+  const update_row: fn(row: query_row(E, Selected)) -> component_values(Selected)
+) -> world2d(EC, Components, E) {
+  let rows = query.iter(_query, world, select_refs);
+  [
+    next_entity_id: world.next_entity_id,
+    component_next: world.component_next,
+    entities: world.entities,
+    for Key, Spec in (Components): match @shape_has_slot(Selected, Key) {
+      true => match rows.keep[2] {
+        true => component_store.set(
+          match rows.keep[1] {
+            true => component_store.set(
+              match rows.keep[0] {
+                true => component_store.set(@field(world, Key), @field(select_refs, Key)(rows.items[0].entity), @field(update_row(rows.items[0]), Key)),
+                false => @field(world, Key),
+              },
+              @field(select_refs, Key)(rows.items[1].entity),
+              @field(update_row(rows.items[1]), Key)
+            ),
+            false => match rows.keep[0] {
+              true => component_store.set(@field(world, Key), @field(select_refs, Key)(rows.items[0].entity), @field(update_row(rows.items[0]), Key)),
+              false => @field(world, Key),
+            },
+          },
+          @field(select_refs, Key)(rows.items[2].entity),
+          @field(update_row(rows.items[2]), Key)
+        ),
+        false => match rows.keep[1] {
+          true => component_store.set(
+            match rows.keep[0] {
+              true => component_store.set(@field(world, Key), @field(select_refs, Key)(rows.items[0].entity), @field(update_row(rows.items[0]), Key)),
+              false => @field(world, Key),
+            },
+            @field(select_refs, Key)(rows.items[1].entity),
+            @field(update_row(rows.items[1]), Key)
+          ),
+          false => match rows.keep[0] {
+            true => component_store.set(@field(world, Key), @field(select_refs, Key)(rows.items[0].entity), @field(update_row(rows.items[0]), Key)),
+            false => @field(world, Key),
+          },
+        },
+      },
+      false => @field(world, Key)
+    }
+  ]
+}

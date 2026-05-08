@@ -6,7 +6,12 @@
   },
   "word": "LowerIdent",
   "supertypes": ["Decl", "Expr", "Literal"],
-  "conflicts": [["Primary"]],
+  "conflicts": [
+    ["Primary"],
+    ["FieldName", "TypeAnn"],
+    ["FieldName", "PatternIdent"],
+    ["FieldName", "TypeParamDecl"]
+  ],
   "queries": {
     "highlights": {
       "entries": [
@@ -27,6 +32,7 @@
         { "node": "String", "capture": "string" },
         { "node": "Number", "capture": "number" },
         { "node": "Bool", "capture": "constant.builtin" },
+        { "node": "Comment", "capture": "comment" },
         { "node": "Placeholder", "capture": "operator" }
       ],
       "patterns": [
@@ -41,19 +47,19 @@
         "(TypeFnDecl (LowerIdent) @type.definition)",
         "(TypeLetDecl (PascalIdent) @type)",
         "(ConstDecl (LowerIdent) @variable)",
-        "(ConstDecl (LowerFieldName) @variable)",
+        "(ConstDecl (FieldName) @variable)",
         "(Param (PatternIdent (LowerIdent) @variable.parameter))",
         "(Param (PatternIdent (PascalIdent) @constructor))",
-        "(Param (LowerFieldName) @variable.parameter)",
+        "(Param (FieldName) @variable.parameter)",
         "(BlockLetDecl (LowerIdent) @variable)",
-        "(BlockLetDecl (LowerFieldName) @variable)",
+        "(BlockLetDecl (FieldName) @variable)",
         "(BlockProofConstDecl (PascalIdent) @type)",
         "(BlockLetTail (LowerIdent) @variable)",
         "(TopLetDecl (LowerIdent) @variable)",
-        "(TopLetDecl (LowerFieldName) @variable)",
-        "(ShapeValueSlot (LowerFieldName) @variable.other.member)",
-        "(TypeShapeSlot (LowerFieldName) @variable.other.member)",
-        "(ShapeSlot (LowerFieldName) @variable.other.member)",
+        "(TopLetDecl (FieldName) @variable)",
+        "(ShapeValueSlot (FieldName) @variable.other.member)",
+        "(TypeShapeSlot (FieldName) @variable.other.member)",
+        "(ShapeSlot (FieldName) @variable.other.member)",
         "(Call \".\" (LowerIdent) @variable.other.member)",
         "(Primary (PascalIdent) @constructor)"
       ],
@@ -62,7 +68,7 @@
           { "node": "LowerIdent" },
           { "node": "LowerIdentRepeat" },
           { "node": "PascalIdent" },
-          { "node": "LowerFieldName" }
+          { "node": "FieldName" }
         ]
       }
     },

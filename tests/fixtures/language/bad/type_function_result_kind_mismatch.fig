@@ -1,0 +1,2 @@
+// expect: type.result_kind
+type fn bad() -> struct { i32 }

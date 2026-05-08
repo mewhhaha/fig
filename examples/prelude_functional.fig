@@ -5,7 +5,7 @@ type fn box(A: type) -> type {
   struct(Box)
 }
 
-fn box.map(v: box(A), const f: fn(x: A) -> B) -> box(B) {
+fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
   Box [value: f(v.value)]
 }
 
@@ -22,7 +22,7 @@ fn wrap(x: i32) -> box(i32) {
 }
 
 fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
-  T.map(v, f)
+  T.map(f, v)
 }
 
 fn binder(v: T(A), const f: fn(x: A) -> T(B), const _proof: monad(T)) -> T(B) {

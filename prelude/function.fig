@@ -10,19 +10,31 @@ fn compose(const f: fn(x: B) -> C, const g: fn(x: A) -> B, value: A) -> C {
   f(g(value))
 }
 
+fn pipe(value: A, const f: fn(x: A) -> B) -> B {
+  f(value)
+}
+
+fn apply_to(value: A, const f: fn(x: A) -> B) -> B {
+  f(value)
+}
+
+fn flip(const f: fn(a: A, b: B) -> C, b: B, a: A) -> C {
+  f(a, b)
+}
+
 type fn functor(T: type fn(A: type) -> type) -> type {
-  let Expected = fn(v: T(A), const f: fn(x: A) -> B) -> T(B);
+  let Expected = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
   @require(@type_has_member(T, #map), "Functor requires map");
   @require(@type_member_type(T, #map) == Expected, "Functor.map has wrong type");
   T
 }
 
 fn fmap(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
-  T.map(v, f)
+  T.map(f, v)
 }
 
 type fn applicative(T: type fn(A: type) -> type) -> type {
-  let Map = fn(v: T(A), const f: fn(x: A) -> B) -> T(B);
+  let Map = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
   let Pure = fn(value: A) -> T(A);
   let Apply = fn(v: T(fn(x: A) -> B), x: T(A)) -> T(B);
   @require(@type_has_member(T, #map), "Applicative requires map");
@@ -43,7 +55,7 @@ fn apply(v: T(fn(x: A) -> B), x: T(A), const _proof: applicative(T)) -> T(B) {
 }
 
 type fn monad(T: type fn(A: type) -> type) -> type {
-  let Map = fn(v: T(A), const f: fn(x: A) -> B) -> T(B);
+  let Map = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
   let Bind = fn(v: T(A), const f: fn(x: A) -> T(B)) -> T(B);
   @require(@type_has_member(T, #map), "Monad requires map");
   @require(@type_member_type(T, #map) == Map, "Monad.map has wrong type");

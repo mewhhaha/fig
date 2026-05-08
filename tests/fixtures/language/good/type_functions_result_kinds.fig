@@ -1,0 +1,17 @@
+type fn id(A: type) -> type { A }
+type fn fixed(N: count, A: type) -> struct {
+  let Fixed = [N*A];
+  struct(Fixed)
+}
+type fn option(A: type) -> union {
+  let None = [];
+  let Some = [value: A];
+  union(None, Some)
+}
+type fn plus(T: type) -> operator {
+  operator(#infixl, 60, "+", T.add)
+}
+type fn choose(i32: type) -> type { bool }
+type fn choose(_: type) -> type { i32 }
+
+pub fn main() -> id(i32) { 1 }

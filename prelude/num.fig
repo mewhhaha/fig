@@ -1,0 +1,11 @@
+fn abs_i32(value: i32) -> i32 {
+  match value < 0 { true => 0 - value, false => value }
+}
+
+fn signum_i32(value: i32) -> i32 {
+  match value < 0 { true => 0 - 1, false => match value == 0 { true => 0, false => 1 } }
+}
+
+fn square_i32(value: i32) -> i32 {
+  value * value
+}

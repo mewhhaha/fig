@@ -15,19 +15,16 @@ type fn tile2x4_i32() -> type {
 }
 
 type fn tile_schedule(Tile: type) -> type {
-  @require(@type_is_product(Tile), "tile schedule expects an inline product layout");
   let TileSchedule = [tile_rows: i32, tile_cols: i32];
   struct(TileSchedule)
 }
 
 type fn vector_schedule(Lane: type) -> type {
-  @require(@type_is_product(Lane), "vector schedule expects an inline lane layout");
   let VectorSchedule = [lanes: i32];
   struct(VectorSchedule)
 }
 
 type fn unroll_schedule(Body: type) -> type {
-  @require(@type_is_product(Body), "unroll schedule expects a concrete body layout");
   let UnrollSchedule = [factor: i32];
   struct(UnrollSchedule)
 }

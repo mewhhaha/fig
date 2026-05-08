@@ -1,0 +1,7 @@
+const std = @import("prelude.std");
+const clock: fn() -> i32 !{time} = @capability("clock");
+let seed: i32 = 42;
+
+pub fn main() -> i32 !{time} {
+  clock() + seed
+}

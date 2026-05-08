@@ -7,6 +7,10 @@ export const intrinsicIds = [
   "memory_store_lane4_i32",
   "ptr_from_i32",
   "ptr_add",
+  "index_cursor_next",
+  "inline_array_builder_start",
+  "inline_array_builder_push",
+  "inline_array_builder_finish",
 ] as const;
 
 export type IntrinsicId = typeof intrinsicIds[number];

@@ -32,6 +32,158 @@ fn lane4_dot_i32(xs: layout.lane4_i32, ys: layout.lane4_i32) -> i32 {
   xs[0] * ys[0] + xs[1] * ys[1] + xs[2] * ys[2] + xs[3] * ys[3]
 }
 
+fn lane4_is_empty_i32(xs: layout.lane4_i32) -> bool {
+  false
+}
+
+fn lane4_length_i32(xs: layout.lane4_i32) -> i32 {
+  4
+}
+
+fn lane4_any_i32(xs: layout.lane4_i32, const pred: fn(x: i32) -> bool) -> bool {
+  match pred(xs[0]) {
+    true => true,
+    false => match pred(xs[1]) {
+      true => true,
+      false => match pred(xs[2]) {
+        true => true,
+        false => pred(xs[3]),
+      },
+    },
+  }
+}
+
+fn lane4_all_i32(xs: layout.lane4_i32, const pred: fn(x: i32) -> bool) -> bool {
+  match pred(xs[0]) {
+    true => match pred(xs[1]) {
+      true => match pred(xs[2]) {
+        true => pred(xs[3]),
+        false => false,
+      },
+      false => false,
+    },
+    false => false,
+  }
+}
+
+fn lane4_count_i32(xs: layout.lane4_i32, const pred: fn(x: i32) -> bool) -> i32 {
+  let c0 = match pred(xs[0]) { true => 1, false => 0 };
+  let c1 = match pred(xs[1]) { true => 1, false => 0 };
+  let c2 = match pred(xs[2]) { true => 1, false => 0 };
+  let c3 = match pred(xs[3]) { true => 1, false => 0 };
+  c0 + c1 + c2 + c3
+}
+
+fn lane4_contains_i32(xs: layout.lane4_i32, value: i32) -> bool {
+  match xs[0] == value {
+    true => true,
+    false => match xs[1] == value {
+      true => true,
+      false => match xs[2] == value {
+        true => true,
+        false => xs[3] == value,
+      },
+    },
+  }
+}
+
+fn lane4_index_of_i32(xs: layout.lane4_i32, value: i32) -> layout.core.option(i32) {
+  match xs[0] == value {
+    true => 0,
+    false => match xs[1] == value {
+      true => 1,
+      false => match xs[2] == value {
+        true => 2,
+        false => match xs[3] == value { true => 3, false => 0 },
+      },
+    },
+  }
+}
+
+fn lane4_sum_i32(xs: layout.lane4_i32) -> i32 {
+  xs[0] + xs[1] + xs[2] + xs[3]
+}
+
+fn lane4_product_i32(xs: layout.lane4_i32) -> i32 {
+  xs[0] * xs[1] * xs[2] * xs[3]
+}
+
+fn lane4_min_i32(xs: layout.lane4_i32) -> i32 {
+  let min01 = match xs[0] < xs[1] { true => xs[0], false => xs[1] };
+  let min23 = match xs[2] < xs[3] { true => xs[2], false => xs[3] };
+  match min01 < min23 { true => min01, false => min23 }
+}
+
+fn lane4_max_i32(xs: layout.lane4_i32) -> i32 {
+  let max01 = match xs[0] > xs[1] { true => xs[0], false => xs[1] };
+  let max23 = match xs[2] > xs[3] { true => xs[2], false => xs[3] };
+  match max01 > max23 { true => max01, false => max23 }
+}
+
+fn lane4_set_i32(xs: layout.lane4_i32, i: i32, value: i32) -> layout.lane4_i32 {
+  match i {
+    0 => [value, xs[1], xs[2], xs[3]],
+    1 => [xs[0], value, xs[2], xs[3]],
+    2 => [xs[0], xs[1], value, xs[3]],
+    3 => [xs[0], xs[1], xs[2], value],
+    _ => xs,
+  }
+}
+
+fn lane4_update_i32(xs: layout.lane4_i32, i: i32, const f: fn(x: i32) -> i32) -> layout.lane4_i32 {
+  match i {
+    0 => [f(xs[0]), xs[1], xs[2], xs[3]],
+    1 => [xs[0], f(xs[1]), xs[2], xs[3]],
+    2 => [xs[0], xs[1], f(xs[2]), xs[3]],
+    3 => [xs[0], xs[1], xs[2], f(xs[3])],
+    _ => xs,
+  }
+}
+
+fn lane4_replace_where_i32(
+  xs: layout.lane4_i32,
+  const pred: fn(x: i32) -> bool,
+  value: i32
+) -> layout.lane4_i32 {
+  [
+    match pred(xs[0]) { true => value, false => xs[0] },
+    match pred(xs[1]) { true => value, false => xs[1] },
+    match pred(xs[2]) { true => value, false => xs[2] },
+    match pred(xs[3]) { true => value, false => xs[3] }
+  ]
+}
+
+fn lane4_take_i32(xs: layout.lane4_i32, n: i32) -> layout.lane4_i32 {
+  [
+    match n > 0 { true => xs[0], false => 0 },
+    match n > 1 { true => xs[1], false => 0 },
+    match n > 2 { true => xs[2], false => 0 },
+    match n > 3 { true => xs[3], false => 0 }
+  ]
+}
+
+fn lane4_drop_i32(xs: layout.lane4_i32, n: i32) -> layout.lane4_i32 {
+  match n {
+    0 => xs,
+    1 => [xs[1], xs[2], xs[3], 0],
+    2 => [xs[2], xs[3], 0, 0],
+    3 => [xs[3], 0, 0, 0],
+    _ => [0, 0, 0, 0],
+  }
+}
+
+fn lane4_reverse_i32(xs: layout.lane4_i32) -> layout.lane4_i32 {
+  [xs[3], xs[2], xs[1], xs[0]]
+}
+
+fn lane4_rotate_left_i32(xs: layout.lane4_i32) -> layout.lane4_i32 {
+  [xs[1], xs[2], xs[3], xs[0]]
+}
+
+fn lane4_rotate_right_i32(xs: layout.lane4_i32) -> layout.lane4_i32 {
+  [xs[3], xs[0], xs[1], xs[2]]
+}
+
 fn mat4_rows_i32(
   r0: layout.lane4_i32,
   r1: layout.lane4_i32,
@@ -45,12 +197,18 @@ fn capacity(xs: layout.lane4_i32) -> i32 {
   4
 }
 
-fn in_bounds(xs: layout.lane4_i32, i: i32) -> i32 {
-  i
+fn in_bounds(xs: layout.lane4_i32, i: i32) -> bool {
+  match 0 <= i { true => i < capacity(xs), false => false }
 }
 
 fn get(xs: layout.lane4_i32, i: i32) -> layout.core.option(i32) {
-  0
+  match i {
+    0 => xs[0],
+    1 => xs[1],
+    2 => xs[2],
+    3 => xs[3],
+    _ => 0,
+  }
 }
 
 type fn runtime_view(A: type) {
@@ -142,6 +300,114 @@ fn iter.reduce(xs: iter, const f: fn(a: i32, b: i32) -> i32) -> i32 {
   iter.fold(iter.drop1(xs), xs.items[0], f)
 }
 
+fn iter.any(xs: iter, const pred: fn(x: i32) -> bool) -> bool {
+  match xs.keep[0] {
+    true => match pred(xs.items[0]) {
+      true => true,
+      false => match xs.keep[1] {
+        true => match pred(xs.items[1]) {
+          true => true,
+          false => match xs.keep[2] {
+            true => match pred(xs.items[2]) {
+              true => true,
+              false => match xs.keep[3] { true => pred(xs.items[3]), false => false },
+            },
+            false => match xs.keep[3] { true => pred(xs.items[3]), false => false },
+          },
+        },
+        false => match xs.keep[2] {
+          true => match pred(xs.items[2]) {
+            true => true,
+            false => match xs.keep[3] { true => pred(xs.items[3]), false => false },
+          },
+          false => match xs.keep[3] { true => pred(xs.items[3]), false => false },
+        },
+      },
+    },
+    false => match xs.keep[1] {
+      true => match pred(xs.items[1]) {
+        true => true,
+        false => match xs.keep[2] {
+          true => match pred(xs.items[2]) {
+            true => true,
+            false => match xs.keep[3] { true => pred(xs.items[3]), false => false },
+          },
+          false => match xs.keep[3] { true => pred(xs.items[3]), false => false },
+        },
+      },
+      false => match xs.keep[2] {
+        true => match pred(xs.items[2]) {
+          true => true,
+          false => match xs.keep[3] { true => pred(xs.items[3]), false => false },
+        },
+        false => match xs.keep[3] { true => pred(xs.items[3]), false => false },
+      },
+    },
+  }
+}
+
+fn iter.all(xs: iter, const pred: fn(x: i32) -> bool) -> bool {
+  match xs.keep[0] {
+    true => match pred(xs.items[0]) {
+      true => match xs.keep[1] {
+        true => match pred(xs.items[1]) {
+          true => match xs.keep[2] {
+            true => match pred(xs.items[2]) {
+              true => match xs.keep[3] { true => pred(xs.items[3]), false => true },
+              false => false,
+            },
+            false => match xs.keep[3] { true => pred(xs.items[3]), false => true },
+          },
+          false => false,
+        },
+        false => match xs.keep[2] {
+          true => match pred(xs.items[2]) {
+            true => match xs.keep[3] { true => pred(xs.items[3]), false => true },
+            false => false,
+          },
+          false => match xs.keep[3] { true => pred(xs.items[3]), false => true },
+        },
+      },
+      false => false,
+    },
+    false => match xs.keep[1] {
+      true => match pred(xs.items[1]) {
+        true => match xs.keep[2] {
+          true => match pred(xs.items[2]) {
+            true => match xs.keep[3] { true => pred(xs.items[3]), false => true },
+            false => false,
+          },
+          false => match xs.keep[3] { true => pred(xs.items[3]), false => true },
+        },
+        false => false,
+      },
+      false => match xs.keep[2] {
+        true => match pred(xs.items[2]) {
+          true => match xs.keep[3] { true => pred(xs.items[3]), false => true },
+          false => false,
+        },
+        false => match xs.keep[3] { true => pred(xs.items[3]), false => true },
+      },
+    },
+  }
+}
+
+fn iter.count(xs: iter) -> i32 {
+  let c0 = match xs.keep[0] { true => 1, false => 0 };
+  let c1 = match xs.keep[1] { true => 1, false => 0 };
+  let c2 = match xs.keep[2] { true => 1, false => 0 };
+  let c3 = match xs.keep[3] { true => 1, false => 0 };
+  c0 + c1 + c2 + c3
+}
+
+fn iter.sum(xs: iter) -> i32 {
+  let v0 = match xs.keep[0] { true => xs.items[0], false => 0 };
+  let v1 = match xs.keep[1] { true => xs.items[1], false => 0 };
+  let v2 = match xs.keep[2] { true => xs.items[2], false => 0 };
+  let v3 = match xs.keep[3] { true => xs.items[3], false => 0 };
+  v0 + v1 + v2 + v3
+}
+
 fn iter.collect(xs: iter) -> compact_array {
   let len0 = match xs.keep[0] { true => 1, false => 0 };
   let i0 = match xs.keep[0] { true => xs.items[0], false => 0 };
@@ -210,6 +476,52 @@ fn iter.collect(xs: iter) -> compact_array {
   CompactArray [items: [i0_final, i1_final, i2_final, i3_final], len: len_final]
 }
 
+fn compact_array.capacity(xs: compact_array) -> i32 {
+  4
+}
+
+fn compact_array.is_empty(xs: compact_array) -> bool {
+  xs.len == 0
+}
+
+fn compact_array.get(xs: compact_array, i: i32) -> layout.core.option(i32) {
+  match i < xs.len {
+    true => get(xs.items, i),
+    false => 0,
+  }
+}
+
+fn compact_array.map(xs: compact_array, const f: fn(x: i32) -> i32) -> compact_array {
+  CompactArray [
+    items: [
+      match xs.len > 0 { true => f(xs.items[0]), false => 0 },
+      match xs.len > 1 { true => f(xs.items[1]), false => 0 },
+      match xs.len > 2 { true => f(xs.items[2]), false => 0 },
+      match xs.len > 3 { true => f(xs.items[3]), false => 0 }
+    ],
+    len: xs.len
+  ]
+}
+
+fn compact_array.fold(xs: compact_array, init: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
+  let init_then, init_else = fork(init);
+  let acc0 = match xs.len > 0 { true => f(init_then, xs.items[0]), false => init_else };
+  let acc0_then, acc0_else = fork(acc0);
+  let acc1 = match xs.len > 1 { true => f(acc0_then, xs.items[1]), false => acc0_else };
+  let acc1_then, acc1_else = fork(acc1);
+  let acc2 = match xs.len > 2 { true => f(acc1_then, xs.items[2]), false => acc1_else };
+  let acc2_then, acc2_else = fork(acc2);
+  match xs.len > 3 { true => f(acc2_then, xs.items[3]), false => acc2_else }
+}
+
+fn compact_array.count(xs: compact_array, const pred: fn(x: i32) -> bool) -> i32 {
+  let c0 = match xs.len > 0 { true => match pred(xs.items[0]) { true => 1, false => 0 }, false => 0 };
+  let c1 = match xs.len > 1 { true => match pred(xs.items[1]) { true => 1, false => 0 }, false => 0 };
+  let c2 = match xs.len > 2 { true => match pred(xs.items[2]) { true => 1, false => 0 }, false => 0 };
+  let c3 = match xs.len > 3 { true => match pred(xs.items[3]) { true => 1, false => 0 }, false => 0 };
+  c0 + c1 + c2 + c3
+}
+
 fn compact_array.iter(xs: compact_array) -> compact_iter {
   CompactIter [source: xs]
 }
@@ -224,6 +536,29 @@ fn range_iter.fold_loop(i: i32, end: i32, acc: i32, const f: fn(acc: i32, x: i32
 
 fn range_iter.fold(xs: range_iter, init: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
   range_iter.fold_loop(xs.source.start, xs.source.end, init, f)
+}
+
+fn range_iter.count(xs: range_iter) -> i32 {
+  match xs.source.start < xs.source.end {
+    true => xs.source.end - xs.source.start,
+    false => 0,
+  }
+}
+
+fn range_iter.sum(xs: range_iter) -> i32 {
+  range_iter.fold(xs, 0, i32_add)
+}
+
+fn range_iter.product(xs: range_iter) -> i32 {
+  range_iter.fold(xs, 1, i32_mul)
+}
+
+fn i32_add(acc: i32, x: i32) -> i32 {
+  acc + x
+}
+
+fn i32_mul(acc: i32, x: i32) -> i32 {
+  acc * x
 }
 
 fn map4_scalar_i32(const f: fn(x: layout.core.scalar_i32) -> layout.core.scalar_i32, x: layout.core.scalar_i32) -> layout.core.scalar_i32 {

@@ -1,0 +1,37 @@
+const core = @import("prelude.core");
+
+fn pair_first(value: core.pair(A, B)) -> A {
+  value.first
+}
+
+fn pair_second(value: core.pair(A, B)) -> B {
+  value.second
+}
+
+fn pair_swap(value: core.pair(A, B)) -> core.pair(B, A) {
+  Pair [first: value.second, second: value.first]
+}
+
+fn pair_map_first(value: core.pair(A, B), const f: fn(x: A) -> C) -> core.pair(C, B) {
+  Pair [first: f(value.first), second: value.second]
+}
+
+fn pair_map_second(value: core.pair(A, B), const f: fn(x: B) -> C) -> core.pair(A, C) {
+  Pair [first: value.first, second: f(value.second)]
+}
+
+fn pair_map(value: core.pair(A, B), const f: fn(x: A) -> C, const g: fn(x: B) -> D) -> core.pair(C, D) {
+  Pair [first: f(value.first), second: g(value.second)]
+}
+
+fn tuple3_first(value: core.tuple3(A, B, C)) -> A {
+  value.first
+}
+
+fn tuple3_second(value: core.tuple3(A, B, C)) -> B {
+  value.second
+}
+
+fn tuple3_third(value: core.tuple3(A, B, C)) -> C {
+  value.third
+}

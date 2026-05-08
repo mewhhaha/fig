@@ -18,7 +18,7 @@ type fn box(A: type) -> type {
   struct(Box)
 }
 
-fn box.map(v: box(A), const f: fn(x: A) -> B) -> box(B) {
+fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
   Box [value: f(v.value)]
 }
 

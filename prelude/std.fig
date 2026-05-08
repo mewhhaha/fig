@@ -1,3 +1,171 @@
 const array = @import("prelude.array_static");
 const fun = @import("prelude.function");
+const operators = @import("prelude.operators");
 const schedule = @import("prelude.schedule");
+
+fn some(value: A) -> array.layout.core.option(A) {
+  value
+}
+
+fn none() -> array.layout.core.option(A) {
+  0
+}
+
+fn option_is_some(value: array.layout.core.option(A)) -> bool {
+  match value { Some => true, None => false }
+}
+
+fn option_is_none(value: array.layout.core.option(A)) -> bool {
+  match value { Some => false, None => true }
+}
+
+fn option_unwrap_or(value: array.layout.core.option(A), fallback: A) -> A {
+  match value { Some(inner) => inner, None => fallback }
+}
+
+fn option_map(value: array.layout.core.option(A), const f: fn(x: A) -> B) -> array.layout.core.option(B) {
+  match value { Some(inner) => f(inner), None => none() }
+}
+
+fn option_and_then(value: array.layout.core.option(A), const f: fn(x: A) -> array.layout.core.option(B)) -> array.layout.core.option(B) {
+  match value { Some(inner) => f(inner), None => none() }
+}
+
+fn option_or(value: array.layout.core.option(A), fallback: array.layout.core.option(A)) -> array.layout.core.option(A) {
+  match value { Some => value, None => fallback }
+}
+
+fn option_or_else(value: array.layout.core.option(A), const fallback: fn() -> array.layout.core.option(A)) -> array.layout.core.option(A) {
+  match value { Some => value, None => fallback() }
+}
+
+fn ok(value: A) -> array.layout.core.result(A, E) {
+  value
+}
+
+fn err(error: E) -> array.layout.core.result(A, E) {
+  error
+}
+
+fn result_is_ok(value: array.layout.core.result(A, E)) -> bool {
+  match value { Ok => true, Err => false }
+}
+
+fn result_is_err(value: array.layout.core.result(A, E)) -> bool {
+  match value { Ok => false, Err => true }
+}
+
+fn result_unwrap_or(value: array.layout.core.result(A, E), fallback: A) -> A {
+  match value { Ok(inner) => inner, Err => fallback }
+}
+
+fn result_map(value: array.layout.core.result(A, E), const f: fn(x: A) -> B) -> array.layout.core.result(B, E) {
+  match value { Ok(inner) => ok(f(inner)), Err(error) => err(error) }
+}
+
+fn result_map_err(value: array.layout.core.result(A, E), const f: fn(x: E) -> F) -> array.layout.core.result(A, F) {
+  match value { Ok(inner) => ok(inner), Err(error) => err(f(error)) }
+}
+
+fn result_and_then(value: array.layout.core.result(A, E), const f: fn(x: A) -> array.layout.core.result(B, E)) -> array.layout.core.result(B, E) {
+  match value { Ok(inner) => f(inner), Err(error) => err(error) }
+}
+
+fn pair_first(value: array.layout.core.pair(A, B)) -> A {
+  value.first
+}
+
+fn pair_second(value: array.layout.core.pair(A, B)) -> B {
+  value.second
+}
+
+fn pair_swap(value: array.layout.core.pair(A, B)) -> array.layout.core.pair(B, A) {
+  Pair [first: value.second, second: value.first]
+}
+
+fn pair_map_first(value: array.layout.core.pair(A, B), const f: fn(x: A) -> C) -> array.layout.core.pair(C, B) {
+  Pair [first: f(value.first), second: value.second]
+}
+
+fn pair_map_second(value: array.layout.core.pair(A, B), const f: fn(x: B) -> C) -> array.layout.core.pair(A, C) {
+  Pair [first: value.first, second: f(value.second)]
+}
+
+fn pair_map(value: array.layout.core.pair(A, B), const f: fn(x: A) -> C, const g: fn(x: B) -> D) -> array.layout.core.pair(C, D) {
+  Pair [first: f(value.first), second: g(value.second)]
+}
+
+fn tuple3_first(value: array.layout.core.tuple3(A, B, C)) -> A {
+  value.first
+}
+
+fn tuple3_second(value: array.layout.core.tuple3(A, B, C)) -> B {
+  value.second
+}
+
+fn tuple3_third(value: array.layout.core.tuple3(A, B, C)) -> C {
+  value.third
+}
+
+fn bool_not(value: bool) -> bool {
+  match value { true => false, false => true }
+}
+
+fn bool_and(a: bool, b: bool) -> bool {
+  match a { true => b, false => false }
+}
+
+fn bool_or(a: bool, b: bool) -> bool {
+  match a { true => true, false => b }
+}
+
+fn bool_xor(a: bool, b: bool) -> bool {
+  match a {
+    true => match b { true => false, false => true },
+    false => b,
+  }
+}
+
+fn select(cond: bool, when_true: A, when_false: A) -> A {
+  match cond { true => when_true, false => when_false }
+}
+
+fn min_i32(a: i32, b: i32) -> i32 {
+  match a < b { true => a, false => b }
+}
+
+fn max_i32(a: i32, b: i32) -> i32 {
+  match a < b { true => b, false => a }
+}
+
+fn clamp_i32(value: i32, low: i32, high: i32) -> i32 {
+  max_i32(low, min_i32(value, high))
+}
+
+fn between_i32(value: i32, low: i32, high: i32) -> bool {
+  match low <= value { true => value <= high, false => false }
+}
+
+fn abs_i32(value: i32) -> i32 {
+  match value < 0 { true => 0 - value, false => value }
+}
+
+fn signum_i32(value: i32) -> i32 {
+  match value < 0 { true => 0 - 1, false => match value == 0 { true => 0, false => 1 } }
+}
+
+fn square_i32(value: i32) -> i32 {
+  value * value
+}
+
+fn pipe(value: A, const f: fn(x: A) -> B) -> B {
+  f(value)
+}
+
+fn apply_to(value: A, const f: fn(x: A) -> B) -> B {
+  f(value)
+}
+
+fn flip(const f: fn(a: A, b: B) -> C, b: B, a: A) -> C {
+  f(a, b)
+}

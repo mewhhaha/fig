@@ -8,11 +8,10 @@ fn add(a: i32, b: i32) -> i32 {
   a + b
 }
 
-pub fn main() -> i32 {
-  let xs: lane4_i32 = [1, 2, 3, 4];
-  let xs_map, xs_zip, xs_total = fork(xs);
-  let ys = map4_i32($ + 1, xs_map);
-  let zs = zip_with4_i32(add, [1, 2, 3, 4], ys);
-  fold4_i32(add, 0, zs) \$ -> add($, xs_total[0])
+fn keep_gt_two(x: i32) -> bool {
+  x > 2
 }
 
+pub fn main() -> i32 {
+  fold4_i32(add, 0, map4_i32(inc, [1, 2, 3, 4]))
+}

@@ -1,0 +1,7 @@
+// expect: type.shape_builtin_arg
+type fn bad(A: type) -> struct {
+  let Count = @shape_count(A);
+  let Out = [Count*i32];
+  struct(Out)
+}
+fn f(x: bad(i32)) -> i32 { 0 }

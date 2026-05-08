@@ -1,0 +1,10 @@
+// expect: parse.syntax
+type fn bad_layout() -> type {
+  let Layout = @wgsl_bindings(```wgsl
+@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;
+```);
+  @require(Layout == i32, "shader layout is not i32");
+  i32
+}
+
+fn use_bad(value: bad_layout()) -> i32 { value }
