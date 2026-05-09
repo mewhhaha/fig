@@ -2,6 +2,8 @@
 (Primary (LowerIdent) @variable)
 (Call (Primary (LowerIdent) @function.call) "(")
 (Call (Primary (ForkBuiltin) @function.builtin) "(")
+(Primary (StaticBuiltin (LowerIdent) @function.builtin))
+(TypePrimary (StaticBuiltin (LowerIdent) @function.builtin))
 (Type (LowerIdent) @type)
 (Type (PascalIdent) @type.parameter)
 (TypePrimary (LowerIdent) @type)
@@ -9,6 +11,7 @@
 (TypeFnDecl (LowerIdent) @type.definition)
 (TypeLetDecl (PascalIdent) @type)
 (ConstDecl (LowerIdent) @variable)
+(ImportBindingList (ImportBindingItems (LowerIdent) @variable))
 (ConstDecl (FieldName) @variable)
 (Param (PatternIdent (LowerIdent) @variable.parameter))
 (Param (PatternIdent (PascalIdent) @constructor))
@@ -19,9 +22,8 @@
 (BlockLetTail (LowerIdent) @variable)
 (TopLetDecl (LowerIdent) @variable)
 (TopLetDecl (FieldName) @variable)
-(ShapeValueSlot (FieldName) @variable.other.member)
-(TypeShapeSlot (FieldName) @variable.other.member)
-(ShapeSlot (FieldName) @variable.other.member)
+(TypeShapeSlot (ShapeSlotKey (LowerIdent) @variable.other.member))
+(ShapeSlot (ShapeSlotKey (LowerIdent) @variable.other.member))
 (Call "." (LowerIdent) @variable.other.member)
 (Primary (PascalIdent) @constructor)
 "import" @keyword.control.import
@@ -47,23 +49,45 @@
 "for" @keyword
 "in" @keyword
 "static" @keyword
+"zip" @keyword
 "!" @operator
+"%" @operator
+"&" @operator
+"&&" @operator
 "(" @punctuation.bracket
 ")" @punctuation.bracket
+"*" @operator
+"+" @operator
 "," @punctuation.delimiter
+"-" @operator
 "->" @operator
 "." @punctuation.delimiter
+".." @operator
+"..." @operator
+"/" @operator
 ":" @punctuation.delimiter
 ";" @punctuation.delimiter
+"<$>" @operator
+"<*>" @operator
+"<=" @operator
+"<>" @operator
 "=" @operator
 "=>" @operator
+">=" @operator
+">>=" @operator
 "@" @operator
 "[" @punctuation.bracket
 "\\" @operator
 "]" @punctuation.bracket
+"^^" @operator
 "{" @punctuation.bracket
 "{}" @operator
+"||" @operator
 "}" @punctuation.bracket
 (fenced_text) @string.special
+(FrozenCollectionOpen) @constant
+(FrozenTypeOpen) @constant
+(CollectionOpen) @constant
+(CollectionClose) @constant
 (Char) @constant
 (LiteralType) @constant

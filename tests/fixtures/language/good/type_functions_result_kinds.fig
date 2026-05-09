@@ -1,11 +1,11 @@
 type fn id(A: type) -> type { A }
 type fn fixed(N: count, A: type) -> struct {
-  let Fixed = [N*A];
+  let Fixed = {N*A};
   struct(Fixed)
 }
 type fn option(A: type) -> union {
-  let None = [];
-  let Some = [value: A];
+  let None = {};
+  let Some = {value: A};
   union(None, Some)
 }
 type fn plus(T: type) -> operator {

@@ -9,7 +9,7 @@ export interface LiteralParseNode { kind: "literal"; value: string; text: string
 export interface ParseDiagnostic { message: string; span?: { start: number; end: number }; token?: Token; }
 export interface ParseResult { ok: boolean; tree: RuleParseNode | null; ast: AstNode | null; diagnostics: ParseDiagnostic[]; tokens: Token[]; }
 
-export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | StaticForBlockAstNode | StaticForBindersAstNode | StaticForSourceAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | PipeBindAstNode | PipeBindAtomAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | StaticForSlotAstNode | PatternAstNode | PatternIdentAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotBodyAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | TypeOpAstNode;
+export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ImportBindingListAstNode | ImportBindingItemsAstNode | ImportBindingTailAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | StaticForBlockAstNode | StaticForBindersAstNode | StaticForSourceAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | PipeBindAstNode | PipeBindAtomAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | BorrowExprAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | StaticForSlotAstNode | PunnedShapeValueSlotAstNode | ShapeValueSlotKeyAstNode | SpreadSlotAstNode | SlotPositionAstNode | CollectionValueAstNode | CollectionValueItemsAstNode | CollectionValueTailAstNode | CollectionSpreadSlotAstNode | CollectionExprAstNode | CollectionPipeBindAstNode | CollectionPipeBindAtomAstNode | CollectionBinaryAstNode | FrozenCollectionValueAstNode | FrozenCollectionValueItemsAstNode | FrozenCollectionValueTailAstNode | TupleValueAstNode | TupleValueItemsAstNode | TupleValueTailAstNode | TupleValueRepeatAstNode | PatternAstNode | PatternIdentAstNode | TuplePatternAstNode | TuplePatternItemsAstNode | TuplePatternTailAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | BorrowTypeAstNode | FrozenTypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotKeyAstNode | ShapeSlotBodyAstNode | TupleTypeAstNode | TupleTypeBodyAstNode | TupleTypeTailAstNode | TupleTypeMoreAstNode | TupleTypeRepeatAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeTupleAstNode | TypeTupleBodyAstNode | TypeTupleTailAstNode | TypeTupleMoreAstNode | TypeTupleRepeatAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | TypeRepeatCountAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | OpNoCollectionCloseAstNode | TypeOpAstNode;
 
 export interface ProgramAstNode {
   kind: "Program";
@@ -200,6 +200,27 @@ export interface ConstDeclAstNode {
   children: AstNode[];
 }
 
+export interface ImportBindingListAstNode {
+  kind: "ImportBindingList";
+  type: "ImportBindingList";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ImportBindingItemsAstNode {
+  kind: "ImportBindingItems";
+  type: "ImportBindingItems";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ImportBindingTailAstNode {
+  kind: "ImportBindingTail";
+  type: "ImportBindingTail";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface ConstValueAstNode {
   kind: "ConstValue";
   type: "ConstValue";
@@ -340,6 +361,13 @@ export interface PrimaryAstNode {
   children: AstNode[];
 }
 
+export interface BorrowExprAstNode {
+  kind: "BorrowExpr";
+  type: "BorrowExpr";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface PlaceholderAstNode {
   kind: "Placeholder";
   type: "Placeholder";
@@ -410,6 +438,139 @@ export interface StaticForSlotAstNode {
   children: AstNode[];
 }
 
+export interface PunnedShapeValueSlotAstNode {
+  kind: "PunnedShapeValueSlot";
+  type: "PunnedShapeValueSlot";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ShapeValueSlotKeyAstNode {
+  kind: "ShapeValueSlotKey";
+  type: "ShapeValueSlotKey";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface SpreadSlotAstNode {
+  kind: "SpreadSlot";
+  type: "SpreadSlot";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface SlotPositionAstNode {
+  kind: "SlotPosition";
+  type: "SlotPosition";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CollectionValueAstNode {
+  kind: "CollectionValue";
+  type: "CollectionValue";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CollectionValueItemsAstNode {
+  kind: "CollectionValueItems";
+  type: "CollectionValueItems";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CollectionValueTailAstNode {
+  kind: "CollectionValueTail";
+  type: "CollectionValueTail";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CollectionSpreadSlotAstNode {
+  kind: "CollectionSpreadSlot";
+  type: "CollectionSpreadSlot";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CollectionExprAstNode {
+  kind: "CollectionExpr";
+  type: "CollectionExpr";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CollectionPipeBindAstNode {
+  kind: "CollectionPipeBind";
+  type: "CollectionPipeBind";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CollectionPipeBindAtomAstNode {
+  kind: "CollectionPipeBindAtom";
+  type: "CollectionPipeBindAtom";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface CollectionBinaryAstNode {
+  kind: "CollectionBinary";
+  type: "CollectionBinary";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface FrozenCollectionValueAstNode {
+  kind: "FrozenCollectionValue";
+  type: "FrozenCollectionValue";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface FrozenCollectionValueItemsAstNode {
+  kind: "FrozenCollectionValueItems";
+  type: "FrozenCollectionValueItems";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface FrozenCollectionValueTailAstNode {
+  kind: "FrozenCollectionValueTail";
+  type: "FrozenCollectionValueTail";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleValueAstNode {
+  kind: "TupleValue";
+  type: "TupleValue";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleValueItemsAstNode {
+  kind: "TupleValueItems";
+  type: "TupleValueItems";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleValueTailAstNode {
+  kind: "TupleValueTail";
+  type: "TupleValueTail";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleValueRepeatAstNode {
+  kind: "TupleValueRepeat";
+  type: "TupleValueRepeat";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface PatternAstNode {
   kind: "Pattern";
   type: "Pattern";
@@ -420,6 +581,27 @@ export interface PatternAstNode {
 export interface PatternIdentAstNode {
   kind: "PatternIdent";
   type: "PatternIdent";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TuplePatternAstNode {
+  kind: "TuplePattern";
+  type: "TuplePattern";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TuplePatternItemsAstNode {
+  kind: "TuplePatternItems";
+  type: "TuplePatternItems";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TuplePatternTailAstNode {
+  kind: "TuplePatternTail";
+  type: "TuplePatternTail";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -455,6 +637,20 @@ export interface ArgsAstNode {
 export interface TypeAstNode {
   kind: "Type";
   type: "Type";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface BorrowTypeAstNode {
+  kind: "BorrowType";
+  type: "BorrowType";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface FrozenTypeAstNode {
+  kind: "FrozenType";
+  type: "FrozenType";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -571,9 +767,51 @@ export interface ShapeSlotAstNode {
   children: AstNode[];
 }
 
+export interface ShapeSlotKeyAstNode {
+  kind: "ShapeSlotKey";
+  type: "ShapeSlotKey";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface ShapeSlotBodyAstNode {
   kind: "ShapeSlotBody";
   type: "ShapeSlotBody";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleTypeAstNode {
+  kind: "TupleType";
+  type: "TupleType";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleTypeBodyAstNode {
+  kind: "TupleTypeBody";
+  type: "TupleTypeBody";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleTypeTailAstNode {
+  kind: "TupleTypeTail";
+  type: "TupleTypeTail";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleTypeMoreAstNode {
+  kind: "TupleTypeMore";
+  type: "TupleTypeMore";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleTypeRepeatAstNode {
+  kind: "TupleTypeRepeat";
+  type: "TupleTypeRepeat";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -620,6 +858,41 @@ export interface TypeShapeAnonSlotBodyAstNode {
   children: AstNode[];
 }
 
+export interface TypeTupleAstNode {
+  kind: "TypeTuple";
+  type: "TypeTuple";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeTupleBodyAstNode {
+  kind: "TypeTupleBody";
+  type: "TypeTupleBody";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeTupleTailAstNode {
+  kind: "TypeTupleTail";
+  type: "TypeTupleTail";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeTupleMoreAstNode {
+  kind: "TypeTupleMore";
+  type: "TypeTupleMore";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeTupleRepeatAstNode {
+  kind: "TypeTupleRepeat";
+  type: "TypeTupleRepeat";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface TypeNonFnExprAstNode {
   kind: "TypeNonFnExpr";
   type: "TypeNonFnExpr";
@@ -630,6 +903,13 @@ export interface TypeNonFnExprAstNode {
 export interface TypeShapeRepeatAstNode {
   kind: "TypeShapeRepeat";
   type: "TypeShapeRepeat";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeRepeatCountAstNode {
+  kind: "TypeRepeatCount";
+  type: "TypeRepeatCount";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -658,6 +938,13 @@ export interface BoolAstNode {
 export interface OpAstNode {
   kind: "Op";
   type: "Op";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface OpNoCollectionCloseAstNode {
+  kind: "OpNoCollectionClose";
+  type: "OpNoCollectionClose";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -693,7 +980,7 @@ const rules: Record<string, Expression> = {
   "TypePattern": { kind: "choice", options: [{ kind: "literal", value: "_" }, { kind: "ref", name: "Literal" }, { kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }] },
   "TypeBinary": { kind: "sequence", items: [{ kind: "ref", name: "TypeCall" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "ref", name: "TypeOp" }, { kind: "ref", name: "TypeCall" }] } }] },
   "TypeCall": { kind: "sequence", items: [{ kind: "ref", name: "TypePrimary" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "TypeExprArgs" } }, { kind: "literal", value: ")" }] } }] },
-  "TypePrimary": { kind: "choice", options: [{ kind: "ref", name: "TypeOperatorDescriptor" }, { kind: "ref", name: "TypeShape" }, { kind: "ref", name: "StaticBuiltin" }, { kind: "ref", name: "Literal" }, { kind: "ref", name: "TypeBuilderName" }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } }] }] },
+  "TypePrimary": { kind: "choice", options: [{ kind: "ref", name: "TypeOperatorDescriptor" }, { kind: "ref", name: "FrozenType" }, { kind: "ref", name: "TypeTuple" }, { kind: "ref", name: "TypeShape" }, { kind: "ref", name: "StaticBuiltin" }, { kind: "ref", name: "Literal" }, { kind: "ref", name: "TypeBuilderName" }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } }] }] },
   "TypeOperatorDescriptor": { kind: "sequence", items: [{ kind: "literal", value: "operator" }, { kind: "literal", value: "(" }, { kind: "ref", name: "LiteralType" }, { kind: "literal", value: "," }, { kind: "ref", name: "Number" }, { kind: "literal", value: "," }, { kind: "ref", name: "String" }, { kind: "literal", value: "," }, { kind: "ref", name: "TypeOperatorTarget" }, { kind: "literal", value: ")" }] },
   "TypeOperatorTarget": { kind: "sequence", items: [{ kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }] }, { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } }] },
   "TypeQualifiedTail": { kind: "repeat1", expression: { kind: "sequence", items: [{ kind: "literal", value: "." }, { kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }] }] } },
@@ -706,16 +993,19 @@ const rules: Record<string, Expression> = {
   "FnTail": { kind: "sequence", items: [{ kind: "literal", value: "fn" }, { kind: "ref", name: "FnName" }, { kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "Params" } }, { kind: "literal", value: ")" }, { kind: "optional", expression: { kind: "ref", name: "ReturnSig" } }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }, { kind: "ref", name: "Block" }] },
   "FnName": { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "." }, { kind: "ref", name: "LowerIdent" }] } }] },
   "FnSig": { kind: "sequence", items: [{ kind: "literal", value: "fn" }, { kind: "ref", name: "FnName" }, { kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "Params" } }, { kind: "literal", value: ")" }, { kind: "optional", expression: { kind: "ref", name: "ReturnSig" } }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }, { kind: "literal", value: ";" }] },
-  "ConstDecl": { kind: "sequence", items: [{ kind: "literal", value: "const" }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Type" }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }] }] }, { kind: "literal", value: "=" }, { kind: "ref", name: "ConstValue" }, { kind: "optional", expression: { kind: "literal", value: ";" } }] },
+  "ConstDecl": { kind: "sequence", items: [{ kind: "literal", value: "const" }, { kind: "choice", options: [{ kind: "ref", name: "ImportBindingList" }, { kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Type" }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }] }] }, { kind: "literal", value: "=" }, { kind: "ref", name: "ConstValue" }, { kind: "optional", expression: { kind: "literal", value: ";" } }] },
+  "ImportBindingList": { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "ref", name: "ImportBindingItems" }] },
+  "ImportBindingItems": { kind: "choice", options: [{ kind: "literal", value: "}" }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "ImportBindingTail" }] }] },
+  "ImportBindingTail": { kind: "choice", options: [{ kind: "literal", value: "}" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "}" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "ImportBindingItems" }] }] },
   "ConstValue": { kind: "ref", name: "Expr" },
-  "TopLetDecl": { kind: "sequence", items: [{ kind: "literal", value: "let" }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Type" }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "TopLetTail" }] }] }] },
+  "TopLetDecl": { kind: "sequence", items: [{ kind: "literal", value: "let" }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "TuplePattern" }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Type" }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "TopLetTail" }] }] }] },
   "TopLetTail": { kind: "sequence", items: [{ kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] },
   "Block": { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "repeat", expression: { kind: "ref", name: "BlockStmt" } }, { kind: "optional", expression: { kind: "ref", name: "Expr" } }, { kind: "literal", value: "}" }] },
   "BlockStmt": { kind: "choice", options: [{ kind: "ref", name: "StaticForBlock" }, { kind: "ref", name: "BlockLetDecl" }, { kind: "ref", name: "BlockProofConstDecl" }] },
   "StaticForBlock": { kind: "sequence", items: [{ kind: "literal", value: "static" }, { kind: "literal", value: "for" }, { kind: "ref", name: "StaticForBinders" }, { kind: "literal", value: "in" }, { kind: "ref", name: "StaticForSource" }, { kind: "ref", name: "Block" }] },
   "StaticForBinders": { kind: "sequence", items: [{ kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }] }, { kind: "optional", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }] }] } }] },
   "StaticForSource": { kind: "ref", name: "Expr" },
-  "BlockLetDecl": { kind: "sequence", items: [{ kind: "literal", value: "let" }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Type" }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "BlockLetTail" }] }] }] },
+  "BlockLetDecl": { kind: "sequence", items: [{ kind: "literal", value: "let" }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "TuplePattern" }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Type" }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "BlockLetTail" }] }] }] },
   "BlockLetTail": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "repeat1", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "LowerIdent" }] } }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }] },
   "BlockProofConstDecl": { kind: "sequence", items: [{ kind: "literal", value: "const" }, { kind: "ref", name: "PascalIdent" }, { kind: "literal", value: "=" }, { kind: "ref", name: "TypeExpr" }, { kind: "literal", value: ";" }] },
   "Expr": { kind: "ref", name: "PipeBind" },
@@ -726,24 +1016,49 @@ const rules: Record<string, Expression> = {
   "PipeBindName": { kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "Placeholder" }] },
   "Binary": { kind: "sequence", items: [{ kind: "ref", name: "Call" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "ref", name: "Op" }, { kind: "ref", name: "Call" }] } }] },
   "Call": { kind: "sequence", items: [{ kind: "ref", name: "Primary" }, { kind: "repeat", expression: { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "Args" } }, { kind: "literal", value: ")" }] }, { kind: "sequence", items: [{ kind: "literal", value: "." }, { kind: "ref", name: "LowerIdent" }] }, { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: "]" }] }] } }] },
-  "Primary": { kind: "choice", options: [{ kind: "ref", name: "Literal" }, { kind: "ref", name: "Placeholder" }, { kind: "ref", name: "ForkBuiltin" }, { kind: "ref", name: "StaticBuiltin" }, { kind: "ref", name: "LowerIdent" }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "ref", name: "ProductConstructorTail" } }] }, { kind: "ref", name: "ParenExpr" }, { kind: "ref", name: "ShapeValue" }] },
+  "Primary": { kind: "choice", options: [{ kind: "ref", name: "BorrowExpr" }, { kind: "ref", name: "Literal" }, { kind: "ref", name: "Placeholder" }, { kind: "ref", name: "ForkBuiltin" }, { kind: "ref", name: "StaticBuiltin" }, { kind: "ref", name: "LowerIdent" }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "ref", name: "ProductConstructorTail" } }] }, { kind: "ref", name: "ParenExpr" }, { kind: "ref", name: "ShapeValue" }, { kind: "ref", name: "CollectionValue" }, { kind: "ref", name: "FrozenCollectionValue" }, { kind: "ref", name: "TupleValue" }] },
+  "BorrowExpr": { kind: "sequence", items: [{ kind: "literal", value: "&" }, { kind: "ref", name: "Primary" }] },
   "Placeholder": { kind: "literal", value: "$" },
   "ProductConstructorTail": { kind: "ref", name: "ShapeValue" },
   "ForkBuiltin": { kind: "literal", value: "fork" },
   "ParenExpr": { kind: "sequence", items: [{ kind: "literal", value: "(" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ")" }] },
-  "ShapeValue": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "ShapeValueItems" }] },
-  "ShapeValueItems": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "ref", name: "StaticForSlot" }, { kind: "ref", name: "ShapeValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Expr" }, { kind: "ref", name: "ShapeValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "ref", name: "ShapeValueTail" }] }] },
+  "ShapeValue": { kind: "choice", options: [{ kind: "literal", value: "{}" }, { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "ref", name: "ShapeValueItems" }] }] },
+  "ShapeValueItems": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "StaticForSlot" }, { kind: "ref", name: "ShapeValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "SpreadSlot" }, { kind: "ref", name: "ShapeValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "ShapeValueSlotKey" }, { kind: "ref", name: "Expr" }, { kind: "ref", name: "ShapeValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "PunnedShapeValueSlot" }, { kind: "ref", name: "ShapeValueTail" }] }] },
   "Range": { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "literal", value: ".." }, { kind: "ref", name: "Expr" }] },
-  "ShapeValueTail": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "ShapeValueItems" }] }] },
-  "ShapeValueSlot": { kind: "choice", options: [{ kind: "ref", name: "StaticForSlot" }, { kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Expr" }] }, { kind: "ref", name: "Expr" }] },
+  "ShapeValueTail": { kind: "choice", options: [{ kind: "literal", value: "}" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "}" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "ShapeValueItems" }] }] },
+  "ShapeValueSlot": { kind: "sequence", items: [{ kind: "ref", name: "ShapeValueSlotKey" }, { kind: "ref", name: "Expr" }] },
   "StaticForSlot": { kind: "sequence", items: [{ kind: "literal", value: "for" }, { kind: "ref", name: "StaticForBinders" }, { kind: "literal", value: "in" }, { kind: "ref", name: "StaticForSource" }, { kind: "literal", value: ":" }, { kind: "ref", name: "Expr" }] },
-  "Pattern": { kind: "choice", options: [{ kind: "literal", value: "_" }, { kind: "ref", name: "PatternIdent" }, { kind: "ref", name: "Literal" }] },
+  "PunnedShapeValueSlot": { kind: "ref", name: "LowerIdent" },
+  "ShapeValueSlotKey": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "SlotPosition" } }, { kind: "literal", value: ":" }] }, { kind: "sequence", items: [{ kind: "ref", name: "SlotPosition" }, { kind: "literal", value: ":" }] }] },
+  "SpreadSlot": { kind: "sequence", items: [{ kind: "literal", value: "..." }, { kind: "ref", name: "Expr" }] },
+  "SlotPosition": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "Number" }, { kind: "literal", value: "]" }] },
+  "CollectionValue": { kind: "sequence", items: [{ kind: "ref", name: "CollectionOpen" }, { kind: "ref", name: "CollectionValueItems" }] },
+  "CollectionValueItems": { kind: "choice", options: [{ kind: "ref", name: "CollectionClose" }, { kind: "sequence", items: [{ kind: "ref", name: "CollectionSpreadSlot" }, { kind: "ref", name: "CollectionValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "CollectionExpr" }, { kind: "ref", name: "CollectionValueTail" }] }] },
+  "CollectionValueTail": { kind: "choice", options: [{ kind: "ref", name: "CollectionClose" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "CollectionValueItems" }] }] },
+  "CollectionSpreadSlot": { kind: "sequence", items: [{ kind: "literal", value: "..." }, { kind: "ref", name: "CollectionExpr" }] },
+  "CollectionExpr": { kind: "ref", name: "CollectionPipeBind" },
+  "CollectionPipeBind": { kind: "sequence", items: [{ kind: "ref", name: "CollectionPipeBindAtom" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "\\" }, { kind: "ref", name: "PipeBindName" }, { kind: "literal", value: "->" }, { kind: "ref", name: "CollectionPipeBindAtom" }] } }] },
+  "CollectionPipeBindAtom": { kind: "choice", options: [{ kind: "ref", name: "MatchExpr" }, { kind: "ref", name: "CollectionBinary" }] },
+  "CollectionBinary": { kind: "sequence", items: [{ kind: "ref", name: "Call" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "ref", name: "OpNoCollectionClose" }, { kind: "ref", name: "Call" }] } }] },
+  "FrozenCollectionValue": { kind: "sequence", items: [{ kind: "ref", name: "FrozenCollectionOpen" }, { kind: "ref", name: "FrozenCollectionValueItems" }] },
+  "FrozenCollectionValueItems": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "ref", name: "SpreadSlot" }, { kind: "ref", name: "FrozenCollectionValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "ref", name: "FrozenCollectionValueTail" }] }] },
+  "FrozenCollectionValueTail": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "FrozenCollectionValueItems" }] }] },
+  "TupleValue": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "TupleValueItems" }] },
+  "TupleValueItems": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "ref", name: "TupleValueRepeat" }, { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "ref", name: "TupleValueTail" }] }] },
+  "TupleValueTail": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TupleValueItems" }] }] },
+  "TupleValueRepeat": { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }, { kind: "ref", name: "TypeRepeatCount" }, { kind: "literal", value: "]" }] },
+  "Pattern": { kind: "choice", options: [{ kind: "literal", value: "_" }, { kind: "ref", name: "TuplePattern" }, { kind: "ref", name: "PatternIdent" }, { kind: "ref", name: "Literal" }] },
   "PatternIdent": { kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "sequence", items: [{ kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "Args" } }, { kind: "literal", value: ")" }] } }] }] },
+  "TuplePattern": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "TuplePatternItems" }] },
+  "TuplePatternItems": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "ref", name: "Pattern" }, { kind: "ref", name: "TuplePatternTail" }] }] },
+  "TuplePatternTail": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TuplePatternItems" }] }] },
   "Params": { kind: "sequence", items: [{ kind: "ref", name: "Param" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "Param" }] } }, { kind: "optional", expression: { kind: "literal", value: "," } }] },
-  "Param": { kind: "sequence", items: [{ kind: "optional", expression: { kind: "literal", value: "const" } }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "optional", expression: { kind: "ref", name: "Type" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "Literal" }, { kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }] }, { kind: "sequence", items: [{ kind: "literal", value: "_" }, { kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "PatternIdent" }, { kind: "optional", expression: { kind: "ref", name: "ParamTail" } }] }] }] },
+  "Param": { kind: "sequence", items: [{ kind: "optional", expression: { kind: "literal", value: "const" } }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "optional", expression: { kind: "ref", name: "Type" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "Literal" }, { kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }] }, { kind: "sequence", items: [{ kind: "literal", value: "_" }, { kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "TuplePattern" }, { kind: "optional", expression: { kind: "ref", name: "ParamTail" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "PatternIdent" }, { kind: "optional", expression: { kind: "ref", name: "ParamTail" } }] }] }] },
   "ParamTail": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "literal", value: ":" }, { kind: "optional", expression: { kind: "ref", name: "Type" } }] }, { kind: "ref", name: "Type" }] },
   "Args": { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "Expr" }] } }, { kind: "optional", expression: { kind: "literal", value: "," } }] },
-  "Type": { kind: "choice", options: [{ kind: "ref", name: "FnType" }, { kind: "literal", value: "type" }, { kind: "ref", name: "Number" }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } }, { kind: "optional", expression: { kind: "ref", name: "TypeArgs" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeArgs" } }] }, { kind: "ref", name: "ShapeType" }] },
+  "Type": { kind: "choice", options: [{ kind: "ref", name: "BorrowType" }, { kind: "ref", name: "FrozenType" }, { kind: "ref", name: "FnType" }, { kind: "literal", value: "type" }, { kind: "literal", value: "const" }, { kind: "ref", name: "Number" }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } }, { kind: "optional", expression: { kind: "ref", name: "TypeArgs" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeArgs" } }] }, { kind: "ref", name: "ShapeType" }, { kind: "ref", name: "TupleType" }] },
+  "BorrowType": { kind: "sequence", items: [{ kind: "literal", value: "&" }, { kind: "literal", value: "(" }, { kind: "ref", name: "Type" }, { kind: "literal", value: ")" }] },
+  "FrozenType": { kind: "sequence", items: [{ kind: "ref", name: "FrozenTypeOpen" }, { kind: "ref", name: "Type" }, { kind: "literal", value: ")" }] },
   "FnType": { kind: "sequence", items: [{ kind: "literal", value: "fn" }, { kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "Params" } }, { kind: "literal", value: ")" }, { kind: "ref", name: "ReturnSig" }] },
   "TypeArgs": { kind: "sequence", items: [{ kind: "literal", value: "(" }, { kind: "ref", name: "TypeExpr" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeExpr" }] } }, { kind: "literal", value: ")" }] },
   "TypeParamsDecl": { kind: "sequence", items: [{ kind: "ref", name: "TypeParamDecl" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeParamDecl" }] } }, { kind: "optional", expression: { kind: "literal", value: "," } }] },
@@ -756,23 +1071,36 @@ const rules: Record<string, Expression> = {
   "TypeAnn": { kind: "sequence", items: [{ kind: "literal", value: ":" }, { kind: "ref", name: "Type" }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }] },
   "ReturnSig": { kind: "sequence", items: [{ kind: "literal", value: "->" }, { kind: "ref", name: "Type" }] },
   "EffectRow": { kind: "sequence", items: [{ kind: "literal", value: "!" }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "ref", name: "LowerIdent" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "LowerIdent" }] } }, { kind: "literal", value: "}" }] }, { kind: "literal", value: "{}" }] }] },
-  "ShapeType": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "ShapeTypeBody" }] },
-  "ShapeTypeBody": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "ref", name: "ShapeSlot" }, { kind: "ref", name: "ShapeTypeTail" }] }] },
-  "ShapeTypeTail": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "ShapeTypeBody" }] }] },
-  "ShapeSlot": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "ShapeSlotBody" }] }, { kind: "ref", name: "ShapeSlotBody" }] },
+  "ShapeType": { kind: "choice", options: [{ kind: "literal", value: "{}" }, { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "ref", name: "ShapeTypeBody" }] }] },
+  "ShapeTypeBody": { kind: "sequence", items: [{ kind: "ref", name: "ShapeSlot" }, { kind: "ref", name: "ShapeTypeTail" }] },
+  "ShapeTypeTail": { kind: "choice", options: [{ kind: "literal", value: "}" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "}" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "ShapeTypeBody" }] }] },
+  "ShapeSlot": { kind: "sequence", items: [{ kind: "optional", expression: { kind: "ref", name: "ShapeSlotKey" } }, { kind: "ref", name: "ShapeSlotBody" }] },
+  "ShapeSlotKey": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "SlotPosition" } }, { kind: "literal", value: ":" }] }, { kind: "sequence", items: [{ kind: "ref", name: "SlotPosition" }, { kind: "literal", value: ":" }] }] },
   "ShapeSlotBody": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "CountRepeat" }, { kind: "ref", name: "Type" }] }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdentRepeat" }, { kind: "ref", name: "Type" }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeArgs" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeArgs" } }] }, { kind: "ref", name: "ShapeType" }] },
-  "TypeShape": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "TypeShapeBody" }] },
-  "TypeShapeBody": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "ref", name: "TypeShapeSlot" }, { kind: "ref", name: "TypeShapeTail" }] }] },
-  "TypeShapeTail": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeShapeBody" }] }] },
-  "TypeShapeSlot": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "TypeShapeSlotBody" }] }, { kind: "ref", name: "TypeShapeAnonSlotBody" }] },
+  "TupleType": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "TupleTypeBody" }] },
+  "TupleTypeBody": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "ref", name: "TupleTypeRepeat" }, { kind: "sequence", items: [{ kind: "ref", name: "Type" }, { kind: "ref", name: "TupleTypeTail" }] }] },
+  "TupleTypeTail": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "]" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "Type" }, { kind: "ref", name: "TupleTypeMore" }] }] },
+  "TupleTypeMore": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "]" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "Type" }, { kind: "ref", name: "TupleTypeMore" }] }] },
+  "TupleTypeRepeat": { kind: "sequence", items: [{ kind: "ref", name: "Type" }, { kind: "literal", value: ";" }, { kind: "ref", name: "TypeRepeatCount" }, { kind: "literal", value: "]" }] },
+  "TypeShape": { kind: "choice", options: [{ kind: "literal", value: "{}" }, { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "ref", name: "TypeShapeBody" }] }] },
+  "TypeShapeBody": { kind: "sequence", items: [{ kind: "ref", name: "TypeShapeSlot" }, { kind: "ref", name: "TypeShapeTail" }] },
+  "TypeShapeTail": { kind: "choice", options: [{ kind: "literal", value: "}" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "}" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeShapeBody" }] }] },
+  "TypeShapeSlot": { kind: "sequence", items: [{ kind: "optional", expression: { kind: "ref", name: "ShapeSlotKey" } }, { kind: "ref", name: "TypeShapeSlotBody" }] },
   "TypeShapeSlotBody": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "TypeShapeRepeat" }, { kind: "ref", name: "TypeExpr" }] }, { kind: "ref", name: "TypeExpr" }] },
   "TypeShapeAnonSlotBody": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "TypeShapeRepeat" }, { kind: "ref", name: "TypeNonFnExpr" }] }, { kind: "ref", name: "TypeNonFnExpr" }] },
+  "TypeTuple": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "TypeTupleBody" }] },
+  "TypeTupleBody": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "ref", name: "TypeTupleRepeat" }, { kind: "sequence", items: [{ kind: "ref", name: "TypeExpr" }, { kind: "ref", name: "TypeTupleTail" }] }] },
+  "TypeTupleTail": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "]" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeExpr" }, { kind: "ref", name: "TypeTupleMore" }] }] },
+  "TypeTupleMore": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "]" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeExpr" }, { kind: "ref", name: "TypeTupleMore" }] }] },
+  "TypeTupleRepeat": { kind: "sequence", items: [{ kind: "ref", name: "TypeExpr" }, { kind: "literal", value: ";" }, { kind: "ref", name: "TypeRepeatCount" }, { kind: "literal", value: "]" }] },
   "TypeNonFnExpr": { kind: "choice", options: [{ kind: "ref", name: "TypeMatch" }, { kind: "ref", name: "TypeBinary" }] },
   "TypeShapeRepeat": { kind: "choice", options: [{ kind: "ref", name: "CountRepeat" }, { kind: "ref", name: "PascalIdentRepeat" }, { kind: "ref", name: "TypeRepeatPrefix" }] },
+  "TypeRepeatCount": { kind: "choice", options: [{ kind: "ref", name: "Number" }, { kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }] },
   "Visibility": { kind: "literal", value: "pub" },
   "Literal": { kind: "choice", options: [{ kind: "ref", name: "Number" }, { kind: "ref", name: "Bool" }, { kind: "ref", name: "Char" }, { kind: "ref", name: "String" }, { kind: "ref", name: "fenced_text" }, { kind: "ref", name: "LiteralType" }] },
   "Bool": { kind: "choice", options: [{ kind: "literal", value: "true" }, { kind: "literal", value: "false" }] },
-  "Op": { kind: "choice", options: [{ kind: "literal", value: "+" }, { kind: "literal", value: "-" }, { kind: "literal", value: "*" }, { kind: "literal", value: "/" }, { kind: "literal", value: "%" }, { kind: "literal", value: "==" }, { kind: "literal", value: "!=" }, { kind: "literal", value: "<" }, { kind: "literal", value: "<=" }, { kind: "literal", value: ">" }, { kind: "literal", value: ">=" }, { kind: "literal", value: "&&" }, { kind: "literal", value: "||" }, { kind: "literal", value: "^^" }, { kind: "literal", value: "<>" }, { kind: "literal", value: "<$>" }, { kind: "literal", value: "<*>" }, { kind: "literal", value: ">>=" }, { kind: "literal", value: "zip" }, { kind: "literal", value: ".." }] },
+  "Op": { kind: "choice", options: [{ kind: "literal", value: "+" }, { kind: "literal", value: "-" }, { kind: "literal", value: "*" }, { kind: "literal", value: "/" }, { kind: "literal", value: "%" }, { kind: "literal", value: "==" }, { kind: "literal", value: "!=" }, { kind: "ref", name: "CollectionOpen" }, { kind: "literal", value: "<=" }, { kind: "ref", name: "CollectionClose" }, { kind: "literal", value: ">=" }, { kind: "literal", value: "&&" }, { kind: "literal", value: "||" }, { kind: "literal", value: "^^" }, { kind: "literal", value: "<>" }, { kind: "literal", value: "<$>" }, { kind: "literal", value: "<*>" }, { kind: "literal", value: ">>=" }, { kind: "literal", value: "zip" }, { kind: "literal", value: ".." }] },
+  "OpNoCollectionClose": { kind: "choice", options: [{ kind: "literal", value: "+" }, { kind: "literal", value: "-" }, { kind: "literal", value: "*" }, { kind: "literal", value: "/" }, { kind: "literal", value: "%" }, { kind: "literal", value: "==" }, { kind: "literal", value: "!=" }, { kind: "ref", name: "CollectionOpen" }, { kind: "literal", value: "<=" }, { kind: "literal", value: ">=" }, { kind: "literal", value: "&&" }, { kind: "literal", value: "||" }, { kind: "literal", value: "^^" }, { kind: "literal", value: "<>" }, { kind: "literal", value: "<$>" }, { kind: "literal", value: "<*>" }, { kind: "literal", value: ">>=" }, { kind: "literal", value: "zip" }, { kind: "literal", value: ".." }] },
   "TypeOp": { kind: "choice", options: [{ kind: "literal", value: "==" }, { kind: "literal", value: "!=" }] },
 };
 const rootRuleName = "Program";
@@ -990,6 +1318,27 @@ export function projectParseNode(node: ParseNode): AstNode | null {
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
+    case "ImportBindingList":
+      return {
+        kind: "ImportBindingList",
+        type: "ImportBindingList",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "ImportBindingItems":
+      return {
+        kind: "ImportBindingItems",
+        type: "ImportBindingItems",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "ImportBindingTail":
+      return {
+        kind: "ImportBindingTail",
+        type: "ImportBindingTail",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
     case "ConstValue":
       return {
         kind: "ConstValue",
@@ -1130,6 +1479,13 @@ export function projectParseNode(node: ParseNode): AstNode | null {
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
+    case "BorrowExpr":
+      return {
+        kind: "BorrowExpr",
+        type: "BorrowExpr",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
     case "Placeholder":
       return {
         kind: "Placeholder",
@@ -1200,6 +1556,139 @@ export function projectParseNode(node: ParseNode): AstNode | null {
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
+    case "PunnedShapeValueSlot":
+      return {
+        kind: "PunnedShapeValueSlot",
+        type: "PunnedShapeValueSlot",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "ShapeValueSlotKey":
+      return {
+        kind: "ShapeValueSlotKey",
+        type: "ShapeValueSlotKey",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "SpreadSlot":
+      return {
+        kind: "SpreadSlot",
+        type: "SpreadSlot",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "SlotPosition":
+      return {
+        kind: "SlotPosition",
+        type: "SlotPosition",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CollectionValue":
+      return {
+        kind: "CollectionValue",
+        type: "CollectionValue",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CollectionValueItems":
+      return {
+        kind: "CollectionValueItems",
+        type: "CollectionValueItems",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CollectionValueTail":
+      return {
+        kind: "CollectionValueTail",
+        type: "CollectionValueTail",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CollectionSpreadSlot":
+      return {
+        kind: "CollectionSpreadSlot",
+        type: "CollectionSpreadSlot",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CollectionExpr":
+      return {
+        kind: "CollectionExpr",
+        type: "CollectionExpr",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CollectionPipeBind":
+      return {
+        kind: "CollectionPipeBind",
+        type: "CollectionPipeBind",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CollectionPipeBindAtom":
+      return {
+        kind: "CollectionPipeBindAtom",
+        type: "CollectionPipeBindAtom",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "CollectionBinary":
+      return {
+        kind: "CollectionBinary",
+        type: "CollectionBinary",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "FrozenCollectionValue":
+      return {
+        kind: "FrozenCollectionValue",
+        type: "FrozenCollectionValue",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "FrozenCollectionValueItems":
+      return {
+        kind: "FrozenCollectionValueItems",
+        type: "FrozenCollectionValueItems",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "FrozenCollectionValueTail":
+      return {
+        kind: "FrozenCollectionValueTail",
+        type: "FrozenCollectionValueTail",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleValue":
+      return {
+        kind: "TupleValue",
+        type: "TupleValue",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleValueItems":
+      return {
+        kind: "TupleValueItems",
+        type: "TupleValueItems",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleValueTail":
+      return {
+        kind: "TupleValueTail",
+        type: "TupleValueTail",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleValueRepeat":
+      return {
+        kind: "TupleValueRepeat",
+        type: "TupleValueRepeat",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
     case "Pattern":
       return {
         kind: "Pattern",
@@ -1211,6 +1700,27 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "PatternIdent",
         type: "PatternIdent",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TuplePattern":
+      return {
+        kind: "TuplePattern",
+        type: "TuplePattern",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TuplePatternItems":
+      return {
+        kind: "TuplePatternItems",
+        type: "TuplePatternItems",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TuplePatternTail":
+      return {
+        kind: "TuplePatternTail",
+        type: "TuplePatternTail",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
@@ -1246,6 +1756,20 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "Type",
         type: "Type",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "BorrowType":
+      return {
+        kind: "BorrowType",
+        type: "BorrowType",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "FrozenType":
+      return {
+        kind: "FrozenType",
+        type: "FrozenType",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
@@ -1361,10 +1885,52 @@ export function projectParseNode(node: ParseNode): AstNode | null {
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
+    case "ShapeSlotKey":
+      return {
+        kind: "ShapeSlotKey",
+        type: "ShapeSlotKey",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
     case "ShapeSlotBody":
       return {
         kind: "ShapeSlotBody",
         type: "ShapeSlotBody",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleType":
+      return {
+        kind: "TupleType",
+        type: "TupleType",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleTypeBody":
+      return {
+        kind: "TupleTypeBody",
+        type: "TupleTypeBody",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleTypeTail":
+      return {
+        kind: "TupleTypeTail",
+        type: "TupleTypeTail",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleTypeMore":
+      return {
+        kind: "TupleTypeMore",
+        type: "TupleTypeMore",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleTypeRepeat":
+      return {
+        kind: "TupleTypeRepeat",
+        type: "TupleTypeRepeat",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
@@ -1410,6 +1976,41 @@ export function projectParseNode(node: ParseNode): AstNode | null {
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
+    case "TypeTuple":
+      return {
+        kind: "TypeTuple",
+        type: "TypeTuple",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TypeTupleBody":
+      return {
+        kind: "TypeTupleBody",
+        type: "TypeTupleBody",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TypeTupleTail":
+      return {
+        kind: "TypeTupleTail",
+        type: "TypeTupleTail",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TypeTupleMore":
+      return {
+        kind: "TypeTupleMore",
+        type: "TypeTupleMore",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TypeTupleRepeat":
+      return {
+        kind: "TypeTupleRepeat",
+        type: "TypeTupleRepeat",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
     case "TypeNonFnExpr":
       return {
         kind: "TypeNonFnExpr",
@@ -1421,6 +2022,13 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "TypeShapeRepeat",
         type: "TypeShapeRepeat",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TypeRepeatCount":
+      return {
+        kind: "TypeRepeatCount",
+        type: "TypeRepeatCount",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
@@ -1449,6 +2057,13 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "Op",
         type: "Op",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "OpNoCollectionClose":
+      return {
+        kind: "OpNoCollectionClose",
+        type: "OpNoCollectionClose",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };

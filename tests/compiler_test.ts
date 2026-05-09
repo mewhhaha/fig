@@ -18,6 +18,24 @@ const resolveProjectModule = async (moduleName: string) => {
   }
 };
 
+async function assertFirstDiagnosticSpanIncludes(
+  source: string,
+  code: string,
+  expectedSource: string,
+) {
+  try {
+    await checkSource(source);
+  } catch (error) {
+    assert(error instanceof CompileError);
+    assertEquals(error.diagnostics[0]?.code, code);
+    const span = error.diagnostics[0]?.span;
+    assert(span, JSON.stringify(error.diagnostics));
+    assertStringIncludes(source.slice(span.start, span.end), expectedSource);
+    return;
+  }
+  throw new Error(`expected ${code}`);
+}
+
 Deno.test("grammar metadata uses fig identity", async () => {
   const metadata = JSON.parse(await Deno.readTextFile("baba.json"));
   assertEquals(metadata.language.scope, "source.fig");
@@ -61,7 +79,7 @@ Deno.test("index cursor itself is not an inline-array index proof", async () => 
     `
       const core = @import("prelude.core");
       type fn inline_array(N: count, A: type) -> type {
-        let InlineArray = [N*A];
+        let InlineArray = {N*A};
         struct(InlineArray)
       }
       fn bad(xs: inline_array(3, i32), cursor: core.index_cursor(3)) -> i32 {
@@ -75,19 +93,19 @@ Deno.test("index cursor itself is not an inline-array index proof", async () => 
 Deno.test("static literal expansion and const-label field access lower", async () => {
   const wat = await watFromSource(`
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn pair() -> type {
-      let Pair = [left: i32, right: i32];
+      let Pair = {left: i32, right: i32};
       struct(Pair)
     }
     fn build() -> inline_array(3, i32) {
-      [for I in 0 .. 3: I]
+      [0, 1, 2]
     }
     pub fn main() -> i32 {
       let xs: inline_array(3, i32) = build();
-      let p: pair = Pair [left: 10, right: 32];
+      let p: pair = Pair {left: 10, right: 32};
       xs[2] + @field(p, #right)
     }
   `);
@@ -99,7 +117,7 @@ Deno.test("array comprehension syntax is rejected", async () => {
   await assertThrowsCompile(
     `
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     pub fn main() -> inline_array(3, i32) {
@@ -110,68 +128,218 @@ Deno.test("array comprehension syntax is rejected", async () => {
   );
 });
 
-Deno.test("static slot expansion lowers through indexed inline-array construction", async () => {
+Deno.test("static for literal syntax is rejected", async () => {
   const source = `
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     fn add_index(xs: inline_array(3, i32), offset: i32) -> inline_array(3, i32) {
       [for i in 0 .. 3: xs[i] + offset]
     }
-    fn map_n(const N: count, xs: inline_array(N, i32), const f: fn(x: i32) -> i32) -> inline_array(N, i32) {
-      [for i in 0 .. N: f(xs[i])]
-    }
-    fn inc(x: i32) -> i32 { x + 1 }
-    pub fn main() -> i32 {
-      let built: inline_array(3, i32) = [for i in 0 .. 3: i];
-      let shifted = add_index([10, 20, 30], 5);
-      built[2] + shifted[1]
-    }
   `;
-  const wat = await watFromSource(source);
-  assertStringIncludes(wat, "i32.const 0");
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
-  assertEquals((instance.exports.main as CallableFunction)(), 27);
+  await assertThrowsCompile(source, "parse.syntax");
 });
 
-Deno.test("static for range bounds accept unparenthesized lower identifiers before colon", async () => {
+Deno.test("record static for literal syntax lowers", async () => {
+  const wat = await watFromSource(
+    `
+      const fields = {x: true, y: true};
+      pub fn main() -> i32 {
+        let value = {for Key, Spec in (fields): 1};
+        value.x + value.y
+      }
+    `,
+  );
+  assertStringIncludes(wat, "i32.add");
+});
+
+Deno.test("product constructor static for literal syntax lowers", async () => {
+  const wat = await watFromSource(
+    `
+      type fn pair() -> type {
+        let Pair = {x: i32, y: i32};
+        struct(Pair)
+      }
+      const fields = {x: true, y: true};
+      pub fn main() -> pair {
+        Pair {for Key, Spec in (fields): 1}
+      }
+    `,
+  );
+  assertStringIncludes(wat, "(result i32) (result i32)");
+});
+
+Deno.test("inline array list spread literals lower as flattened slots", async () => {
+  const wat = await watFromSource(
+    `
+      const layout = @import("prelude.layout");
+
+      fn tail() -> layout.inline_array_list(2, i32) {
+        <2, 3>
+      }
+
+      fn build_list() -> layout.inline_array_list(4, i32) {
+        let rest = tail();
+        <0, 1, ...rest>
+      }
+
+      pub fn main() -> layout.inline_array(4, i32) {
+        layout.inline_array.from_list(4, i32, build_list())
+      }
+    `,
+    { resolveModule: resolveProjectModule },
+  );
+
+  assertStringIncludes(wat, `(result i32) (result i32) (result i32) (result i32)`);
+  assert(!wat.includes("collect_start"));
+  assert(!wat.includes("collect_push"));
+  assert(!wat.includes("collect_finish"));
+});
+
+Deno.test("spread entries stay out of product and require inline array list tails", async () => {
+  await assertThrowsCompile(
+    `
+      const layout = @import("prelude.layout");
+      type fn pair() { let Pair = {first: i32, second: i32}; struct(Pair) }
+      fn tail() -> layout.inline_array_list(1, i32) { <2> }
+      pub fn bad() -> pair { Pair [first: 1, ...tail()] }
+    `,
+    "parse.syntax",
+    { resolveModule: resolveProjectModule },
+  );
+
+  await assertThrowsCompile(
+    `
+      const layout = @import("prelude.layout");
+      pub fn bad(xs: layout.inline_array(1, i32)) -> layout.inline_array_list(2, i32) {
+        <1, ...xs>
+      }
+    `,
+    "collection.spread_tail_type",
+    { resolveModule: resolveProjectModule },
+  );
+});
+
+Deno.test("target-typed collection literals lower through collector members", async () => {
+  const checked = await checkSource(`
+    type fn bag(A: type) {
+      let Bag = {sum: i32};
+      struct(Bag)
+    }
+    fn bag.collect_start(const a: type) -> bag(a) { Bag {sum: 0} }
+    fn bag.collect_push(const a: type, builder: bag(a), item: a) -> bag(a) { builder }
+    fn bag.collect_finish(const a: type, builder: bag(a)) -> bag(a) { builder }
+    fn take(xs: bag(i32)) -> bag(i32) { xs }
+    pub fn main() -> i32 {
+      let xs: bag(i32) = <1, 2, 3>;
+      let ys = take(<4, 5>);
+      xs.sum + ys.sum
+    }
+  `);
+  const main = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "main"
+  );
+  const first = main?.body.statements[0];
+  assertEquals(first?.kind === "let" && first.value.kind === "call"
+    ? first.value.callee
+    : undefined, { kind: "var", name: "bag.collect_finish" });
+  const second = main?.body.statements[1];
+  assertEquals(
+    second?.kind === "let" && second.value.kind === "call" &&
+        second.value.args[0]?.kind === "call"
+      ? second.value.args[0].callee
+      : undefined,
+    { kind: "var", name: "bag.collect_finish" },
+  );
+});
+
+Deno.test("collection literals require target collector context", async () => {
+  await assertThrowsCompile(
+    `
+      pub fn bad() -> i32 {
+        let xs = <1, 2, 3>;
+        0
+      }
+    `,
+    "collection.expected_type",
+  );
+  await assertThrowsCompile(
+    `
+      type fn scalar() { i32 }
+      pub fn bad() -> scalar { <1, 2> }
+    `,
+    "collection.collector_missing",
+  );
+});
+
+Deno.test("record value punning lowers in records and product constructors", async () => {
+  const checked = await checkSource(`
+    type fn pair() -> type {
+      let Pair = {left: i32, right: i32};
+      struct(Pair)
+    }
+    fn take(pair: pair) -> pair { pair }
+    pub fn main() -> i32 {
+      let left = 10;
+      let right = 32;
+      let record = {left, right};
+      let product = take(Pair {left, right});
+      record.left + product.right
+    }
+  `);
+  const main = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "main"
+  );
+  assertEquals(main?.kind, "fn");
+});
+
+Deno.test("tuple values types repeats and destructuring check", async () => {
+  await checkSource(`
+    type fn pair() -> type {
+      let Pair = [i32, [i32; 3]];
+      struct(Pair)
+    }
+    type fn lane3() -> type {
+      let Lane = [i32; 3];
+      struct(Lane)
+    }
+    fn make_pair() -> pair { [1, [0; 3]] }
+    pub fn main() -> i32 {
+      let [head, values] = make_pair();
+      head + values[0] + values[1] + values[2]
+    }
+  `);
+});
+
+Deno.test("static for range bounds syntax is rejected", async () => {
   const source = `
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     fn double(x: i32) -> i32 { x * 2 }
     fn tight(const n: count) -> inline_array(n, i32) {
       [for i in 0 .. n: double(i)]
     }
-    fn spaced(const n: count) -> inline_array(n, i32) {
-      [for i in 0 .. n : double(i)]
-    }
-    pub fn main() -> i32 {
-      let xs: inline_array(3, i32) = tight(3);
-      let ys: inline_array(3, i32) = spaced(3);
-      xs[2] + ys[1]
-    }
   `;
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
-  assertEquals((instance.exports.main as CallableFunction)(), 6);
+  await assertThrowsCompile(source, "parse.syntax");
 });
 
 Deno.test("field labels remain valid with tight and spaced colons", async () => {
   const source = `
     type fn pair() -> type {
-      let Pair = [left: i32, right : i32];
+      let Pair = {left: i32, right : i32};
       struct(Pair)
     }
     type fn box(T: type) -> type {
-      let Box = [value: T];
+      let Box = {value: T};
       struct(Box)
     }
     fn add(x: i32, y : i32) -> i32 { x + y }
     pub fn main() -> i32 {
-      let p: pair = Pair [left: 10, right : 30];
-      let b: box(i32) = Box [value : add(@field(p, #left), @field(p, #right))];
+      let p: pair = Pair {left: 10, right : 30};
+      let b: box(i32) = Box {value : add(@field(p, #left), @field(p, #right))};
       @field(b, #value)
     }
   `;
@@ -183,7 +351,7 @@ Deno.test("array builder pipe sugar reports replacement diagnostic", async () =>
   try {
     await checkSource(`
       type fn inline_array(N: count, A: type) -> type {
-        let InlineArray = [N*A];
+        let InlineArray = {N*A};
         struct(InlineArray)
       }
       pub fn main() -> inline_array(3, i32) {
@@ -250,17 +418,17 @@ Deno.test("parses language surface declarations and literals", async () => {
   const program = await parse(`
     const clock: fn() -> i64 !{time} = @capability("clock");
     type fn id() { i32 }
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-    type fn maybe(A: type) { let Nothing = []; let Some = [value: A]; union(Nothing, Some) }
-    type fn buffer(N: count) { let Buffer = [N*i32]; struct(Buffer) }
-    type fn weird() { let Weird = [fst: i32, 4*i32, 1*i32]; struct(Weird) }
-    type fn eq(T: type) { let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool]; struct(Eq) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+    type fn maybe(A: type) { let Nothing = {}; let Some = {value: A}; union(Nothing, Some) }
+    type fn buffer(N: count) { let Buffer = {N*i32}; struct(Buffer) }
+    type fn weird() { let Weird = {fst: i32, 4*i32, 1*i32}; struct(Weird) }
+    type fn eq(T: type) { let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool}; struct(Eq) }
     fn eql_point(a: point, b: point) -> bool { a.x == b.x }
     fn neq_point(a: point, b: point) -> bool { a.x != b.x }
-    const point_eq: eq(point) = [eql: eql_point, neq: neq_point]
+    const point_eq: eq(point) = {eql: eql_point, neq: neq_point}
     pub fn main() -> i32 !{} {
-      let xs: [3*i32] = [1, 2, 3];
-      let point: point = Point [x: 1, y: 2];
+      let xs: {3*i32} = [1, 2, 3];
+      let point: point = Point {x: 1, y: 2};
       let label = \`\`\`hello
 world\`\`\`;
       match 1 { _ => 2, }
@@ -279,17 +447,17 @@ Deno.test("attaches slash doc comments to Fig bindings", async () => {
       A: type
     ) -> struct {
       /// product shape
-      let Point = [
+      let Point = {
         /// x coordinate
         x: A,
         /// y coordinate
         y: A,
-      ];
+      };
       struct(Point)
     }
 
     /// top constant
-    const origin = [x: 0, y: 0];
+    const origin = {x: 0, y: 0};
 
     /// top let
     let top_value = 1;
@@ -327,7 +495,10 @@ Deno.test("attaches slash doc comments to Fig bindings", async () => {
   );
   assertEquals(add?.doc, "adds values");
   assertEquals(add?.params.map((param) => param.doc), ["left input", "right input"]);
-  assertEquals(add?.body.statements[0]?.kind === "let" ? add.body.statements[0].doc : undefined, "local temp");
+  assertEquals(
+    add?.body.statements[0]?.kind === "let" ? add.body.statements[0].doc : undefined,
+    "local temp",
+  );
   assertEquals(
     add?.body.statements[1]?.kind === "proof_const" ? add.body.statements[1].doc : undefined,
     "local proof",
@@ -356,7 +527,11 @@ Deno.test("doc comments attach only to the immediately following binding", async
   assertEquals(byName.get("blank_breaks")?.doc, undefined);
   assertEquals(byName.get("comment_breaks")?.doc, undefined);
   assertEquals(byName.get("ordinary_comment")?.doc, undefined);
-  assertEquals(program.sourceImports?.[0], { kind: "source_import", module: "prelude.std", alias: "std" });
+  assertEquals(program.sourceImports?.[0], {
+    kind: "source_import",
+    module: "prelude.std",
+    alias: "std",
+  });
 });
 
 Deno.test("preserves docs through source import qualification", async () => {
@@ -374,10 +549,10 @@ Deno.test("preserves docs through source import qualification", async () => {
               /// payload type
               A: type
             ) -> struct {
-              let Box = [
+              let Box = {
                 /// payload field
                 value: A,
-              ];
+              };
               struct(Box)
             }
           `
@@ -389,17 +564,20 @@ Deno.test("preserves docs through source import qualification", async () => {
   );
   assertEquals(box?.doc, "imported box");
   assertEquals(box?.params[0]?.doc, "payload type");
-  assertEquals(box?.normalized?.kind === "product" ? box.normalized.shape.slots[0]?.doc : undefined, "payload field");
+  assertEquals(
+    box?.normalized?.kind === "product" ? box.normalized.shape.slots[0]?.doc : undefined,
+    "payload field",
+  );
 });
 
 Deno.test("accepts const declarations without trailing semicolons", async () => {
   const checked = await checkSource(`
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-    type fn eq(T: type) { let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool]; struct(Eq) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+    type fn eq(T: type) { let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool}; struct(Eq) }
     fn eql_point(a: point, b: point) -> bool { a.x == b.x }
     fn neq_point(a: point, b: point) -> bool { a.x != b.x }
-    const point_eq: eq(point) = [eql: eql_point, neq: neq_point]
-    const point_eq_again: eq(point) = [eql: eql_point, neq: neq_point]
+    const point_eq: eq(point) = {eql: eql_point, neq: neq_point}
+    const point_eq_again: eq(point) = {eql: eql_point, neq: neq_point}
   `);
   assertEquals(
     checked.program.declarations.filter((decl) => decl.kind === "const").length,
@@ -410,10 +588,10 @@ Deno.test("accepts const declarations without trailing semicolons", async () => 
 Deno.test("normalizes type function declarations", async () => {
   const checked = await checkSource(`
     type fn id() { i32 }
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-    type fn maybe(A: type) { let Nothing = []; let Some = [value: A]; union(Nothing, Some) }
-    type fn weird() { let Weird = [fst: i32, 4*i32, 1*i32]; struct(Weird) }
-    type fn why(A: count) { let Why = [fst: i32, A*i32]; struct(Why) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+    type fn maybe(A: type) { let Nothing = {}; let Some = {value: A}; union(Nothing, Some) }
+    type fn weird() { let Weird = {fst: i32, 4*i32, 1*i32}; struct(Weird) }
+    type fn why(A: count) { let Why = {fst: i32, A*i32}; struct(Why) }
   `);
   const program = checked.program;
   assertEquals(program.declarations[0], {
@@ -473,28 +651,28 @@ Deno.test("normalizes type function declarations", async () => {
 
 Deno.test("type functions accept const shapes for generated product fields", async () => {
   const checked = await checkSource(`
-    type fn transform2d() -> type { i32 }
-    type fn velocity2d() -> type { i32 }
+    type fn transform2d() -> type { let Transform2d = {x: i32}; struct(Transform2d) }
+    type fn velocity2d() -> type { let Velocity2d = {x: i32}; struct(Velocity2d) }
     type fn sprite2d() -> type { i32 }
     type fn entity2d() -> type { i32 }
     type fn component_store(Count: count, Component: type) -> type {
-      let Store = [Count*Component];
+      let Store = {Count*Component};
       struct(Store)
     }
     type fn component_store_for(Component: const) -> type {
       component_store(Component.count, Component.component)
     }
     type fn world2d(EntityCount: count, Components: const, Entity: type) -> type {
-      let Base = [entities: component_store(EntityCount, Entity)];
+      let Base = {entities: component_store(EntityCount, Entity)};
       let Stores = @shape_map(Components, component_store_for);
       let World2d = @shape_concat(Base, Stores);
       struct(World2d)
     }
-    const game_components = [
-      transforms: [count: 3, component: transform2d],
-      velocities: [count: 1, component: velocity2d],
-      sprites: [count: 3, component: sprite2d],
-    ];
+    const game_components = {
+      transforms: {count: 3, component: transform2d},
+      velocities: {count: 1, component: velocity2d},
+      sprites: {count: 3, component: sprite2d},
+    };
     pub fn use_world(world: world2d(3, game_components, entity2d)) -> i32 { 0 }
   `);
   const type = checked.program.declarations.find((decl): decl is TypeDecl =>
@@ -512,19 +690,19 @@ Deno.test("type functions accept inline const shape arguments", async () => {
     type fn transform2d() -> type { i32 }
     type fn entity2d() -> type { i32 }
     type fn component_store(Count: count, Component: type) -> type {
-      let Store = [Count*Component];
+      let Store = {Count*Component};
       struct(Store)
     }
     type fn component_store_for(Component: const) -> type {
       component_store(Component.count, Component.component)
     }
     type fn world2d(EntityCount: count, Components: const, Entity: type) -> type {
-      let Base = [entities: component_store(EntityCount, Entity)];
+      let Base = {entities: component_store(EntityCount, Entity)};
       let Stores = @shape_map(Components, component_store_for);
       let World2d = @shape_concat(Base, Stores);
       struct(World2d)
     }
-    pub fn use_world(world: world2d(3, [transforms: [count: 3, component: transform2d]], entity2d)) -> i32 { 0 }
+    pub fn use_world(world: world2d(3, {transforms: {count: 3, component: transform2d}}, entity2d)) -> i32 { 0 }
   `);
   const useWorld = checked.program.declarations.find((decl): decl is FnDecl =>
     decl.kind === "fn" && decl.name === "use_world"
@@ -537,19 +715,19 @@ Deno.test("shape concat reports duplicate generated fields", async () => {
     `
       type fn item() -> type { i32 }
       type fn component_store(Count: count, Component: type) -> type {
-        let Store = [Count*Component];
+        let Store = {Count*Component};
         struct(Store)
       }
       type fn component_store_for(Component: const) -> type {
         component_store(Component.count, Component.component)
       }
       type fn bad_world(Components: const) -> type {
-        let Base = [transforms: component_store(1, item)];
+        let Base = {transforms: component_store(1, item)};
         let Stores = @shape_map(Components, component_store_for);
         let World = @shape_concat(Base, Stores);
         struct(World)
       }
-      pub fn use_world(world: bad_world([transforms: [count: 1, component: item]])) -> i32 { 0 }
+      pub fn use_world(world: bad_world({transforms: {count: 1, component: item}})) -> i32 { 0 }
     `,
     "type.shape_concat_duplicate",
   );
@@ -571,17 +749,17 @@ Deno.test("static shape inspection and transforms build products", async () => {
       }
     }
     type fn shape_tools(A: type) -> type {
-      let Base = [x: i32, y: i64, z: bool];
-      let Picked = @shape_pick(Base, [x: true, z: i32]);
-      let Omitted = @shape_omit(Base, [z: true]);
+      let Base = {x: i32, y: i64, z: bool};
+      let Picked = @shape_pick(Base, {x: true, z: i32});
+      let Omitted = @shape_omit(Base, {z: true});
       let Intersected = @shape_intersect(Picked, Omitted);
       let Difference = @shape_difference(Base, Intersected);
-      let Renamed = @shape_rename(Difference, [y: #flag, z: "done"]);
+      let Renamed = @shape_rename(Difference, {y: #flag, z: "done"});
       let Mapped = @shape_map_with_key(Renamed, rename_value);
       let Filtered = @shape_filter(Mapped, keep_xy);
       let Count = @shape_count(Filtered);
-      let TrueOut = @shape_concat(Filtered, [extra: @shape_slot(Filtered, #flag)]);
-      let FalseOut = [missing: i32];
+      let TrueOut = @shape_concat(Filtered, {extra: @shape_slot(Filtered, #flag)});
+      let FalseOut = {missing: i32};
       match @shape_has_slot(Filtered, #flag) {
         true => struct(TrueOut),
         false => struct(FalseOut),
@@ -597,19 +775,19 @@ Deno.test("static shape inspection and transforms build products", async () => {
 
 Deno.test("static type reflection feeds shape helpers", async () => {
   const checked = await checkSource(`
-    type fn point() -> type { let Point = [x: i32, y: i32, z: bool]; struct(Point) }
-    type fn option(A: type) -> type { let None = []; let Some = [value: A]; union(None, Some) }
+    type fn point() -> type { let Point = {x: i32, y: i32, z: bool}; struct(Point) }
+    type fn option(A: type) -> type { let None = {}; let Some = {value: A}; union(None, Some) }
     type fn reflected_point(A: type) -> type {
       let Slots = @type_slots(point);
-      let Picked = @shape_pick(Slots, [x: true, y: true]);
+      let Picked = @shape_pick(Slots, {x: true, y: true});
       let Count = @shape_count(Picked);
-      let Reflected = [Count*@shape_slot(Picked, #x)];
+      let Reflected = {Count*@shape_slot(Picked, #x)};
       struct(Reflected)
     }
     type fn reflected_some(A: type) -> type {
       let Variants = @type_variants(option(i32));
       let SomeSlots = @type_variant_slots(option(i32), #Some);
-      let Missing = [missing: i32];
+      let Missing = {missing: i32};
       match @shape_count(SomeSlots) == @shape_count(@shape_slot(Variants, #Some)) {
         true => struct(SomeSlots),
         false => struct(Missing),
@@ -623,225 +801,212 @@ Deno.test("static type reflection feeds shape helpers", async () => {
   assertStringIncludes(useReflected?.params[1]?.type ?? "", "reflected_some");
 });
 
-Deno.test("ecs query accepts matching imported world stores", async () => {
-  const checked = await checkSource(`
+Deno.test("generic empty derives primitive and product zero values", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(`
+      const core = @import("prelude.core");
+      type fn point() -> type {
+        let Point = {x: i32, visible: bool};
+        struct(Point)
+      }
+      pub fn main() -> i32 {
+        let p = core.empty(point);
+        let visible_value = match p.visible { true => 100, false => p.x };
+        core.empty(i32) + visible_value
+      }
+    `, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as () => number)(), 0);
+});
+
+Deno.test("explicit empty member overrides derived product empty", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(`
+      const core = @import("prelude.core");
+      type fn point() -> type {
+        let Point = {x: i32};
+        struct(Point)
+      }
+      fn point.empty() -> point { Point {x: 7} }
+      pub fn main() -> i32 {
+        let p = core.empty(point);
+        p.x
+      }
+    `, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as () => number)(), 7);
+});
+
+Deno.test("generic empty rejects unsupported sum values", async () => {
+  await assertThrowsCompile(
+    `
+      const core = @import("prelude.core");
+      type fn maybe_i32() -> type {
+        let None = {};
+        let Some = {value: i32};
+        union(None, Some)
+      }
+      pub fn main() -> maybe_i32 { core.empty(maybe_i32) }
+    `,
+    "type.unknown_type_member",
+    { resolveModule: resolveProjectModule },
+  );
+});
+
+Deno.test("ecs sparse query accepts canonical sparse worlds", async () => {
+  const checked = await checkSource(
+    `
     const ecs = @import("engine.ecs");
     type fn transform2d() -> type { i32 }
     type fn velocity2d() -> type { i32 }
-    type fn entity2d() -> type { i32 }
-    type fn transform_store() -> type { ecs.component_store(3, transform2d) }
-    type fn velocity_store() -> type { ecs.component_store(1, velocity2d) }
-    type fn entity_store() -> type { ecs.component_store(3, entity2d) }
-    type fn world() -> type {
-      let World = [entities: entity_store, transforms: transform_store, velocities: velocity_store];
-      struct(World)
-    }
-    const movement_query = [
-      transforms: [count: 3, component: transform2d],
-    ];
-    fn movement_system(const _query: ecs.query(world, movement_query), world: world) -> world {
+    const components = {transform: transform2d, velocity: velocity2d};
+    const movement_query = {transform: transform2d, velocity: velocity2d};
+    type fn world() -> type { ecs.sparse_world(3, components) }
+    pub fn main(world: world) -> world {
       world
     }
-    pub fn main(world: world) -> world {
-      movement_system(ecs.query(world, movement_query), world)
-    }
-  `, { resolveModule: resolveProjectModule });
+  `,
+    { resolveModule: resolveProjectModule },
+  );
   const main = checked.program.declarations.find((decl): decl is FnDecl =>
     decl.kind === "fn" && decl.name === "main"
   );
   assertStringIncludes(main?.params[0]?.type ?? "", "world");
 });
 
-Deno.test("ecs query2 iter3 pipeline typechecks, runs, and fuses", async () => {
-  const source = `
-    const ecs = @import("engine.ecs");
-    type fn entity() -> type {
-      let FoldEntity = [left: i32, right: i32, id: i32];
-      struct(FoldEntity)
-    }
-    type fn left_component() -> type {
-      let LeftComponent = [value: i32];
-      struct(LeftComponent)
-    }
-    type fn right_component() -> type {
-      let RightComponent = [value: i32];
-      struct(RightComponent)
-    }
-    type fn entity_store() -> type { ecs.component_store(3, entity) }
-    type fn left_store() -> type { ecs.component_store(3, left_component) }
-    type fn right_store() -> type { ecs.component_store(3, right_component) }
-    type fn world() -> type {
-      let World = [entities: entity_store, lefts: left_store, rights: right_store];
-      struct(World)
-    }
-    const fold_query = [
-      lefts: [count: 3, component: left_component],
-      rights: [count: 3, component: right_component],
-    ];
-    fn left_index(entity: entity) -> i32 { entity.left }
-    fn right_index(entity: entity) -> i32 { entity.right }
-    fn keep(row: ecs.query2_row(entity, left_component, right_component)) -> bool {
-      row.entity.id > 1
-    }
-    fn row_value(row: ecs.query2_row(entity, left_component, right_component)) -> i32 {
-      row.entity.id + row.a.value + row.b.value
-    }
-    fn add(acc: i32, value: i32) -> i32 {
-      acc + value
-    }
-    fn seed_world() -> world {
-      [
-        entities: [
-          FoldEntity [left: 0, right: 2, id: 1],
-          FoldEntity [left: 1, right: 1, id: 2],
-          FoldEntity [left: 2, right: 0, id: 3]
-        ],
-        lefts: [
-          LeftComponent [value: 10],
-          LeftComponent [value: 20],
-          LeftComponent [value: 30]
-        ],
-        rights: [
-          RightComponent [value: 100],
-          RightComponent [value: 200],
-          RightComponent [value: 300]
-        ]
-      ]
-    }
-    pub fn main() -> i32 {
-      let world = seed_world();
-      ecs.iter3.fold(
-        ecs.iter3.map(
-          ecs.iter3.filter(
-            ecs.query2.iter3(
-              ecs.query(world, fold_query),
-              world.entities,
-              world.lefts,
-              world.rights,
-              left_index,
-              right_index
-            ),
-            keep
-          ),
-          row_value
-        ),
-        0,
-        add
-      )
-    }
-  `;
-  await checkSource(source, { resolveModule: resolveProjectModule });
-  const wat = await watFromSource(source, { resolveModule: resolveProjectModule });
-  assert(!wat.includes("call $query2.iter3"));
-  assert(!wat.includes("call $iter3.filter"));
-  assert(!wat.includes("call $iter3.map"));
-  assert(!wat.includes("call $iter3.fold"));
-  const instance = new WebAssembly.Instance(
-    new WebAssembly.Module(await wasmFromSource(source, { resolveModule: resolveProjectModule })),
-  );
-  assertEquals((instance.exports.main as () => number)(), 355);
-});
-
-Deno.test("ecs query rejects missing imported world store", async () => {
+Deno.test("ecs sparse query rejects missing sparse component slots", async () => {
   await assertThrowsCompile(
     `
       const ecs = @import("engine.ecs");
       type fn transform2d() -> type { i32 }
       type fn sprite2d() -> type { i32 }
-      type fn entity2d() -> type { i32 }
-      type fn transform_store() -> type { ecs.component_store(3, transform2d) }
-      type fn sprite_store() -> type { ecs.component_store(3, sprite2d) }
-      type fn entity_store() -> type { ecs.component_store(3, entity2d) }
-      type fn world() -> type {
-        let World = [entities: entity_store, transforms: transform_store];
-        struct(World)
-      }
-      const render_query = [
-        sprites: [count: 3, component: sprite2d],
-      ];
-      pub fn main(world: ecs.query(world, render_query)) -> world { world }
+      const components = {
+        transform: transform2d,
+      };
+      const render_query = {
+        sprite: sprite2d,
+      };
+      const render_query_token: ecs.sparse_query(ecs.sparse_world(3, components), render_query) = {};
+      pub fn main() -> i32 { 0 }
     `,
     "type.require",
     { resolveModule: resolveProjectModule },
   );
 });
 
-Deno.test("ecs query rejects imported world store type mismatch", async () => {
+Deno.test("ecs sparse world seeds from partial entity rows", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(`
+      const ecs = @import("engine.ecs");
+      type fn transform2d() -> type { let Transform2d = {x: i32}; struct(Transform2d) }
+      type fn velocity2d() -> type { let Velocity2d = {x: i32}; struct(Velocity2d) }
+      const components = {transform: transform2d, velocity: velocity2d};
+      pub fn main() -> i32 {
+        let w = ecs.sparse_world.empty(components)
+          \\w -> ecs.entity.add(w, {transform: Transform2d {x: 1}, velocity: Velocity2d {x: 2}})
+          \\w -> ecs.entity.add(w, {transform: Transform2d {x: 10}})
+          \\w -> ecs.entity.add(w, {velocity: Velocity2d {x: 20}});
+        match w.velocity.present[1] {
+          true => 0,
+          false => w.transform.values[1].x + w.velocity.values[1].x,
+        }
+      }
+    `, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as () => number)(), 10);
+});
+
+Deno.test("const declarations cannot be annotated as type", async () => {
+  await assertThrowsCompile(
+    `
+      type fn transform2d() -> type { let Transform2d = {x: i32}; struct(Transform2d) }
+      const components: type = {transform: transform2d};
+      pub fn main() -> i32 { 0 }
+    `,
+    "type.const_dictionary_type",
+  );
+});
+
+Deno.test("ecs sparse world entity rows reject extra fields", async () => {
   await assertThrowsCompile(
     `
       const ecs = @import("engine.ecs");
-      type fn transform2d() -> type { i32 }
-      type fn other_transform2d() -> type { bool }
-      type fn entity2d() -> type { i32 }
-      type fn transform_store() -> type { ecs.component_store(3, transform2d) }
-      type fn other_transform_store() -> type { ecs.component_store(3, other_transform2d) }
-      type fn entity_store() -> type { ecs.component_store(3, entity2d) }
-      type fn world() -> type {
-        let World = [entities: entity_store, transforms: transform_store];
-        struct(World)
+      type fn transform2d() -> type { let Transform2d = {x: i32}; struct(Transform2d) }
+      const components = {transform: transform2d};
+      pub fn main() -> i32 {
+        let w = ecs.sparse_world.empty(components)
+          \\w -> ecs.entity.add(w, {transform: Transform2d {x: 1}, sprite: 1});
+        0
       }
-      const bad_query = [
-        transforms: [count: 3, component: other_transform2d],
-      ];
-      pub fn main(world: ecs.query(world, bad_query)) -> world { world }
     `,
     "type.require",
     { resolveModule: resolveProjectModule },
   );
 });
 
-Deno.test("ecs query requires imported world store order", async () => {
+Deno.test("ecs sparse world entity rows reject mismatched component values", async () => {
   await assertThrowsCompile(
     `
       const ecs = @import("engine.ecs");
-      type fn transform2d() -> type { i32 }
-      type fn velocity2d() -> type { i32 }
-      type fn entity2d() -> type { i32 }
-      type fn transform_store() -> type { ecs.component_store(3, transform2d) }
-      type fn velocity_store() -> type { ecs.component_store(1, velocity2d) }
-      type fn entity_store() -> type { ecs.component_store(3, entity2d) }
-      type fn world() -> type {
-        let World = [entities: entity_store, transforms: transform_store, velocities: velocity_store];
-        struct(World)
+      type fn transform2d() -> type { let Transform2d = {x: i32}; struct(Transform2d) }
+      const components = {transform: transform2d};
+      pub fn main() -> i32 {
+        let w = ecs.sparse_world.empty(components)
+          \\w -> ecs.entity.add(w, {transform: true});
+        0
       }
-      const reversed_query = [
-        velocities: [count: 1, component: velocity2d],
-        transforms: [count: 3, component: transform2d],
-      ];
-      pub fn main(world: ecs.query(world, reversed_query)) -> world { world }
     `,
     "type.require",
     { resolveModule: resolveProjectModule },
   );
+});
+
+Deno.test("ecs sparse world entity add leaves fixed storage unchanged after capacity", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(`
+      const ecs = @import("engine.ecs");
+      type fn marker() -> type { let Marker = {tag: i32}; struct(Marker) }
+      const components = {marker: marker};
+      pub fn main() -> i32 {
+        let w = ecs.sparse_world.empty(components)
+          \\w -> ecs.entity.add(w, {marker: Marker {tag: 1}})
+          \\w -> ecs.entity.add(w, {marker: Marker {tag: 2}})
+          \\w -> ecs.entity.add(w, {marker: Marker {tag: 3}})
+          \\w -> ecs.entity.add(w, {marker: Marker {tag: 4}});
+        w.next_entity_id + w.marker.values[2].tag
+      }
+    `, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as () => number)(), 7);
 });
 
 Deno.test("shape and type reflection diagnostics are focused", async () => {
   await assertThrowsCompile(
-    "type fn bad(A: type) -> type { let Shape = [x: A]; let X = @shape_slot(Shape, #y); let Out = [value: X]; struct(Out) } pub fn f(x: bad(i32)) -> i32 { 0 }",
+    "type fn bad(A: type) -> type { let Shape = {x: A}; let X = @shape_slot(Shape, #y); let Out = {value: X}; struct(Out) } pub fn f(x: bad(i32)) -> i32 { 0 }",
     "type.unknown_shape_slot",
   );
   await assertThrowsCompile(
-    "type fn option(A: type) -> type { let None = []; union(None) } type fn bad(A: type) -> type { @type_variant_slots(option(A), #Some) } pub fn f(x: bad(i32)) -> i32 { 0 }",
+    "type fn option(A: type) -> type { let None = {}; union(None) } type fn bad(A: type) -> type { @type_variant_slots(option(A), #Some) } pub fn f(x: bad(i32)) -> i32 { 0 }",
     "type.unknown_type_variant",
   );
   await assertThrowsCompile(
-    "type fn bad(A: type) -> type { let Shape = [x: A, y: A]; let Renamed = @shape_rename(Shape, [x: #z, y: #z]); struct(Renamed) } pub fn f(x: bad(i32)) -> i32 { 0 }",
+    "type fn bad(A: type) -> type { let Shape = {x: A, y: A}; let Renamed = @shape_rename(Shape, {x: #z, y: #z}); struct(Renamed) } pub fn f(x: bad(i32)) -> i32 { 0 }",
     "type.shape_rename_duplicate",
   );
   await assertThrowsCompile(
-    "type fn bad(A: type) -> type { let Count = @shape_count(A); let Out = [Count*i32]; struct(Out) } pub fn f(x: bad(i32)) -> i32 { 0 }",
+    "type fn bad(A: type) -> type { let Count = @shape_count(A); let Out = {Count*i32}; struct(Out) } pub fn f(x: bad(i32)) -> i32 { 0 }",
     "type.shape_builtin_arg",
   );
   await assertThrowsCompile(
-    "type fn not_bool(Key: const, Value: const) -> type { Value } type fn bad(A: type) -> type { let Shape = [x: A]; let Filtered = @shape_filter(Shape, not_bool); struct(Filtered) } pub fn f(x: bad(i32)) -> i32 { 0 }",
+    "type fn not_bool(Key: const, Value: const) -> type { Value } type fn bad(A: type) -> type { let Shape = {x: A}; let Filtered = @shape_filter(Shape, not_bool); struct(Filtered) } pub fn f(x: bad(i32)) -> i32 { 0 }",
     "type.shape_filter",
   );
 });
 
 Deno.test("checks type function result kinds", async () => {
   await checkSource(`
-    type fn point() -> struct { let Point = [x: i32]; struct(Point) }
-    type fn option(A: type) -> union { let None = []; let Some = [value: A]; union(None, Some) }
+    type fn point() -> struct { let Point = {x: i32}; struct(Point) }
+    type fn option(A: type) -> union { let None = {}; let Some = {value: A}; union(None, Some) }
     type fn id() -> type { i32 }
   `);
   await assertThrowsCompile(
@@ -849,17 +1014,17 @@ Deno.test("checks type function result kinds", async () => {
     "type.result_kind",
   );
   await assertThrowsCompile(
-    "type fn bad() -> struct { let None = []; union(None) }",
+    "type fn bad() -> struct { let None = {}; union(None) }",
     "type.result_kind",
   );
   await assertThrowsCompile(
-    "type fn bad() -> union { let Point = [x: i32]; struct(Point) }",
+    "type fn bad() -> union { let Point = {x: i32}; struct(Point) }",
     "type.result_kind",
   );
   await assertThrowsCompile(
     `
-      type fn choose(i32: type) -> struct { let Box = [value: i32]; struct(Box) }
-      type fn choose(bool: type) -> union { let None = []; union(None) }
+      type fn choose(i32: type) -> struct { let Box = {value: i32}; struct(Box) }
+      type fn choose(bool: type) -> union { let None = {}; union(None) }
     `,
     "type.clause_result_kind",
   );
@@ -875,13 +1040,15 @@ Deno.test("operator descriptors lower custom infix calls", async () => {
       operator(#infixl, 60, "+", T.add)
     }
     type fn box() -> struct {
-      let Box = [value: i32];
+      let Box = {value: i32};
       struct(Box)
     }
-    fn box.add(a: box, b: box) -> box { Box [value: a.value + b.value] }
+    fn box.add(a: box, b: box) -> box { Box {value: a.value + b.value} }
     pub fn main(a: box, b: box) -> box { a + b }
   `);
-  const main = checked.program.declarations.find((decl) => decl.kind === "fn" && decl.name === "main");
+  const main = checked.program.declarations.find((decl) =>
+    decl.kind === "fn" && decl.name === "main"
+  );
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "call");
   if (main.body.expr?.kind === "call" && main.body.expr.callee.kind === "var") {
@@ -901,22 +1068,24 @@ Deno.test("operator descriptors lower custom comparison and append calls", async
       operator(#infixr, 55, "<>", T.append)
     }
     type fn box() -> struct {
-      let Box = [value: i32];
+      let Box = {value: i32};
       struct(Box)
     }
     fn box.eql(a: box, b: box) -> bool { a.value == b.value }
     fn box.lt(a: box, b: box) -> bool { a.value < b.value }
-    fn box.append(a: box, b: box) -> box { Box [value: a.value + b.value] }
+    fn box.append(a: box, b: box) -> box { Box {value: a.value + b.value} }
     pub fn eq(a: box, b: box) -> bool { a == b }
     pub fn lt(a: box, b: box) -> bool { a < b }
     pub fn append(a: box, b: box) -> box { a <> b }
   `);
   const callees = checked.program.declarations
     .filter((decl) => decl.kind === "fn" && decl.public)
-    .map((decl) => decl.kind === "fn" && decl.body.expr?.kind === "call" &&
-      decl.body.expr.callee.kind === "var"
-      ? decl.body.expr.callee.name
-      : "");
+    .map((decl) =>
+      decl.kind === "fn" && decl.body.expr?.kind === "call" &&
+        decl.body.expr.callee.kind === "var"
+        ? decl.body.expr.callee.name
+        : ""
+    );
   assertEquals(callees, ["box.eql", "box.lt", "box.append"]);
 });
 
@@ -924,7 +1093,9 @@ Deno.test("operator parser honors precedence for extended symbols", async () => 
   const checked = await checkSource(`
     pub fn main() -> i32 { 1 + 2 * 3 % 4 }
   `);
-  const main = checked.program.declarations.find((decl) => decl.kind === "fn" && decl.name === "main");
+  const main = checked.program.declarations.find((decl) =>
+    decl.kind === "fn" && decl.name === "main"
+  );
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "binary");
   if (main.body.expr?.kind === "binary") assertEquals(main.body.expr.op, "+");
@@ -932,9 +1103,9 @@ Deno.test("operator parser honors precedence for extended symbols", async () => 
 
 Deno.test("parses type function examples", async () => {
   const program = await parse(`
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-    type fn maybe(A: type) { let Nothing = []; let Some = [value: A]; union(Nothing, Some) }
-    type fn why(A: count) { let Why = [fst: i32, A*i32]; struct(Why) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+    type fn maybe(A: type) { let Nothing = {}; let Some = {value: A}; union(Nothing, Some) }
+    type fn why(A: count) { let Why = {fst: i32, A*i32}; struct(Why) }
   `);
   assertEquals(program.declarations.map((decl) => decl.kind === "type" ? decl.name : ""), [
     "point",
@@ -945,27 +1116,27 @@ Deno.test("parses type function examples", async () => {
 
 Deno.test("checks product constructor expressions", async () => {
   await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    fn make(x: i32) -> box { Box [value: x] }
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    fn make(x: i32) -> box { Box {value: x} }
     pub fn main() -> i32 { make(1).value }
   `);
   await assertThrowsCompile(
     `
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    fn make(x: i32) -> box { Box [] }
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    fn make(x: i32) -> box { Box {} }
   `,
     "type.constructor_missing_slot",
   );
   await assertThrowsCompile(
     `
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    fn make(x: i32) -> box { Box [value: x, other: x] }
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    fn make(x: i32) -> box { Box {value: x, other: x} }
   `,
     "type.constructor_unknown_slot",
   );
   await assertThrowsCompile(
     `
-    fn make(x: i32) -> i32 { Missing [value: x] }
+    fn make(x: i32) -> i32 { Missing {value: x} }
   `,
     "type.unknown_constructor",
   );
@@ -973,7 +1144,7 @@ Deno.test("checks product constructor expressions", async () => {
 
 Deno.test("reports type function diagnostics", async () => {
   await assertThrowsCompile(
-    "type fn bad(A: count) { let Bad = [x: A, A*i32]; struct(Bad) }",
+    "type fn bad(A: count) { let Bad = {x: A, A*i32}; struct(Bad) }",
     "type.param_kind_conflict",
   );
   await assertThrowsCompile("type fn loop() { loop() }", "type.recursive_type_fn");
@@ -1003,19 +1174,19 @@ Deno.test("reports type function diagnostics", async () => {
     "type.unsupported_expr",
   );
   await assertThrowsCompile(
-    "type fn bad(a: type) { let Bad = [value: a]; struct(Bad) }",
+    "type fn bad(a: type) { let Bad = {value: a}; struct(Bad) }",
     "type.type_param_casing",
   );
   await assertThrowsCompile(
-    "type fn Pair(A: type) { let Pair = [fst: A, snd: A]; struct(Pair) }",
+    "type fn Pair(A: type) { let Pair = {fst: A, snd: A}; struct(Pair) }",
     "parse.syntax",
   );
   await assertThrowsCompile(
-    "type fn pair(A: type) { let Pair = [fst: A, snd: A]; struct(Pair) } fn f(x: Pair(i32)) -> i32 { 1 }",
+    "type fn pair(A: type) { let Pair = {fst: A, snd: A}; struct(Pair) } fn f(x: Pair(i32)) -> i32 { 1 }",
     "type.type_fn_reference_casing",
   );
   await checkSource(
-    "type fn pair(A: type) { let Pair = [fst: A, snd: A]; struct(Pair) } fn f(x: pair(i32)) -> i32 { 1 }",
+    "type fn pair(A: type) { let Pair = {fst: A, snd: A}; struct(Pair) } fn f(x: pair(i32)) -> i32 { 1 }",
   );
 });
 
@@ -1156,8 +1327,8 @@ Deno.test("namespace source imports qualify values and types", async () => {
     [
       "prelude.std",
       `
-        type fn lane4_i32() { [4*i32] }
-        type fn pair(A: type, B: type) { [fst: A, snd: B] }
+        type fn lane4_i32() { {4*i32} }
+        type fn pair(A: type, B: type) { {fst: A, snd: B} }
         fn inc_local(x: i32) -> i32 { x + 1 }
         pub fn inc(x: i32) -> i32 { inc_local(x) }
         pub fn map4_i32(f: fn(x: i32) -> i32, xs: lane4_i32) -> lane4_i32 {
@@ -1184,7 +1355,7 @@ Deno.test("namespace source imports qualify values and types", async () => {
       const std = @import("prelude.std");
       const local = @import("./local_module.fig");
       pub fn main() -> std.lane4_i32 { std.map4_i32(std.inc, [1, 2, 3, 4]) }
-      fn pair_value() -> std.pair(i32, i32) { [1, 2] }
+      fn pair_value() -> std.pair(i32, i32) { {fst: 1, snd: 2} }
       fn local_value() -> i32 { local.use_helper(1) }
     `,
     { resolveModule },
@@ -1207,12 +1378,79 @@ Deno.test("namespace source imports qualify values and types", async () => {
   );
 });
 
+Deno.test("destructured source imports select exact declarations", async () => {
+  const modules = new Map([
+    [
+      "prelude.array",
+      `
+        type fn lane4_i32() -> type { {4*i32} }
+        fn inc_local(x: i32) -> i32 { x + 1 }
+        pub fn lane4_add_i32(xs: lane4_i32, ys: lane4_i32) -> lane4_i32 {
+          [xs[0] + ys[0], xs[1] + ys[1], xs[2] + ys[2], xs[3] + ys[3]]
+        }
+        pub fn map4_i32(f: fn(x: i32) -> i32, xs: lane4_i32) -> lane4_i32 {
+          [f(inc_local(xs[0])), f(xs[1]), f(xs[2]), f(xs[3])]
+        }
+      `,
+    ],
+  ]);
+  const resolveModule = (specifier: string) => modules.get(specifier);
+
+  const parsed = await parse('const { map4_i32, } = @import("prelude.array");');
+  assertEquals(parsed.sourceImports?.[0].bindings?.map((binding) => binding.name), ["map4_i32"]);
+
+  const checked = await checkSource(
+    `
+      const { map4_i32, lane4_add_i32 } = @import("prelude.array");
+      fn inc(x: i32) -> i32 { x + 1 }
+      pub fn main() -> i32 {
+        let xs = map4_i32(inc, [1, 2, 3, 4]);
+        lane4_add_i32(xs, xs)[0]
+      }
+    `,
+    { resolveModule },
+  );
+
+  const names = checked.program.declarations.map((decl) => decl.name);
+  assert(names.includes("map4_i32"));
+  assert(names.includes("lane4_add_i32"));
+  assert(names.some((name) => name.endsWith(".inc_local")));
+  assert(!names.includes("inc_local"));
+});
+
+Deno.test("destructured source imports diagnose invalid bindings and conflicts", async () => {
+  const modules = new Map([
+    ["prelude.array", "pub fn map4_i32(x: i32) -> i32 { x }"],
+  ]);
+  const resolveModule = (specifier: string) => modules.get(specifier);
+
+  await assertThrowsCompile(
+    'const { missing } = @import("prelude.array"); pub fn main() -> i32 { 1 }',
+    "module.missing_binding",
+    { resolveModule },
+  );
+  await assertThrowsCompile(
+    'const { map4_i32, map4_i32 } = @import("prelude.array"); pub fn main() -> i32 { 1 }',
+    "module.duplicate_binding",
+    { resolveModule },
+  );
+  await assertThrowsCompile(
+    'const { map4_i32 } = @import("prelude.array"); fn map4_i32() -> i32 { 1 }',
+    "module.duplicate_import",
+    { resolveModule },
+  );
+  await assertThrowsCompile(
+    "const { map4_i32 } = 1; pub fn main() -> i32 { 1 }",
+    "parse.lower",
+  );
+});
+
 Deno.test("namespace source imports support nested qualified references", async () => {
   const modules = new Map([
     [
       "prelude.layout",
       `
-        type fn lane4_i32() -> type { [4*i32] }
+        type fn lane4_i32() -> type { {4*i32} }
       `,
     ],
     [
@@ -1250,7 +1488,7 @@ Deno.test("merge source import alias is ordinary namespace alias", async () => {
     [
       "prelude.array",
       `
-        type fn lane4_i32() -> type { [4*i32] }
+        type fn lane4_i32() -> type { {4*i32} }
         pub fn map4_i32(x: i32) -> i32 { x + 1 }
       `,
     ],
@@ -1327,13 +1565,13 @@ Deno.test("namespace source imports qualify static slots fields and type-block n
       "layout.lib",
       `
         type fn pair() -> type {
-          let Pair = [left: i32, right: i32];
+          let Pair = {left: i32, right: i32};
           struct(Pair)
         }
-        type fn triple() -> type { [3*i32] }
-        const default_pair = [left: 7, right: 11]
+        type fn triple() -> type { {3*i32} }
+        const default_pair = {left: 7, right: 11}
         pub fn build() -> triple {
-          [for I in 0 .. 3: @field(default_pair, #right) + I]
+          [11, 12, 13]
         }
       `,
     ],
@@ -1389,6 +1627,171 @@ Deno.test("tracks owned values and rejects move-after-pass", async () => {
     }
   `,
     "ownership.use_after_move",
+  );
+});
+
+Deno.test("supports call-scoped read borrows", async () => {
+  const program = await parse(`
+    type fn pair() -> struct {
+      let Pair = {a: i32, b: i32};
+      struct(Pair)
+    }
+    fn sum_twice(p: &(pair)) -> i32 {
+      p.a + p.b + p.a
+    }
+    fn id_pair(p: pair) -> pair { p }
+    pub fn main() -> i32 {
+      let p: pair = {a: 10, b: 3};
+      let first = sum_twice(&p);
+      let second = sum_twice(&p);
+      first + second + id_pair(p).a
+    }
+  `);
+  const main = program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "main"
+  );
+  assert(main?.body.statements[1]?.kind === "let");
+  assertEquals(main.body.statements[1].value.kind, "call");
+  await checkSource(`
+    type fn pair() -> struct {
+      let Pair = {a: i32, b: i32};
+      struct(Pair)
+    }
+    fn sum_twice(p: &(pair)) -> i32 {
+      p.a + p.b + p.a
+    }
+    fn id_pair(p: pair) -> pair { p }
+    pub fn main() -> i32 {
+      let p: pair = {a: 10, b: 3};
+      let first = sum_twice(&p);
+      let second = sum_twice(&p);
+      first + second + id_pair(p).a
+    }
+  `);
+  const wat = await watFromSource(`
+    type fn pair() -> struct {
+      let Pair = {a: i32, b: i32};
+      struct(Pair)
+    }
+    fn sum_twice(p: &(pair)) -> i32 {
+      p.a + p.b + p.a
+    }
+    pub fn main() -> i32 {
+      let p: pair = {a: 10, b: 3};
+      sum_twice(&p)
+    }
+  `);
+  assertStringIncludes(wat, `(func $sum_twice (param $p$a i32) (param $p$b i32) (result i32)`);
+});
+
+Deno.test("rejects borrows outside borrowed parameter calls", async () => {
+  await assertThrowsCompile(
+    `
+    fn owned(x: i32) -> i32 { x }
+    pub fn main() -> i32 {
+      let x = 1;
+      owned(&x)
+    }
+  `,
+    "ownership.borrow_expected",
+  );
+  await assertThrowsCompile(
+    `
+    fn owned(x: i32) -> i32 { x }
+    fn borrowed(x: &(i32)) -> i32 {
+      owned(x)
+    }
+    pub fn main() -> i32 {
+      let x = 1;
+      borrowed(&x)
+    }
+  `,
+    "ownership.borrow_to_owned",
+  );
+  await assertThrowsCompile(
+    `
+    pub fn main() -> i32 {
+      let x = 1;
+      let y = &x;
+      x
+    }
+  `,
+    "ownership.borrow_expected",
+  );
+  await assertThrowsCompile(
+    `
+    fn bad(x: i32) -> &(i32) { &x }
+  `,
+    "borrow.position",
+  );
+});
+
+Deno.test("supports frozen references and static frozen collection literals", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn holder() -> type {
+      let Holder = {xs: #(layout.inline_array(3, i32))};
+      struct(Holder)
+    }
+    pub fn main() -> i32 {
+      let xs: #(layout.inline_array(3, i32)) = #[10, 20, 30];
+      let h: holder = {xs: xs};
+      xs[1] + h.xs[2]
+    }
+  `;
+  await checkSource(source, { resolveModule: resolveProjectModule });
+  const wat = await watFromSource(source, { resolveModule: resolveProjectModule });
+  assertStringIncludes(wat, "(data (i32.const");
+  assertStringIncludes(wat, "i32.load");
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 50);
+});
+
+Deno.test("freezes owned values through an explicit arena token", async () => {
+  const source = `
+    const core = @import("prelude.core");
+    type fn inline_array(N: count, A: type) -> type {
+      let InlineArray = {N*A};
+      struct(InlineArray)
+    }
+    pub fn main(arena: core.frozen_arena) -> i32 {
+      let value: inline_array(3, i32) = <4, 5, 6>;
+      let arena2, frozen = core.freeze(arena, value);
+      frozen[2] + arena2
+    }
+  `;
+  await checkSource(source, { resolveModule: resolveProjectModule });
+  const wat = await watFromSource(source, { resolveModule: resolveProjectModule });
+  assertStringIncludes(wat, "i32.store");
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(2048), 2066);
+});
+
+Deno.test("rejects frozen references where owned values are required", async () => {
+  await assertThrowsCompile(
+    `
+      const layout = @import("prelude.layout");
+      fn take(xs: layout.inline_array(3, i32)) -> i32 { xs[0] }
+      pub fn bad() -> i32 {
+        let xs: #(layout.inline_array(3, i32)) = #[1, 2, 3];
+        take(xs)
+      }
+    `,
+    "ownership.frozen_to_owned",
+    { resolveModule: resolveProjectModule },
+  );
+  await assertThrowsCompile(
+    `
+      pub fn bad() -> i32 {
+        let xs = #[1, 2, 3];
+        1
+      }
+    `,
+    "frozen.expected_type",
   );
 });
 
@@ -1538,8 +1941,8 @@ Deno.test("pipe bind evaluates left once and binds flattened products", async ()
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
       await wasmFromSource(`
-    type fn pair() { let Pair = [left: i32, right: i32]; struct(Pair) }
-    fn make_pair(x: i32) -> pair { Pair [left: x, right: x + 1] }
+    type fn pair() { let Pair = {left: i32, right: i32}; struct(Pair) }
+    fn make_pair(x: i32) -> pair { Pair {left: x, right: x + 1} }
     pub fn main() -> i32 {
       make_pair(4) \\p -> p.left + p.right
     }
@@ -1551,7 +1954,7 @@ Deno.test("pipe bind evaluates left once and binds flattened products", async ()
 
 Deno.test("$ const function helper sugar is unary and rejects runtime captures", async () => {
   const wat = await watFromSource(`
-    type fn lane4_i32() { let Lane4I32 = [4*i32]; struct(Lane4I32) }
+    type fn lane4_i32() { let Lane4I32 = {4*i32}; struct(Lane4I32) }
     fn map4_i32(const f: fn(x: i32) -> i32, xs: lane4_i32) -> lane4_i32 {
       [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
     }
@@ -1565,7 +1968,7 @@ Deno.test("$ const function helper sugar is unary and rejects runtime captures",
   );
   await assertThrowsCompile(
     `
-    type fn lane4_i32() { let Lane4I32 = [4*i32]; struct(Lane4I32) }
+    type fn lane4_i32() { let Lane4I32 = {4*i32}; struct(Lane4I32) }
     fn map4_i32(const f: fn(x: i32) -> i32, xs: lane4_i32) -> lane4_i32 {
       [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
     }
@@ -1580,7 +1983,7 @@ Deno.test("$ const function helper sugar is unary and rejects runtime captures",
 
 Deno.test("n-way fork and product result destructuring bind local result slots", async () => {
   const wat = await watFromSource(`
-    type fn pair() { let Pair = [first: i32, second: i32]; struct(Pair) }
+    type fn pair() { let Pair = {first: i32, second: i32}; struct(Pair) }
     fn make_pair() -> pair { [2, 3] }
     fn sink(x: i32) -> i32 { x }
     pub fn main() -> i32 {
@@ -1616,7 +2019,7 @@ Deno.test("n-way fork and product result destructuring bind local result slots",
   );
   await assertThrowsCompile(
     `
-    type fn pair() { let Pair = [first: i32, second: i32]; struct(Pair) }
+    type fn pair() { let Pair = {first: i32, second: i32}; struct(Pair) }
     fn make_pair() -> pair { [2, 3] }
     pub fn main() -> i32 {
       let a, b, c = make_pair();
@@ -1630,7 +2033,7 @@ Deno.test("n-way fork and product result destructuring bind local result slots",
 Deno.test("memory load intrinsics borrow memory but stores consume memory tokens", async () => {
   await checkSource(`
     type fn ptr(A: type) -> type {
-      let Ptr = [addr: i32];
+      let Ptr = {addr: i32};
       struct(Ptr)
     }
     fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
@@ -1655,7 +2058,7 @@ Deno.test("memory load intrinsics borrow memory but stores consume memory tokens
   await assertThrowsCompile(
     `
     type fn ptr(A: type) -> type {
-      let Ptr = [addr: i32];
+      let Ptr = {addr: i32};
       struct(Ptr)
     }
     fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
@@ -1683,33 +2086,33 @@ Deno.test("memory load intrinsics borrow memory but stores consume memory tokens
 
 Deno.test("models type contracts with explicit const dictionaries", async () => {
   const parsed = await checkSource(`
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn option(A: type) { let None = []; let Some = [value: A]; union(None, Some) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn option(A: type) { let None = {}; let Some = {value: A}; union(None, Some) }
     fn requires_product(T) -> bool !{io} { @type_is_product(T) }
     type fn eq(T: type) {
-      let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool];
+      let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool};
       match requires_product(T) {
         true => struct(Eq),
         false => @compile_error("eq requires A product type"),
       }
     }
     type fn functor(F: type) {
-      let Functor = [map: fn(x: F) -> F];
+      let Functor = {map: fn(x: F) -> F};
       match @type_has_slot(F, #value) {
         true => struct(Functor),
         false => @compile_error("functor requires value slot"),
       }
     }
     type fn applicative(F: type) {
-      let Applicative = [pure: fn(x: i32) -> F, apply: fn(f: F, x: F) -> F];
+      let Applicative = {pure: fn(x: i32) -> F, apply: fn(f: F, x: F) -> F};
       match @type_slot_type(F, #value) {
         i32 => struct(Applicative),
         _ => @compile_error("applicative requires i32 value"),
       }
     }
     type fn monad(F: type) {
-      let Monad = [bind: fn(x: F) -> F];
+      let Monad = {bind: fn(x: F) -> F};
       match @type_is_product(F) {
         true => struct(Monad),
         false => @compile_error("monad requires product"),
@@ -1717,25 +2120,25 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
     }
     fn eql_point(a: point, b: point) -> bool { a.x == b.x }
     fn neq_point(a: point, b: point) -> bool { a.x != b.x }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    fn pure_box(x: i32) -> box { [value: x] }
-    fn apply_box(f: box, x: box) -> box { [value: f.value + x.value] }
-    fn bind_box(x: box) -> box { [value: x.value + 10] }
-    const point_eq: eq(point) = [eql: eql_point, neq: neq_point];
-    const box_functor: functor(box) = [map: map_box];
-    const box_applicative: applicative(box) = [pure: pure_box, apply: apply_box];
-    const box_monad: monad(box) = [bind: bind_box];
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    fn pure_box(x: i32) -> box { {value: x} }
+    fn apply_box(f: box, x: box) -> box { {value: f.value + x.value} }
+    fn bind_box(x: box) -> box { {value: x.value + 10} }
+    const point_eq: eq(point) = {eql: eql_point, neq: neq_point};
+    const box_functor: functor(box) = {map: map_box};
+    const box_applicative: applicative(box) = {pure: pure_box, apply: apply_box};
+    const box_monad: monad(box) = {bind: bind_box};
     fn same(dict: eq(point), a: point, b: point) -> i32 {
       match dict.eql(A, B) { true => 1, false => 0 }
     }
     fn mapped(dict: functor(box), x: box) -> i32 { dict.map(x).value }
-    fn applied(dict: applicative(box), x: i32) -> i32 { dict.apply(dict.pure(x), [value: 2]).value }
+    fn applied(dict: applicative(box), x: i32) -> i32 { dict.apply(dict.pure(x), {value: 2}).value }
     fn bound(dict: monad(box), x: box) -> i32 { dict.bind(x).value }
     pub fn main() -> i32 {
-      same(point_eq, Point [x: 1, y: 2], Point [x: 1, y: 2])
-        + mapped(box_functor, [value: 1])
+      same(point_eq, Point {x: 1, y: 2}, Point {x: 1, y: 2})
+        + mapped(box_functor, {value: 1})
         + applied(box_applicative, 2)
-        + bound(box_monad, [value: 3])
+        + bound(box_monad, {value: 3})
     }
   `);
   const eq = parsed.program.declarations.find((decl) => decl.kind === "type" && decl.name === "eq");
@@ -1748,27 +2151,27 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
     },
   );
   await checkSource(`
-    type fn option(A: type) { let None = []; let Some = [value: A]; union(None, Some) }
+    type fn option(A: type) { let None = {}; let Some = {value: A}; union(None, Some) }
     type fn has_some(T: type) {
-      let HasSome = [ok: i32];
+      let HasSome = {ok: i32};
       match @type_has_variant(T, #Some) == @type_variant_has_slot(T, #Some, #value) {
         true => struct(HasSome),
         false => @compile_error("expected Some value"),
       }
     }
     fn ok() -> i32 { 1 }
-    const dict: has_some(option(i32)) = [ok: ok];
+    const dict: has_some(option(i32)) = {ok: ok};
   `);
   await checkSource(`
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-    type fn eq(T: type) { let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool]; struct(Eq) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+    type fn eq(T: type) { let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool}; struct(Eq) }
     fn eql_point(a: point, b: point) -> bool { a.x == b.x }
     fn neq_point(a: point, b: point) -> bool { a.x != b.x }
-    const point_eq: eq(point) = [eql: eql_point, neq: neq_point];
+    const point_eq: eq(point) = {eql: eql_point, neq: neq_point};
     pub fn main() -> i32 { same(1) }
   `);
   await assertThrowsCompile(
-    "fn map_array(x: i32) -> i32 { x } const bad = [map: map_array];",
+    "fn map_array(x: i32) -> i32 { x } const bad = {map: map_array};",
     "type.const_annotation",
   );
   await assertThrowsCompile(
@@ -1777,18 +2180,18 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
   );
   await assertThrowsCompile(
     `
-    type fn eq(T: type) { let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool]; struct(Eq) }
-    const bad: eq(point) = [];
+    type fn eq(T: type) { let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool}; struct(Eq) }
+    const bad: eq(point) = {};
   `,
     "type.const_missing_slot",
   );
   await assertThrowsCompile(
     `
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-    type fn eq(T: type) { let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool]; struct(Eq) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+    type fn eq(T: type) { let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool}; struct(Eq) }
     fn eql_point(a: point, b: point) -> bool { a.x == b.x }
     fn neq_point(a: point, b: point) -> bool { a.x != b.x }
-    const bad: eq(point) = [eql: eql_point, neq: neq_point, other: eql_point];
+    const bad: eq(point) = {eql: eql_point, neq: neq_point, other: eql_point};
   `,
     "type.const_unknown_slot",
   );
@@ -1796,35 +2199,35 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
     `
     type fn id() { i32 }
     fn map_array(x: i32) -> i32 { x }
-    const bad: id = [map: map_array];
+    const bad: id = {map: map_array};
   `,
     "type.const_dictionary_type",
   );
   await assertThrowsCompile(
     `
     fn map_array(x: i32) -> i32 { x }
-    const bad: i32 = [map: map_array(1)];
+    const bad: i32 = {map: map_array(1)};
   `,
     "type.const_slot_function",
   );
   await assertThrowsCompile(
     `
-    const bad: i32 = [map: missing];
+    const bad: i32 = {map: missing};
   `,
     "type.unknown_const_function",
   );
   await assertThrowsCompile(
     `
     fn map_array(x: i32) -> i32 { x }
-    const bad: i32 = [map: map_array, map: map_array];
+    const bad: i32 = {map: map_array, map: map_array};
   `,
     "type.duplicate_const_slot",
   );
   await assertThrowsCompile(
     `
-    type fn option(A: type) { let None = []; let Some = [value: A]; union(None, Some) }
+    type fn option(A: type) { let None = {}; let Some = {value: A}; union(None, Some) }
     type fn eq(T: type) {
-      let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool];
+      let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool};
       match @type_is_product(T) {
         true => struct(Eq),
         false => @compile_error("eq requires A product type"),
@@ -1832,15 +2235,15 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
     }
     fn eql_i32(a: i32, b: i32) -> bool { A == B }
     fn neq_i32(a: i32, b: i32) -> bool { A != B }
-    const bad: eq(option(i32)) = [eql: eql_i32, neq: neq_i32];
+    const bad: eq(option(i32)) = {eql: eql_i32, neq: neq_i32};
   `,
     "type.compile_error",
   );
   await assertThrowsCompile(
     `
-    type fn option(A: type) { let None = []; let Some = [value: A]; union(None, Some) }
+    type fn option(A: type) { let None = {}; let Some = {value: A}; union(None, Some) }
     type fn eq(T: type) {
-      let Eq = [eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool];
+      let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool};
       match @type_is_product(T) {
         true => struct(Eq),
         false => @compile_error("eq requires A product type"),
@@ -1852,17 +2255,17 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
   );
   await assertThrowsCompile(
     `
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
-    type fn box() { let Box = [value: i32]; struct(Box) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+    type fn box() { let Box = {value: i32}; struct(Box) }
     type fn functor(F: type) {
-      let Functor = [map: fn(x: F) -> F];
+      let Functor = {map: fn(x: F) -> F};
       match @type_slot_type(F, #missing) {
         i32 => struct(Functor),
         _ => struct(Functor),
       }
     }
-    fn map_box(x: box) -> box { [value: x.value] }
-    const bad: functor(point) = [map: map_box];
+    fn map_box(x: box) -> box { {value: x.value} }
+    const bad: functor(point) = {map: map_box};
   `,
     "type.unknown_type_slot",
   );
@@ -1871,7 +2274,7 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
 Deno.test("models attached type members for static contracts", async () => {
   const checked = await checkSource(`
     fn eql_point(a: point, b: point) -> bool { a.x == b.x }
-    type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
+    type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
     fn point.eql(a: point, b: point) -> bool { eql_point(a, b) }
     type fn eq(T: type) {
       let Expected = fn(a: T, b: T) -> bool;
@@ -1900,7 +2303,7 @@ Deno.test("models attached type members for static contracts", async () => {
 Deno.test("reports attached type member contract failures", async () => {
   await assertThrowsCompile(
     `
-      type fn point() { let Point = [x: i32, y: i32]; struct(Point) }
+      type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
       type fn eq(T: type) {
         @require(@type_has_member(T, #eql), "Eq requires eql");
       }
@@ -1911,7 +2314,7 @@ Deno.test("reports attached type member contract failures", async () => {
   await assertThrowsCompile(
     `
       fn eql_point(a: point) -> bool { true }
-      type fn point() { let Point = [x: i32]; struct(Point) }
+      type fn point() { let Point = {x: i32}; struct(Point) }
       fn point.eql(a: point) -> bool { eql_point(a) }
       type fn eq(T: type) {
         let Expected = fn(a: T, b: T) -> bool;
@@ -1923,11 +2326,61 @@ Deno.test("reports attached type member contract failures", async () => {
   );
 });
 
+Deno.test("reports compile-time contract failures on caller spans", async () => {
+  await assertFirstDiagnosticSpanIncludes(
+    `
+      type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
+      type fn eq(T: type) {
+        @require(@type_has_member(T, #eql), "Eq requires eql");
+      }
+      fn same(proof: eq(point)) -> bool { true }
+    `,
+    "type.require",
+    "proof: eq(point)",
+  );
+
+  await assertFirstDiagnosticSpanIncludes(
+    `
+      type fn empty(A: type) -> type {
+        let Empty = {value: A};
+        struct(Empty)
+      }
+      type fn functor(T: type fn(A: type) -> type) -> type {
+        @require(@type_has_member(T, #map), "Functor requires map");
+        T
+      }
+      fn inc(x: i32) -> i32 { x + 1 }
+      fn mapper(v: T(A), const f: fn(x: A) -> B) -> T(B) {
+        const Mapper = functor(T);
+        v
+      }
+      pub fn main() -> empty(i32) { mapper(Empty {value: 1}, inc) }
+    `,
+    "type.require",
+    "mapper(Empty {value: 1}, inc",
+  );
+
+  await assertFirstDiagnosticSpanIncludes(
+    `
+      type fn option(A: type) { let None = {}; let Some = {value: A}; union(None, Some) }
+      type fn eq(T: type) {
+        match @type_is_product(T) {
+          true => T,
+          false => @compile_error("eq requires product"),
+        }
+      }
+      const bad: eq(option(i32)) = {};
+    `,
+    "type.compile_error",
+    "const bad: eq(option(i32))",
+  );
+});
+
 Deno.test("specializes functor constraints over type constructors", async () => {
   const parsed = await parse(`
-    type fn box(A: type) -> type { let Box = [value: A]; struct(Box) }
+    type fn box(A: type) -> type { let Box = {value: A}; struct(Box) }
     fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
-      Box [value: f(v.value)]
+      Box {value: f(v.value)}
     }
   `);
   const parsedMap = parsed.declarations.find((decl): decl is FnDecl =>
@@ -1937,11 +2390,11 @@ Deno.test("specializes functor constraints over type constructors", async () => 
 
   const checked = await checkSource(`
     type fn box(A: type) -> type {
-      let Box = [value: A];
+      let Box = {value: A};
       struct(Box)
     }
     fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
-      Box [value: f(v.value)]
+      Box {value: f(v.value)}
     }
     type fn functor(T: type fn(A: type) -> type) -> type {
       let Expected = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
@@ -1953,7 +2406,7 @@ Deno.test("specializes functor constraints over type constructors", async () => 
     fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
       T.map(f, v)
     }
-    pub fn main() -> box(i32) { mapper(Box [value: 1], inc, functor(box)) }
+    pub fn main() -> box(i32) { mapper(Box {value: 1}, inc, functor(box)) }
   `);
   const boxMap = checked.program.declarations.find((decl): decl is FnDecl =>
     decl.kind === "fn" && decl.name.startsWith("box_map__")
@@ -1966,12 +2419,12 @@ Deno.test("specializes functor constraints over type constructors", async () => 
   assertEquals(mapper?.returnType, "box(i32)");
   assertEquals(
     mapper?.body.expr?.kind === "call" ? mapper.body.expr.callee : undefined,
-    { kind: "var", name: "box_map__inc" },
+    { kind: "var", name: "box_map__i32__i32__inc" },
   );
 
   await assertThrowsCompile(
     `
-      type fn empty(A: type) -> type { let Empty = [value: A]; struct(Empty) }
+      type fn empty(A: type) -> type { let Empty = {value: A}; struct(Empty) }
       type fn functor(T: type fn(A: type) -> type) -> type {
         let Expected = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
         @require(@type_has_member(T, #map), "Functor requires map");
@@ -1985,7 +2438,7 @@ Deno.test("specializes functor constraints over type constructors", async () => 
   await assertThrowsCompile(
     `
       type fn bad_box(A: type) -> type {
-        let BadBox = [value: A];
+        let BadBox = {value: A};
         struct(BadBox)
       }
       fn bad_box.map(v: bad_box(A)) -> bad_box(A) { v }
@@ -2001,25 +2454,25 @@ Deno.test("specializes functor constraints over type constructors", async () => 
   );
   await assertThrowsCompile(
     `
-      type fn concrete() { let Concrete = [value: i32]; struct(Concrete) }
+      type fn concrete() { let Concrete = {value: i32}; struct(Concrete) }
       type fn functor(T: type fn(A: type) -> type) -> type { T }
       fn bad(const _proof: functor(concrete)) -> i32 { 0 }
     `,
     "type.param_kind",
   );
   await checkSource(`
-    type fn box(A: type) -> struct { let Box = [value: A]; struct(Box) }
+    type fn box(A: type) -> struct { let Box = {value: A}; struct(Box) }
     type fn functor(T: type fn(A: type) -> struct) -> type { T }
     fn ok(const _proof: functor(box)) -> i32 { 0 }
   `);
   await checkSource(`
-    type fn box(A: type) -> struct { let Box = [value: A]; struct(Box) }
+    type fn box(A: type) -> struct { let Box = {value: A}; struct(Box) }
     type fn broad(T: type fn(A: type) -> type) -> type { T }
     fn ok(const _proof: broad(box)) -> i32 { 0 }
   `);
   await assertThrowsCompile(
     `
-      type fn option(A: type) -> union { let None = []; let Some = [value: A]; union(None, Some) }
+      type fn option(A: type) -> union { let None = {}; let Some = {value: A}; union(None, Some) }
       type fn functor(T: type fn(A: type) -> struct) -> type { T }
       fn bad(const _proof: functor(option)) -> i32 { 0 }
     `,
@@ -2029,9 +2482,9 @@ Deno.test("specializes functor constraints over type constructors", async () => 
 
 Deno.test("attaches qualified type member functions", async () => {
   const checked = await checkSource(`
-    type fn box(A: type) -> type { let Box = [value: A]; struct(Box) }
+    type fn box(A: type) -> type { let Box = {value: A}; struct(Box) }
     fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
-      Box [value: f(v.value)]
+      Box {value: f(v.value)}
     }
     type fn functor(T: type fn(A: type) -> type) -> type {
       let Expected = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
@@ -2043,7 +2496,7 @@ Deno.test("attaches qualified type member functions", async () => {
     fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
       T.map(f, v)
     }
-    pub fn main() -> box(i32) { mapper(Box [value: 1], inc, functor(box)) }
+    pub fn main() -> box(i32) { mapper(Box {value: 1}, inc, functor(box)) }
   `);
   const box = checked.program.declarations.find((decl): decl is TypeDecl =>
     decl.kind === "type" && decl.name === "box"
@@ -2057,7 +2510,7 @@ Deno.test("attaches qualified type member functions", async () => {
   );
   assertEquals(
     mapper?.body.expr?.kind === "call" ? mapper.body.expr.callee : undefined,
-    { kind: "var", name: "box_map__inc" },
+    { kind: "var", name: "box_map__i32__i32__inc" },
   );
   await assertThrowsCompile(
     `
@@ -2067,7 +2520,7 @@ Deno.test("attaches qualified type member functions", async () => {
   );
   await assertThrowsCompile(
     `
-      type fn box(A: type) -> type { let Box = [value: A]; struct(Box) }
+      type fn box(A: type) -> type { let Box = {value: A}; struct(Box) }
       fn box.map(v: box(A)) -> box(A) { v }
       fn box.map(v: box(A)) -> box(A) { v }
     `,
@@ -2078,11 +2531,11 @@ Deno.test("attaches qualified type member functions", async () => {
 Deno.test("infers local proof consts at generic call sites", async () => {
   const checked = await checkSource(`
     type fn box(A: type) -> type {
-      let Box = [value: A];
+      let Box = {value: A};
       struct(Box)
     }
     fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
-      Box [value: f(v.value)]
+      Box {value: f(v.value)}
     }
     type fn functor(T: type fn(A: type) -> type) -> type {
       let Expected = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
@@ -2096,7 +2549,7 @@ Deno.test("infers local proof consts at generic call sites", async () => {
       Mapper.map(f, v)
     }
     pub fn main() -> box(i32) {
-      mapper(Box [value: 1], inc)
+      mapper(Box {value: 1}, inc)
     }
   `);
   const mapper = checked.program.declarations.find((decl): decl is FnDecl =>
@@ -2107,13 +2560,13 @@ Deno.test("infers local proof consts at generic call sites", async () => {
   assertEquals(mapper?.body.statements, []);
   assertEquals(
     mapper?.body.expr?.kind === "call" ? mapper.body.expr.callee : undefined,
-    { kind: "var", name: "box_map__inc" },
+    { kind: "var", name: "box_map__i32__i32__inc" },
   );
 
   await assertThrowsCompile(
     `
       type fn empty(A: type) -> type {
-        let Empty = [value: A];
+        let Empty = {value: A};
         struct(Empty)
       }
       type fn functor(T: type fn(A: type) -> type) -> type {
@@ -2125,7 +2578,7 @@ Deno.test("infers local proof consts at generic call sites", async () => {
         const Mapper = functor(T);
         v
       }
-      pub fn main() -> empty(i32) { mapper(Empty [value: 1], inc) }
+      pub fn main() -> empty(i32) { mapper(Empty {value: 1}, inc) }
     `,
     "type.require",
   );
@@ -2133,14 +2586,14 @@ Deno.test("infers local proof consts at generic call sites", async () => {
   await assertThrowsCompile(
     `
       type fn box(A: type) -> type {
-        let Box = [value: A];
+        let Box = {value: A};
         struct(Box)
       }
       fn bad(v: T(A)) -> T(A) {
         const mapper = T;
         v
       }
-      pub fn main() -> box(i32) { bad(Box [value: 1]) }
+      pub fn main() -> box(i32) { bad(Box {value: 1}) }
     `,
     "parse.syntax",
   );
@@ -2149,15 +2602,15 @@ Deno.test("infers local proof consts at generic call sites", async () => {
 Deno.test("rejects duplicate type function fragments and members", async () => {
   await assertThrowsCompile(
     `
-      type fn box(A: type) -> type { let Box = [value: A]; struct(Box) }
-      type fn box(A: type) -> type { let Box = [other: A]; struct(Box) }
+      type fn box(A: type) -> type { let Box = {value: A}; struct(Box) }
+      type fn box(A: type) -> type { let Box = {other: A}; struct(Box) }
     `,
     "type.duplicate_runtime_fragment",
   );
   await assertThrowsCompile(
     `
       type fn box(A: type) -> type {
-        let Box = [value: A];
+        let Box = {value: A};
         struct(Box)
       }
       fn box.map(v: box(A)) -> box(A) { v }
@@ -2169,13 +2622,13 @@ Deno.test("rejects duplicate type function fragments and members", async () => {
 
 Deno.test("specializes const parameters at call sites", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    const box_functor: functor(box) = [map: map_box];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    const box_functor: functor(box) = {map: map_box};
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
     pub fn main() -> box {
-      let a = mapped(box_functor, [value: 1]);
+      let a = mapped(box_functor, {value: 1});
       mapped(box_functor, a)
     }
   `);
@@ -2204,9 +2657,9 @@ Deno.test("specializes const parameters at call sites", async () => {
 
   await assertThrowsCompile(
     `
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
     fn bad(dict: functor(box), x: box) -> box { mapped(dict, x) }
   `,
@@ -2216,15 +2669,15 @@ Deno.test("specializes const parameters at call sites", async () => {
 
 Deno.test("memoizes distinct const parameter specializations", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    fn map_box_alt(x: box) -> box { [value: x.value + 2] }
-    const box_functor: functor(box) = [map: map_box];
-    const alt_functor: functor(box) = [map: map_box_alt];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    fn map_box_alt(x: box) -> box { {value: x.value + 2} }
+    const box_functor: functor(box) = {map: map_box};
+    const alt_functor: functor(box) = {map: map_box_alt};
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
     pub fn main() -> box {
-      let a = mapped(box_functor, [value: 1]);
+      let a = mapped(box_functor, {value: 1});
       mapped(alt_functor, a)
     }
   `);
@@ -2236,16 +2689,16 @@ Deno.test("memoizes distinct const parameter specializations", async () => {
 
 Deno.test("names specializations with multiple const parameters", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    fn map_box_alt(x: box) -> box { [value: x.value + 2] }
-    const box_functor: functor(box) = [map: map_box];
-    const alt_functor: functor(box) = [map: map_box_alt];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    fn map_box_alt(x: box) -> box { {value: x.value + 2} }
+    const box_functor: functor(box) = {map: map_box};
+    const alt_functor: functor(box) = {map: map_box_alt};
     fn mapped_twice(const first: functor(box), const second: functor(box), x: box) -> box {
       second.map(first.map(x))
     }
-    pub fn main() -> box { mapped_twice(box_functor, alt_functor, [value: 1]) }
+    pub fn main() -> box { mapped_twice(box_functor, alt_functor, {value: 1}) }
   `);
   const specialized = findFn(checked.program, "mapped_twice__box_functor__alt_functor");
   assertEquals(specialized?.kind === "fn" ? specialized.params : undefined, [
@@ -2256,14 +2709,14 @@ Deno.test("names specializations with multiple const parameters", async () => {
 
 Deno.test("reuses nested const-specialized calls", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    const box_functor: functor(box) = [map: map_box];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    const box_functor: functor(box) = {map: map_box};
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
     fn mapped_outer(const dict: functor(box), x: box) -> box { mapped(dict, x) }
     pub fn main() -> box {
-      let a = mapped_outer(box_functor, [value: 1]);
+      let a = mapped_outer(box_functor, {value: 1});
       mapped_outer(box_functor, a)
     }
   `);
@@ -2288,12 +2741,12 @@ Deno.test("reuses nested const-specialized calls", async () => {
 
 Deno.test("optimizes const-parameter forwarding wrappers to direct calls", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    const box_functor: functor(box) = [map: map_box];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    const box_functor: functor(box) = {map: map_box};
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
-    pub fn main() -> box { mapped(box_functor, [value: 1]) }
+    pub fn main() -> box { mapped(box_functor, {value: 1}) }
   `);
 
   assertEquals(findFns(checked.program, "mapped__box_functor").length, 1);
@@ -2313,13 +2766,13 @@ Deno.test("optimizes const-parameter forwarding wrappers to direct calls", async
 
 Deno.test("optimizes repeated forwarding wrapper call sites", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    const box_functor: functor(box) = [map: map_box];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    const box_functor: functor(box) = {map: map_box};
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
     pub fn main() -> box {
-      let a = mapped(box_functor, [value: 1]);
+      let a = mapped(box_functor, {value: 1});
       let b = mapped(box_functor, a);
       mapped(box_functor, b)
     }
@@ -2333,13 +2786,13 @@ Deno.test("optimizes repeated forwarding wrapper call sites", async () => {
 
 Deno.test("optimizes nested forwarding specializations transitively", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    const box_functor: functor(box) = [map: map_box];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    const box_functor: functor(box) = {map: map_box};
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
     fn mapped_outer(const dict: functor(box), x: box) -> box { mapped(dict, x) }
-    pub fn main() -> box { mapped_outer(box_functor, [value: 1]) }
+    pub fn main() -> box { mapped_outer(box_functor, {value: 1}) }
   `);
 
   const counts = countCalls(optimizeProgram(checked.program), { includeGenerated: false });
@@ -2350,15 +2803,15 @@ Deno.test("optimizes nested forwarding specializations transitively", async () =
 
 Deno.test("does not inline non-forwarding generated specializations", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    const box_functor: functor(box) = [map: map_box];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    const box_functor: functor(box) = {map: map_box};
     fn mapped(const dict: functor(box), x: box) -> box {
       let y = dict.map(x);
       dict.map(y)
     }
-    pub fn main() -> box { mapped(box_functor, [value: 1]) }
+    pub fn main() -> box { mapped(box_functor, {value: 1}) }
   `);
 
   const counts = countCalls(optimizeProgram(checked.program));
@@ -2367,13 +2820,13 @@ Deno.test("does not inline non-forwarding generated specializations", async () =
 
 Deno.test("optimizes specialization calls by resolved generated name", async () => {
   const checked = await checkSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    const box_functor: functor(box) = [map: map_box];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    const box_functor: functor(box) = {map: map_box};
     fn mapped__box_functor(x: box) -> box { x }
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
-    pub fn main() -> box { mapped(box_functor, [value: 1]) }
+    pub fn main() -> box { mapped(box_functor, {value: 1}) }
   `);
 
   assertEquals(findFns(checked.program, "mapped__box_functor").length, 1);
@@ -2427,7 +2880,7 @@ Deno.test("defaults unsuffixed integer literals in i32 contexts", async () => {
 Deno.test("checks bounded inline array indexing", async () => {
   const header = `
     type fn inline_array(N: count, A: type) {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn lane4_i32() -> type { inline_array(4, i32) }
@@ -2440,8 +2893,8 @@ Deno.test("checks bounded inline array indexing", async () => {
     type fn lane8_i32() -> type { inline_array(8, i32) }
     type fn lane8_alias() -> type { lane8_i32 }
     type fn option(A: type) -> union {
-      let None = [];
-      let Some = [value: A];
+      let None = {};
+      let Some = {value: A};
       union(None, Some)
     }
     fn get(xs: lane4_i32, i: i32) -> option(i32) { 0 }
@@ -2476,7 +2929,7 @@ Deno.test("supports arbitrary unsigned integer widths with storage-lane packing"
   await assertThrowsCompile("pub fn bad(x: u65) -> u65 { x }", "type.unknown_type");
 
   const packedByte = await watFromSource(`
-    type fn pair() { let Pair = [a: u1, b: u7]; struct(Pair) }
+    type fn pair() { let Pair = {a: u1, b: u7}; struct(Pair) }
     pub fn main(p: pair) -> u7 { p.b }
   `);
   assertStringIncludes(packedByte, `(param $p$a$b i32)`);
@@ -2485,21 +2938,21 @@ Deno.test("supports arbitrary unsigned integer widths with storage-lane packing"
   assertStringIncludes(packedByte, `i32.and`);
 
   const packedNibbles = await watFromSource(`
-    type fn pair() { let Pair = [a: u4, b: u4]; struct(Pair) }
+    type fn pair() { let Pair = {a: u4, b: u4}; struct(Pair) }
     pub fn main(p: pair) -> pair { p }
   `);
   assertStringIncludes(packedNibbles, `(param $p$a$b i32)`);
   assertStringIncludes(packedNibbles, `(result i32)`);
 
   const separateByteLanes = await watFromSource(`
-    type fn pair() { let Pair = [a: u7, b: u7]; struct(Pair) }
+    type fn pair() { let Pair = {a: u7, b: u7}; struct(Pair) }
     pub fn main(p: pair) -> pair { p }
   `);
   assertStringIncludes(separateByteLanes, `(param $p$a i32) (param $p$b i32)`);
   assertStringIncludes(separateByteLanes, `(result i32) (result i32)`);
 
   const arrayLanes = await watFromSource(`
-    type fn lane4_u7() -> type { let Lane = [4*u7]; struct(Lane) }
+    type fn lane4_u7() -> type { let Lane = {4*u7}; struct(Lane) }
     pub fn main(xs: lane4_u7) -> lane4_u7 { xs }
   `);
   assertStringIncludes(

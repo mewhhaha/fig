@@ -1,15 +1,15 @@
 type fn point() -> struct {
-  let Point = [x: i32, y: i32];
+  let Point = {x: i32, y: i32};
   struct(Point)
 }
 
 type fn option(A: type) -> union {
-  let None = [];
-  let Some = [value: A];
+  let None = {};
+  let Some = {value: A};
   union(None, Some)
 }
 
-fn make_point(x: i32, y: i32) -> point { Point [x: x, y: y] }
+fn make_point(x: i32, y: i32) -> point { Point {x: x, y: y} }
 fn unwrap_or(value: option(i32), fallback: i32) -> i32 {
   match value { Some(inner) => inner, None => fallback }
 }

@@ -2,7 +2,7 @@
 // while the current backend still emits ordinary scalar code.
 
 type fn inline_array(N: count, A: type) -> type {
-  let InlineArray = [N*A];
+  let InlineArray = {N*A};
   struct(InlineArray)
 }
 
@@ -15,37 +15,37 @@ type fn tile2x4_i32() -> type {
 }
 
 type fn tile_schedule(Tile: type) -> type {
-  let TileSchedule = [tile_rows: i32, tile_cols: i32];
+  let TileSchedule = {tile_rows: i32, tile_cols: i32};
   struct(TileSchedule)
 }
 
 type fn vector_schedule(Lane: type) -> type {
-  let VectorSchedule = [lanes: i32];
+  let VectorSchedule = {lanes: i32};
   struct(VectorSchedule)
 }
 
 type fn unroll_schedule(Body: type) -> type {
-  let UnrollSchedule = [factor: i32];
+  let UnrollSchedule = {factor: i32};
   struct(UnrollSchedule)
 }
 
 type fn scheduled_tile(Tile: type) -> type {
-  let ScheduledTile = [
+  let ScheduledTile = {
     data: Tile,
     tile: tile_schedule(Tile),
     vector: vector_schedule(lane4_i32),
     unroll: unroll_schedule(Tile)
-  ];
+  };
   struct(ScheduledTile)
 }
 
 fn make_schedule(data: tile2x4_i32) -> scheduled_tile(tile2x4_i32) {
-  [
+  {
     data: data,
-    tile: [tile_rows: 2, tile_cols: 4],
-    vector: [lanes: 4],
-    unroll: [factor: 2]
-  ]
+    tile: {tile_rows: 2, tile_cols: 4},
+    vector: {lanes: 4},
+    unroll: {factor: 2}
+  }
 }
 
 fn consume_schedule(plan: scheduled_tile(tile2x4_i32)) -> i32 {
@@ -53,6 +53,6 @@ fn consume_schedule(plan: scheduled_tile(tile2x4_i32)) -> i32 {
 }
 
 pub fn main() -> i32 {
-  let data: tile2x4_i32 = [[1, 2, 3, 4], [5, 6, 7, 8]];
+  let data: tile2x4_i32 = <<1, 2, 3, 4>, <5, 6, 7, 8>>;
   consume_schedule(make_schedule(data))
 }

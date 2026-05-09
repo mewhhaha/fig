@@ -7,7 +7,7 @@ fn neq_point(a: point, b: point) -> bool {
 }
 
 type fn point() {
-  let Point = [x: i32, y: i32];
+  let Point = {x: i32, y: i32};
   struct(Point)
 }
 
@@ -18,12 +18,12 @@ type fn eq(T: type) {
 }
 
 type fn box(A: type) -> type {
-  let Box = [value: A];
+  let Box = {value: A};
   struct(Box)
 }
 
 fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
-  Box [value: f(v.value)]
+  Box {value: f(v.value)}
 }
 
 type fn functor(T: type fn(A: type) -> type) -> type {
@@ -49,6 +49,6 @@ fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
 }
 
 pub fn main() -> i32 {
-  let mapped = mapper(Box [value: 1], inc, functor(box));
-  same(point, eq(point), Point [x: 1, y: 2], Point [x: 1, y: 2]) + mapped.value
+  let mapped = mapper(Box {value: 1}, inc, functor(box));
+  same(point, eq(point), Point {x: 1, y: 2}, Point {x: 1, y: 2}) + mapped.value
 }

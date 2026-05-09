@@ -25,10 +25,12 @@ fn below_nine(x: i32) -> bool {
 }
 
 pub fn main() -> i32 {
-  let folded = inline_array.iter([1, 2, 3, 4]) \$ ->
+  let xs: merge.array.layout.lane4_i32 = <1, 2, 3, 4>;
+  let ys: merge.array.layout.lane4_i32 = <1, 2, 3, 4>;
+  let folded = inline_array.iter(xs) \$ ->
     $.map(double).filter(above_four).map(inc).reverse().filter(below_nine).map(square).fold(10, add);
 
-  let compact: compact_array = inline_array.iter([1, 2, 3, 4]) \$ ->
+  let compact: compact_array = inline_array.iter(ys) \$ ->
     $.map(double).filter(above_four).map(inc).collect();
 
   folded + compact.len + compact.items[0] + compact.items[1]

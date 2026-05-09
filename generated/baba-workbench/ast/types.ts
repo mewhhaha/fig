@@ -6,7 +6,7 @@ export interface SyntaxNodeLike {
   childForFieldName?(name: string): SyntaxNodeLike | null;
 }
 
-export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | StaticForBlockAstNode | StaticForBindersAstNode | StaticForSourceAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | PipeBindAstNode | PipeBindAtomAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | StaticForSlotAstNode | PatternAstNode | PatternIdentAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotBodyAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | TypeOpAstNode;
+export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ImportBindingListAstNode | ImportBindingItemsAstNode | ImportBindingTailAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | StaticForBlockAstNode | StaticForBindersAstNode | StaticForSourceAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | PipeBindAstNode | PipeBindAtomAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | BorrowExprAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ForkBuiltinAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | StaticForSlotAstNode | PunnedShapeValueSlotAstNode | ShapeValueSlotKeyAstNode | SpreadSlotAstNode | SlotPositionAstNode | CollectionValueAstNode | CollectionValueItemsAstNode | CollectionValueTailAstNode | CollectionSpreadSlotAstNode | CollectionExprAstNode | CollectionPipeBindAstNode | CollectionPipeBindAtomAstNode | CollectionBinaryAstNode | FrozenCollectionValueAstNode | FrozenCollectionValueItemsAstNode | FrozenCollectionValueTailAstNode | TupleValueAstNode | TupleValueItemsAstNode | TupleValueTailAstNode | TupleValueRepeatAstNode | PatternAstNode | PatternIdentAstNode | TuplePatternAstNode | TuplePatternItemsAstNode | TuplePatternTailAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | BorrowTypeAstNode | FrozenTypeAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotKeyAstNode | ShapeSlotBodyAstNode | TupleTypeAstNode | TupleTypeBodyAstNode | TupleTypeTailAstNode | TupleTypeMoreAstNode | TupleTypeRepeatAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeTupleAstNode | TypeTupleBodyAstNode | TypeTupleTailAstNode | TypeTupleMoreAstNode | TypeTupleRepeatAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | TypeRepeatCountAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | OpNoCollectionCloseAstNode | TypeOpAstNode;
 
 export interface ProgramAstNode {
   kind: "Program";
@@ -197,6 +197,27 @@ export interface ConstDeclAstNode {
   fields: Record<string, never>;
 }
 
+export interface ImportBindingListAstNode {
+  kind: "ImportBindingList";
+  type: "ImportBindingList";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ImportBindingItemsAstNode {
+  kind: "ImportBindingItems";
+  type: "ImportBindingItems";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ImportBindingTailAstNode {
+  kind: "ImportBindingTail";
+  type: "ImportBindingTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface ConstValueAstNode {
   kind: "ConstValue";
   type: "ConstValue";
@@ -337,6 +358,13 @@ export interface PrimaryAstNode {
   fields: Record<string, never>;
 }
 
+export interface BorrowExprAstNode {
+  kind: "BorrowExpr";
+  type: "BorrowExpr";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface PlaceholderAstNode {
   kind: "Placeholder";
   type: "Placeholder";
@@ -407,6 +435,139 @@ export interface StaticForSlotAstNode {
   fields: Record<string, never>;
 }
 
+export interface PunnedShapeValueSlotAstNode {
+  kind: "PunnedShapeValueSlot";
+  type: "PunnedShapeValueSlot";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ShapeValueSlotKeyAstNode {
+  kind: "ShapeValueSlotKey";
+  type: "ShapeValueSlotKey";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface SpreadSlotAstNode {
+  kind: "SpreadSlot";
+  type: "SpreadSlot";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface SlotPositionAstNode {
+  kind: "SlotPosition";
+  type: "SlotPosition";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CollectionValueAstNode {
+  kind: "CollectionValue";
+  type: "CollectionValue";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CollectionValueItemsAstNode {
+  kind: "CollectionValueItems";
+  type: "CollectionValueItems";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CollectionValueTailAstNode {
+  kind: "CollectionValueTail";
+  type: "CollectionValueTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CollectionSpreadSlotAstNode {
+  kind: "CollectionSpreadSlot";
+  type: "CollectionSpreadSlot";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CollectionExprAstNode {
+  kind: "CollectionExpr";
+  type: "CollectionExpr";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CollectionPipeBindAstNode {
+  kind: "CollectionPipeBind";
+  type: "CollectionPipeBind";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CollectionPipeBindAtomAstNode {
+  kind: "CollectionPipeBindAtom";
+  type: "CollectionPipeBindAtom";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface CollectionBinaryAstNode {
+  kind: "CollectionBinary";
+  type: "CollectionBinary";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface FrozenCollectionValueAstNode {
+  kind: "FrozenCollectionValue";
+  type: "FrozenCollectionValue";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface FrozenCollectionValueItemsAstNode {
+  kind: "FrozenCollectionValueItems";
+  type: "FrozenCollectionValueItems";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface FrozenCollectionValueTailAstNode {
+  kind: "FrozenCollectionValueTail";
+  type: "FrozenCollectionValueTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleValueAstNode {
+  kind: "TupleValue";
+  type: "TupleValue";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleValueItemsAstNode {
+  kind: "TupleValueItems";
+  type: "TupleValueItems";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleValueTailAstNode {
+  kind: "TupleValueTail";
+  type: "TupleValueTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleValueRepeatAstNode {
+  kind: "TupleValueRepeat";
+  type: "TupleValueRepeat";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface PatternAstNode {
   kind: "Pattern";
   type: "Pattern";
@@ -417,6 +578,27 @@ export interface PatternAstNode {
 export interface PatternIdentAstNode {
   kind: "PatternIdent";
   type: "PatternIdent";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TuplePatternAstNode {
+  kind: "TuplePattern";
+  type: "TuplePattern";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TuplePatternItemsAstNode {
+  kind: "TuplePatternItems";
+  type: "TuplePatternItems";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TuplePatternTailAstNode {
+  kind: "TuplePatternTail";
+  type: "TuplePatternTail";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -452,6 +634,20 @@ export interface ArgsAstNode {
 export interface TypeAstNode {
   kind: "Type";
   type: "Type";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface BorrowTypeAstNode {
+  kind: "BorrowType";
+  type: "BorrowType";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface FrozenTypeAstNode {
+  kind: "FrozenType";
+  type: "FrozenType";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -568,9 +764,51 @@ export interface ShapeSlotAstNode {
   fields: Record<string, never>;
 }
 
+export interface ShapeSlotKeyAstNode {
+  kind: "ShapeSlotKey";
+  type: "ShapeSlotKey";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface ShapeSlotBodyAstNode {
   kind: "ShapeSlotBody";
   type: "ShapeSlotBody";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleTypeAstNode {
+  kind: "TupleType";
+  type: "TupleType";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleTypeBodyAstNode {
+  kind: "TupleTypeBody";
+  type: "TupleTypeBody";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleTypeTailAstNode {
+  kind: "TupleTypeTail";
+  type: "TupleTypeTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleTypeMoreAstNode {
+  kind: "TupleTypeMore";
+  type: "TupleTypeMore";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TupleTypeRepeatAstNode {
+  kind: "TupleTypeRepeat";
+  type: "TupleTypeRepeat";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -617,6 +855,41 @@ export interface TypeShapeAnonSlotBodyAstNode {
   fields: Record<string, never>;
 }
 
+export interface TypeTupleAstNode {
+  kind: "TypeTuple";
+  type: "TypeTuple";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeTupleBodyAstNode {
+  kind: "TypeTupleBody";
+  type: "TypeTupleBody";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeTupleTailAstNode {
+  kind: "TypeTupleTail";
+  type: "TypeTupleTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeTupleMoreAstNode {
+  kind: "TypeTupleMore";
+  type: "TypeTupleMore";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeTupleRepeatAstNode {
+  kind: "TypeTupleRepeat";
+  type: "TypeTupleRepeat";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface TypeNonFnExprAstNode {
   kind: "TypeNonFnExpr";
   type: "TypeNonFnExpr";
@@ -627,6 +900,13 @@ export interface TypeNonFnExprAstNode {
 export interface TypeShapeRepeatAstNode {
   kind: "TypeShapeRepeat";
   type: "TypeShapeRepeat";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeRepeatCountAstNode {
+  kind: "TypeRepeatCount";
+  type: "TypeRepeatCount";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -655,6 +935,13 @@ export interface BoolAstNode {
 export interface OpAstNode {
   kind: "Op";
   type: "Op";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface OpNoCollectionCloseAstNode {
+  kind: "OpNoCollectionClose";
+  type: "OpNoCollectionClose";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }

@@ -2,7 +2,7 @@
 const ops = @import("prelude.operators");
 
 type fn box() -> struct {
-  let Box = [value: i32];
+  let Box = {value: i32};
   struct(Box)
 }
 pub fn main(a: box, b: box) -> box { a <> b }

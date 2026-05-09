@@ -1,4 +1,5 @@
 import type {
+  AstNodeMeta,
   CapabilityImport,
   ConstDecl,
   Declaration,
@@ -81,20 +82,38 @@ function lowerCapabilityConst(node: Node): CapabilityImport {
 }
 
 function lowerSourceImportConst(node: Node): SourceImport {
-  const alias = text(first(node, "LowerIdent"), "import alias");
   const match = node.text.match(/@\s*import\s*\(\s*("([^"\\]|\\.)*")\s*\)/);
   if (!match) fail("parse.lower", 'source import requires @import("specifier")', spanFor(node));
   const specifier = JSON.parse(match[1]);
+  const bindingList = optional(node, "ImportBindingList");
+  if (bindingList) {
+    const bindings = descendants(bindingList, "LowerIdent").map((nameNode) => ({
+      name: nameNode.text,
+      ...meta(nameNode, nameNode),
+    }));
+    return {
+      kind: "source_import",
+      ...meta(node, bindingList),
+      module: specifier,
+      bindings,
+    };
+  }
+  const aliasNode = first(node, "LowerIdent");
+  const alias = text(aliasNode, "import alias");
   return {
     kind: "source_import",
-    ...meta(node, first(node, "LowerIdent")),
+    ...meta(node, aliasNode),
     module: specifier,
     alias,
   };
 }
 
 function isSourceImportConst(node: Node): boolean {
-  return node.type === "ConstDecl" && /@\s*import\s*\(/.test(node.text);
+  if (node.type !== "ConstDecl") return false;
+  if (optional(node, "ImportBindingList") && !/@\s*import\s*\(/.test(node.text)) {
+    fail("parse.lower", 'const deconstruction requires @import("specifier")', spanFor(node));
+  }
+  return /@\s*import\s*\(/.test(node.text);
 }
 
 function isCapabilityConst(node: Node): boolean {
@@ -289,22 +308,77 @@ function lowerTypeBlock(node: Node): TypeBlock {
 }
 
 function lowerShapeType(node: Node): ShapeType {
-  return { ...spanOnly(node), slots: named(node).filter(is("ShapeSlot")).map(lowerShapeTypeSlot) };
+  return {
+    ...spanOnly(node),
+    slots: canonicalizeSlots(named(node).filter(is("ShapeSlot")).map(lowerShapeTypeSlot), "shape type"),
+  };
 }
 
 function lowerShapeTypeSlot(node: Node): ShapeType["slots"][number] {
   const body = only(node, "ShapeSlotBody");
+  const key = optional(node, "ShapeSlotKey");
   const repeat = named(body)
     .find((child) => child.type === "CountRepeat" || isRepeatIdentifier(child))
     ?.text.replace(/\s*\*$/, "").trim();
   const slot: ShapeType["slots"][number] = {
-    ...meta(node, named(node).find(isFieldName)),
+    ...meta(node, slotLabelNode(key)),
     ...doc(node),
-    label: named(node).find(isFieldName)?.text.replace(/:\s*$/, "").trim(),
+    ...slotKeyParts(key),
     type: optional(body, "Type")?.text ?? body.text,
   };
   if (repeat) slot.repeat = repeat;
   return slot;
+}
+
+function slotLabelNode(node: Node | undefined): Node | undefined {
+  return node ? named(node).find(is("LowerIdent")) : undefined;
+}
+
+function slotKeyParts(node: Node | undefined): { label?: string; position?: number } {
+  if (!node) return {};
+  const label = named(node).find(is("LowerIdent"))?.text;
+  const positionNode = optional(node, "SlotPosition");
+  const parts: { label?: string; position?: number } = {};
+  if (label) parts.label = label;
+  if (positionNode) {
+    const raw = first(positionNode, "Number").text;
+    const position = Number.parseInt(raw, 10);
+    if (!Number.isInteger(position) || position < 0 || String(position) !== raw) {
+      fail("parse.lower", `slot position must be a non-negative integer: ${raw}`, spanFor(positionNode));
+    }
+    parts.position = position;
+  }
+  return parts;
+}
+
+function canonicalizeSlots<T extends { position?: number; spread?: boolean; span?: Span }>(
+  slots: T[],
+  description: string,
+): T[] {
+  if (!slots.some((slot) => slot.position !== undefined)) return slots;
+  const explicit = new Set<number>();
+  for (const slot of slots) {
+    if (slot.position === undefined || slot.spread) continue;
+    if (explicit.has(slot.position)) {
+      fail("parse.lower", `duplicate ${description} slot position ${slot.position}`, slot.span);
+    }
+    explicit.add(slot.position);
+  }
+
+  let next = 0;
+  const positioned = slots.map((slot) => {
+    if (slot.position !== undefined || slot.spread) return slot;
+    while (explicit.has(next)) next++;
+    explicit.add(next);
+    return { ...slot, position: next++ };
+  });
+  const max = Math.max(...positioned.map((slot) => slot.position ?? -1));
+  for (let position = 0; position <= max; position++) {
+    if (!positioned.some((slot) => slot.position === position)) {
+      fail("parse.lower", `non-contiguous ${description} slot positions; missing position ${position}`, undefined);
+    }
+  }
+  return positioned.toSorted((left, right) => (left.position ?? 0) - (right.position ?? 0));
 }
 
 function lowerTypeExpr(node: Node): TypeExpr {
@@ -371,6 +445,13 @@ function lowerTypeExpr(node: Node): TypeExpr {
     }
     case "FnType":
       return { kind: "type_fn", ...spanOnly(expr), source: expr.text };
+    case "FrozenType":
+      return {
+        kind: "type_call",
+        ...spanOnly(expr),
+        callee: { kind: "type_ref", name: "#" },
+        args: [lowerTypeExpr(first(expr, "Type"))],
+      };
     case "Literal":
       return lowerTypeLiteral(expr);
     case "StaticBuiltin":
@@ -381,6 +462,8 @@ function lowerTypeExpr(node: Node): TypeExpr {
       };
     case "TypeShape":
       return { kind: "type_shape", ...spanOnly(expr), shape: lowerTypeShape(expr) };
+    case "TypeTuple":
+      return { kind: "type_shape", ...spanOnly(expr), shape: lowerTypeTuple(expr) };
     case "TypeBuilderName":
       return { kind: "type_ref", ...meta(expr, expr), name: expr.text };
     case "TypePrimary":
@@ -507,35 +590,77 @@ function lowerTypeLiteralPattern(node: Node): TypePattern {
 
 function lowerTypeShape(node: Node): TypeShape {
   const body = optional(node, "TypeShapeBody") ?? node;
-  return { ...spanOnly(node), slots: listSlots(body, "TypeShapeSlot").map(lowerTypeShapeSlot) };
+  return {
+    ...spanOnly(node),
+    slots: canonicalizeSlots(listSlots(body, "TypeShapeSlot").map(lowerTypeShapeSlot), "type shape"),
+  };
+}
+
+function lowerTypeTuple(node: Node): TypeShape {
+  const repeat = optional(node, "TypeTupleRepeat");
+  if (repeat) {
+    const expr = first(repeat, "TypeExpr");
+    return {
+      ...spanOnly(node),
+      slots: [{
+        ...spanOnly(repeat),
+        position: 0,
+        type: lowerTypeExpr(expr),
+        repeat: lowerTupleRepeatCount(first(repeat, "TypeRepeatCount")),
+      }],
+    };
+  }
+  const exprs = listTupleItems(node, "TypeExpr");
+  return {
+    ...spanOnly(node),
+    slots: exprs.map((expr, position) => ({
+      ...spanOnly(expr),
+      position,
+      type: lowerTypeExpr(expr),
+    })),
+  };
 }
 
 function lowerTypeShapeSlot(node: Node): TypeShape["slots"][number] {
-  const body = optional(node, "TypeShapeSlotBody") ?? only(node, "TypeShapeAnonSlotBody");
+  const body = only(node, "TypeShapeSlotBody");
+  const key = optional(node, "ShapeSlotKey");
   const repeatNode = optional(body, "TypeShapeRepeat");
   return {
-    ...meta(node, named(node).find(isFieldName)),
+    ...meta(node, slotLabelNode(key)),
     ...doc(node),
-    label: named(node).find(isFieldName)?.text.replace(/:\s*$/, "").trim(),
+    ...slotKeyParts(key),
     repeat: repeatNode ? lowerTypeRepeat(repeatNode) : undefined,
     type: lowerTypeExpr(optional(body, "TypeExpr") ?? first(body, "TypeNonFnExpr")),
   };
 }
 
 function lowerTypeRepeat(node: Node): TypeShape["slots"][number]["repeat"] {
-  const parts = node.text.split("*").map((part) => part.trim()).filter(Boolean);
-  let expr: TypeCountExpr = countAtom(parts[0]);
+  const base = node.startIndex ?? 0;
+  const parts = [...node.text.matchAll(/[^*]+/g)].map((match) => {
+    const raw = match[0];
+    const leading = raw.length - raw.trimStart().length;
+    const text = raw.trim();
+    const start = base + (match.index ?? 0) + leading;
+    return { text, start, end: start + text.length };
+  }).filter((part) => part.text);
+  let expr: TypeCountExpr = countAtom(parts[0].text, spanFromOffsets(parts[0].start, parts[0].end));
   for (const part of parts.slice(1)) {
-    expr = { kind: "count_mul", left: expr, right: countAtom(part) };
+    const right = countAtom(part.text, spanFromOffsets(part.start, part.end));
+    expr = { kind: "count_mul", span: joinSpans(expr.span, right.span), left: expr, right };
   }
   return expr;
 }
 
-function countAtom(text: string): TypeCountExpr {
+function lowerTupleRepeatCount(node: Node): TypeCountExpr {
+  const child = named(node)[0] ?? node;
+  return countAtom(child.text.trim(), spanFor(child));
+}
+
+function countAtom(text: string, span?: Span): TypeCountExpr {
   if (/^[0-9]/.test(text)) {
-    return { kind: "count_literal" as const, value: Number.parseInt(text, 10), source: text };
+    return { kind: "count_literal" as const, value: Number.parseInt(text, 10), source: text, ...(span ? { span } : {}) };
   }
-  return { kind: "count_ref" as const, name: text };
+  return { kind: "count_ref" as const, name: text, ...(span ? { span } : {}) };
 }
 
 function unwrapType(node: Node): Node {
@@ -594,6 +719,14 @@ function lowerParamPattern(node: Node): ParamPattern {
       };
     }
   }
+  if (node.type === "TuplePattern" || child.type === "TuplePattern") {
+    const tuple = node.type === "TuplePattern" ? node : child;
+    return {
+      kind: "tuple",
+      ...spanOnly(tuple),
+      items: listTupleItems(tuple, "Pattern").map(lowerParamPattern),
+    };
+  }
   if (node.type === "PatternIdent" || child.type === "PatternIdent") {
     const patternIdent = node.type === "PatternIdent" ? node : child;
     const ident = firstIdentifier(patternIdent).text;
@@ -649,6 +782,17 @@ function hashText(source: string): number {
 }
 
 function lowerLet(node: Node): LetDecl | ForkLetDecl | DestructureLetDecl {
+  const tuplePattern = optional(node, "TuplePattern");
+  if (tuplePattern) {
+    const pattern = lowerParamPattern(tuplePattern);
+    const names = patternBindingNames(pattern);
+    return {
+      kind: "destructure_let",
+      ...spanOnly(node),
+      names,
+      value: lowerExpr(only(node, "Expr")),
+    };
+  }
   const ids = named(node).filter((child) => isIdentifier(child) || isFieldName(child));
   const tail = optional(node, "TopLetTail") ?? optional(node, "BlockLetTail") ?? node;
   const tailIds = named(tail).filter(isIdentifier);
@@ -688,6 +832,21 @@ function lowerLet(node: Node): LetDecl | ForkLetDecl | DestructureLetDecl {
     type: named(tail).find(is("Type"))?.text,
     value: lowerExpr(only(tail, "Expr")),
   };
+}
+
+function patternBindingNames(pattern: ParamPattern): string[] {
+  switch (pattern.kind) {
+    case "binding":
+      return [pattern.name];
+    case "tuple":
+      return pattern.items.flatMap(patternBindingNames);
+    case "constructor":
+      return pattern.args.flatMap(patternBindingNames);
+    case "wildcard":
+    case "literal":
+    case "type":
+      return [];
+  }
 }
 
 function lowerProofConst(node: Node): ProofConstDecl {
@@ -750,15 +909,26 @@ function lowerExpr(node: Node): Expr {
       return { kind: "match", ...spanOnly(expr), value: lowerExpr(value), arms };
     }
     case "PipeBind":
+    case "CollectionPipeBind":
       return lowerPipeBind(expr);
+    case "CollectionExpr":
+      return lowerExpr(named(expr)[0]);
     case "PipeBindAtom":
+    case "CollectionPipeBindAtom":
       return lowerExpr(named(expr)[0]);
     case "Binary":
+    case "CollectionBinary":
       return lowerBinary(expr);
     case "Call":
       return lowerCall(expr);
     case "Primary":
       return lowerPrimary(expr);
+    case "BorrowExpr":
+      return {
+        kind: "borrow",
+        ...spanOnly(expr),
+        value: lowerExpr(first(expr, "Primary")),
+      };
     case "Block":
       return lowerBlock(expr);
     default:
@@ -842,11 +1012,13 @@ function operatorAssociativity(op: string): "left" | "right" | "none" {
 
 function lowerPipeBind(node: Node): Expr {
   const children = named(node);
-  let current = lowerExpr(first(node, "PipeBindAtom"));
+  let current = lowerExpr(optional(node, "PipeBindAtom") ?? first(node, "CollectionPipeBindAtom"));
   for (let index = 0; index < children.length; index++) {
     const name = children[index];
     if (name.type !== "PipeBindName") continue;
-    const body = children.slice(index + 1).find(is("PipeBindAtom"));
+    const body = children.slice(index + 1).find((child) =>
+      child.type === "PipeBindAtom" || child.type === "CollectionPipeBindAtom"
+    );
     if (!body) return current;
     const bindName = text(named(name)[0] ?? name, "pipe bind name");
     const loweredBody = lowerPipeBindBody(body, bindName);
@@ -876,6 +1048,8 @@ function bindDollarPlaceholders(expr: Expr): Expr {
         callee: bindDollarPlaceholders(expr.callee),
         args: expr.args.map(bindDollarPlaceholders),
       };
+    case "borrow":
+      return { ...expr, value: bindDollarPlaceholders(expr.value) };
     case "index":
       return {
         ...expr,
@@ -1072,6 +1246,12 @@ function lowerPrimary(node: Node): Expr {
   switch (child.type) {
     case "Literal":
       return lowerLiteral(child);
+    case "BorrowExpr":
+      return {
+        kind: "borrow",
+        ...spanOnly(child),
+        value: lowerExpr(first(child, "Primary")),
+      };
     case "Placeholder":
       return { kind: "placeholder", ...spanOnly(child) };
     case "ForkBuiltin":
@@ -1111,6 +1291,12 @@ function lowerPrimary(node: Node): Expr {
       return lowerExpr(child);
     case "ShapeValue":
       return lowerShapeValue(child);
+    case "CollectionValue":
+      return lowerCollectionValue(child);
+    case "FrozenCollectionValue":
+      return lowerFrozenCollectionValue(child);
+    case "TupleValue":
+      return lowerTupleValue(child);
     case "Block":
       return lowerBlock(child);
     default:
@@ -1119,25 +1305,65 @@ function lowerPrimary(node: Node): Expr {
 }
 
 function lowerShapeValue(node: Node): Expr {
-  const slots = lowerShapeValueItems(optional(node, "ShapeValueItems") ?? node);
-  if (slots.length === 0) return { kind: "shape", ...spanOnly(node), slots: [] };
+  const slots = canonicalizeSlots(lowerShapeValueItems(optional(node, "ShapeValueItems") ?? node), "record value");
+  if (slots.length === 0) return { kind: "shape", syntax: "record", ...spanOnly(node), slots: [] };
   return {
     kind: "shape",
+    syntax: "record",
     ...spanOnly(node),
     slots,
   };
 }
 
 function lowerShapeValueItems(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
-  const staticFor = named(node).find(is("StaticForSlot"));
-  if (staticFor) return [{ ...spanOnly(staticFor), value: lowerStaticForSlot(staticFor) }, ...lowerShapeValueTail(node)];
-  const expr = named(node).find(is("Expr"));
+  const staticFor = optional(node, "StaticForSlot");
+  if (staticFor) {
+    const binderNodes = named(first(staticFor, "StaticForBinders")).filter(isIdentifier);
+    const binders = binderNodes.map((item) => item.text);
+    return [{
+      ...spanOnly(staticFor),
+      value: {
+        kind: "static_for_slots",
+        ...spanOnly(staticFor),
+        iterator: binders[0] ?? "Key",
+        ...(docText(binderNodes[0]) ? { iteratorDoc: docText(binderNodes[0]) } : {}),
+        valueIterator: binders[1],
+        ...(docText(binderNodes[1]) ? { valueIteratorDoc: docText(binderNodes[1]) } : {}),
+        source: lowerStaticForSource(first(staticFor, "StaticForSource")),
+        labeled: true,
+        value: lowerExpr(first(staticFor, "Expr")),
+      },
+    }, ...lowerShapeValueTail(node)];
+  }
+  const spread = named(node).find(is("SpreadSlot"));
+  if (spread) {
+    return [{
+      ...spanOnly(spread),
+      spread: true,
+      value: lowerExpr(first(spread, "Expr")),
+    }, ...lowerShapeValueTail(node)];
+  }
+  const punned = optional(node, "PunnedShapeValueSlot");
+  if (punned) {
+    const name = first(punned, "LowerIdent").text;
+    return [{
+      ...meta(punned, first(punned, "LowerIdent")),
+      ...doc(punned),
+      label: name,
+      value: { kind: "var", ...meta(punned, first(punned, "LowerIdent")), name },
+    }, ...lowerShapeValueTail(node)];
+  }
+  const expr = named(node).find((child) =>
+    child.type === "Expr" || child.type === "CollectionExpr" ||
+    child.type === "CollectionPipeBind" || child.type === "CollectionPipeBindAtom" ||
+    child.type === "CollectionBinary" || child.type === "Call"
+  ) ?? descendants(node, "CollectionExpr")[0] ?? descendants(node, "Expr")[0];
   if (!expr) return [];
-  const field = named(node).find(isFieldName);
+  const key = optional(node, "ShapeValueSlotKey");
   return [{
-    ...meta(node, field),
+    ...meta(node, slotLabelNode(key)),
     ...doc(node),
-    label: field?.text.replace(/:\s*$/, "").trim(),
+    ...slotKeyParts(key),
     value: lowerExpr(expr),
   }, ...lowerShapeValueTail(node)];
 }
@@ -1148,20 +1374,129 @@ function lowerShapeValueTail(node: Node): Extract<Expr, { kind: "shape" }>["slot
   return tailItems ? lowerShapeValueItems(tailItems) : [];
 }
 
-function lowerStaticForSlot(node: Node): Expr {
-  const binderNodes = named(first(node, "StaticForBinders")).filter(isIdentifier);
-  const binders = binderNodes.map((item) => item.text);
+function lowerCollectionValue(node: Node): Expr {
   return {
-    kind: "static_for_slots",
-    ...meta(node, binderNodes[0]),
-    iterator: binders[0] ?? "I",
-    ...(docText(binderNodes[0]) ? { iteratorDoc: docText(binderNodes[0]) } : {}),
-    valueIterator: binders[1],
-    ...(docText(binderNodes[1]) ? { valueIteratorDoc: docText(binderNodes[1]) } : {}),
-    source: lowerStaticForSource(first(node, "StaticForSource")),
-    labeled: binders.length > 1,
-    value: lowerExpr(named(node).filter(is("Expr")).at(-1)!),
+    kind: "shape",
+    syntax: "collection",
+    ...spanOnly(node),
+    slots: lowerCollectionValueItems(optional(node, "CollectionValueItems") ?? node),
   };
+}
+
+function lowerCollectionValueItems(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
+  const spread = named(node).find((child) => child.type === "SpreadSlot" || child.type === "CollectionSpreadSlot");
+  if (spread) {
+    return [{
+      ...spanOnly(spread),
+      spread: true,
+      value: lowerExpr(optional(spread, "Expr") ?? first(spread, "CollectionExpr")),
+    }, ...lowerCollectionValueTail(node)];
+  }
+  const expr = named(node).find((child) =>
+    child.type === "Expr" || child.type === "CollectionExpr" ||
+    child.type === "CollectionPipeBind" || child.type === "CollectionPipeBindAtom" ||
+    child.type === "CollectionBinary" || child.type === "Call"
+  ) ?? descendants(node, "CollectionExpr")[0] ?? descendants(node, "Expr")[0];
+  if (!expr) return [];
+  return [{
+    ...spanOnly(expr),
+    value: lowerExpr(expr),
+  }, ...lowerCollectionValueTail(node)];
+}
+
+function lowerCollectionValueTail(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
+  const tail = named(node).find(is("CollectionValueTail"));
+  const tailItems = tail ? named(tail).find(is("CollectionValueItems")) : undefined;
+  return tailItems ? lowerCollectionValueItems(tailItems) : [];
+}
+
+function lowerFrozenCollectionValue(node: Node): Expr {
+  return {
+    kind: "shape",
+    syntax: "frozen_collection",
+    ...spanOnly(node),
+    slots: lowerFrozenCollectionValueItems(optional(node, "FrozenCollectionValueItems") ?? node),
+  };
+}
+
+function lowerFrozenCollectionValueItems(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
+  const spread = named(node).find(is("SpreadSlot"));
+  if (spread) {
+    return [{
+      ...spanOnly(spread),
+      spread: true,
+      value: lowerExpr(first(spread, "Expr")),
+    }, ...lowerFrozenCollectionValueTail(node)];
+  }
+  const expr = named(node).find(is("Expr"));
+  if (!expr) return [];
+  return [{
+    ...spanOnly(expr),
+    value: lowerExpr(expr),
+  }, ...lowerFrozenCollectionValueTail(node)];
+}
+
+function lowerFrozenCollectionValueTail(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
+  const tail = named(node).find(is("FrozenCollectionValueTail"));
+  const tailItems = tail ? named(tail).find(is("FrozenCollectionValueItems")) : undefined;
+  return tailItems ? lowerFrozenCollectionValueItems(tailItems) : [];
+}
+
+function lowerTupleValue(node: Node): Expr {
+  const repeat = optional(node, "TupleValueRepeat");
+  if (repeat) {
+    const value = lowerExpr(first(repeat, "Expr"));
+    const count = lowerTupleRepeatCount(first(repeat, "TypeRepeatCount"));
+    return {
+      kind: "shape",
+      syntax: "record",
+      ...spanOnly(node),
+      slots: expandRepeatedValueSlot(value, count, spanOnly(repeat)),
+    };
+  }
+  const exprs = listTupleItems(node, "Expr");
+  return {
+    kind: "shape",
+    syntax: "record",
+    ...spanOnly(node),
+    slots: exprs.map((expr, position) => ({
+      ...spanOnly(expr),
+      position,
+      value: lowerExpr(expr),
+    })),
+  };
+}
+
+function expandRepeatedValueSlot(
+  value: Expr,
+  count: TypeCountExpr,
+  meta: AstNodeMeta,
+): Extract<Expr, { kind: "shape" }>["slots"] {
+  if (count.kind === "count_literal") {
+    return Array.from({ length: count.value }, (_, position) => ({
+      ...meta,
+      position,
+      value,
+    }));
+  }
+  return [{ ...meta, position: 0, value, repeat: count }];
+}
+
+function listTupleItems(node: Node, type: "Expr" | "TypeExpr" | "Pattern"): Node[] {
+  const found: Node[] = [];
+  for (const child of named(node)) {
+    if (child.type === type) found.push(child);
+    else if (
+      child.type === "TupleValue" || child.type === "TupleValueItems" ||
+      child.type === "TupleValueTail" || child.type === "TypeTuple" ||
+      child.type === "TypeTupleBody" || child.type === "TypeTupleTail" ||
+      child.type === "TuplePattern" || child.type === "TuplePatternItems" ||
+      child.type === "TuplePatternTail"
+    ) {
+      found.push(...listTupleItems(child, type));
+    }
+  }
+  return found;
 }
 
 function lowerStaticForSource(node: Node): StaticForSource {
@@ -1275,6 +1610,12 @@ function optional(node: Node, type: string): Node | undefined {
   return named(node).find(is(type));
 }
 
+function descendants(node: Node, type: string): Node[] {
+  return named(node).flatMap((child) =>
+    child.type === type ? [child] : descendants(child, type)
+  );
+}
+
 function listSlots(node: Node, type: string): Node[] {
   const found: Node[] = [];
   for (const child of named(node)) {
@@ -1357,6 +1698,17 @@ function spanFor(node: Node): Span | undefined {
     end: node.endIndex,
     line: node.startPosition.row + 1,
     column: node.startPosition.column + 1,
+    ...(currentSourceId ? { sourceId: currentSourceId } : {}),
+  };
+}
+
+function spanFromOffsets(start: number | undefined, end: number | undefined): Span | undefined {
+  if (start === undefined || end === undefined) return undefined;
+  return {
+    start,
+    end,
+    line: 1,
+    column: 1,
     ...(currentSourceId ? { sourceId: currentSourceId } : {}),
   };
 }

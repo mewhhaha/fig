@@ -6,6 +6,7 @@
   },
   "imports": {
     "@mewhhaha/baba": "../baba/src/mod.ts",
+    "tsdoc": "npm:@microsoft/tsdoc@0.15.1",
     "web-tree-sitter": "npm:web-tree-sitter@0.26.6"
   },
   "tasks": {

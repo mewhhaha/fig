@@ -11,6 +11,7 @@ export const intrinsicIds = [
   "inline_array_builder_start",
   "inline_array_builder_push",
   "inline_array_builder_finish",
+  "freeze",
 ] as const;
 
 export type IntrinsicId = typeof intrinsicIds[number];

@@ -14,10 +14,10 @@ summarizes the current supported surface.
 - Use `docs/LANGUAGE.md` as the language index and reading order.
 - Use `docs/reference/syntax.md` for declarations, params, blocks, patterns, literals, imports, and
   capabilities.
-- Use `docs/reference/types.md` for primitive, function, shape/product/union, repeat, and
-  constructor types.
-- Use `docs/reference/expressions.md` for calls, constructors, match, operators, pipe-bind, `$`,
-  `fork`, and destructuring.
+- Use `docs/reference/types.md` for primitive, function, tuple, shape/product/union, repeat, borrow,
+  frozen, and constructor types.
+- Use `docs/reference/expressions.md` for calls, constructors, tuples, collections, borrows, match,
+  operators, pipe-bind, `$`, `fork`, and destructuring.
 - Use `docs/reference/type-functions.md` for type blocks, result kinds, parameters, `struct`,
   `union`, `operator`, and type matches.
 - Use `docs/reference/builtins.md` for every `@...` compiler builtin and backend intrinsic.
@@ -35,9 +35,10 @@ summarizes the current supported surface.
 
 ## Doc Comments
 
-Use `///` doc comments when writing Fig declarations or bindings that should carry raw markdown
-metadata for future hover tooling. The compiler stores the stripped text on the checked AST; there
-is no hover UI or TSDoc parsing yet.
+Use `///` doc comments when writing Fig declarations or bindings that should carry markdown
+metadata for editor hovers. The compiler stores the stripped text on the checked AST, and the LSP
+renders it below the symbol signature when available. Well-formed TSDoc-style tags are accepted by
+the hover renderer.
 
 Doc comments attach only to the immediately following binding when there is no blank line, ordinary
 `//` comment, or code between the comment block and the binding. Multiple contiguous `///` lines
@@ -62,12 +63,12 @@ type fn point(
   A: type
 ) -> struct {
   /// Product shape.
-  let Point = [
+  let Point = {
     /// Horizontal coordinate.
     x: A,
     /// Vertical coordinate.
     y: A,
-  ];
+  };
   struct(Point)
 }
 ```
@@ -109,6 +110,15 @@ Imported declarations are qualified through the alias, including nested imports 
 `std.array.layout.lane4_i32`. The alias is an ordinary namespace alias; it does not merge imported
 names into the current scope. Duplicate aliases are rejected.
 
+Use destructured source imports only for exact top-level declarations:
+
+```fig
+const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");
+```
+
+Destructured imports do not support aliases, dotted names, type annotations, or non-`@import`
+right-hand sides.
+
 ## Names and Visibility
 
 - Type function names are lowercase, including type constructor references such as `pair(i32)`.
@@ -128,6 +138,9 @@ Use these literal forms:
 - Characters and strings: `'x'`, `"fig"`.
 - Fenced text: triple backticks, useful for WGSL shader source.
 - Literal type tags: `#Tag`, `#field`, `#infixl`.
+- Tuple and repeat values: `[1, true]`, `[0; 4]`.
+- Target-typed collection literals: `<1, 2, 3>`, including spread such as `<0, ...rest>`.
+- Frozen collection literals: `#[1, 2, 3]` when the expected type is frozen.
 
 Unsuffixed integer literals default from context, commonly to `i32`. Current primitive scalar types
 include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`, `memory`, and arbitrary unsigned
@@ -146,9 +159,10 @@ Parameter forms include:
 
 - `name: Type`
 - `const name: Type` for static function/dictionary/type parameters.
+- `name: &(Type)` for call-scoped borrowed parameters.
 - Literal clauses such as `fn choose(1: i32) -> i32 { 10 }` ordered before broader clauses.
 - `_ : Type` placeholders.
-- Pattern identifiers for sum variants in limited clause contexts.
+- Pattern identifiers for sum variants and tuple destructuring in supported clause contexts.
 
 Multiple clauses with the same function name are ordered and checked for compatible arity and return
 types. Use repeated function definitions when you want to check several parameter values at once;
@@ -158,7 +172,7 @@ generated runtime parameters.
 Function types use `fn(...) -> Type`; const function parameters enable compile-time specialization:
 
 ```fig
-fn map4(const f: fn(x: i32) -> i32, xs: [4*i32]) -> [4*i32] {
+fn map4(const f: fn(x: i32) -> i32, xs: {4*i32}) -> {4*i32} {
   [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
 }
 ```
@@ -180,8 +194,13 @@ Supported expressions include:
 - Function calls: `f(x)`.
 - Field access: `point.x`.
 - Indexing: `xs[0]`.
-- Product construction: `Point [x: 1, y: 2]` or `[1, 2]` where the type is known.
-- Shape values: `[x: 1, y: 2]`.
+- Product construction: `Point {x: 1, y: 2}` with labeled, positioned, punned, spread, or static
+  generated slots.
+- Shape values: `{x: 1, y: 2}`, `{x, y}`, `{...base, z: 3}`, and
+  `{for Key, Spec in (fields): value}`.
+- Tuple and repeat values: `[1, 2]`, `[0; 4]`.
+- Target-typed collection literals: `<1, 2, 3>`, `<0, ...rest>`.
+- Borrow expressions: `&value` for `&(Type)` parameters.
 - `match value { pattern => expr, _ => fallback }`.
 - Binary operators listed in `grammar.ebnf`.
 - Ranges: `start .. end`.
@@ -221,13 +240,13 @@ Define concrete product and sum layouts with type functions:
 
 ```fig
 type fn point() -> struct {
-  let Point = [x: i32, y: i32];
+  let Point = {x: i32, y: i32};
   struct(Point)
 }
 
 type fn option(A: type) -> union {
-  let None = [];
-  let Some = [value: A];
+  let None = {};
+  let Some = {value: A};
   union(None, Some)
 }
 ```
@@ -236,7 +255,7 @@ Shape slots may be labeled or anonymous. Counted inline arrays use repeat syntax
 
 ```fig
 type fn inline_array(N: count, A: type) -> type {
-  let InlineArray = [N*A];
+  let InlineArray = {N*A};
   struct(InlineArray)
 }
 ```
@@ -245,6 +264,9 @@ Indexing a fixed inline array with a literal is bounds-checked. Dynamic indexing
 `index(N)` proof type matching the array length; otherwise use a checked helper that returns an
 `option`.
 
+Tuple types use brackets, such as `[i32, bool]` and `[i32; 4]`. Shape and product types use braces.
+Borrowed and frozen types use `&(T)` and `#(T)`.
+
 ## Type Functions
 
 Type functions run at compile time and return `type`, `struct`, `union`, or `operator`:
@@ -252,7 +274,7 @@ Type functions run at compile time and return `type`, `struct`, `union`, or `ope
 ```fig
 type fn id() -> type { i32 }
 type fn pair(A: type, B: type) -> struct {
-  let Pair = [first: A, second: B];
+  let Pair = {first: A, second: B};
   struct(Pair)
 }
 ```
@@ -276,6 +298,24 @@ Inside type functions:
 - Use `@compile_error("message")` or `@require(condition, "message")` for diagnostics.
 - Do not call effectful host capabilities from type-level evaluation.
 
+When choosing a type-function pattern:
+
+- If you intend to define a runtime data layout, write a `type fn`, bind a PascalCase shape, and
+  return `struct(Shape)` or `union(...)`.
+- If you intend to require behavior on a type, write a contract `type fn` with `@require` and
+  attached members such as `T.eql`, `T.append`, or `T.map`.
+- If you intend generic runtime helpers with no runtime proof cost, pass `const _proof:
+  contract(T)` and call attached members through `T.member(...)`.
+- If you intend to abstract over a unary type constructor, accept `T: type fn(A: type) -> type`,
+  use values as `T(A)`, and reflect members on `T`.
+- If you intend type-directed construction or dispatch, pass the type as `const T` or
+  `const t: type`; avoid modeling types as runtime values.
+- If ordinary value parameters already determine the type, prefer inference. Pass `const T`
+  explicitly only for otherwise unpinned cases such as `empty(T)`, `pure(T, ...)`, or explicit
+  static dispatch.
+- If you intend static layout/count specialization, use `const n: count`, `const a: type`, or
+  another `const` parameter.
+
 ## Static Reflection and Shape Builtins
 
 Use static builtins only with the `@` prefix. Current reflection helpers include:
@@ -285,9 +325,9 @@ Use static builtins only with the `@` prefix. Current reflection helpers include
   `@type_has_member(T, #map)`.
 - Type lookup: `@type_slot_type(T, #field)`, `@type_member_type(T, #member)`, `@type_slots(T)`,
   `@type_variants(T)`, `@type_variant_slots(T, #Variant)`.
-- Shape operations: `@shape_has_slot`, `@shape_slot`, `@shape_count`, `@shape_pick`, `@shape_omit`,
-  `@shape_intersect`, `@shape_difference`, `@shape_rename`, `@shape_map`, `@shape_map_with_key`,
-  `@shape_filter`, `@shape_concat`.
+- Shape operations: `@shape_has_slot`, `@shape_slot`, `@shape_count`, `@shape_first_key`,
+  `@shape_tail`, `@shape_pick`, `@shape_omit`, `@shape_intersect`, `@shape_difference`,
+  `@shape_rename`, `@shape_map`, `@shape_map_with_key`, `@shape_filter`, `@shape_concat`.
 
 Shape maps require mapper type functions. `@shape_map_with_key` and `@shape_filter` mappers take
 `(Key: const, Value: const)`. `@shape_filter` predicates must return `bool`. Generated shape fields
@@ -315,7 +355,7 @@ called statically as `T.map(...)` inside generic code. Local proof consts such a
 Const dictionaries are product-shaped constants whose fields are function references:
 
 ```fig
-const point_eq: eq(point) = [eql: point.eql, neq: point.neq];
+const point_eq: eq(point) = {eql: point.eql, neq: point.neq};
 ```
 
 Fields must match the annotated product shape, and slot values must be function references rather
@@ -344,18 +384,18 @@ Define functor-like types by attaching a `map` member to a unary type constructo
 
 ```fig
 type fn box(A: type) -> type {
-  let Box = [value: A];
+  let Box = {value: A};
   struct(Box)
 }
 
 fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
-  Box [value: f(v.value)]
+  Box {value: f(v.value)}
 }
 
 fn inc(x: i32) -> i32 { x + 1 }
 
 pub fn main() -> i32 {
-  fmap(Box [value: 1], inc, functor(box)).value
+  fmap(Box {value: 1}, inc, functor(box)).value
 }
 ```
 
@@ -367,19 +407,19 @@ fn box.bind(v: box(A), const f: fn(x: A) -> box(B)) -> box(B) {
 }
 
 fn wrap(x: i32) -> box(i32) {
-  Box [value: x + 10]
+  Box {value: x + 10}
 }
 
 pub fn main() -> i32 {
-  bind(fmap(Box [value: 1], inc, functor(box)), wrap, monad(box)).value
+  bind(fmap(Box {value: 1}, inc, functor(box)), wrap, monad(box)).value
 }
 ```
 
 Define applicative-like types with `map`, `pure`, and `apply`:
 
 ```fig
-fn box.pure(value: A) -> box(A) { Box [value: value] }
-fn box.apply(v: box(fn(x: A) -> B), x: box(A)) -> box(B) { Box [value: v.value(x.value)] }
+fn box.pure(value: A) -> box(A) { Box {value: value} }
+fn box.apply(v: box(fn(x: A) -> B), x: box(A)) -> box(B) { Box {value: v.value(x.value)} }
 fn proof(const _proof: applicative(box)) -> i32 { 0 }
 ```
 
@@ -387,12 +427,12 @@ Use semigroup/monoid patterns for append and empty operations on concrete types:
 
 ```fig
 fn point.append(a: point, b: point) -> point {
-  Point [x: a.x + b.x, y: a.y + b.y]
+  Point {x: a.x + b.x, y: a.y + b.y}
 }
-fn point.empty() -> point { Point [x: 0, y: 0] }
+fn point.empty() -> point { Point {x: 0, y: 0} }
 
 pub fn main() -> i32 {
-  let total = append(point, semigroup(point), Point [x: 1, y: 2], Point [x: 3, y: 4]);
+  let total = append(point, semigroup(point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
   total.x + total.y
 }
 ```
@@ -433,13 +473,15 @@ Functional operator forms lower to attached members:
 ```fig
 const merge = @import("prelude.std");
 
-pub fn mapped() -> box(i32) { inc <$> Box [value: 1] }
-pub fn bound() -> box(i32) { Box [value: 1] >>= wrap }
+pub fn mapped() -> box(i32) { inc <$> Box {value: 1} }
+pub fn bound() -> box(i32) { Box {value: 1} >>= wrap }
 ```
 
 When implementing new abstractions, keep the contract as a `type fn`, attach runtime behavior with
 qualified member functions, pass proof values as `const _proof` parameters, and rely on
-specialization to erase proof and dispatch overhead.
+specialization to erase proof and dispatch overhead. Const dictionaries are still useful for highly
+specialized static dispatch, but attached members plus erased proof parameters are the preferred
+default for typeclass-like APIs.
 
 ## Operators
 
@@ -459,13 +501,23 @@ type fn op_add(T: type) -> operator {
 }
 ```
 
-Supported fixity tags are `#infix`, `#infixl`, and `#infixr`. The prelude exposes common operator
-descriptors in `prelude.operators` and through `prelude.std`.
+Current expression syntax resolves user-defined binary operators through visible descriptors,
+usually `#infix`, `#infixl`, or `#infixr`. The prelude exposes common operator descriptors in
+`prelude.operators` and through `prelude.std`.
 
 ## Ownership and Forking
 
 Fig tracks moves for values. Passing a value to a function consumes it unless the operation is known
 to borrow it. Reusing a moved local is rejected.
+
+Use `&value` only for a call-scoped borrow into an `&(Type)` parameter:
+
+```fig
+fn sum(p: &(point)) -> i32 { p.x + p.y }
+let total = sum(&point);
+```
+
+Borrowed values cannot be stored, returned, or passed as owned parameters.
 
 Use `fork(value)` to create multiple owned copies:
 

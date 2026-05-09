@@ -8,9 +8,11 @@
   "supertypes": ["Decl", "Expr", "Literal"],
   "conflicts": [
     ["Primary"],
+    ["Call"],
     ["FieldName", "TypeAnn"],
     ["FieldName", "PatternIdent"],
-    ["FieldName", "TypeParamDecl"]
+    ["FieldName", "TypeParamDecl"],
+    ["ImportBindingItems", "ImportBindingTail"]
   ],
   "queries": {
     "highlights": {
@@ -40,6 +42,8 @@
         "(Primary (LowerIdent) @variable)",
         "(Call (Primary (LowerIdent) @function.call) \"(\")",
         "(Call (Primary (ForkBuiltin) @function.builtin) \"(\")",
+        "(Primary (StaticBuiltin (LowerIdent) @function.builtin))",
+        "(TypePrimary (StaticBuiltin (LowerIdent) @function.builtin))",
         "(Type (LowerIdent) @type)",
         "(Type (PascalIdent) @type.parameter)",
         "(TypePrimary (LowerIdent) @type)",
@@ -47,6 +51,7 @@
         "(TypeFnDecl (LowerIdent) @type.definition)",
         "(TypeLetDecl (PascalIdent) @type)",
         "(ConstDecl (LowerIdent) @variable)",
+        "(ImportBindingList (ImportBindingItems (LowerIdent) @variable))",
         "(ConstDecl (FieldName) @variable)",
         "(Param (PatternIdent (LowerIdent) @variable.parameter))",
         "(Param (PatternIdent (PascalIdent) @constructor))",
@@ -57,9 +62,8 @@
         "(BlockLetTail (LowerIdent) @variable)",
         "(TopLetDecl (LowerIdent) @variable)",
         "(TopLetDecl (FieldName) @variable)",
-        "(ShapeValueSlot (FieldName) @variable.other.member)",
-        "(TypeShapeSlot (FieldName) @variable.other.member)",
-        "(ShapeSlot (FieldName) @variable.other.member)",
+        "(TypeShapeSlot (ShapeSlotKey (LowerIdent) @variable.other.member))",
+        "(ShapeSlot (ShapeSlotKey (LowerIdent) @variable.other.member))",
         "(Call \".\" (LowerIdent) @variable.other.member)",
         "(Primary (PascalIdent) @constructor)"
       ],

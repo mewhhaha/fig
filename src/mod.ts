@@ -47,6 +47,13 @@ export async function checkSource(source: string, options: CheckSourceOptions = 
 
 export async function checkSourceForAnalysis(source: string, options: CheckSourceOptions = {}) {
   const program = await parse(source, { sourceId: options.sourceId });
+  return await checkParsedSourceForAnalysis(program, options);
+}
+
+export async function checkParsedSourceForAnalysis(
+  program: Program,
+  options: CheckSourceOptions = {},
+) {
   if (!options.resolveModule) return checkProgramForAnalysis(program);
   return checkProgramForAnalysis(
     await resolveSourceImports(program, { resolveModule: options.resolveModule }),
@@ -115,7 +122,10 @@ async function resolveSourceImports(
   async function mergeImports(program: Program): Promise<Program> {
     const importedPrograms: Program[] = [];
     const aliasedImports: { alias: string; program: Program }[] = [];
+    const destructuredImports: { alias: string; sourceImport: SourceImport; program: Program }[] = [];
     const aliases = new Set<string>();
+    const reservedNames = new Set(program.declarations.map(declarationName));
+    let hiddenImportIndex = 0;
     for (const item of program.sourceImports ?? []) {
       if (item.alias) {
         if (
@@ -129,13 +139,39 @@ async function resolveSourceImports(
           continue;
         }
         aliases.add(item.alias);
+        reservedNames.add(item.alias);
+      }
+      if (item.bindings) {
+        const seenBindings = new Set<string>();
+        for (const binding of item.bindings) {
+          if (seenBindings.has(binding.name)) {
+            diagnostics.push({
+              code: "module.duplicate_binding",
+              message: `source import binding ${binding.name} is listed more than once`,
+              span: binding.nameSpan ?? binding.span,
+            });
+          }
+          seenBindings.add(binding.name);
+        }
       }
       const imported = await load(item.module, item);
       if (!imported) continue;
       if (item.alias) aliasedImports.push({ alias: item.alias, program: imported });
+      else if (item.bindings) {
+        const alias = nextHiddenImportAlias(reservedNames, hiddenImportIndex++);
+        reservedNames.add(alias);
+        for (const decl of imported.declarations) {
+          reservedNames.add(qualifyName(declarationName(decl), alias));
+        }
+        destructuredImports.push({
+          alias,
+          sourceImport: item,
+          program: imported,
+        });
+      }
       else importedPrograms.push(imported);
     }
-    return mergePrograms(importedPrograms, aliasedImports, program, diagnostics);
+    return mergePrograms(importedPrograms, aliasedImports, destructuredImports, program, diagnostics);
   }
 
   const merged = await mergeImports(root);
@@ -146,6 +182,7 @@ async function resolveSourceImports(
 function mergePrograms(
   imports: Program[],
   aliasedImports: { alias: string; program: Program }[],
+  destructuredImports: { alias: string; sourceImport: SourceImport; program: Program }[],
   program: Program,
   diagnostics: Diagnostic[],
 ): Program {
@@ -153,10 +190,13 @@ function mergePrograms(
   const aliasedDecls = aliasedImports.flatMap(({ alias, program }) =>
     qualifyImportedDeclarations(program.declarations, alias)
   );
+  const destructuredDecls = destructuredImports.flatMap((item) =>
+    destructureImportedDeclarations(item.sourceImport, item.program, item.alias, diagnostics)
+  );
   const localNames = new Set(program.declarations.map(declarationName));
   const seenImported = new Map<string, Declaration>();
   const declarations: Declaration[] = [];
-  for (const decl of [...importedDecls, ...aliasedDecls]) {
+  for (const decl of [...importedDecls, ...aliasedDecls, ...destructuredDecls]) {
     const name = declarationName(decl);
     if (localNames.has(name) || seenImported.has(name)) {
       diagnostics.push({
@@ -175,11 +215,63 @@ function mergePrograms(
     imports: [
       ...imports.flatMap((item) => item.imports),
       ...aliasedImports.flatMap((item) => item.program.imports),
+      ...destructuredImports.flatMap((item) => item.program.imports),
       ...program.imports,
     ],
     sourceImports: [],
     declarations,
   });
+}
+
+function destructureImportedDeclarations(
+  sourceImport: SourceImport,
+  program: Program,
+  alias: string,
+  diagnostics: Diagnostic[],
+): Declaration[] {
+  const bindings = sourceImport.bindings ?? [];
+  const names = new Set(program.declarations.flatMap(collectDeclarationNames));
+  const hiddenDecls = qualifyImportedDeclarations(program.declarations, alias).map(markPrivate);
+  const selected: Declaration[] = [];
+  const seenBindings = new Set<string>();
+  for (const binding of bindings) {
+    if (seenBindings.has(binding.name)) continue;
+    seenBindings.add(binding.name);
+    const decl = program.declarations.find((item) => declarationName(item) === binding.name);
+    if (!decl) {
+      diagnostics.push({
+        code: "module.missing_binding",
+        message: `module ${sourceImport.module} has no declaration named ${binding.name}`,
+        span: binding.nameSpan ?? binding.span,
+      });
+      continue;
+    }
+    selected.push(unqualifiedSelectedDeclaration(qualifyDeclaration(decl, alias, names), binding.name));
+  }
+  return [...hiddenDecls, ...selected];
+}
+
+function nextHiddenImportAlias(reservedNames: Set<string>, start: number): string {
+  let index = start;
+  while (true) {
+    const alias = `__import${index++}`;
+    if (![...reservedNames].some((name) => name === alias || name.startsWith(`${alias}.`))) {
+      return alias;
+    }
+  }
+}
+
+function unqualifiedSelectedDeclaration(decl: Declaration, name: string): Declaration {
+  if (decl.kind === "fn") return withMeta(decl, { ...decl, name });
+  if (decl.kind === "type") return withMeta(decl, { ...decl, name });
+  return withMeta(decl, { ...decl, name });
+}
+
+function markPrivate(decl: Declaration): Declaration {
+  if (decl.kind === "fn" || decl.kind === "type") {
+    return withMeta(decl, { ...decl, public: false });
+  }
+  return decl;
 }
 
 async function parseModuleSource(
@@ -286,6 +378,8 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
         callee: qualifyExpr(expr.callee, alias, names),
         args: expr.args.map((arg) => qualifyExpr(arg, alias, names)),
       });
+    case "borrow":
+      return withMeta(expr, { ...expr, value: qualifyExpr(expr.value, alias, names) });
     case "index":
       return withMeta(expr, {
         ...expr,

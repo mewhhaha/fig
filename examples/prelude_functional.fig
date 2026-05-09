@@ -1,12 +1,12 @@
 const merge = @import("prelude.std");
 
 type fn box(A: type) -> type {
-  let Box = [value: A];
+  let Box = {value: A};
   struct(Box)
 }
 
 fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
-  Box [value: f(v.value)]
+  Box {value: f(v.value)}
 }
 
 fn box.bind(v: box(A), const f: fn(x: A) -> box(B)) -> box(B) {
@@ -18,7 +18,7 @@ fn inc(x: i32) -> i32 {
 }
 
 fn wrap(x: i32) -> box(i32) {
-  Box [value: x + 10]
+  Box {value: x + 10}
 }
 
 fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
@@ -30,6 +30,6 @@ fn binder(v: T(A), const f: fn(x: A) -> T(B), const _proof: monad(T)) -> T(B) {
 }
 
 pub fn main() -> i32 {
-  let mapped = fmap(Box [value: 1], inc, functor(box));
+  let mapped = fmap(Box {value: 1}, inc, functor(box));
   bind(mapped, wrap, monad(box)).value
 }

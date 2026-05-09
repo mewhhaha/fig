@@ -1,6 +1,6 @@
 // expect: type.unknown_type_variant
 type fn option(A: type) -> union {
-  let None = [];
+  let None = {};
   union(None)
 }
 type fn bad(A: type) -> type { @type_variant_slots(option(A), #Some) }

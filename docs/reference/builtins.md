@@ -42,13 +42,15 @@ work during const evaluation when their arguments are compile-time values.
 
 ## Shape Builtins
 
-Shape builtins operate on compile-time shape values such as `[x: i32, y: bool]`.
+Shape builtins operate on compile-time shape values such as `{x: i32, y: bool}`.
 
 | Builtin               | Arguments                        | Returns    |
 | --------------------- | -------------------------------- | ---------- |
 | `@shape_has_slot`     | shape, label                     | `bool`     |
 | `@shape_slot`         | shape, label                     | slot value |
 | `@shape_count`        | shape                            | number     |
+| `@shape_first_key`    | shape                            | first key  |
+| `@shape_tail`         | shape                            | shape      |
 | `@shape_pick`         | shape, selector shape            | shape      |
 | `@shape_omit`         | shape, selector shape            | shape      |
 | `@shape_intersect`    | shape, selector shape            | shape      |

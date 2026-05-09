@@ -42,7 +42,7 @@ pub fn main() -> i32 {
   let maybe = std.option_map(std.some(1), inc);
   let value = std.option_unwrap_or(maybe, 0);
   let bounded = std.clamp_i32(value + 10, 0, 8);
-  let swapped = std.pair_swap(Pair [first: bounded, second: std.result_unwrap_or(std.ok(2), 0)]);
+  let swapped = std.pair_swap(Pair {first: bounded, second: std.result_unwrap_or(std.ok(2), 0)});
   swapped.first + swapped.second
 }
 ```

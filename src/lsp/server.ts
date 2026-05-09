@@ -1,13 +1,12 @@
 import {
   AnalysisCache,
   codeActions,
-  completionsAt,
   definitionAt,
   documentSymbols,
   hoverAt,
+  inlayHintsAt,
   prepareRenameAt,
   referencesAt,
-  renameAt,
   SEMANTIC_TOKEN_TYPES,
   semanticTokens,
   signatureHelpAt,
@@ -52,6 +51,7 @@ export class FigLanguageServer {
               full: true,
             },
             documentSymbolProvider: true,
+            inlayHintProvider: true,
             workspaceSymbolProvider: true,
             codeActionProvider: true,
             documentFormattingProvider: true,
@@ -91,14 +91,20 @@ export class FigLanguageServer {
         return result ? definitionAt(result, params.position) : [];
       }
       case "textDocument/completion": {
-        const result = this.analysis.get(params.textDocument.uri) ??
-          await this.analysis.reanalyze(params.textDocument.uri);
-        return result ? { isIncomplete: false, items: completionsAt(result, params.position) } : [];
+        return {
+          isIncomplete: false,
+          items: await this.analysis.completionsAt(params.textDocument.uri, params.position),
+        };
       }
       case "textDocument/documentSymbol": {
         const result = this.analysis.get(params.textDocument.uri) ??
           await this.analysis.reanalyze(params.textDocument.uri);
         return result ? documentSymbols(result) : [];
+      }
+      case "textDocument/inlayHint": {
+        const result = this.analysis.get(params.textDocument.uri) ??
+          await this.analysis.reanalyze(params.textDocument.uri);
+        return result ? inlayHintsAt(result, params.range) : [];
       }
       case "textDocument/references": {
         const result = this.analysis.get(params.textDocument.uri) ??
@@ -111,9 +117,11 @@ export class FigLanguageServer {
         return result ? prepareRenameAt(result, params.position) : null;
       }
       case "textDocument/rename": {
-        const result = this.analysis.get(params.textDocument.uri) ??
-          await this.analysis.reanalyze(params.textDocument.uri);
-        return result ? renameAt(result, params.position, params.newName) : null;
+        return await this.analysis.renameAt(
+          params.textDocument.uri,
+          params.position,
+          params.newName,
+        );
       }
       case "textDocument/signatureHelp": {
         const result = this.analysis.get(params.textDocument.uri) ??

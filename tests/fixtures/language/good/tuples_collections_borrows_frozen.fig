@@ -1,0 +1,26 @@
+const layout = @import("prelude.layout");
+
+type fn pair() -> type {
+  let Pair = [i32, [i32; 3]];
+  struct(Pair)
+}
+
+fn make_pair() -> pair { [1, [2; 3]] }
+
+fn sum_pair(p: &(pair)) -> i32 {
+  p[0] + p[1][0] + p[1][1] + p[1][2]
+}
+
+fn tail() -> layout.inline_array_list(2, i32) {
+  <3, 4>
+}
+
+pub fn main() -> i32 {
+  let [head, values] = make_pair();
+  let pair = make_pair();
+  let borrowed = sum_pair(&pair);
+  let list: layout.inline_array_list(4, i32) = <1, 2, ...tail()>;
+  let array = layout.inline_array.from_list(4, i32, list);
+  let frozen: #(layout.inline_array(3, i32)) = #[10, 20, 30];
+  head + values[0] + values[1] + values[2] + borrowed + array[3] + frozen[1]
+}

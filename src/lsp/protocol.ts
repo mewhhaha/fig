@@ -41,6 +41,22 @@ export interface TextDocumentPositionParams {
   position: Position;
 }
 
+export interface InlayHintParams {
+  textDocument: TextDocumentIdentifier;
+  range: Range;
+}
+
+export const enum InlayHintKind {
+  Type = 1,
+  Parameter = 2,
+}
+
+export interface InlayHint {
+  position: Position;
+  label: string;
+  kind?: InlayHintKind;
+}
+
 export interface CompletionItem {
   label: string;
   kind?: number;

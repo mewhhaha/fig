@@ -7,17 +7,17 @@ type fn keep_xy(Key: const, _: const) -> type {
 }
 
 type fn shaped() -> type {
-  let Base = [x: i32, y: bool, z: i32];
-  let Picked = @shape_pick(Base, [x: true, y: true]);
-  let Omitted = @shape_omit(Base, [z: true]);
+  let Base = {x: i32, y: bool, z: i32};
+  let Picked = @shape_pick(Base, {x: true, y: true});
+  let Omitted = @shape_omit(Base, {z: true});
   let Intersected = @shape_intersect(Picked, Omitted);
   let Difference = @shape_difference(Base, Intersected);
-  let Renamed = @shape_rename(Difference, [z: #done]);
+  let Renamed = @shape_rename(Difference, {z: #done});
   let Mapped = @shape_map(Renamed, value_for);
   let Keyed = @shape_map_with_key(Mapped, keyed);
   let Filtered = @shape_filter(Keyed, keep_xy);
   let Count = @shape_count(Filtered);
-  let Out = @shape_concat(Filtered, [count: Count, x_type: @shape_slot(Filtered, #x)]);
+  let Out = @shape_concat(Filtered, {count: Count, x_type: @shape_slot(Filtered, #x)});
   match @shape_has_slot(Out, #count) {
     true => struct(Out),
     false => @compile_error("missing count"),

@@ -21,6 +21,7 @@
     "zip"
   ],
   "symbols": [
+    "...",
     "<*>",
     "<$>",
     ">>=",
@@ -52,17 +53,32 @@
     "*",
     "/",
     "\\",
+    "&",
     "%",
     "+",
-    "<",
     "=",
-    ">",
     "$"
   ],
   "tokens": [
     {
       "name": "CountRepeat",
       "pattern": "[0-9]+\\*"
+    },
+    {
+      "name": "FrozenCollectionOpen",
+      "pattern": "#\\["
+    },
+    {
+      "name": "FrozenTypeOpen",
+      "pattern": "#\\("
+    },
+    {
+      "name": "CollectionOpen",
+      "pattern": "<"
+    },
+    {
+      "name": "CollectionClose",
+      "pattern": ">"
     },
     {
       "name": "Number",

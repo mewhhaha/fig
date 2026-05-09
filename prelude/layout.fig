@@ -3,12 +3,37 @@ const core = @import("prelude.core");
 // Static inline layouts. These are value layouts today, not memory-backed arrays.
 
 type fn inline_array(N: count, A: type) {
-  let InlineArray = [N*A];
+  let InlineArray = {N*A};
   struct(InlineArray)
 }
 
+type fn inline_array_list(N: count, A: type) {
+  let InlineArrayList = {N*A};
+  struct(InlineArrayList)
+}
+
+type fn collector(Target: type, Item: type, Builder: type) {
+  let Start = fn() -> Builder;
+  let Push = fn(builder: Builder, item: Item) -> Builder;
+  let Finish = fn(builder: Builder) -> Target;
+  @require(@type_has_member(Target, #collect_start), "collector requires collect_start");
+  @require(@type_has_member(Target, #collect_push), "collector requires collect_push");
+  @require(@type_has_member(Target, #collect_finish), "collector requires collect_finish");
+  @require(@type_member_type(Target, #collect_start) == Start, "collector collect_start has wrong type");
+  @require(@type_member_type(Target, #collect_push) == Push, "collector collect_push has wrong type");
+  @require(@type_member_type(Target, #collect_finish) == Finish, "collector collect_finish has wrong type");
+}
+
+fn inline_array_list.nil(const a: type) -> inline_array_list(0, a) {
+  []
+}
+
+fn inline_array.from_list(const n: count, const a: type, xs: inline_array_list(n, a)) -> inline_array(n, a) {
+  xs
+}
+
 type fn inline_array_builder(N: count, A: type) -> type {
-  let Builder = [N*A];
+  let Builder = {N*A};
   struct(Builder)
 }
 
@@ -304,6 +329,6 @@ type fn mat4_i32() -> type {
 }
 
 type fn view_i32_8x2() {
-  let ViewI32x8x2 = [base: inline_array(8, i32), len: i32, stride: i32];
+  let ViewI32x8x2 = {base: inline_array(8, i32), len: i32, stride: i32};
   struct(ViewI32x8x2)
 }

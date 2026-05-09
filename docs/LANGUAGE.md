@@ -27,12 +27,12 @@ truth: use `grammar.ebnf`, `src/check.ts`, `src/primitives.ts`, and the tested f
 const std = @import("prelude.std");
 
 type fn point() -> struct {
-  let Point = [x: i32, y: i32];
+  let Point = {x: i32, y: i32};
   struct(Point)
 }
 
 fn point.add(a: point, b: point) -> point {
-  Point [x: a.x + b.x, y: a.y + b.y]
+  Point {x: a.x + b.x, y: a.y + b.y}
 }
 
 pub fn main() -> i32 { 42 }

@@ -25,6 +25,11 @@ export interface SourceImport extends AstNodeMeta {
   kind: "source_import";
   module: string;
   alias?: string;
+  bindings?: SourceImportBinding[];
+}
+
+export interface SourceImportBinding extends AstNodeMeta {
+  name: string;
 }
 
 export interface FnDecl extends AstNodeMeta {
@@ -178,6 +183,7 @@ export interface ShapeType extends AstNodeMeta {
 export interface ShapeTypeSlot extends AstNodeMeta {
   doc?: string;
   label?: string;
+  position?: number;
   type: string;
   repeat?: string;
 }
@@ -217,6 +223,7 @@ export interface TypeShape extends AstNodeMeta {
 export interface TypeShapeSlot extends AstNodeMeta {
   doc?: string;
   label?: string;
+  position?: number;
   type: TypeExpr;
   repeat?: TypeCountExpr;
 }
@@ -255,6 +262,7 @@ export type ParamPattern =
     & { kind: "literal"; value: string; literalKind: "number" | "bool" | "string" | "literalType" }
     & AstNodeMeta
   )
+  | ({ kind: "tuple"; items: ParamPattern[] } & AstNodeMeta)
   | ({ kind: "constructor"; name: string; args: ParamPattern[] } & AstNodeMeta)
   | ({ kind: "type"; name: string } & AstNodeMeta);
 
@@ -278,6 +286,7 @@ export type Expr =
     inferredType?: string;
   } & AstNodeMeta)
   | ({ kind: "var"; name: string } & AstNodeMeta)
+  | ({ kind: "borrow"; value: Expr } & AstNodeMeta)
   | ({ kind: "placeholder" } & AstNodeMeta)
   | ({ kind: "pipe_bind"; value: Expr; name: string; doc?: string; body: Expr } & AstNodeMeta)
   | ({ kind: "call"; callee: Expr; args: Expr[] } & AstNodeMeta)
@@ -288,7 +297,14 @@ export type Expr =
     & AstNodeMeta
   )
   | (
-    & { kind: "shape"; slots: ({ doc?: string; label?: string; value: Expr } & AstNodeMeta)[] }
+    & {
+      kind: "shape";
+      syntax?: "record" | "collection" | "frozen_collection";
+      slots: (
+        & { doc?: string; label?: string; position?: number; value: Expr; spread?: boolean; repeat?: TypeCountExpr }
+        & AstNodeMeta
+      )[];
+    }
     & AstNodeMeta
   )
   | ({
@@ -305,7 +321,10 @@ export type Expr =
   | ({
     kind: "product_constructor";
     constructor: string;
-    slots: ({ doc?: string; label?: string; value: Expr } & AstNodeMeta)[];
+    slots: (
+      & { doc?: string; label?: string; position?: number; value: Expr; spread?: boolean; repeat?: TypeCountExpr }
+      & AstNodeMeta
+    )[];
   } & AstNodeMeta)
   | ({ kind: "range"; start: Expr; end: Expr } & AstNodeMeta)
   | BlockExpr;

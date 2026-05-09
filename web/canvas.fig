@@ -21,7 +21,7 @@ fn shader_id(const Source: string) -> i32 {
 }
 
 type fn event_record() -> type {
-  let EventRecord = [
+  let EventRecord = {
     kind: i32,
     target: i32,
     code: i32,
@@ -30,7 +30,7 @@ type fn event_record() -> type {
     delta_x: i32,
     delta_y: i32,
     flags: i32
-  ];
+  };
   struct(EventRecord)
 }
 

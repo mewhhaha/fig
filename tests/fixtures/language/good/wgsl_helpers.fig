@@ -1,14 +1,17 @@
 const canvas = @import("web.canvas");
 
-const shader: string = ```wgsl
+const shader_id: i32 = @wgsl_shader_id(```wgsl
 @group(0) @binding(1) var<uniform> camera: mat4x4<f32>;
 @vertex fn vs(@location(0) pos: vec2<f32>) -> @location(0) vec4<f32> { return vec4<f32>(); }
-```;
+```);
 
 type fn layout() -> type {
-  canvas.shader_layout(shader)
+  canvas.shader_layout(```wgsl
+@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;
+@vertex fn vs(@location(0) pos: vec2<f32>) -> @location(0) vec4<f32> { return vec4<f32>(); }
+```)
 }
 
 pub fn main() -> i32 !{gpu} {
-  canvas.gpu_create_shader(canvas.shader_id(shader))
+  canvas.gpu_create_shader(shader_id)
 }

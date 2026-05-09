@@ -1,6 +1,6 @@
 type fn option(A: type) -> union {
-  let None = [];
-  let Some = [value: A];
+  let None = {};
+  let Some = {value: A};
   union(None, Some)
 }
 

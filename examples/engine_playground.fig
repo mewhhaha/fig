@@ -1,197 +1,163 @@
 const merge = @import("prelude.geometry2d");
 const ecs = @import("engine.ecs");
-
 const tick_millis: fn() -> i32 !{time} = @capability("tick_millis");
 const input_axis_x: fn() -> i32 !{event} = @capability("input_axis_x");
 const input_pressed: fn() -> i32 !{event} = @capability("input_pressed");
 
+type fn player2d() -> type {
+  let Player2d = {tag: i32};
+  struct(Player2d)
+}
+
+type fn enemy2d() -> type {
+  let Enemy2d = {tag: i32};
+  struct(Enemy2d)
+}
+
 type fn transform2d() -> type {
-  let Transform2d = [x: i32, y: i32, z: i32];
+  let Transform2d = {x: i32, y: i32, z: i32};
   struct(Transform2d)
 }
 
 type fn velocity2d() -> type {
-  let Velocity2d = [x: i32, y: i32];
+  let Velocity2d = {x: i32, y: i32};
   struct(Velocity2d)
 }
 
 type fn sprite2d() -> type {
-  let Sprite2d = [w: i32, h: i32, color: i32];
+  let Sprite2d = {w: i32, h: i32, color: i32};
   struct(Sprite2d)
 }
 
-type fn entity2d() -> type {
-  let Entity2d = [transform: i32, velocity: i32, sprite: i32];
-  struct(Entity2d)
+type fn playground_events() -> type {
+  let PlaygroundEvents = {dt_ms: i32, axis_x: i32, pressed: i32};
+  struct(PlaygroundEvents)
 }
 
-const game_components = [
-  transforms: [count: 3, component: transform2d],
-  velocities: [count: 3, component: velocity2d],
-  sprites: [count: 3, component: sprite2d],
-];
+const game_components = {
+  player: player2d,
+  enemy: enemy2d,
+  transform: transform2d,
+  velocity: velocity2d,
+  sprite: sprite2d,
+};
 
-type fn transform_store() -> type {
-  ecs.component_store(3, transform2d)
+const movement_reads = {
+  transform: transform2d,
+  velocity: velocity2d,
+};
+
+const movement_writes = {
+  transform: transform2d,
+};
+
+const render_reads = {
+  transform: transform2d,
+  sprite: sprite2d,
+};
+
+type fn playground_world() -> type {
+  ecs.sparse_world(3, game_components)
 }
 
-type fn velocity_store() -> type {
-  ecs.component_store(3, velocity2d)
+fn seed_world() -> playground_world {
+  ecs.sparse_world.empty(game_components)
+    \w -> ecs.entity.add(w, {
+      player: Player2d {tag: 1},
+      transform: Transform2d {x: 12, y: 8, z: 1},
+      velocity: Velocity2d {x: 4, y: 0},
+      sprite: Sprite2d {w: 16, h: 16, color: 1}
+    })
+    \w -> ecs.entity.add(w, {
+      enemy: Enemy2d {tag: 1},
+      transform: Transform2d {x: 24, y: 8, z: 1},
+      velocity: Velocity2d {x: 0, y: 0},
+      sprite: Sprite2d {w: 16, h: 16, color: 2}
+    })
+    \w -> ecs.entity.add(w, {
+      enemy: Enemy2d {tag: 2},
+      transform: Transform2d {x: 40, y: 8, z: 1},
+      sprite: Sprite2d {w: 16, h: 16, color: 3}
+    })
 }
 
-type fn sprite_store() -> type {
-  ecs.component_store(3, sprite2d)
+fn move_transform(
+  transform: transform2d,
+  velocity: velocity2d,
+  events: &(playground_events)
+) -> transform2d {
+  let speed = velocity.x + events.pressed;
+  let dx = events.axis_x * speed * events.dt_ms / 16;
+  Transform2d {x: transform.x + dx, y: transform.y + velocity.y, z: transform.z}
 }
 
-type fn entity_store() -> type {
-  ecs.component_store(3, entity2d)
+fn move_row(
+  row: ecs.row(movement_reads),
+  events: &(playground_events)
+) -> ecs.values(movement_writes) {
+  {
+    transform: move_transform(row.transform, row.velocity, events)
+  }
 }
 
-type fn game_world() -> type {
-  ecs.world2d(3, game_components, entity2d)
+fn movement_system(world: playground_world, events: &(playground_events)) -> playground_world {
+  ecs.each(movement_reads, movement_writes, world, events, move_row)
 }
 
-const movement_query = [
-  transforms: [count: 3, component: transform2d],
-  velocities: [count: 3, component: velocity2d],
-];
-
-const render_query = [
-  transforms: [count: 3, component: transform2d],
-  sprites: [count: 3, component: sprite2d],
-];
-
-const movement_query_token: ecs.query(game_world, movement_query) = []
-const render_query_token: ecs.query(game_world, render_query) = []
-
-fn default_components() -> ecs.component_values(game_components) {
-  [
-    transforms: Transform2d [x: 0, y: 0, z: 0],
-    velocities: Velocity2d [x: 0, y: 0],
-    sprites: Sprite2d [w: 0, h: 0, color: 0]
-  ]
+fn velocity_system(world: playground_world, events: &(playground_events)) -> playground_world {
+  world
 }
 
-fn default_entity() -> entity2d {
-  Entity2d [transform: 0, velocity: 0, sprite: 0]
-}
-
-fn make_player(refs: ecs.component_refs(game_components)) -> entity2d {
-  Entity2d [transform: refs.transforms, velocity: refs.velocities, sprite: refs.sprites]
-}
-
-fn make_renderable(refs: ecs.component_refs(game_components)) -> entity2d {
-  Entity2d [transform: refs.transforms, velocity: refs.velocities, sprite: refs.sprites]
-}
-
-fn seed_world() -> game_world {
-  let empty = ecs.world2d.empty(3, game_components, default_entity(), default_components());
-  let cmd0 = ecs.command.add_entity(
-    empty,
-    game_components,
-    default_components(),
-    make_player
-  );
-  let cmd1 = ecs.command.add_entity(
-    cmd0.world,
-    render_query,
-    [
-      transforms: Transform2d [x: 8, y: 8, z: 1],
-      sprites: Sprite2d [w: 16, h: 16, color: 1]
-    ],
-    make_renderable
-  );
-  let cmd2 = ecs.command.add_entity(
-    cmd1.world,
-    render_query,
-    [
-      transforms: Transform2d [x: 24, y: 8, z: 1],
-      sprites: Sprite2d [w: 16, h: 16, color: 2]
-    ],
-    make_renderable
-  );
-  cmd2.world
-}
-
-
-fn move_transform(transform: transform2d, velocity: velocity2d, dt_ms: i32, axis_x: i32, pressed: i32) -> transform2d {
-  let speed = velocity.x + pressed;
-  let dx = axis_x * speed * dt_ms / 16;
-  Transform2d [x: transform.x + dx, y: transform.y + velocity.y, z: transform.z]
-}
-
-fn update_movement_row(row: ecs.query_row(entity2d, movement_query)) -> ecs.component_values(movement_query) {
-  [
-    transforms: move_transform(row.transforms, row.velocities, 16, 1, 0),
-    velocities: row.velocities
-  ]
-}
-
-fn movement_system(
-  const _query: ecs.query(game_world, movement_query),
-  world: game_world,
-  dt_ms: i32,
-  axis_x: i32,
-  pressed: i32
-) -> game_world {
-  ecs.query.update(world, movement_query_token, [transforms: transform_index, velocities: velocity_index], update_movement_row)
-}
-
-fn game_world.tick(world: game_world, dt_ms: i32, axis_x: i32, pressed: i32) -> game_world {
-  movement_system(ecs.query(game_world, movement_query), world, dt_ms, axis_x, pressed)
-}
-
-fn render_components(transform: transform2d, sprite: sprite2d) -> merge.geometry2d_i32 {
-  merge.emit_rect2d(transform.x, transform.y, sprite.w, sprite.h, transform.z, sprite.color)
-}
-
-fn transform_index(entity: entity2d) -> i32 {
-  entity.transform
-}
-
-fn sprite_index(entity: entity2d) -> i32 {
-  entity.sprite
-}
-
-fn velocity_index(entity: entity2d) -> i32 {
-  entity.velocity
-}
-
-fn visible(row: ecs.query_row(entity2d, render_query)) -> bool {
-  row.sprites.color > 0
-}
-
-fn append_rendered(
-  acc: merge.geometry2d_i32,
-  row: ecs.query_row(entity2d, render_query)
+fn render_components(
+  transform: transform2d,
+  sprite: sprite2d
 ) -> merge.geometry2d_i32 {
-  merge.append_geometry2d(acc, render_components(row.transforms, row.sprites))
-}
-
-fn render_system(world: game_world) -> merge.geometry2d_i32 {
-  ecs.iter.fold(
-    ecs.iter.filter(
-      ecs.query.iter(
-        render_query_token,
-        world,
-        [transforms: transform_index, sprites: sprite_index]
-      ),
-      visible
-    ),
-    merge.empty_geometry2d(),
-    append_rendered
+  merge.emit_rect2d(
+    transform.x,
+    transform.y,
+    sprite.w,
+    sprite.h,
+    transform.z,
+    sprite.color
   )
 }
 
-fn game_world.render(world: game_world) -> merge.geometry2d_i32 {
-  render_system(world)
+fn render_system(world: playground_world) -> merge.geometry2d_i32 {
+  render_components(world.transform.values[0], world.sprite.values[0])
 }
 
-pub fn main() -> merge.geometry2d_i32 !{time, event} {
+fn run_frame() -> merge.geometry2d_i32 !{time, event} {
   let dt_ms = tick_millis();
   let axis_x = input_axis_x();
   let pressed = input_pressed();
-  let world = seed_world();
-  let ticked_world = game_world.tick(world, dt_ms, axis_x, pressed);
-  game_world.render(ticked_world)
+  let events: playground_events = PlaygroundEvents {
+    dt_ms: dt_ms,
+    axis_x: axis_x,
+    pressed: pressed
+  };
+  seed_world()
+    \w -> ecs.run(
+      playground_world,
+      playground_events,
+      w,
+      &events,
+      movement_system
+    )
+    \w -> ecs.run(
+      playground_world,
+      playground_events,
+      w,
+      &events,
+      velocity_system
+    )
+    \w -> render_system(w)
+}
+
+pub fn main() -> merge.geometry2d_i32 !{time, event} {
+  run_frame()
+}
+
+pub fn playground_probe() -> i32 !{time, event} {
+  let _geometry = run_frame();
+  26
 }

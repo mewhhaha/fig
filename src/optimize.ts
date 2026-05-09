@@ -98,6 +98,8 @@ function optimizeExpr(expr: Expr, forwarding: Map<string, string>, functions: Ma
     case "call": {
       const callee = optimizeExpr(expr.callee, forwarding, functions);
       const args = expr.args.map((arg) => optimizeExpr(arg, forwarding, functions));
+      const staticValue = optimizeStaticShapeCall(callee, args);
+      if (staticValue) return staticValue;
       if (callee.kind === "var") {
         const target = forwarding.get(callee.name);
         if (target) return { ...expr, callee: { kind: "var", name: target }, args };
@@ -106,6 +108,8 @@ function optimizeExpr(expr: Expr, forwarding: Map<string, string>, functions: Ma
       }
       return { ...expr, callee, args };
     }
+    case "borrow":
+      return { ...expr, value: optimizeExpr(expr.value, forwarding, functions) };
     case "index":
       return {
         ...expr,
@@ -131,11 +135,20 @@ function optimizeExpr(expr: Expr, forwarding: Map<string, string>, functions: Ma
         };
       }
     case "match":
-      return {
+      {
+        const value = optimizeExpr(expr.value, forwarding, functions);
+        if (value.kind === "literal" && value.literalKind === "bool") {
+          const selected = expr.arms.find((arm) =>
+            arm.pattern.kind === "literal" && arm.pattern.value === value.value
+          );
+          if (selected) return optimizeExpr(selected.value, forwarding, functions);
+        }
+        return {
         ...expr,
-        value: optimizeExpr(expr.value, forwarding, functions),
+        value,
         arms: expr.arms.map((arm) => ({ ...arm, value: optimizeExpr(arm.value, forwarding, functions) })),
-      };
+        };
+      }
     case "shape":
       return {
         ...expr,
@@ -173,6 +186,52 @@ function optimizeExpr(expr: Expr, forwarding: Map<string, string>, functions: Ma
   }
 }
 
+function optimizeStaticShapeCall(callee: Expr, args: Expr[]): Expr | undefined {
+  if (callee.kind !== "var" || callee.name !== "@shape_has_slot") return undefined;
+  const slotsArg = args[0];
+  const keyArg = args[1];
+  if (
+    slotsArg?.kind !== "call" || slotsArg.callee.kind !== "var" ||
+    slotsArg.callee.name !== "@type_slots" || keyArg?.kind !== "literal" ||
+    keyArg.literalKind !== "literalType"
+  ) return undefined;
+  const typeArg = slotsArg.args[0];
+  if (typeArg?.kind !== "var") return undefined;
+  const labels = inlineStructLabels(typeArg.name);
+  if (!labels) return undefined;
+  return { kind: "literal", literalKind: "bool", value: String(labels.has(keyArg.value.slice(1))) };
+}
+
+function inlineStructLabels(type: string): Set<string> | undefined {
+  const trimmed = type.trim();
+  if (!trimmed.startsWith("struct({") || !trimmed.endsWith("})")) return undefined;
+  const inner = trimmed.slice("struct({".length, -2).trim();
+  if (!inner) return new Set();
+  const labels = new Set<string>();
+  for (const part of splitTopLevel(inner)) {
+    const colon = part.indexOf(":");
+    if (colon > 0) labels.add(part.slice(0, colon).trim());
+  }
+  return labels;
+}
+
+function splitTopLevel(source: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < source.length; index++) {
+    const ch = source[index];
+    if (ch === "(" || ch === "{" || ch === "[") depth++;
+    else if (ch === ")" || ch === "}" || ch === "]") depth--;
+    else if (ch === "," && depth === 0) {
+      parts.push(source.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  parts.push(source.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
 function inlineGeneratedCall(
   name: string,
   args: Expr[],
@@ -186,6 +245,10 @@ function inlineGeneratedCall(
     const arg = args[index];
     if (arg?.kind === "var") {
       body = substituteVar(body, param.name, arg) as FnDecl["body"];
+      return;
+    }
+    if (arg?.kind === "borrow" && arg.value.kind === "var") {
+      body = substituteVar(body, param.name, arg.value) as FnDecl["body"];
       return;
     }
     statements.push({
@@ -244,6 +307,8 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
         callee: substituteVar(expr.callee, name, value),
         args: expr.args.map((arg) => substituteVar(arg, name, value)),
       };
+    case "borrow":
+      return { ...expr, value: substituteVar(expr.value, name, value) };
     case "index":
       return {
         ...expr,

@@ -18,8 +18,9 @@ Qualified names use dots, for example `std.option_map`, `point.eql`, or
 
 Doc comments start with `///` and attach as raw markdown text to the immediately following binding
 when there is no blank line, ordinary `//` comment, or code between the comment block and the
-binding. The compiler stores the text for future tools such as hover providers; it does not parse
-markdown or TSDoc tags yet.
+binding. The compiler stores the text on the checked AST, and LSP hover renders the text below the
+symbol signature. TSDoc-style tags such as `@param` and `@returns` are accepted by the hover
+renderer when they are well formed.
 
 ```fig
 /// Adds two numbers.
@@ -40,12 +41,12 @@ type fn point(
   A: type
 ) -> struct {
   /// Product payload shape.
-  let Point = [
+  let Point = {
     /// Horizontal coordinate.
     x: A,
     /// Vertical coordinate.
     y: A,
-  ];
+  };
   struct(Point)
 }
 ```
@@ -64,6 +65,16 @@ const local = @import("./local_module.fig");
 
 The alias becomes a namespace. Imported declarations stay qualified through the alias; imports do
 not merge declarations into local scope. Duplicate import aliases are rejected.
+
+Destructured source imports select exact declarations as unqualified local bindings:
+
+```fig
+const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");
+```
+
+Destructured import entries are plain declaration names. Aliases, dotted names, annotations, and
+non-`@import` right-hand sides are rejected. Namespace imports can qualify nested imports, so a
+module imported as `std` can expose names such as `std.array.layout.lane4_i32`.
 
 Host imports are top-level consts whose value is `@capability("name")` and whose type is a function
 type:
@@ -123,6 +134,7 @@ fn g(const f: fn(x: i32) -> i32, x: i32) -> i32 { f(x) }
 fn h(1: i32) -> i32 { 10 }
 fn ignore(_: i32) -> i32 { 0 }
 fn variant(Some(value): option(i32)) -> i32 { value }
+fn tuple([left, right]: pair) -> i32 { left + right }
 ```
 
 `const` parameters are compile-time parameters. They specialize at call sites and are erased from
@@ -145,9 +157,11 @@ result slots:
 
 ```fig
 let first, second = make_pair();
+let [head, tail] = make_pair();
 ```
 
-Patterns are `_`, lowercase bindings, literals, and PascalCase variants with optional payload args:
+Patterns are `_`, lowercase bindings, literals, tuple patterns, and PascalCase variants with
+optional payload args:
 
 ```fig
 match maybe {
@@ -178,3 +192,12 @@ false
 ```
 
 Fenced text literals use triple backticks and are useful for shader source.
+
+## Deprecated Syntax
+
+`static for` blocks still parse for compatibility, but they are deprecated and emit diagnostics.
+Prefer tail-recursive helpers or the supported record/product static slot syntax where a
+compile-time shape expands fields.
+
+Array-comprehension-style literals such as `[for i in 0 .. 3: expr]` are rejected. Use tuple/list
+literals, inline-array helpers, or record/product static slots instead.

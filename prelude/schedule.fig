@@ -1,17 +1,17 @@
 // Static schedule metadata. No backend lowering consumes these contracts yet.
 
 type fn tile(M: count, N: count) {
-  let Tile = [rows: i32, cols: i32];
+  let Tile = {rows: i32, cols: i32};
   struct(Tile)
 }
 
 type fn vectorize(Lanes: count) {
-  let Vectorize = [lanes: i32];
+  let Vectorize = {lanes: i32};
   struct(Vectorize)
 }
 
 type fn unroll(Factor: count) {
-  let Unroll = [factor: i32];
+  let Unroll = {factor: i32};
   struct(Unroll)
 }
 

@@ -6,8 +6,15 @@ Fig tracks moves for values. Passing a value to a function consumes it unless th
 to borrow it. Reusing a moved local is rejected. Memory load intrinsics borrow the memory argument;
 stores consume and return memory.
 
+Call-scoped borrows use `&value` with a parameter type written `&(T)`. A borrowed argument is not
+moved by the call, but the borrowed value cannot be stored, returned, or accepted as an owned
+parameter.
+
 `fork(local)` consumes a local variable and creates multiple owned copies through multi-bind.
 Forking an unknown name or a non-local expression is rejected.
+
+Frozen values use frozen types such as `#(T)` and frozen literals such as `#[1, 2, 3]`. Frozen
+values are immutable and are checked against their frozen expected type.
 
 ## Effects
 
@@ -29,6 +36,10 @@ members, shape transforms, and selected WGSL metadata.
 
 Compile-time expressions are intentionally smaller than runtime expressions. `fork` is not
 const-evaluable or type-evaluable, and unsupported static forms report focused diagnostics.
+
+Static slots in records and product constructors evaluate a compile-time shape and generate one
+field per key. Static `for` statement blocks still parse for older examples but are deprecated;
+array-comprehension-style `[for ...]` literals are rejected.
 
 ## WebAssembly Target
 

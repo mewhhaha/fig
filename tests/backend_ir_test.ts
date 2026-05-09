@@ -28,7 +28,7 @@ Deno.test("backend folds scalar literal arithmetic", async () => {
 Deno.test("backend lowers runtime inline-array indexing with branches", async () => {
   const wat = await watFromSource(`
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     fn get(xs: inline_array(3, i32), index: i32) -> i32 {
@@ -95,7 +95,7 @@ Deno.test("tail-recursive self calls lower to loops by default", async () => {
 Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
   const source = `
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     fn fold_loop(xs: inline_array(3, i32), index: i32, acc: i32) -> i32 {
@@ -122,7 +122,7 @@ Deno.test("index cursor Yield item proves inline-array indexing and lowers inlin
   const source = `
     const core = @import("prelude.core");
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     fn sum_loop(xs: inline_array(3, i32), cursor: core.index_cursor(3), acc: i32) -> i32 {
@@ -150,11 +150,11 @@ Deno.test("inline array builder primitives lower without runtime calls", async (
   const wat = await watFromSource(`
     type fn index(N: count) -> type { i32 }
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn inline_array_builder(N: count, A: type) -> type {
-      let Builder = [N*A];
+      let Builder = {N*A};
       struct(Builder)
     }
     fn inline_array_builder.start(const n: count, const a: type) -> inline_array_builder(n, a) {
@@ -255,7 +255,7 @@ Deno.test("opcode mode rejects direct self recursion outside tail position", asy
     "dynamic index operand",
     `
     type fn inline_array(N: count, A: type) {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn lane4_i32() -> type { inline_array(4, i32) }
@@ -291,12 +291,12 @@ async function assertTailCallRejected(label: string, source: string) {
 
 Deno.test("backend keeps generated forwarding wrappers inlined at call sites", async () => {
   const wat = await watFromSource(`
-    type fn box() { let Box = [value: i32]; struct(Box) }
-    type fn functor(F: type) { let Functor = [map: fn(x: F) -> F]; struct(Functor) }
-    fn map_box(x: box) -> box { [value: x.value + 1] }
-    const box_functor: functor(box) = [map: map_box];
+    type fn box() { let Box = {value: i32}; struct(Box) }
+    type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
+    fn map_box(x: box) -> box { {value: x.value + 1} }
+    const box_functor: functor(box) = {map: map_box};
     fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
-    pub fn main() -> box { mapped(box_functor, [value: 41]) }
+    pub fn main() -> box { mapped(box_functor, {value: 41}) }
   `);
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(main, "call $map_box");
@@ -306,7 +306,7 @@ Deno.test("backend keeps generated forwarding wrappers inlined at call sites", a
 Deno.test("lane4_i32 public ABI stays scalar while pure lane add uses SIMD internally", async () => {
   const source = `
     type fn inline_array(N: count, A: type) {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn lane4_i32() -> type { inline_array(4, i32) }
@@ -339,7 +339,7 @@ Deno.test("lane4_i32 public ABI stays scalar while pure lane add uses SIMD inter
 Deno.test("SIMD lane add matches scalar result", async () => {
   const source = `
     type fn inline_array(N: count, A: type) {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn lane4_i32() -> type { inline_array(4, i32) }
@@ -574,7 +574,7 @@ Deno.test("memory-backed SIMD matrix multiply emits and runs with wasm memory", 
 Deno.test("ptr constructor helper lowers to direct memory address", async () => {
   const wat = await watFromSource(`
     type fn ptr(A: type) -> type {
-      let Ptr = [addr: i32];
+      let Ptr = {addr: i32};
       struct(Ptr)
     }
     fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
@@ -605,7 +605,7 @@ Deno.test("ptr constructor helper lowers to direct memory address", async () => 
 Deno.test("chained ptr.add helpers lower without helper calls", async () => {
   const wat = await watFromSource(`
     type fn ptr(A: type) -> type {
-      let Ptr = [addr: i32];
+      let Ptr = {addr: i32};
       struct(Ptr)
     }
     fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
@@ -638,7 +638,7 @@ Deno.test("chained ptr.add helpers lower without helper calls", async () => {
 Deno.test("scalar load/store aliases lower to memory instructions without helper calls", async () => {
   const wat = await watFromSource(`
     type fn ptr(A: type) -> type {
-      let Ptr = [addr: i32];
+      let Ptr = {addr: i32};
       struct(Ptr)
     }
     fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
@@ -677,7 +677,7 @@ Deno.test("scalar load/store aliases lower to memory instructions without helper
 Deno.test("ptr params locals and forks lower as scalar i32 values", async () => {
   const wat = await watFromSource(`
     type fn ptr(A: type) -> type {
-      let Ptr = [addr: i32];
+      let Ptr = {addr: i32};
       struct(Ptr)
     }
     fn ptr.from_i32(addr: i32) -> ptr(A) {
@@ -710,7 +710,7 @@ Deno.test("ptr params locals and forks lower as scalar i32 values", async () => 
 Deno.test("lane4 load/store aliases lower to SIMD memory instructions without helper calls", async () => {
   const wat = await watFromSource(`
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn lane4_i32() -> type { inline_array(4, i32) }
@@ -721,7 +721,7 @@ Deno.test("lane4 load/store aliases lower to SIMD memory instructions without he
   @memory_store_lane4_i32(mem, p, value)
 }
     type fn ptr(A: type) -> type {
-      let Ptr = [addr: i32];
+      let Ptr = {addr: i32};
       struct(Ptr)
     }
     fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
@@ -762,7 +762,7 @@ Deno.test("lane4 load/store aliases lower to SIMD memory instructions without he
 Deno.test("memory lane intrinsics remain backend aliases", async () => {
   const wat = await watFromSource(`
     type fn inline_array(N: count, A: type) -> type {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn lane4_i32() -> type { inline_array(4, i32) }
@@ -786,7 +786,7 @@ Deno.test("memory lane intrinsics remain backend aliases", async () => {
 Deno.test("unsupported lane patterns fall back to scalar WAT", async () => {
   const wat = await watFromSource(`
     type fn inline_array(N: count, A: type) {
-      let InlineArray = [N*A];
+      let InlineArray = {N*A};
       struct(InlineArray)
     }
     type fn lane4_i32() -> type { inline_array(4, i32) }

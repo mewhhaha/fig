@@ -2,12 +2,12 @@
 // It does not claim WebAssembly SIMD lowering yet.
 
 type fn inline_array(N: count, A: type) {
-  let InlineArray = [N*A];
+  let InlineArray = {N*A};
   struct(InlineArray)
 }
 
 type fn scalar_box() {
-  let ScalarBox = [value: i32];
+  let ScalarBox = {value: i32};
   struct(ScalarBox)
 }
 
@@ -16,7 +16,7 @@ type fn words8() -> type {
 }
 
 type fn strided_view_i32_8x2() {
-  let StridedViewI32x8x2 = [base: words8, len: i32, stride: i32];
+  let StridedViewI32x8x2 = {base: words8, len: i32, stride: i32};
   struct(StridedViewI32x8x2)
 }
 
@@ -29,15 +29,15 @@ type fn tile2x4_i32() -> type {
 }
 
 type fn map4(T: type) {
-  let Map4 = [apply: fn(x: T) -> T];
+  let Map4 = {apply: fn(x: T) -> T};
   struct(Map4)
 }
 
 fn add1_box(x: scalar_box) -> scalar_box {
-  [value: x.value + 1]
+  {value: x.value + 1}
 }
 
-const scalar_map4: map4(scalar_box) = [apply: add1_box];
+const scalar_map4: map4(scalar_box) = {apply: add1_box};
 
 fn apply_tile(const ops: map4(scalar_box), x: scalar_box) -> scalar_box {
   ops.apply(ops.apply(ops.apply(ops.apply(x))))
@@ -52,7 +52,7 @@ fn first_lane(tile: tile2x4_i32) -> i32 {
 }
 
 pub fn main() -> i32 {
-  let view: strided_view_i32_8x2 = [base: [1, 2, 3, 4, 5, 6, 7, 8], len: 8, stride: 2];
-  let tile: tile2x4_i32 = [[1, 2, 3, 4], [5, 6, 7, 8]];
-  apply_tile(scalar_map4, [value: view_base(view) + first_lane(tile)]).value
+  let view: strided_view_i32_8x2 = {base: <1, 2, 3, 4, 5, 6, 7, 8>, len: 8, stride: 2};
+  let tile: tile2x4_i32 = <<1, 2, 3, 4>, <5, 6, 7, 8>>;
+  apply_tile(scalar_map4, {value: view_base(view) + first_lane(tile)}).value
 }

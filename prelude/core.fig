@@ -14,22 +14,26 @@ type fn semigroup(T: type) -> type {
   T
 }
 
+type fn empty_value(T: type) -> type {
+  let Empty = fn() -> T;
+  @require(@type_has_member(T, #empty), "Empty requires empty");
+  @require(@type_member_type(T, #empty) == Empty, "Empty.empty has wrong type");
+  T
+}
+
 type fn monoid(T: type) -> type {
   let Append = fn(a: T, b: T) -> T;
-  let Empty = fn() -> T;
   @require(@type_has_member(T, #append), "Monoid requires append");
   @require(@type_member_type(T, #append) == Append, "Monoid.append has wrong type");
-  @require(@type_has_member(T, #empty), "Monoid requires empty");
-  @require(@type_member_type(T, #empty) == Empty, "Monoid.empty has wrong type");
-  T
+  empty_value(T)
 }
 
 fn append(const T, const _proof: semigroup(T), a: T, b: T) -> T {
   T.append(a, b)
 }
 
-fn empty(const T, const _proof: monoid(T)) -> T {
-  T.empty()
+fn empty(const t: type) -> t {
+  @empty(t)
 }
 
 type fn copyable(T: type) -> type {
@@ -37,19 +41,19 @@ type fn copyable(T: type) -> type {
 }
 
 type fn option(A: type) -> union {
-  let None = [];
-  let Some = [value: A];
+  let None = {};
+  let Some = {value: A};
   union(None, Some)
 }
 
 type fn result(A: type, E: type) -> union {
-  let Ok = [value: A];
-  let Err = [error: E];
+  let Ok = {value: A};
+  let Err = {error: E};
   union(Ok, Err)
 }
 
 type fn pair(A: type, B: type) -> type {
-  let Pair = [first: A, second: B];
+  let Pair = {first: A, second: B};
   struct(Pair)
 }
 
@@ -58,7 +62,7 @@ type fn tuple2(A: type, B: type) -> type {
 }
 
 type fn tuple3(A: type, B: type, C: type) -> type {
-  let Tuple3 = [first: A, second: B, third: C];
+  let Tuple3 = {first: A, second: B, third: C};
   struct(Tuple3)
 }
 
@@ -67,8 +71,8 @@ type fn index(N: count) -> type {
 }
 
 type fn iter_step(State: type, Item: type) -> union {
-  let Done = [];
-  let Yield = [item: Item, next: State];
+  let Done = {};
+  let Yield = {item: Item, next: State};
   union(Done, Yield)
 }
 
@@ -96,13 +100,26 @@ type fn droppable(T: type) -> type {
 }
 
 type fn scalar_i32() {
-  let ScalarI32 = [value: i32];
+  let ScalarI32 = {value: i32};
   struct(ScalarI32)
 }
 
 type fn ptr(A: type) -> type {
-  let Ptr = [addr: i32];
+  let Ptr = {addr: i32};
   struct(Ptr)
+}
+
+type fn frozen_arena() -> type {
+  i32
+}
+
+type fn freeze_result(T: type) -> type {
+  let FreezeResult = {arena: frozen_arena, value: #(T)};
+  struct(FreezeResult)
+}
+
+fn freeze(const T: type, arena: frozen_arena, value: T) -> freeze_result(T) {
+  @freeze(arena, value)
 }
 
 fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 {
