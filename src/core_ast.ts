@@ -94,16 +94,6 @@ export interface ProofConstDecl extends AstNodeMeta {
   value: TypeExpr;
 }
 
-export interface StaticForDecl extends AstNodeMeta {
-  kind: "static_for";
-  iterator: string;
-  iteratorDoc?: string;
-  valueIterator?: string;
-  valueIteratorDoc?: string;
-  source: StaticForSource;
-  body: Statement[];
-}
-
 export interface TypeDecl extends AstNodeMeta {
   kind: "type";
   doc?: string;
@@ -196,9 +186,10 @@ export type TypeExpr =
   | ({ kind: "type_shape"; shape: TypeShape } & AstNodeMeta)
   | ({ kind: "type_match"; value: TypeExpr; arms: TypeMatchArm[] } & AstNodeMeta)
   | ({ kind: "type_operator"; descriptor: OperatorDescriptor } & AstNodeMeta)
-  | ({ kind: "type_binary"; op: string; left: TypeExpr; right: TypeExpr } & AstNodeMeta)
+  | ({ kind: "type_binary"; op: "==" | "!=" | "|"; left: TypeExpr; right: TypeExpr } & AstNodeMeta)
   | ({ kind: "type_bool"; value: boolean } & AstNodeMeta)
   | ({ kind: "type_number"; value: string } & AstNodeMeta)
+  | ({ kind: "type_char"; value: string } & AstNodeMeta)
   | ({ kind: "type_string"; value: string } & AstNodeMeta)
   | ({ kind: "type_literal"; value: string } & AstNodeMeta);
 
@@ -212,6 +203,7 @@ export type TypePattern =
   | ({ kind: "bool"; value: boolean } & AstNodeMeta)
   | ({ kind: "literal"; value: string } & AstNodeMeta)
   | ({ kind: "string"; value: string } & AstNodeMeta)
+  | ({ kind: "char"; value: string } & AstNodeMeta)
   | ({ kind: "number"; value: string } & AstNodeMeta)
   | ({ kind: "type"; name: string } & AstNodeMeta);
 
@@ -252,6 +244,7 @@ export interface Param extends AstNodeMeta {
   name: string;
   type: string;
   const?: boolean;
+  inferStaticType?: boolean;
   pattern?: ParamPattern;
 }
 
@@ -259,7 +252,11 @@ export type ParamPattern =
   | ({ kind: "binding"; name: string } & AstNodeMeta)
   | ({ kind: "wildcard" } & AstNodeMeta)
   | (
-    & { kind: "literal"; value: string; literalKind: "number" | "bool" | "string" | "literalType" }
+    & {
+      kind: "literal";
+      value: string;
+      literalKind: "number" | "bool" | "string" | "char" | "literalType";
+    }
     & AstNodeMeta
   )
   | ({ kind: "tuple"; items: ParamPattern[] } & AstNodeMeta)
@@ -272,7 +269,7 @@ export interface BlockExpr extends AstNodeMeta {
   expr?: Expr;
 }
 
-export type Statement = LetDecl | ForkLetDecl | DestructureLetDecl | ProofConstDecl | StaticForDecl;
+export type Statement = LetDecl | ForkLetDecl | DestructureLetDecl | ProofConstDecl;
 
 export type StaticForSource =
   | { kind: "range"; start: Expr; end: Expr }
@@ -301,7 +298,14 @@ export type Expr =
       kind: "shape";
       syntax?: "record" | "collection" | "frozen_collection";
       slots: (
-        & { doc?: string; label?: string; position?: number; value: Expr; spread?: boolean; repeat?: TypeCountExpr }
+        & {
+          doc?: string;
+          label?: string;
+          position?: number;
+          value: Expr;
+          spread?: boolean;
+          repeat?: TypeCountExpr;
+        }
         & AstNodeMeta
       )[];
     }
@@ -322,7 +326,14 @@ export type Expr =
     kind: "product_constructor";
     constructor: string;
     slots: (
-      & { doc?: string; label?: string; position?: number; value: Expr; spread?: boolean; repeat?: TypeCountExpr }
+      & {
+        doc?: string;
+        label?: string;
+        position?: number;
+        value: Expr;
+        spread?: boolean;
+        repeat?: TypeCountExpr;
+      }
       & AstNodeMeta
     )[];
   } & AstNodeMeta)

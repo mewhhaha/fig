@@ -21,7 +21,6 @@ const keywords = new Set<string>([
   "match",
   "operator",
   "pub",
-  "static",
   "struct",
   "true",
   "type",
@@ -65,6 +64,7 @@ const symbols: string[] = [
   "%",
   "+",
   "=",
+  "|",
   "$",
 ];
 const skipPatterns: Array<{ kind: string; pattern: RegExp }> = [
@@ -83,7 +83,7 @@ const tokenPatterns: Array<{ kind: string; pattern: RegExp }> = [
   { kind: "LiteralType", pattern: new RegExp("#([a-z_][a-z0-9_]*|[A-Z][A-Za-z0-9]*)", "y") },
   { kind: "LowerIdentRepeat", pattern: new RegExp("[a-z_][a-z0-9_]*\\*", "y") },
   { kind: "PascalIdentRepeat", pattern: new RegExp("[A-Z][A-Za-z0-9]*\\*", "y") },
-  { kind: "TypeRepeatPrefix", pattern: new RegExp("([A-Z][A-Za-z0-9]*|[0-9]+)\\*(\\s*[0-9]+\\*)*", "y") },
+  { kind: "TypeRepeatPrefix", pattern: new RegExp("([a-z_][a-z0-9_]*|[A-Z][A-Za-z0-9]*|[0-9]+)\\*(\\s*[0-9]+\\*)*", "y") },
   { kind: "LowerIdent", pattern: new RegExp("[a-z_][a-z0-9_]*", "y") },
   { kind: "PascalIdent", pattern: new RegExp("[A-Z][A-Za-z0-9]*", "y") },
 ];

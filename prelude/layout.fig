@@ -2,228 +2,228 @@ const core = @import("prelude.core");
 
 // Static inline layouts. These are value layouts today, not memory-backed arrays.
 
-type fn inline_array(N: count, A: type) {
-  let InlineArray = {N*A};
+type fn InlineArray(n: count, a: type) {
+  let InlineArray = {n*a};
   struct(InlineArray)
 }
 
-type fn inline_array_list(N: count, A: type) {
-  let InlineArrayList = {N*A};
+type fn InlineArrayList(n: count, a: type) {
+  let InlineArrayList = {n*a};
   struct(InlineArrayList)
 }
 
-type fn collector(Target: type, Item: type, Builder: type) {
-  let Start = fn() -> Builder;
-  let Push = fn(builder: Builder, item: Item) -> Builder;
-  let Finish = fn(builder: Builder) -> Target;
-  @require(@type_has_member(Target, #collect_start), "collector requires collect_start");
-  @require(@type_has_member(Target, #collect_push), "collector requires collect_push");
-  @require(@type_has_member(Target, #collect_finish), "collector requires collect_finish");
-  @require(@type_member_type(Target, #collect_start) == Start, "collector collect_start has wrong type");
-  @require(@type_member_type(Target, #collect_push) == Push, "collector collect_push has wrong type");
-  @require(@type_member_type(Target, #collect_finish) == Finish, "collector collect_finish has wrong type");
+type fn Collector(target: type, item: type, builder: type) {
+  let Start = fn() -> builder;
+  let Push = fn(builder: builder, item: item) -> builder;
+  let Finish = fn(builder: builder) -> target;
+  @require(@type_has_member(target, #collect_start), "collector requires collect_start");
+  @require(@type_has_member(target, #collect_push), "collector requires collect_push");
+  @require(@type_has_member(target, #collect_finish), "collector requires collect_finish");
+  @require(@type_member_type(target, #collect_start) == Start, "collector collect_start has wrong type");
+  @require(@type_member_type(target, #collect_push) == Push, "collector collect_push has wrong type");
+  @require(@type_member_type(target, #collect_finish) == Finish, "collector collect_finish has wrong type");
 }
 
-fn inline_array_list.nil(const a: type) -> inline_array_list(0, a) {
+fn InlineArrayList.nil(const a: type) -> InlineArrayList(0, a) {
   []
 }
 
-fn inline_array.from_list(const n: count, const a: type, xs: inline_array_list(n, a)) -> inline_array(n, a) {
+fn InlineArray.from_list(const n: count, const a: type, xs: InlineArrayList(n, a)) -> InlineArray(n, a) {
   xs
 }
 
-type fn inline_array_builder(N: count, A: type) -> type {
-  let Builder = {N*A};
+type fn InlineArrayBuilder(n: count, a: type) -> type {
+  let Builder = {n*a};
   struct(Builder)
 }
 
-fn inline_array_builder.start(const n: count, const a: type) -> inline_array_builder(n, a) {
+fn InlineArrayBuilder.start(const n: count, const a: type) -> InlineArrayBuilder(n, a) {
   @inline_array_builder_start(n, a)
 }
 
-fn inline_array_builder.push(
+fn InlineArrayBuilder.push(
   const n: count,
   const a: type,
-  builder: inline_array_builder(n, a),
-  i: core.index(n),
+  builder: InlineArrayBuilder(n, a),
+  i: core.Index(n),
   value: a
-) -> inline_array_builder(n, a) {
+) -> InlineArrayBuilder(n, a) {
   @inline_array_builder_push(n, a, builder, i, value)
 }
 
-fn inline_array_builder.finish(const n: count, const a: type, builder: inline_array_builder(n, a)) -> inline_array(n, a) {
+fn InlineArrayBuilder.finish(const n: count, const a: type, builder: InlineArrayBuilder(n, a)) -> InlineArray(n, a) {
   @inline_array_builder_finish(n, a, builder)
 }
 
-fn inline_array.tabulate(const n: count, const a: type, const f: fn(i: core.index(n)) -> a) -> inline_array(n, a) {
-  inline_array.tabulate_loop(n, a, core.index_cursor.start(n), inline_array_builder.start(n, a), f)
+fn InlineArray.tabulate(const n: count, const a: type, const f: fn(i: core.Index(n)) -> a) -> InlineArray(n, a) {
+  InlineArray.tabulate_loop(n, a, core.IndexCursor.start(n), InlineArrayBuilder.start(n, a), f)
 }
 
-fn inline_array.tabulate_loop(
+fn InlineArray.tabulate_loop(
   const n: count,
   const a: type,
-  cursor: core.index_cursor(n),
-  builder: inline_array_builder(n, a),
-  const f: fn(i: core.index(n)) -> a
-) -> inline_array(n, a) {
+  cursor: core.IndexCursor(n),
+  builder: InlineArrayBuilder(n, a),
+  const f: fn(i: core.Index(n)) -> a
+) -> InlineArray(n, a) {
   let builder_then, builder_else = fork(builder);
-  match core.index_cursor.next(n, cursor) {
-    Yield(i, next) => inline_array.tabulate_loop(n, a, next, inline_array_builder.push(n, a, builder_then, i, f(i)), f),
-    Done => inline_array_builder.finish(n, a, builder_else),
+  match core.IndexCursor.next(n, cursor) {
+    Yield(i, next) => InlineArray.tabulate_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_then, i, f(i)), f),
+    Done => InlineArrayBuilder.finish(n, a, builder_else),
   }
 }
 
-fn inline_array.tabulate_with(
+fn InlineArray.tabulate_with(
   const n: count,
   const a: type,
   const state: type,
   state_value: state,
-  const f: fn(i: core.index(n), state_value: state) -> a
-) -> inline_array(n, a) {
-  inline_array.tabulate_with_loop(n, a, state, core.index_cursor.start(n), inline_array_builder.start(n, a), state_value, f)
+  const f: fn(i: core.Index(n), state_value: state) -> a
+) -> InlineArray(n, a) {
+  InlineArray.tabulate_with_loop(n, a, state, core.IndexCursor.start(n), InlineArrayBuilder.start(n, a), state_value, f)
 }
 
-fn inline_array.tabulate_with_loop(
+fn InlineArray.tabulate_with_loop(
   const n: count,
   const a: type,
   const state: type,
-  cursor: core.index_cursor(n),
-  builder: inline_array_builder(n, a),
+  cursor: core.IndexCursor(n),
+  builder: InlineArrayBuilder(n, a),
   state_value: state,
-  const f: fn(i: core.index(n), state_value: state) -> a
-) -> inline_array(n, a) {
+  const f: fn(i: core.Index(n), state_value: state) -> a
+) -> InlineArray(n, a) {
   let builder_then, builder_else = fork(builder);
   let state_then, state_else = fork(state_value);
   let state_call, state_next = fork(state_then);
-  match core.index_cursor.next(n, cursor) {
-    Yield(i, next) => inline_array.tabulate_with_loop(n, a, state, next, inline_array_builder.push(n, a, builder_then, i, f(i, state_call)), state_next, f),
-    Done => inline_array_builder.finish(n, a, builder_else),
+  match core.IndexCursor.next(n, cursor) {
+    Yield(i, next) => InlineArray.tabulate_with_loop(n, a, state, next, InlineArrayBuilder.push(n, a, builder_then, i, f(i, state_call)), state_next, f),
+    Done => InlineArrayBuilder.finish(n, a, builder_else),
   }
 }
 
-fn inline_array.fill(const n: count, const a: type, value: a) -> inline_array(n, a) {
-  inline_array.fill_loop(n, a, core.index_cursor.start(n), inline_array_builder.start(n, a), value)
+fn InlineArray.fill(const n: count, const a: type, value: a) -> InlineArray(n, a) {
+  InlineArray.fill_loop(n, a, core.IndexCursor.start(n), InlineArrayBuilder.start(n, a), value)
 }
 
-fn inline_array.fill_loop(
+fn InlineArray.fill_loop(
   const n: count,
   const a: type,
-  cursor: core.index_cursor(n),
-  builder: inline_array_builder(n, a),
+  cursor: core.IndexCursor(n),
+  builder: InlineArrayBuilder(n, a),
   value: a
-) -> inline_array(n, a) {
+) -> InlineArray(n, a) {
   let builder_then, builder_else = fork(builder);
   let value_then, value_else = fork(value);
   let value_push, value_next = fork(value_then);
-  match core.index_cursor.next(n, cursor) {
-    Yield(i, next) => inline_array.fill_loop(n, a, next, inline_array_builder.push(n, a, builder_then, i, value_push), value_next),
-    Done => inline_array_builder.finish(n, a, builder_else),
+  match core.IndexCursor.next(n, cursor) {
+    Yield(i, next) => InlineArray.fill_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_then, i, value_push), value_next),
+    Done => InlineArrayBuilder.finish(n, a, builder_else),
   }
 }
 
-fn inline_array.map(
+fn InlineArray.map(
   const n: count,
   const a: type,
   const b: type,
-  xs: inline_array(n, a),
+  xs: InlineArray(n, a),
   const f: fn(x: a) -> b
-) -> inline_array(n, b) {
-  inline_array.map_loop(n, a, b, core.index_cursor.start(n), inline_array_builder.start(n, b), xs, f)
+) -> InlineArray(n, b) {
+  InlineArray.map_loop(n, a, b, core.IndexCursor.start(n), InlineArrayBuilder.start(n, b), xs, f)
 }
 
-fn inline_array.map_loop(
+fn InlineArray.map_loop(
   const n: count,
   const a: type,
   const b: type,
-  cursor: core.index_cursor(n),
-  builder: inline_array_builder(n, b),
-  xs: inline_array(n, a),
+  cursor: core.IndexCursor(n),
+  builder: InlineArrayBuilder(n, b),
+  xs: InlineArray(n, a),
   const f: fn(x: a) -> b
-) -> inline_array(n, b) {
+) -> InlineArray(n, b) {
   let builder_then, builder_else = fork(builder);
   let xs_then, xs_else = fork(xs);
   let xs_current, xs_next = fork(xs_then);
-  match core.index_cursor.next(n, cursor) {
-    Yield(i, next) => inline_array.map_loop(n, a, b, next, inline_array_builder.push(n, b, builder_then, i, f(xs_current[i])), xs_next, f),
-    Done => inline_array_builder.finish(n, b, builder_else),
+  match core.IndexCursor.next(n, cursor) {
+    Yield(i, next) => InlineArray.map_loop(n, a, b, next, InlineArrayBuilder.push(n, b, builder_then, i, f(xs_current[i])), xs_next, f),
+    Done => InlineArrayBuilder.finish(n, b, builder_else),
   }
 }
 
-fn inline_array.imap(
+fn InlineArray.imap(
   const n: count,
   const a: type,
   const b: type,
-  xs: inline_array(n, a),
-  const f: fn(i: core.index(n), x: a) -> b
-) -> inline_array(n, b) {
-  inline_array.imap_loop(n, a, b, core.index_cursor.start(n), inline_array_builder.start(n, b), xs, f)
+  xs: InlineArray(n, a),
+  const f: fn(i: core.Index(n), x: a) -> b
+) -> InlineArray(n, b) {
+  InlineArray.imap_loop(n, a, b, core.IndexCursor.start(n), InlineArrayBuilder.start(n, b), xs, f)
 }
 
-fn inline_array.imap_loop(
+fn InlineArray.imap_loop(
   const n: count,
   const a: type,
   const b: type,
-  cursor: core.index_cursor(n),
-  builder: inline_array_builder(n, b),
-  xs: inline_array(n, a),
-  const f: fn(i: core.index(n), x: a) -> b
-) -> inline_array(n, b) {
+  cursor: core.IndexCursor(n),
+  builder: InlineArrayBuilder(n, b),
+  xs: InlineArray(n, a),
+  const f: fn(i: core.Index(n), x: a) -> b
+) -> InlineArray(n, b) {
   let builder_then, builder_else = fork(builder);
   let xs_then, xs_else = fork(xs);
   let xs_current, xs_next = fork(xs_then);
-  match core.index_cursor.next(n, cursor) {
-    Yield(i, next) => inline_array.imap_loop(n, a, b, next, inline_array_builder.push(n, b, builder_then, i, f(i, xs_current[i])), xs_next, f),
-    Done => inline_array_builder.finish(n, b, builder_else),
+  match core.IndexCursor.next(n, cursor) {
+    Yield(i, next) => InlineArray.imap_loop(n, a, b, next, InlineArrayBuilder.push(n, b, builder_then, i, f(i, xs_current[i])), xs_next, f),
+    Done => InlineArrayBuilder.finish(n, b, builder_else),
   }
 }
 
-fn inline_array.imap_with_state(
+fn InlineArray.imap_with_state(
   const n: count,
   const a: type,
   const b: type,
   const state: type,
-  xs: inline_array(n, a),
+  xs: InlineArray(n, a),
   state_value: state,
-  const f: fn(i: core.index(n), x: a, state_value: state) -> b
-) -> inline_array(n, b) {
-  inline_array.imap_with_state_loop(n, a, b, state, core.index_cursor.start(n), inline_array_builder.start(n, b), xs, state_value, f)
+  const f: fn(i: core.Index(n), x: a, state_value: state) -> b
+) -> InlineArray(n, b) {
+  InlineArray.imap_with_state_loop(n, a, b, state, core.IndexCursor.start(n), InlineArrayBuilder.start(n, b), xs, state_value, f)
 }
 
-fn inline_array.imap_with_state_loop(
+fn InlineArray.imap_with_state_loop(
   const n: count,
   const a: type,
   const b: type,
   const state: type,
-  cursor: core.index_cursor(n),
-  builder: inline_array_builder(n, b),
-  xs: inline_array(n, a),
+  cursor: core.IndexCursor(n),
+  builder: InlineArrayBuilder(n, b),
+  xs: InlineArray(n, a),
   state_value: state,
-  const f: fn(i: core.index(n), x: a, state_value: state) -> b
-) -> inline_array(n, b) {
+  const f: fn(i: core.Index(n), x: a, state_value: state) -> b
+) -> InlineArray(n, b) {
   let builder_then, builder_else = fork(builder);
   let xs_then, xs_else = fork(xs);
   let state_then, state_else = fork(state_value);
   let xs_current, xs_next = fork(xs_then);
   let state_call, state_next = fork(state_then);
-  match core.index_cursor.next(n, cursor) {
-    Yield(i, next) => inline_array.imap_with_state_loop(n, a, b, state, next, inline_array_builder.push(n, b, builder_then, i, f(i, xs_current[i], state_call)), xs_next, state_next, f),
-    Done => inline_array_builder.finish(n, b, builder_else),
+  match core.IndexCursor.next(n, cursor) {
+    Yield(i, next) => InlineArray.imap_with_state_loop(n, a, b, state, next, InlineArrayBuilder.push(n, b, builder_then, i, f(i, xs_current[i], state_call)), xs_next, state_next, f),
+    Done => InlineArrayBuilder.finish(n, b, builder_else),
   }
 }
 
-fn inline_array.set(const n: count, const a: type, xs: inline_array(n, a), index: core.index(n), value: a) -> inline_array(n, a) {
-  inline_array.set_loop(n, a, core.index_cursor.start(n), inline_array_builder.start(n, a), xs, index, value)
+fn InlineArray.set(const n: count, const a: type, xs: InlineArray(n, a), index: core.Index(n), value: a) -> InlineArray(n, a) {
+  InlineArray.set_loop(n, a, core.IndexCursor.start(n), InlineArrayBuilder.start(n, a), xs, index, value)
 }
 
-fn inline_array.set_loop(
+fn InlineArray.set_loop(
   const n: count,
   const a: type,
-  cursor: core.index_cursor(n),
-  builder: inline_array_builder(n, a),
-  xs: inline_array(n, a),
-  index: core.index(n),
+  cursor: core.IndexCursor(n),
+  builder: InlineArrayBuilder(n, a),
+  xs: InlineArray(n, a),
+  index: core.Index(n),
   value: a
-) -> inline_array(n, a) {
+) -> InlineArray(n, a) {
   let builder_then, builder_else = fork(builder);
   let xs_then, xs_else = fork(xs);
   let value_then, value_else = fork(value);
@@ -234,34 +234,34 @@ fn inline_array.set_loop(
   let value_true_next, value_false_next = fork(value_next);
   let index_test, index_next = fork(index);
   let index_true_next, index_false_next = fork(index_next);
-  match core.index_cursor.next(n, cursor) {
+  match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => match i == index_test {
-      true => inline_array.set_loop(n, a, next, inline_array_builder.push(n, a, builder_true, i, value_current), xs_true_next, index_true_next, value_true_next),
-      false => inline_array.set_loop(n, a, next, inline_array_builder.push(n, a, builder_false, i, xs_current[i]), xs_false_next, index_false_next, value_false_next),
+      true => InlineArray.set_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_true, i, value_current), xs_true_next, index_true_next, value_true_next),
+      false => InlineArray.set_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_false, i, xs_current[i]), xs_false_next, index_false_next, value_false_next),
     },
-    Done => inline_array_builder.finish(n, a, builder_else),
+    Done => InlineArrayBuilder.finish(n, a, builder_else),
   }
 }
 
-fn inline_array.update(
+fn InlineArray.update(
   const n: count,
   const a: type,
-  xs: inline_array(n, a),
-  index: core.index(n),
+  xs: InlineArray(n, a),
+  index: core.Index(n),
   const f: fn(x: a) -> a
-) -> inline_array(n, a) {
-  inline_array.update_loop(n, a, core.index_cursor.start(n), inline_array_builder.start(n, a), xs, index, f)
+) -> InlineArray(n, a) {
+  InlineArray.update_loop(n, a, core.IndexCursor.start(n), InlineArrayBuilder.start(n, a), xs, index, f)
 }
 
-fn inline_array.update_loop(
+fn InlineArray.update_loop(
   const n: count,
   const a: type,
-  cursor: core.index_cursor(n),
-  builder: inline_array_builder(n, a),
-  xs: inline_array(n, a),
-  index: core.index(n),
+  cursor: core.IndexCursor(n),
+  builder: InlineArrayBuilder(n, a),
+  xs: InlineArray(n, a),
+  index: core.Index(n),
   const f: fn(x: a) -> a
-) -> inline_array(n, a) {
+) -> InlineArray(n, a) {
   let builder_then, builder_else = fork(builder);
   let xs_then, xs_else = fork(xs);
   let builder_true, builder_false = fork(builder_then);
@@ -269,66 +269,66 @@ fn inline_array.update_loop(
   let xs_update, xs_false_next = fork(xs_next);
   let index_test, index_next = fork(index);
   let index_true_next, index_false_next = fork(index_next);
-  match core.index_cursor.next(n, cursor) {
+  match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => match i == index_test {
-      true => inline_array.update_loop(n, a, next, inline_array_builder.push(n, a, builder_true, i, f(xs_current[i])), xs_update, index_true_next, f),
-      false => inline_array.update_loop(n, a, next, inline_array_builder.push(n, a, builder_false, i, xs_current[i]), xs_false_next, index_false_next, f),
+      true => InlineArray.update_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_true, i, f(xs_current[i])), xs_update, index_true_next, f),
+      false => InlineArray.update_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_false, i, xs_current[i]), xs_false_next, index_false_next, f),
     },
-    Done => inline_array_builder.finish(n, a, builder_else),
+    Done => InlineArrayBuilder.finish(n, a, builder_else),
   }
 }
 
-fn inline_array.fold_indices(
+fn InlineArray.fold_indices(
   const n: count,
   const acc_type: type,
-  cursor: core.index_cursor(n),
+  cursor: core.IndexCursor(n),
   acc: acc_type,
-  const f: fn(acc: acc_type, i: core.index(n)) -> acc_type
+  const f: fn(acc: acc_type, i: core.Index(n)) -> acc_type
 ) -> acc_type {
   let acc_then, acc_else = fork(acc);
-  match core.index_cursor.next(n, cursor) {
-    Yield(i, next) => inline_array.fold_indices(n, acc_type, next, f(acc_then, i), f),
+  match core.IndexCursor.next(n, cursor) {
+    Yield(i, next) => InlineArray.fold_indices(n, acc_type, next, f(acc_then, i), f),
     Done => acc_else,
   }
 }
 
-type fn lane4_i32() -> type {
-  inline_array(4, i32)
+type fn Lane4I32() -> type {
+  InlineArray(4, i32)
 }
 
-type fn lane4_bool() -> type {
-  inline_array(4, bool)
+type fn Lane4Bool() -> type {
+  InlineArray(4, bool)
 }
 
-fn memory.load_lane4_i32(mem: memory, p: core.ptr(lane4_i32)) -> lane4_i32 {
+fn memory.load_lane4_i32(mem: memory, p: core.Ptr(Lane4I32)) -> Lane4I32 {
   @memory_load_lane4_i32(mem, p)
 }
 
 fn memory.store_lane4_i32(
   mem: memory,
-  p: core.ptr(lane4_i32),
-  value: lane4_i32
+  p: core.Ptr(Lane4I32),
+  value: Lane4I32
 ) -> memory {
   @memory_store_lane4_i32(mem, p, value)
 }
 
-type fn lane4_scalar_i32() -> type {
-  inline_array(4, core.scalar_i32)
+type fn Lane4ScalarI32() -> type {
+  InlineArray(4, core.ScalarI32)
 }
 
-type fn tile2x4_i32() -> type {
-  inline_array(2, lane4_i32)
+type fn Tile2x4I32() -> type {
+  InlineArray(2, Lane4I32)
 }
 
-type fn tile4x4_i32() -> type {
-  inline_array(4, lane4_i32)
+type fn Tile4x4I32() -> type {
+  InlineArray(4, Lane4I32)
 }
 
-type fn mat4_i32() -> type {
-  tile4x4_i32
+type fn Mat4I32() -> type {
+  Tile4x4I32
 }
 
-type fn view_i32_8x2() {
-  let ViewI32x8x2 = {base: inline_array(8, i32), len: i32, stride: i32};
+type fn ViewI328x2() {
+  let ViewI32x8x2 = {base: InlineArray(8, i32), len: i32, stride: i32};
   struct(ViewI32x8x2)
 }

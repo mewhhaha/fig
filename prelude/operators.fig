@@ -1,45 +1,45 @@
-type fn op_add(T: type) -> operator {
-  operator(#infixl, 60, "+", T.add)
+type fn OpAdd(t: type) -> operator {
+  operator(#infixl, 60, "+", t.add)
 }
 
-type fn op_sub(T: type) -> operator {
-  operator(#infixl, 60, "-", T.sub)
+type fn OpSub(t: type) -> operator {
+  operator(#infixl, 60, "-", t.sub)
 }
 
-type fn op_mul(T: type) -> operator {
-  operator(#infixl, 70, "*", T.mul)
+type fn OpMul(t: type) -> operator {
+  operator(#infixl, 70, "*", t.mul)
 }
 
-type fn op_div(T: type) -> operator {
-  operator(#infixl, 70, "/", T.div)
+type fn OpDiv(t: type) -> operator {
+  operator(#infixl, 70, "/", t.div)
 }
 
-type fn op_rem(T: type) -> operator {
-  operator(#infixl, 70, "%", T.rem)
+type fn OpRem(t: type) -> operator {
+  operator(#infixl, 70, "%", t.rem)
 }
 
-type fn op_eql(T: type) -> operator {
-  operator(#infix, 40, "==", T.eql)
+type fn OpEql(t: type) -> operator {
+  operator(#infix, 40, "==", t.eql)
 }
 
-type fn op_neq(T: type) -> operator {
-  operator(#infix, 40, "!=", T.neq)
+type fn OpNeq(t: type) -> operator {
+  operator(#infix, 40, "!=", t.neq)
 }
 
-type fn op_lt(T: type) -> operator {
-  operator(#infix, 50, "<", T.lt)
+type fn OpLt(t: type) -> operator {
+  operator(#infix, 50, "<", t.lt)
 }
 
-type fn op_lte(T: type) -> operator {
-  operator(#infix, 50, "<=", T.lte)
+type fn OpLte(t: type) -> operator {
+  operator(#infix, 50, "<=", t.lte)
 }
 
-type fn op_gt(T: type) -> operator {
-  operator(#infix, 50, ">", T.gt)
+type fn OpGt(t: type) -> operator {
+  operator(#infix, 50, ">", t.gt)
 }
 
-type fn op_gte(T: type) -> operator {
-  operator(#infix, 50, ">=", T.gte)
+type fn OpGte(t: type) -> operator {
+  operator(#infix, 50, ">=", t.gte)
 }
 
 fn bool_and(a: bool, b: bool) -> bool {
@@ -65,38 +65,38 @@ fn bool_neq(a: bool, b: bool) -> bool {
   bool_xor(a, b)
 }
 
-type fn op_bool_and() -> operator {
+type fn OpBoolAnd() -> operator {
   operator(#infixr, 30, "&&", bool_and)
 }
 
-type fn op_bool_or() -> operator {
+type fn OpBoolOr() -> operator {
   operator(#infixr, 20, "||", bool_or)
 }
 
-type fn op_bool_xor() -> operator {
+type fn OpBoolXor() -> operator {
   operator(#infixr, 25, "^^", bool_xor)
 }
 
-type fn op_bool_eq() -> operator {
+type fn OpBoolEq() -> operator {
   operator(#infix, 40, "==", bool_eq)
 }
 
-type fn op_bool_neq() -> operator {
+type fn OpBoolNeq() -> operator {
   operator(#infix, 40, "!=", bool_neq)
 }
 
-type fn op_append(T: type) -> operator {
-  operator(#infixr, 55, "<>", T.append)
+type fn OpAppend(t: type) -> operator {
+  operator(#infixr, 55, "<>", t.append)
 }
 
-type fn op_apply(T: type) -> operator {
-  operator(#infixl, 65, "<*>", T.apply)
+type fn OpApply(t: type) -> operator {
+  operator(#infixl, 65, "<*>", t.apply)
 }
 
-type fn op_map(T: type) -> operator {
-  operator(#infixl, 65, "<$>", T.map)
+type fn OpMap(t: type) -> operator {
+  operator(#infixl, 65, "<$>", t.map)
 }
 
-type fn op_bind(T: type) -> operator {
-  operator(#infixl, 10, ">>=", T.bind)
+type fn OpBind(t: type) -> operator {
+  operator(#infixl, 10, ">>=", t.bind)
 }

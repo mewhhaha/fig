@@ -13,10 +13,10 @@ Type functions currently cover several compile-time concepts:
   arrays.
 - Static reflection: product/sum/alias checks, slot lookup, variant lookup, and attached member
   lookup.
-- Static contracts: `@require`-checked proofs such as `eq(T)`, `functor(T)`, `droppable(T)`, and
+- Static contracts: `@require`-checked proofs such as `Eq(t)`, `Functor(t)`, `Droppable(t)`, and
   layout predicates.
 - Constructor-polymorphic helpers: generic functions can infer type constructors at call sites and
-  use local proof consts such as `const Mapper = functor(T);`.
+  use local proof consts such as `const Mapper = Functor(t);`.
 - Memory-oriented modeling: examples can encode owned values, borrowed handles, arena-tied
   references, fixed inline buffers, and drop capabilities as compile-time type-function contracts.
 
@@ -63,7 +63,7 @@ load/store aliases that lower directly to Wasm memory operations.
 
 Use fixed inline arrays and iterators for collection-shaped code for now. `prelude.std` exposes the
 pure fixed helpers from `prelude.array_static`, including explicit `lane4_*` helpers,
-`range_i32`/range iterators, `iter.map`/`iter.filter`/`iter.fold`, and `compact_array` collection
+`range_i32`/range iterators, `Iter.map`/`Iter.filter`/`Iter.fold`, and `compact_array` collection
 for fixed-capacity filtered results.
 
 Heap-backed lists and growable vectors are intentionally deferred. The standard prelude does not

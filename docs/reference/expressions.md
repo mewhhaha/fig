@@ -6,7 +6,7 @@ pipe-bind, and `$`.
 
 ```fig
 add(1, 2)
-point.x
+Point.x
 xs[0]
 Point {x: 1, y: 2}
 {x: 1, y: 2}
@@ -22,7 +22,7 @@ Use `match` instead of `if`. Arms are ordered. Function clauses are also ordered
 literal and wildcard dispatch.
 
 ```fig
-fn unwrap_or(value: option(i32), fallback: i32) -> i32 {
+fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
   match value { Some(inner) => inner, None => fallback }
 }
 ```
@@ -88,7 +88,7 @@ let point = Point {for Key, Spec in (fields): 1};
 ```
 
 The generated key is used as the slot label. Static slots are supported in records and product
-constructors; static `for` statement blocks are deprecated.
+constructors.
 
 ## Tuples, Collections, and Frozen Values
 
@@ -100,29 +100,29 @@ let zeros = [0; 4];
 ```
 
 Angle-bracket collection literals are target-typed and lower through collector members on the
-expected type. A spread can append a tail collection when the expected collector supports it:
+expected type. a spread can append a tail collection when the expected collector supports it:
 
 ```fig
-let tail: layout.inline_array_list(3, i32) = <1, 2, 3>;
-let ys: layout.inline_array_list(4, i32) = <0, ...tail>;
+let tail: Layout.InlineArrayList(3, i32) = <1, 2, 3>;
+let ys: Layout.InlineArrayList(4, i32) = <0, ...tail>;
 ```
 
 Frozen literals use `#` and require a frozen expected type:
 
 ```fig
-let xs: #(layout.inline_array(3, i32)) = #[10, 20, 30];
+let xs: #(Layout.InlineArray(3, i32)) = #[10, 20, 30];
 ```
 
 ## Borrows
 
-`&value` creates a call-scoped borrow for a parameter whose type is written `&(T)`:
+`&value` creates a call-scoped borrow for a parameter whose type is written `&(t)`:
 
 ```fig
-fn sum(point: &(point2d)) -> i32 { point.x + point.y }
+fn sum(point: &(point2d)) -> i32 { Point.x + Point.y }
 let total = sum(&point);
 ```
 
-Borrows cannot be stored or returned as owned values.
+Borrows cannot be stored or returned as owned Values.
 
 ## Operators
 

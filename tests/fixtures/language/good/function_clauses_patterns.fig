@@ -1,14 +1,14 @@
-type fn option(A: type) -> union {
+type fn Option(a: type) -> union {
   let None = {};
-  let Some = {value: A};
+  let Some = {value: a};
   union(None, Some)
 }
 
 fn score(true: bool, true: bool) -> i32 { 3 }
 fn score(_: bool, _: bool) -> i32 { 0 }
 
-fn unwrap(Some(value): option(i32)) -> i32 { value }
-fn unwrap(None: option(i32)) -> i32 { 0 }
+fn unwrap(Some(value): Option(i32)) -> i32 { value }
+fn unwrap(None: Option(i32)) -> i32 { 0 }
 
 pub fn main() -> i32 {
   score(true, false) + unwrap(Some(4))

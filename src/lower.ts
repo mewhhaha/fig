@@ -310,7 +310,10 @@ function lowerTypeBlock(node: Node): TypeBlock {
 function lowerShapeType(node: Node): ShapeType {
   return {
     ...spanOnly(node),
-    slots: canonicalizeSlots(named(node).filter(is("ShapeSlot")).map(lowerShapeTypeSlot), "shape type"),
+    slots: canonicalizeSlots(
+      named(node).filter(is("ShapeSlot")).map(lowerShapeTypeSlot),
+      "shape type",
+    ),
   };
 }
 
@@ -344,17 +347,21 @@ function slotKeyParts(node: Node | undefined): { label?: string; position?: numb
     const raw = first(positionNode, "Number").text;
     const position = Number.parseInt(raw, 10);
     if (!Number.isInteger(position) || position < 0 || String(position) !== raw) {
-      fail("parse.lower", `slot position must be a non-negative integer: ${raw}`, spanFor(positionNode));
+      fail(
+        "parse.lower",
+        `slot position must be a non-negative integer: ${raw}`,
+        spanFor(positionNode),
+      );
     }
     parts.position = position;
   }
   return parts;
 }
 
-function canonicalizeSlots<T extends { position?: number; spread?: boolean; span?: Span }>(
-  slots: T[],
+function canonicalizeSlots<t extends { position?: number; spread?: boolean; span?: Span }>(
+  slots: t[],
   description: string,
-): T[] {
+): t[] {
   if (!slots.some((slot) => slot.position !== undefined)) return slots;
   const explicit = new Set<number>();
   for (const slot of slots) {
@@ -375,7 +382,11 @@ function canonicalizeSlots<T extends { position?: number; spread?: boolean; span
   const max = Math.max(...positioned.map((slot) => slot.position ?? -1));
   for (let position = 0; position <= max; position++) {
     if (!positioned.some((slot) => slot.position === position)) {
-      fail("parse.lower", `non-contiguous ${description} slot positions; missing position ${position}`, undefined);
+      fail(
+        "parse.lower",
+        `non-contiguous ${description} slot positions; missing position ${position}`,
+        undefined,
+      );
     }
   }
   return positioned.toSorted((left, right) => (left.position ?? 0) - (right.position ?? 0));
@@ -405,7 +416,7 @@ function lowerTypeExpr(node: Node): TypeExpr {
         current = {
           kind: "type_binary",
           ...spanOnly(expr),
-          op: ops[index].text,
+          op: ops[index].text as "==" | "!=" | "|",
           left: current,
           right: lowerTypeExpr(calls[index + 1]),
         };
@@ -470,6 +481,8 @@ function lowerTypeExpr(node: Node): TypeExpr {
       if (optional(expr, "TypeQualifiedTail")) {
         return { kind: "type_ref", ...spanOnly(expr), name: expr.text.replace(/\s+/g, "") };
       }
+      return lowerTypeExpr(named(expr)[0]);
+    case "TypeAtom":
       return lowerTypeExpr(named(expr)[0]);
     case "Type":
       if (optional(expr, "TypeQualifiedTail")) {
@@ -559,6 +572,13 @@ function lowerTypeLiteral(node: Node): TypeExpr {
   if (literal.type === "String") {
     return { kind: "type_string", ...spanOnly(literal), value: JSON.parse(literal.text) };
   }
+  if (literal.type === "Char") {
+    return {
+      kind: "type_char",
+      ...spanOnly(literal),
+      value: JSON.parse(`"${literal.text.slice(1, -1)}"`),
+    };
+  }
   if (literal.type === "Multiline" || literal.type === "fenced_text") {
     return { kind: "type_string", ...spanOnly(literal), value: multilineContents(literal.text) };
   }
@@ -582,6 +602,13 @@ function lowerTypeLiteralPattern(node: Node): TypePattern {
   if (literal.type === "String") {
     return { kind: "string", ...spanOnly(literal), value: JSON.parse(literal.text) };
   }
+  if (literal.type === "Char") {
+    return {
+      kind: "char",
+      ...spanOnly(literal),
+      value: JSON.parse(`"${literal.text.slice(1, -1)}"`),
+    };
+  }
   if (literal.type === "Number") {
     return { kind: "number", ...spanOnly(literal), value: literal.text };
   }
@@ -592,7 +619,10 @@ function lowerTypeShape(node: Node): TypeShape {
   const body = optional(node, "TypeShapeBody") ?? node;
   return {
     ...spanOnly(node),
-    slots: canonicalizeSlots(listSlots(body, "TypeShapeSlot").map(lowerTypeShapeSlot), "type shape"),
+    slots: canonicalizeSlots(
+      listSlots(body, "TypeShapeSlot").map(lowerTypeShapeSlot),
+      "type shape",
+    ),
   };
 }
 
@@ -658,7 +688,12 @@ function lowerTupleRepeatCount(node: Node): TypeCountExpr {
 
 function countAtom(text: string, span?: Span): TypeCountExpr {
   if (/^[0-9]/.test(text)) {
-    return { kind: "count_literal" as const, value: Number.parseInt(text, 10), source: text, ...(span ? { span } : {}) };
+    return {
+      kind: "count_literal" as const,
+      value: Number.parseInt(text, 10),
+      source: text,
+      ...(span ? { span } : {}),
+    };
   }
   return { kind: "count_ref" as const, name: text, ...(span ? { span } : {}) };
 }
@@ -666,7 +701,8 @@ function countAtom(text: string, span?: Span): TypeCountExpr {
 function unwrapType(node: Node): Node {
   const children = named(node);
   if (
-    ["TypeExpr", "TypeNonFnExpr", "TypePrimary", "TypeCall", "TypeBinary"].includes(node.type) &&
+    ["TypeExpr", "TypeNonFnExpr", "TypePrimary", "TypeCall", "TypeBinary", "TypeUnion", "TypeAtom"]
+      .includes(node.type) &&
     children.length === 1
   ) {
     return unwrapType(children[0]);
@@ -680,13 +716,16 @@ function lowerParam(node: Node): Param {
   const nameNode = named(node).find((child) => isIdentifier(child) || isFieldName(child));
   const pattern = patternNode ? lowerParamPattern(patternNode) : lowerNameParamPattern(nameNode);
   const name = paramBindingName(pattern, nameNode);
+  const explicitType = optional(node, "Type")?.text ??
+    optional(node, "TypeAnn")?.text.replace(/^\s*:\s*/, "");
+  const isConstParam = /^\s*const\b/.test(node.text);
   return {
     ...meta(node, nameNode),
     ...doc(node),
     name,
-    type: optional(node, "Type")?.text ?? optional(node, "TypeAnn")?.text.replace(/^\s*:\s*/, "") ??
-      "type",
-    const: /^\s*const\b/.test(node.text) ? true : undefined,
+    type: explicitType ?? "type",
+    const: isConstParam ? true : undefined,
+    ...(isConstParam && !explicitType ? { inferStaticType: true } : {}),
     ...(pattern.kind !== "binding" || pattern.name !== name ? { pattern } : {}),
   };
 }
@@ -771,7 +810,21 @@ function paramBindingName(pattern: ParamPattern, fallback: Node | undefined): st
 }
 
 function knownTypeName(name: string): boolean {
-  return ["type", "bool", "string", "i32", "u32", "i64", "u64", "f32", "f64"].includes(name) ||
+  return [
+    "type",
+    "const",
+    "count",
+    "bool",
+    "char",
+    "string",
+    "memory",
+    "i32",
+    "u32",
+    "i64",
+    "u64",
+    "f32",
+    "f64",
+  ].includes(name) ||
     /^u([1-9]|[1-5][0-9]|6[0-4])$/.test(name);
 }
 
@@ -870,31 +923,13 @@ function lowerBlock(node: Node): Extract<Expr, { kind: "block" }> {
       const stmt = named(child)[0];
       if (stmt.type === "BlockLetDecl") statements.push(lowerLet(stmt));
       else if (stmt.type === "BlockProofConstDecl") statements.push(lowerProofConst(stmt));
-      else if (stmt.type === "StaticForBlock") statements.push(lowerStaticForBlock(stmt));
     } else if (child.type === "BlockProofConstDecl") {
       statements.push(lowerProofConst(child));
-    } else if (child.type === "StaticForBlock") {
-      statements.push(lowerStaticForBlock(child));
     } else if (child.type === "Expr") {
       expr = lowerExpr(child);
     }
   }
   return { kind: "block", ...spanOnly(node), statements, expr };
-}
-
-function lowerStaticForBlock(node: Node): Statement {
-  const binderNodes = named(first(node, "StaticForBinders")).filter(isIdentifier);
-  const binders = binderNodes.map((item) => item.text);
-  return {
-    kind: "static_for",
-    ...meta(node, binderNodes[0]),
-    iterator: binders[0] ?? "I",
-    ...(docText(binderNodes[0]) ? { iteratorDoc: docText(binderNodes[0]) } : {}),
-    valueIterator: binders[1],
-    ...(docText(binderNodes[1]) ? { valueIteratorDoc: docText(binderNodes[1]) } : {}),
-    source: lowerStaticForSource(first(node, "StaticForSource")),
-    body: lowerBlock(first(node, "Block")).statements,
-  };
 }
 
 function lowerExpr(node: Node): Expr {
@@ -904,7 +939,11 @@ function lowerExpr(node: Node): Expr {
       const value = first(expr, "Expr");
       const arms = named(expr).filter(is("Arm")).map((arm) => {
         const armExpr = first(arm, "Expr");
-        return { ...spanOnly(arm), pattern: lowerParamPattern(first(arm, "Pattern")), value: lowerExpr(armExpr) };
+        return {
+          ...spanOnly(arm),
+          pattern: lowerParamPattern(first(arm, "Pattern")),
+          value: lowerExpr(armExpr),
+        };
       });
       return { kind: "match", ...spanOnly(expr), value: lowerExpr(value), arms };
     }
@@ -1129,9 +1168,7 @@ function bindDollarStaticForSource(source: StaticForSource): StaticForSource {
 function lowerCall(node: Node): Expr {
   const children = named(node);
   let expr = lowerPrimary(children[0]);
-  if (!children.some(is("Args")) && /\)\s*$/.test(node.text)) {
-    return { kind: "call", ...spanOnly(node), callee: expr, args: [] };
-  }
+  const isZeroArgCall = !children.some(is("Args")) && /\)\s*$/.test(node.text);
   let pendingMember: { receiver: Expr; member: string } | undefined;
   for (let i = 1; i < children.length; i++) {
     const child = children[i];
@@ -1202,6 +1239,9 @@ function lowerCall(node: Node): Expr {
       };
     }
   }
+  if (isZeroArgCall) {
+    return { kind: "call", ...spanOnly(node), callee: expr, args: [] };
+  }
   return expr;
 }
 
@@ -1218,8 +1258,8 @@ function isCallPunctuation(node: Node): boolean {
 }
 
 function receiverMemberName(receiver: Expr, member: string): string {
-  if (isPipelineReceiver(receiver)) return `iter.${member}`;
-  if (receiver.kind === "range") return `range_i32.${member}`;
+  if (isPipelineReceiver(receiver)) return `Iter.${member}`;
+  if (receiver.kind === "range") return `RangeI32.${member}`;
   if (receiver.kind === "call" && receiver.callee.kind === "var") {
     const owner = iteratorReceiverOwner(receiver.callee.name);
     if (owner) return `${owner}.${member}`;
@@ -1228,13 +1268,13 @@ function receiverMemberName(receiver: Expr, member: string): string {
 }
 
 function iteratorReceiverOwner(callee: string): string | undefined {
-  if (callee.endsWith(".layout.inline_array.iter")) {
-    return `${callee.slice(0, -".layout.inline_array.iter".length)}.iter`;
+  if (callee.endsWith(".layout.InlineArray.iter")) {
+    return `${callee.slice(0, -".layout.InlineArray.iter".length)}.iter`;
   }
-  if (callee === "inline_array.iter" || callee.startsWith("iter.")) return "iter";
-  if (callee === "layout.inline_array.iter") return "iter";
-  if (callee === "compact_array.iter" || callee.startsWith("compact_iter.")) return "compact_iter";
-  if (callee === "range_i32.iter" || callee.startsWith("range_iter.")) return "range_iter";
+  if (callee === "InlineArray.iter" || callee.startsWith("Iter.")) return "iter";
+  if (callee === "layout.InlineArray.iter") return "iter";
+  if (callee === "CompactArray.iter" || callee.startsWith("CompactIter.")) return "compact_iter";
+  if (callee === "RangeI32.iter" || callee.startsWith("RangeIter.")) return "range_iter";
   return undefined;
 }
 
@@ -1305,7 +1345,10 @@ function lowerPrimary(node: Node): Expr {
 }
 
 function lowerShapeValue(node: Node): Expr {
-  const slots = canonicalizeSlots(lowerShapeValueItems(optional(node, "ShapeValueItems") ?? node), "record value");
+  const slots = canonicalizeSlots(
+    lowerShapeValueItems(optional(node, "ShapeValueItems") ?? node),
+    "record value",
+  );
   if (slots.length === 0) return { kind: "shape", syntax: "record", ...spanOnly(node), slots: [] };
   return {
     kind: "shape",
@@ -1353,11 +1396,12 @@ function lowerShapeValueItems(node: Node): Extract<Expr, { kind: "shape" }>["slo
       value: { kind: "var", ...meta(punned, first(punned, "LowerIdent")), name },
     }, ...lowerShapeValueTail(node)];
   }
-  const expr = named(node).find((child) =>
-    child.type === "Expr" || child.type === "CollectionExpr" ||
-    child.type === "CollectionPipeBind" || child.type === "CollectionPipeBindAtom" ||
-    child.type === "CollectionBinary" || child.type === "Call"
-  ) ?? descendants(node, "CollectionExpr")[0] ?? descendants(node, "Expr")[0];
+  const expr =
+    named(node).find((child) =>
+      child.type === "Expr" || child.type === "CollectionExpr" ||
+      child.type === "CollectionPipeBind" || child.type === "CollectionPipeBindAtom" ||
+      child.type === "CollectionBinary" || child.type === "Call"
+    ) ?? descendants(node, "CollectionExpr")[0] ?? descendants(node, "Expr")[0];
   if (!expr) return [];
   const key = optional(node, "ShapeValueSlotKey");
   return [{
@@ -1384,7 +1428,9 @@ function lowerCollectionValue(node: Node): Expr {
 }
 
 function lowerCollectionValueItems(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
-  const spread = named(node).find((child) => child.type === "SpreadSlot" || child.type === "CollectionSpreadSlot");
+  const spread = named(node).find((child) =>
+    child.type === "SpreadSlot" || child.type === "CollectionSpreadSlot"
+  );
   if (spread) {
     return [{
       ...spanOnly(spread),
@@ -1392,11 +1438,12 @@ function lowerCollectionValueItems(node: Node): Extract<Expr, { kind: "shape" }>
       value: lowerExpr(optional(spread, "Expr") ?? first(spread, "CollectionExpr")),
     }, ...lowerCollectionValueTail(node)];
   }
-  const expr = named(node).find((child) =>
-    child.type === "Expr" || child.type === "CollectionExpr" ||
-    child.type === "CollectionPipeBind" || child.type === "CollectionPipeBindAtom" ||
-    child.type === "CollectionBinary" || child.type === "Call"
-  ) ?? descendants(node, "CollectionExpr")[0] ?? descendants(node, "Expr")[0];
+  const expr =
+    named(node).find((child) =>
+      child.type === "Expr" || child.type === "CollectionExpr" ||
+      child.type === "CollectionPipeBind" || child.type === "CollectionPipeBindAtom" ||
+      child.type === "CollectionBinary" || child.type === "Call"
+    ) ?? descendants(node, "CollectionExpr")[0] ?? descendants(node, "Expr")[0];
   if (!expr) return [];
   return [{
     ...spanOnly(expr),
@@ -1611,9 +1658,7 @@ function optional(node: Node, type: string): Node | undefined {
 }
 
 function descendants(node: Node, type: string): Node[] {
-  return named(node).flatMap((child) =>
-    child.type === type ? [child] : descendants(child, type)
-  );
+  return named(node).flatMap((child) => child.type === type ? [child] : descendants(child, type));
 }
 
 function listSlots(node: Node, type: string): Node[] {

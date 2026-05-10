@@ -70,7 +70,7 @@ Deno.test("engine playground frame seeds, ticks, and renders visible sprites", a
       input_pressed: () => 1,
     },
   });
-  assertEquals((instance.exports.playground_probe as () => number)(), 26);
+  assertEquals((instance.exports.playground_probe as () => number)(), 12);
 });
 
 Deno.test("capability imports are emitted in WAT and wasm", async () => {

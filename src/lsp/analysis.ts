@@ -10,8 +10,8 @@ import type {
   Program,
   ShapeTypeSlot,
   Statement,
-  TypeDecl,
   TypeCountExpr,
+  TypeDecl,
   TypeExpr,
   TypeMatchArm,
   TypePattern,
@@ -157,6 +157,11 @@ export class AnalysisCache {
     const document = this.openDocuments.get(uri);
     if (!document) return undefined;
     const mapper = new PositionMapper(document.text);
+    const mapperForUri = (targetUri: string) => {
+      if (targetUri === document.uri) return mapper;
+      const open = this.openDocuments.get(targetUri);
+      return open ? new PositionMapper(open.text) : mapper;
+    };
     const diagnosticsByUri: Record<string, Diagnostic[]> = { [document.uri]: [] };
     let program: Program | undefined;
     let syntaxProgram: Program | undefined;
@@ -219,7 +224,7 @@ export class AnalysisCache {
       diagnostics: diagnosticsByUri[document.uri],
       diagnosticsByUri,
       symbols: [
-        ...indexProgram(document.uri, program, document.text, mapper),
+        ...indexProgram(document.uri, program, document.text, mapper, mapperForUri),
         ...indexSource(document.uri, document.text, mapper),
         ...builtinSymbols(document.uri, mapper),
       ],
@@ -329,6 +334,11 @@ export class AnalysisCache {
       const text = await Deno.readTextFile(uriToPath(uri));
       const document = { uri, version: 0, text };
       const mapper = new PositionMapper(text);
+      const mapperForUri = (targetUri: string) => {
+        if (targetUri === uri) return mapper;
+        const open = this.openDocuments.get(targetUri);
+        return open ? new PositionMapper(open.text) : mapper;
+      };
       let program: Program | undefined;
       let syntaxProgram: Program | undefined;
       try {
@@ -347,7 +357,7 @@ export class AnalysisCache {
         mapper,
         diagnostics: [],
         symbols: [
-          ...indexProgram(uri, program, text, mapper),
+          ...indexProgram(uri, program, text, mapper, mapperForUri),
           ...indexSource(uri, text, mapper),
           ...builtinSymbols(uri, mapper),
         ],
@@ -452,6 +462,10 @@ export function hoverAt(
   const qualifiedValue = qualifiedValueHoverAt(result, position);
   if (qualifiedValue) return qualifiedValue;
   const word = wordAt(result.document.text, offset);
+  if (word && !word.includes(".")) {
+    const pipeBinder = nearestPipeBinderSymbol(result, word, offset);
+    if (pipeBinder) return hoverForSymbol(pipeBinder);
+  }
   if (word?.includes(".")) {
     const projected = projectedVarInfo(word, result);
     if (projected) {
@@ -473,6 +487,8 @@ export function hoverAt(
   if (direct) return hoverForSymbol(direct);
   const constructor = productConstructorHoverAt(result, position);
   if (constructor) return constructor;
+  const resolvedWord = word && !word.includes(".") ? resolvedSymbolAt(result, position) : undefined;
+  if (resolvedWord?.kind === "local") return hoverForSymbol(resolvedWord);
   const expression = expressionHoverAt(result, position);
   if (expression) return expression;
   const call = callExpressionHoverAt(result, position);
@@ -486,7 +502,8 @@ export function hoverAt(
 }
 
 export function definitionAt(result: AnalysisResult, position: Position): Location[] {
-  const symbol = resolvedSymbolAt(result, position);
+  const symbol = qualifiedDefinitionSymbolAt(result, position) ??
+    resolvedSymbolAt(result, position);
   return symbol ? [{ uri: symbol.uri, range: symbol.selectionRange }] : [];
 }
 
@@ -528,7 +545,7 @@ export function completionsAt(result: AnalysisResult, position: Position): Compl
       label: "type fn",
       kind: 15,
       detail: "type function snippet",
-      insertText: "type fn ${1:name}(${2:T: type}) -> type {\n  ${0:T}\n}",
+      insertText: "type fn ${1:name}(${2:t: type}) -> type {\n  ${0:t}\n}",
       insertTextFormat: 2,
     },
   ];
@@ -562,16 +579,6 @@ export function inlayHintsAt(result: AnalysisResult, range: Range): InlayHint[] 
         visitExpr(stmt.value);
       } else if (stmt.kind === "destructure_let") {
         visitExpr(stmt.value);
-      } else if (stmt.kind === "static_for") {
-        for (const nested of stmt.body) {
-          if (nested.kind === "let") {
-            const hint = inlayHintForLet(result, nested);
-            if (hint && positionInRange(hint.position, range)) hints.push(hint);
-            visitExpr(nested.value);
-          } else if (nested.kind === "destructure_let") {
-            visitExpr(nested.value);
-          }
-        }
       }
     }
     visitExpr(expr.expr);
@@ -764,15 +771,6 @@ function exprsOverlappingRange(result: AnalysisResult, range: Range): Expr[] {
   const found: Expr[] = [];
   const visitStatement = (stmt: Statement) => {
     if (stmt.kind === "let" || stmt.kind === "destructure_let") visitExpr(stmt.value);
-    else if (stmt.kind === "static_for") {
-      if (stmt.source.kind === "range") {
-        visitExpr(stmt.source.start);
-        visitExpr(stmt.source.end);
-      } else {
-        visitExpr(stmt.source.shape);
-      }
-      for (const child of stmt.body) visitStatement(child);
-    }
   };
   const visitExpr = (expr: Expr | undefined) => {
     const span = expr ? fullExprSpan(result, expr) : undefined;
@@ -837,13 +835,19 @@ function callPipelineParts(
 function nestedMatchFlattenEdit(result: AnalysisResult, expr: Expr): CodeAction | undefined {
   if (expr.kind !== "match" || !expr.span || expr.arms.length === 0) return undefined;
   const innerMatches = expr.arms.map((arm) => arm.value);
-  if (!innerMatches.every((item): item is Extract<Expr, { kind: "match" }> => item.kind === "match")) {
+  if (
+    !innerMatches.every((item): item is Extract<Expr, { kind: "match" }> => item.kind === "match")
+  ) {
     return undefined;
   }
   const firstInner = innerMatches[0];
   if (!firstInner.value.span || !expr.value.span) return undefined;
   const innerValue = sourceForSpan(result, firstInner.value.span);
-  if (!innerMatches.every((item) => item.value.span && sourceForSpan(result, item.value.span) === innerValue)) {
+  if (
+    !innerMatches.every((item) =>
+      item.value.span && sourceForSpan(result, item.value.span) === innerValue
+    )
+  ) {
     return undefined;
   }
   if (expr.arms.some((arm) => patternBindingNamesForHover(arm.pattern).length > 0)) {
@@ -879,7 +883,10 @@ function nestedMatchFlattenEdit(result: AnalysisResult, expr: Expr): CodeAction 
   };
 }
 
-function sourceForSpan(result: AnalysisResult, span: NonNullable<CompileDiagnostic["span"]>): string {
+function sourceForSpan(
+  result: AnalysisResult,
+  span: NonNullable<CompileDiagnostic["span"]>,
+): string {
   return result.document.text.slice(span.start, span.end);
 }
 
@@ -947,6 +954,10 @@ function rangeFromSpan(
   return span ? mapper.range(span.start, span.end) : undefined;
 }
 
+function sourceIdForSpan(span: CompileDiagnostic["span"]): string | undefined {
+  return span?.sourceId;
+}
+
 function rangeFromFound(
   found: { start: number; end: number } | undefined,
   mapper: PositionMapper,
@@ -959,6 +970,7 @@ function indexProgram(
   program: Program | undefined,
   source: string,
   mapper: PositionMapper,
+  mapperForUri: (uri: string) => PositionMapper = () => mapper,
 ): IndexedSymbol[] {
   if (!program) return [];
   const symbols = [
@@ -967,7 +979,7 @@ function indexProgram(
   ];
   const topLevelTypes = new Map<string, string>();
   for (const decl of program.declarations) {
-    symbols.push(...symbolForDecl(uri, decl, program, source, mapper, topLevelTypes));
+    symbols.push(...symbolForDecl(uri, decl, program, source, mapper, topLevelTypes, mapperForUri));
     recordDeclarationType(decl, program, topLevelTypes);
   }
   return symbols;
@@ -1028,13 +1040,20 @@ function symbolForDecl(
   source: string,
   mapper: PositionMapper,
   topLevelTypes: Map<string, string>,
+  mapperForUri: (uri: string) => PositionMapper,
 ): IndexedSymbol[] {
-  const range = rangeFromSpan(decl.nameSpan ?? decl.span, mapper) ??
-    rangeFromFound(findNameRange(source, decl.name, decl.kind), mapper) ?? mapper.range(0, 0);
+  const symbolUri = sourceIdForSpan(decl.nameSpan ?? decl.span) ?? uri;
+  const symbolMapper = mapperForUri(symbolUri);
+  const symbolSource = symbolUri === uri ? source : undefined;
+  const range = rangeFromSpan(decl.nameSpan ?? decl.span, symbolMapper) ??
+    (symbolSource
+      ? rangeFromFound(findNameRange(symbolSource, decl.name, decl.kind), symbolMapper)
+      : undefined) ??
+    symbolMapper.range(0, 0);
   const base: IndexedSymbol = {
     name: decl.name,
     kind: decl.kind,
-    uri,
+    uri: symbolUri,
     range,
     selectionRange: range,
     documentation: "doc" in decl ? decl.doc : undefined,
@@ -1045,12 +1064,15 @@ function symbolForDecl(
     const localTypes = new Map(topLevelTypes);
     for (const param of decl.params) localTypes.set(param.name, param.type);
     for (const param of decl.params) {
-      const paramRange = rangeFromSpan(param.nameSpan ?? param.span, mapper) ??
-        rangeFromFound(findNameRange(source, param.name), mapper) ?? range;
+      const paramRange = rangeFromSpan(param.nameSpan ?? param.span, symbolMapper) ??
+        (symbolSource
+          ? rangeFromFound(findNameRange(symbolSource, param.name), symbolMapper)
+          : undefined) ??
+        range;
       extra.push({
         name: param.name,
         kind: "param",
-        uri,
+        uri: symbolUri,
         range: paramRange,
         selectionRange: paramRange,
         detail: param.type,
@@ -1059,20 +1081,53 @@ function symbolForDecl(
       });
     }
     for (const stmt of decl.body.statements) {
-      extra.push(...symbolsForStatement(uri, stmt, source, mapper, decl.name, program, localTypes));
-      extra.push(...symbolsForExpr(uri, statementValue(stmt), source, mapper, decl.name, program, localTypes));
+      extra.push(
+        ...symbolsForStatement(
+          symbolUri,
+          stmt,
+          symbolSource ?? source,
+          symbolMapper,
+          decl.name,
+          program,
+          localTypes,
+        ),
+      );
+      extra.push(
+        ...symbolsForExpr(
+          symbolUri,
+          statementValue(stmt),
+          symbolSource ?? source,
+          symbolMapper,
+          decl.name,
+          program,
+          localTypes,
+        ),
+      );
       recordStatementTypes(stmt, program, localTypes);
     }
-    extra.push(...symbolsForExpr(uri, decl.body.expr, source, mapper, decl.name, program, localTypes));
+    extra.push(
+      ...symbolsForExpr(
+        symbolUri,
+        decl.body.expr,
+        symbolSource ?? source,
+        symbolMapper,
+        decl.name,
+        program,
+        localTypes,
+      ),
+    );
   }
   if (decl.kind === "type") {
     for (const param of decl.params) {
-      const paramRange = rangeFromSpan(param.nameSpan ?? param.span, mapper) ??
-        rangeFromFound(findNameRange(source, param.name), mapper) ?? range;
+      const paramRange = rangeFromSpan(param.nameSpan ?? param.span, symbolMapper) ??
+        (symbolSource
+          ? rangeFromFound(findNameRange(symbolSource, param.name), symbolMapper)
+          : undefined) ??
+        range;
       extra.push({
         name: param.name,
         kind: "param",
-        uri,
+        uri: symbolUri,
         range: paramRange,
         selectionRange: paramRange,
         detail: param.kind,
@@ -1081,12 +1136,15 @@ function symbolForDecl(
       });
     }
     for (const stmt of decl.body.statements) {
-      const memberRange = rangeFromSpan(stmt.nameSpan ?? stmt.span, mapper) ??
-        rangeFromFound(findNameRange(source, stmt.name), mapper) ?? range;
+      const memberRange = rangeFromSpan(stmt.nameSpan ?? stmt.span, symbolMapper) ??
+        (symbolSource
+          ? rangeFromFound(findNameRange(symbolSource, stmt.name), symbolMapper)
+          : undefined) ??
+        range;
       extra.push({
         name: stmt.name,
         kind: "member",
-        uri,
+        uri: symbolUri,
         range: memberRange,
         selectionRange: memberRange,
         documentation: stmt.doc,
@@ -1112,18 +1170,51 @@ function symbolsForExpr(
       const blockTypes = new Map(localTypes);
       const symbols: IndexedSymbol[] = [];
       for (const stmt of expr.statements) {
-        symbols.push(...symbolsForStatement(uri, stmt, source, mapper, container, program, blockTypes));
-        symbols.push(...symbolsForExpr(uri, statementValue(stmt), source, mapper, container, program, blockTypes));
+        symbols.push(
+          ...symbolsForStatement(uri, stmt, source, mapper, container, program, blockTypes),
+        );
+        symbols.push(
+          ...symbolsForExpr(
+            uri,
+            statementValue(stmt),
+            source,
+            mapper,
+            container,
+            program,
+            blockTypes,
+          ),
+        );
         if (program) recordStatementTypes(stmt, program, blockTypes);
       }
-      symbols.push(...symbolsForExpr(uri, expr.expr, source, mapper, container, program, blockTypes));
+      symbols.push(
+        ...symbolsForExpr(uri, expr.expr, source, mapper, container, program, blockTypes),
+      );
       return symbols;
     }
-    case "pipe_bind":
+    case "pipe_bind": {
+      const valueType = program && localTypes
+        ? expressionTypeFromProgram(expr.value, program, localTypes)
+        : undefined;
+      const binderSpan = pipeBindNameSpanFromSource(source, expr);
+      const binderRange = rangeFromSpan(binderSpan, mapper) ??
+        rangeFromFound(findNameRange(source, expr.name), mapper) ?? mapper.range(0, 0);
+      const scopedTypes = new Map(localTypes);
+      if (valueType) scopedTypes.set(expr.name, valueType);
       return [
         ...symbolsForExpr(uri, expr.value, source, mapper, container, program, localTypes),
-        ...symbolsForExpr(uri, expr.body, source, mapper, container, program, localTypes),
+        {
+          name: expr.name,
+          kind: "local",
+          uri,
+          range: binderRange,
+          selectionRange: binderRange,
+          detail: valueType,
+          documentation: expr.doc,
+          container,
+        },
+        ...symbolsForExpr(uri, expr.body, source, mapper, container, program, scopedTypes),
       ];
+    }
     case "match":
       return [
         ...symbolsForExpr(uri, expr.value, source, mapper, container, program, localTypes),
@@ -1192,14 +1283,19 @@ function inlayHintForLet(result: AnalysisResult, stmt: Statement): InlayHint | u
   };
 }
 
-function hasExplicitLetAnnotation(result: AnalysisResult, stmt: Extract<Statement, { kind: "let" }>) {
+function hasExplicitLetAnnotation(
+  result: AnalysisResult,
+  stmt: Extract<Statement, { kind: "let" }>,
+) {
   const found = findNameRange(result.document.text, stmt.name);
   const start = stmt.nameSpan?.end ?? found?.end ?? stmt.span?.start;
   if (start === undefined) return false;
   const nextEquals = result.document.text.indexOf("=", start);
   const nextSemicolon = result.document.text.indexOf(";", start);
   const end = stmt.value.span?.start ??
-    (nextEquals >= 0 && (nextSemicolon < 0 || nextEquals < nextSemicolon) ? nextEquals : stmt.span?.end);
+    (nextEquals >= 0 && (nextSemicolon < 0 || nextEquals < nextSemicolon)
+      ? nextEquals
+      : stmt.span?.end);
   if (end === undefined || end < start) return false;
   const between = result.document.text.slice(start, end);
   const equals = between.indexOf("=");
@@ -1217,9 +1313,7 @@ function symbolsForStatement(
 ): IndexedSymbol[] {
   const names = stmt.kind === "let" || stmt.kind === "proof_const"
     ? [stmt.name]
-    : stmt.kind === "fork_let" || stmt.kind === "destructure_let"
-    ? stmt.names
-    : [stmt.iterator, stmt.valueIterator].filter((item): item is string => !!item);
+    : stmt.names;
   return names.map((name) => {
     const range = rangeFromSpan(spanForStatementName(stmt, name), mapper) ??
       rangeFromFound(findNameRange(source, name), mapper) ?? mapper.range(0, 0);
@@ -1294,7 +1388,9 @@ function expressionTypeFromProgram(
     const local = localTypes.get(expr.name);
     if (local) return local;
     const decl = program?.declarations.find((item) => item.name === expr.name);
-    if (decl?.kind === "fn" || decl?.kind === "type") return detailForDecl(decl, program, localTypes);
+    if (decl?.kind === "fn" || decl?.kind === "type") {
+      return detailForDecl(decl, program, localTypes);
+    }
     return undefined;
   }
   if (expr.kind === "call" && expr.callee.kind === "var") {
@@ -1315,11 +1411,16 @@ function expressionTypeFromProgram(
   }
   if (expr.kind === "range") return "range_i32";
   if (expr.kind === "shape") {
-    return shapeExpressionType(expr, (value) => expressionTypeFromProgram(value, program, localTypes));
+    return shapeExpressionType(
+      expr,
+      (value) => expressionTypeFromProgram(value, program, localTypes),
+    );
   }
   if (expr.kind === "pipe_bind") return expressionTypeFromProgram(expr.body, program, localTypes);
   if (expr.kind === "match") {
-    const armTypes = expr.arms.map((arm) => expressionTypeFromProgram(arm.value, program, localTypes));
+    const armTypes = expr.arms.map((arm) =>
+      expressionTypeFromProgram(arm.value, program, localTypes)
+    );
     const first = armTypes[0];
     return first && armTypes.every((type) => type === first) ? first : undefined;
   }
@@ -1342,7 +1443,7 @@ function spanForStatementName(
   if (stmt.kind === "fork_let" || stmt.kind === "destructure_let") {
     return stmt.nameSpans?.[name] ?? stmt.span;
   }
-  return stmt.nameSpan ?? stmt.span;
+  return undefined;
 }
 
 function indexSource(uri: string, source: string, mapper: PositionMapper): IndexedSymbol[] {
@@ -1360,8 +1461,7 @@ function indexSource(uri: string, source: string, mapper: PositionMapper): Index
       detail: match[2],
     });
   }
-  const destructuredImportRegex =
-    /\bconst\s*\{\s*([^}]*)\}\s*=\s*@import\s*\(\s*"([^"]+)"/g;
+  const destructuredImportRegex = /\bconst\s*\{\s*([^}]*)\}\s*=\s*@import\s*\(\s*"([^"]+)"/g;
   for (const match of source.matchAll(destructuredImportRegex)) {
     const listStart = match.index + match[0].indexOf(match[1]);
     const bindingRegex = /\b[a-z_][\w]*\b/g;
@@ -1617,23 +1717,50 @@ function directSymbolAt(result: AnalysisResult, position: Position): IndexedSymb
     return offset >= start && offset <= end;
   });
   const namedCandidates = candidates.filter((item) =>
-      item.name === word || item.name === `@${word}` || lastSegment(item.name) === word
-    );
+    item.name === word || item.name === `@${word}` || lastSegment(item.name) === word
+  );
   return namedCandidates.sort((a, b) => {
-    const aName = word && (a.name === word || a.name === `@${word}` || lastSegment(a.name) === word) ? 0 : 1;
-    const bName = word && (b.name === word || b.name === `@${word}` || lastSegment(b.name) === word) ? 0 : 1;
+    const aName = word && (a.name === word || a.name === `@${word}` || lastSegment(a.name) === word)
+      ? 0
+      : 1;
+    const bName = word && (b.name === word || b.name === `@${word}` || lastSegment(b.name) === word)
+      ? 0
+      : 1;
     if (aName !== bName) return aName - bName;
+    const aLocal = a.kind === "local" ? 0 : 1;
+    const bLocal = b.kind === "local" ? 0 : 1;
+    if (aLocal !== bLocal) return aLocal - bLocal;
     return rangeLength(result, a.selectionRange) - rangeLength(result, b.selectionRange);
   })[0];
 }
 
 function resolvedSymbolAt(result: AnalysisResult, position: Position): IndexedSymbol | undefined {
-  const direct = symbolAt(result, position);
-  if (direct) return direct;
   const offset = result.mapper.offsetAt(position);
   const word = wordAt(result.document.text, offset);
   if (!word) return undefined;
-  return resolveName(result, word);
+  const pipeBinder = nearestPipeBinderSymbol(result, word, offset);
+  if (
+    pipeBinder &&
+    result.mapper.offsetAt(pipeBinder.selectionRange.start) < offset
+  ) {
+    return pipeBinder;
+  }
+  const direct = symbolAt(result, position);
+  if (direct) return direct;
+  return resolveNameAtOffset(result, word, offset) ?? resolveName(result, word);
+}
+
+function qualifiedDefinitionSymbolAt(
+  result: AnalysisResult,
+  position: Position,
+): IndexedSymbol | undefined {
+  const offset = result.mapper.offsetAt(position);
+  const segment = qualifiedSegmentAt(result.document.text, offset);
+  if (!segment) return undefined;
+  if (segment.segmentIndex === 0) {
+    return resolveValueNameAt(result, segment.segmentText, offset);
+  }
+  return resolveName(result, segment.segmentText);
 }
 
 function isRenameableSymbol(symbol: IndexedSymbol): boolean {
@@ -1650,14 +1777,14 @@ function renameEditsForSymbol(
   if ((symbol.kind === "local" || symbol.kind === "param") && result.document.uri !== symbol.uri) {
     return edits;
   }
-  const declaration = result.symbols.find((candidate) =>
-    sameSymbolIdentity(candidate, symbol)
-  );
+  const declaration = result.symbols.find((candidate) => sameSymbolIdentity(candidate, symbol));
   if (declaration) {
     edits.push({ range: declaration.selectionRange, newText: newName });
   }
   for (const reference of result.references) {
-    const resolved = resolveName(result, reference.targetName ?? reference.name);
+    const offset = result.mapper.offsetAt(reference.range.start);
+    const resolved = resolveNameAtOffset(result, reference.targetName ?? reference.name, offset) ??
+      resolveName(result, reference.targetName ?? reference.name);
     if (resolved && equivalentSymbol(result, resolved, symbol)) {
       edits.push({ range: reference.range, newText: newName });
     }
@@ -1705,6 +1832,113 @@ function resolveName(result: AnalysisResult, name: string): IndexedSymbol | unde
     result.symbols.find((item) => item.name === name.split(".")[0]) ??
     result.symbols.find((item) => item.name === lastSegment(name)) ??
     result.symbols.find((item) => item.name.endsWith(`.${lastSegment(name)}`));
+}
+
+function resolveNameAtOffset(
+  result: AnalysisResult,
+  name: string,
+  offset: number,
+): IndexedSymbol | undefined {
+  const pipeBinder = nearestPipeBinderSymbol(result, name, offset);
+  if (pipeBinder) return pipeBinder;
+  const localCandidates = result.symbols.filter((item) =>
+    (item.kind === "local" || item.kind === "param") &&
+    item.uri === result.document.uri &&
+    (item.name === name || lastSegment(item.name) === name) &&
+    result.mapper.offsetAt(item.selectionRange.start) <= offset
+  );
+  return localCandidates.sort((a, b) => {
+    const aLocal = a.kind === "local" ? 0 : 1;
+    const bLocal = b.kind === "local" ? 0 : 1;
+    if (aLocal !== bLocal) return aLocal - bLocal;
+    return result.mapper.offsetAt(b.selectionRange.start) -
+      result.mapper.offsetAt(a.selectionRange.start);
+  })[0];
+}
+
+function nearestPipeBinderSymbol(
+  result: AnalysisResult,
+  name: string,
+  offset: number,
+): IndexedSymbol | undefined {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`\\\\\\s*(${escaped})\\s*->`, "g");
+  let match: RegExpExecArray | null;
+  let best: { start: number; end: number } | undefined;
+  while ((match = regex.exec(result.document.text))) {
+    const nameStart = match.index + match[0].indexOf(match[1]);
+    const nameEnd = nameStart + name.length;
+    if (nameStart > offset) break;
+    best = { start: nameStart, end: nameEnd };
+  }
+  if (!best) return undefined;
+  const range = result.mapper.range(best.start, best.end);
+  const indexed = result.symbols.find((symbol) =>
+    symbol.kind === "local" && symbol.name === name &&
+    result.mapper.offsetAt(symbol.selectionRange.start) === best.start
+  );
+  const detail = indexed?.detail ?? nearestPipeBinderType(result, name, best.start);
+  return {
+    name,
+    kind: "local",
+    uri: result.document.uri,
+    range,
+    selectionRange: range,
+    detail,
+    documentation: indexed?.documentation,
+    container: indexed?.container ?? enclosingFunctionName(result, offset),
+  };
+}
+
+function nearestPipeBinderType(
+  result: AnalysisResult,
+  name: string,
+  binderStart: number,
+): string | undefined {
+  const previousStage = previousPipelineStageType(result, binderStart);
+  if (previousStage) return previousStage;
+  const container = enclosingFunctionName(result, binderStart);
+  const candidates = result.symbols.filter((symbol) =>
+    symbol.kind === "local" &&
+    symbol.name === name &&
+    symbol.container === container &&
+    symbol.detail
+  );
+  return candidates.sort((a, b) =>
+    Math.abs(result.mapper.offsetAt(a.selectionRange.start) - binderStart) -
+    Math.abs(result.mapper.offsetAt(b.selectionRange.start) - binderStart)
+  )[0]?.detail;
+}
+
+function previousPipelineStageType(
+  result: AnalysisResult,
+  binderStart: number,
+): string | undefined {
+  const source = result.document.text;
+  const before = source.slice(0, binderStart);
+  const previousPipe = [...before.matchAll(/\\\s*[A-Za-z_]\w*\s*->/g)].at(-1);
+  const stageStart = previousPipe
+    ? (previousPipe.index ?? 0) + previousPipe[0].length
+    : pipelineBaseStart(source, binderStart);
+  const stageText = source.slice(stageStart, binderStart).trim();
+  return callTextReturnType(stageText, result);
+}
+
+function pipelineBaseStart(source: string, binderStart: number): number {
+  const before = source.slice(0, binderStart);
+  const lineStart = before.lastIndexOf("\n");
+  const previousLineStart = before.lastIndexOf("\n", Math.max(0, lineStart - 1));
+  return previousLineStart >= 0 ? previousLineStart + 1 : 0;
+}
+
+function callTextReturnType(text: string, result: AnalysisResult): string | undefined {
+  const match = text.match(/([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/);
+  if (!match) return undefined;
+  const name = match[1];
+  const fn = functionDecl(result, name);
+  if (fn?.returnType) return fn.returnType;
+  const symbol = resolveName(result, name);
+  return symbol?.detail ? functionReturnType(symbol.detail) : undefined;
 }
 
 function qualifiedValueHoverAt(
@@ -1963,6 +2197,7 @@ function checkedAstHoverAt(
       case "type_operator":
       case "type_bool":
       case "type_number":
+      case "type_char":
       case "type_string":
       case "type_literal":
         break;
@@ -1975,73 +2210,114 @@ function checkedAstHoverAt(
     visitTypeExpr(slot.type);
   };
   const visitTypeMatchArm = (arm: TypeMatchArm) => {
-    add(arm.span, `${renderTypePatternHover(arm.pattern)} => ${renderTypeExprHover(arm.value)}`, "type match arm");
+    add(
+      arm.span,
+      `${renderTypePatternHover(arm.pattern)} => ${renderTypeExprHover(arm.value)}`,
+      "type match arm",
+    );
     visitTypePattern(arm.pattern);
     visitTypeExpr(arm.value);
   };
-  const visitExpr = (expr: Expr | undefined) => {
+  const infoForExpr = (
+    expr: Expr,
+    localTypes: Map<string, string>,
+  ): { name: string; kind: IndexedSymbol["kind"]; detail?: string; documentation?: string } => {
+    if (expr.kind === "var") {
+      const local = localTypes.get(expr.name);
+      if (local) return { name: expr.name, kind: "local", detail: local };
+    }
+    const info = expressionTypeInfo(expr, result);
+    if (info) return info;
+    const type = expressionTypeFromProgram(expr, result.program, localTypes);
+    return type
+      ? { name: renderExprName(expr), kind: "local", detail: type }
+      : expressionSyntaxInfo(expr);
+  };
+  const visitExpr = (expr: Expr | undefined, localTypes = new Map<string, string>()) => {
     if (!expr) return;
-    const info = expressionTypeInfo(expr, result) ?? expressionSyntaxInfo(expr);
+    const info = infoForExpr(expr, localTypes);
     add(expr.span, info.name, info.detail, info.kind, info.documentation);
     switch (expr.kind) {
       case "block":
-        for (const stmt of expr.statements) visitStatement(stmt);
-        visitExpr(expr.expr);
+        {
+          const blockTypes = new Map(localTypes);
+          for (const stmt of expr.statements) {
+            visitStatement(stmt, blockTypes);
+            recordStatementTypesForHover(stmt, blockTypes);
+          }
+          visitExpr(expr.expr, blockTypes);
+        }
         break;
       case "pipe_bind":
-        add(pipeBindNameSpan(result, expr), expr.name, expressionType(expr.value, result), "local", expr.doc);
-        visitExpr(expr.value);
-        visitExpr(expr.body);
+        {
+          const valueType = expressionTypeFromProgram(expr.value, result.program, localTypes);
+          const scopedTypes = new Map(localTypes);
+          if (valueType) scopedTypes.set(expr.name, valueType);
+          add(pipeBindNameSpan(result, expr), expr.name, valueType, "local", expr.doc);
+          visitExpr(expr.value, localTypes);
+          visitExpr(expr.body, scopedTypes);
+        }
         break;
       case "match":
-        visitExpr(expr.value);
+        visitExpr(expr.value, localTypes);
         for (const arm of expr.arms) {
           add(arm.span, `${renderParamPatternHover(arm.pattern)} => ...`, "match arm");
           visitPattern(arm.pattern);
-          visitExpr(arm.value);
+          visitExpr(arm.value, localTypes);
         }
         break;
       case "call":
-        visitExpr(expr.callee);
-        for (const arg of expr.args) visitExpr(arg);
+        visitExpr(expr.callee, localTypes);
+        for (const arg of expr.args) visitExpr(arg, localTypes);
         break;
       case "index":
-        visitExpr(expr.target);
-        visitExpr(expr.index);
+        visitExpr(expr.target, localTypes);
+        visitExpr(expr.index, localTypes);
         break;
       case "binary":
-        visitExpr(expr.left);
-        visitExpr(expr.right);
+        visitExpr(expr.left, localTypes);
+        visitExpr(expr.right, localTypes);
         break;
       case "shape":
       case "product_constructor":
         for (const slot of expr.slots) {
-          const slotName = slot.label ?? (slot.position !== undefined ? `[${slot.position}]` : "slot");
-          add(slot.nameSpan ?? slot.span, slotName, expressionType(slot.value, result), "member", slot.doc);
+          const slotName = slot.label ??
+            (slot.position !== undefined ? `[${slot.position}]` : "slot");
+          add(
+            slot.nameSpan ?? slot.span,
+            slotName,
+            expressionTypeFromProgram(slot.value, result.program, localTypes),
+            "member",
+            slot.doc,
+          );
           visitCount(slot.repeat);
-          visitExpr(slot.value);
+          visitExpr(slot.value, localTypes);
         }
         break;
       case "static_for_slots":
         add(staticForExprBinderSpan(result, expr, expr.iterator), expr.iterator, "static iterator");
         if (expr.valueIterator) {
-          add(staticForExprBinderSpan(result, expr, expr.valueIterator), expr.valueIterator, "static value iterator");
+          add(
+            staticForExprBinderSpan(result, expr, expr.valueIterator),
+            expr.valueIterator,
+            "static value iterator",
+          );
         }
         if (expr.source.kind === "range") {
-          visitExpr(expr.source.start);
-          visitExpr(expr.source.end);
+          visitExpr(expr.source.start, localTypes);
+          visitExpr(expr.source.end, localTypes);
         } else {
-          visitExpr(expr.source.shape);
+          visitExpr(expr.source.shape, localTypes);
         }
-        visitExpr(expr.value);
+        visitExpr(expr.value, localTypes);
         break;
       case "field":
-        visitExpr(expr.value);
-        visitExpr(expr.key);
+        visitExpr(expr.value, localTypes);
+        visitExpr(expr.key, localTypes);
         break;
       case "range":
-        visitExpr(expr.start);
-        visitExpr(expr.end);
+        visitExpr(expr.start, localTypes);
+        visitExpr(expr.end, localTypes);
         break;
       case "literal":
       case "placeholder":
@@ -2049,34 +2325,62 @@ function checkedAstHoverAt(
         break;
     }
   };
-  const visitStatement = (stmt: Statement) => {
+  const recordStatementTypesForHover = (
+    stmt: Statement,
+    localTypes: Map<string, string>,
+  ) => {
     if (stmt.kind === "let") {
-      add(stmt.nameSpan ?? stmt.span, stmt.name, stmt.type ?? expressionType(stmt.value, result), "local", stmt.doc);
-      visitExpr(stmt.value);
+      const type = stmt.type ?? expressionTypeFromProgram(stmt.value, result.program, localTypes);
+      if (type) localTypes.set(stmt.name, type);
+    } else if (stmt.kind === "destructure_let") {
+      stmt.names.forEach((name, index) => {
+        const type = stmt.slotTypes?.[index];
+        if (type) localTypes.set(name, type);
+      });
+    } else if (stmt.kind === "fork_let" && stmt.sourceType) {
+      for (const name of stmt.names) localTypes.set(name, stmt.sourceType);
+    }
+  };
+  const visitStatement = (stmt: Statement, localTypes = new Map<string, string>()) => {
+    if (stmt.kind === "let") {
+      add(
+        stmt.nameSpan ?? stmt.span,
+        stmt.name,
+        stmt.type ?? expressionTypeFromProgram(stmt.value, result.program, localTypes),
+        "local",
+        stmt.doc,
+      );
+      visitExpr(stmt.value, localTypes);
     } else if (stmt.kind === "destructure_let") {
       stmt.names.forEach((name, index) =>
-        add(stmt.nameSpans?.[name] ?? stmt.span, name, stmt.slotTypes?.[index], "local", stmt.nameDocs?.[name])
+        add(
+          stmt.nameSpans?.[name] ?? stmt.span,
+          name,
+          stmt.slotTypes?.[index],
+          "local",
+          stmt.nameDocs?.[name],
+        )
       );
-      visitExpr(stmt.value);
+      visitExpr(stmt.value, localTypes);
     } else if (stmt.kind === "fork_let") {
       for (const name of stmt.names) {
-        add(stmt.nameSpans?.[name] ?? stmt.span, name, stmt.sourceType, "local", stmt.nameDocs?.[name]);
+        add(
+          stmt.nameSpans?.[name] ?? stmt.span,
+          name,
+          stmt.sourceType,
+          "local",
+          stmt.nameDocs?.[name],
+        );
       }
     } else if (stmt.kind === "proof_const") {
-      add(stmt.nameSpan ?? stmt.span, stmt.name, renderTypeExprHover(stmt.value), "const", stmt.doc);
+      add(
+        stmt.nameSpan ?? stmt.span,
+        stmt.name,
+        renderTypeExprHover(stmt.value),
+        "const",
+        stmt.doc,
+      );
       visitTypeExpr(stmt.value);
-    } else {
-      add(stmt.nameSpan ?? stmt.span, stmt.iterator, "static iterator", "local", stmt.iteratorDoc);
-      if (stmt.valueIterator) {
-        add(stmt.nameSpan ?? stmt.span, stmt.valueIterator, "static value iterator", "local", stmt.valueIteratorDoc);
-      }
-      if (stmt.source.kind === "range") {
-        visitExpr(stmt.source.start);
-        visitExpr(stmt.source.end);
-      } else {
-        visitExpr(stmt.source.shape);
-      }
-      for (const nested of stmt.body) visitStatement(nested);
     }
   };
 
@@ -2092,25 +2396,51 @@ function checkedAstHoverAt(
   }
   for (const decl of result.program.declarations) {
     if (decl.kind === "fn") {
-      add(decl.nameSpan ?? decl.span, decl.name, detailForDecl(decl, result.program), "fn", decl.doc);
+      add(
+        decl.nameSpan ?? decl.span,
+        decl.name,
+        detailForDecl(decl, result.program),
+        "fn",
+        decl.doc,
+      );
       for (const param of decl.params) {
         add(param.nameSpan ?? param.span, param.name, param.type, "param", param.doc);
         visitPattern(param.pattern, param.type);
       }
-      visitExpr(decl.body);
+      const localTypes = new Map<string, string>();
+      for (const param of decl.params) localTypes.set(param.name, param.type);
+      visitExpr(decl.body, localTypes);
     } else if (decl.kind === "type") {
-      add(decl.nameSpan ?? decl.span, decl.name, detailForDecl(decl, result.program), "type", decl.doc);
+      add(
+        decl.nameSpan ?? decl.span,
+        decl.name,
+        detailForDecl(decl, result.program),
+        "type",
+        decl.doc,
+      );
       for (const param of decl.params) {
         add(param.nameSpan ?? param.span, param.name, param.kind, "param", param.doc);
       }
       for (const pattern of decl.paramPatterns ?? []) visitPattern(pattern);
       for (const stmt of decl.body.statements) {
-        add(stmt.nameSpan ?? stmt.span, stmt.name, renderTypeExprHover(stmt.value), "member", stmt.doc);
+        add(
+          stmt.nameSpan ?? stmt.span,
+          stmt.name,
+          renderTypeExprHover(stmt.value),
+          "member",
+          stmt.doc,
+        );
         visitTypeExpr(stmt.value);
       }
       visitTypeExpr(decl.body.expr);
     } else {
-      add(decl.nameSpan ?? decl.span, decl.name, detailForDecl(decl, result.program), decl.kind, decl.doc);
+      add(
+        decl.nameSpan ?? decl.span,
+        decl.name,
+        detailForDecl(decl, result.program),
+        decl.kind,
+        decl.doc,
+      );
       visitExpr(decl.value);
     }
   }
@@ -2239,13 +2569,20 @@ function expressionSyntaxInfo(
     case "static_for_slots":
       return { name: "static-for slots", kind: "local" };
     case "shape":
-      return { name: expr.syntax === "collection" ? "collection value" : "record value", kind: "local" };
+      return {
+        name: expr.syntax === "collection" ? "collection value" : "record value",
+        kind: "local",
+      };
     case "product_constructor":
       return { name: expr.constructor, kind: "local", detail: "product constructor" };
     case "range":
       return { name: "range_i32", kind: "local" };
     case "literal":
-      return { name: expr.value, kind: "local", detail: expr.inferredType ?? literalTypeName(expr) };
+      return {
+        name: expr.value,
+        kind: "local",
+        detail: expr.inferredType ?? literalTypeName(expr),
+      };
     case "var":
       return { name: expr.name, kind: "local" };
   }
@@ -2325,7 +2662,9 @@ function symbolValueType(symbol: IndexedSymbol | undefined): string | undefined 
   if (symbol.kind === "fn") return functionReturnType(symbol.detail);
   if (symbol.kind === "const" || symbol.kind === "let") {
     const prefix = `${symbol.kind} ${symbol.name}:`;
-    return symbol.detail.startsWith(prefix) ? symbol.detail.slice(prefix.length).trim() : symbol.detail;
+    return symbol.detail.startsWith(prefix)
+      ? symbol.detail.slice(prefix.length).trim()
+      : symbol.detail;
   }
   return symbol.detail;
 }
@@ -2460,8 +2799,7 @@ function qualifiedSegmentAt(source: string, offset: number): QualifiedSegmentMat
   if (source[offset] === "." || source[offset] === "[" || source[offset] === "]") {
     return undefined;
   }
-  const chainRegex =
-    /[A-Za-z_]\w*(?:\[[^\]\s.]*\])?(?:\.[A-Za-z_]\w*(?:\[[^\]\s.]*\])?)*/g;
+  const chainRegex = /[A-Za-z_]\w*(?:\[[^\]\s.]*\])?(?:\.[A-Za-z_]\w*(?:\[[^\]\s.]*\])?)*/g;
   for (const match of source.matchAll(chainRegex)) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
@@ -2476,7 +2814,10 @@ function qualifiedSegmentAt(source: string, offset: number): QualifiedSegmentMat
       fullText: match[0],
       segmentText: segment.text,
       segmentIndex,
-      segmentRange: new PositionMapper(source).range(segment.identifierStart, segment.identifierEnd),
+      segmentRange: new PositionMapper(source).range(
+        segment.identifierStart,
+        segment.identifierEnd,
+      ),
       segments,
     };
   }
@@ -2551,7 +2892,9 @@ function renderTypeExprHover(expr: TypeExpr): string {
     case "type_static_ref":
       return `@${expr.name}`;
     case "type_call":
-      return `${renderTypeExprHover(expr.callee)}(${expr.args.map(renderTypeExprHover).join(", ")})`;
+      return `${renderTypeExprHover(expr.callee)}(${
+        expr.args.map(renderTypeExprHover).join(", ")
+      })`;
     case "type_fn":
       return expr.source.replace(/\s+/g, " ").trim();
     case "type_shape":
@@ -2576,6 +2919,8 @@ function renderTypeExprHover(expr: TypeExpr): string {
       return expr.value ? "true" : "false";
     case "type_number":
       return expr.value;
+    case "type_char":
+      return `'${expr.value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
     case "type_string":
       return JSON.stringify(expr.value);
     case "type_literal":
@@ -2603,6 +2948,7 @@ function typeExprKindHover(expr: TypeExpr): string {
       return "type expression";
     case "type_bool":
     case "type_number":
+    case "type_char":
     case "type_string":
     case "type_literal":
       return "type literal";
@@ -2619,6 +2965,8 @@ function renderTypePatternHover(pattern: TypePattern): string {
       return `#${pattern.value}`;
     case "string":
       return JSON.stringify(pattern.value);
+    case "char":
+      return `'${pattern.value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
     case "number":
       return pattern.value;
     case "type":
@@ -2648,11 +2996,18 @@ function pipeBindNameSpan(
   result: AnalysisResult,
   expr: Extract<Expr, { kind: "pipe_bind" }>,
 ): CompileDiagnostic["span"] {
+  return pipeBindNameSpanFromSource(result.document.text, expr);
+}
+
+function pipeBindNameSpanFromSource(
+  sourceText: string,
+  expr: Extract<Expr, { kind: "pipe_bind" }>,
+): CompileDiagnostic["span"] {
   if (!expr.span) return undefined;
-  const source = result.document.text.slice(expr.span.start, expr.span.end);
+  const source = sourceText.slice(expr.span.start, expr.span.end);
   const escaped = expr.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(`\\\\\\s*(${escaped})\\s*->`).exec(source);
-  if (!match?.index) return expr.span;
+  if (match?.index === undefined) return expr.span;
   const start = expr.span.start + match.index + match[0].indexOf(match[1]);
   return { ...expr.span, start, end: start + expr.name.length };
 }
@@ -2666,7 +3021,11 @@ function staticForExprBinderSpan(
   const source = result.document.text.slice(expr.span.start, expr.span.end);
   const match = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).exec(source);
   if (!match?.index) return expr.span;
-  return { ...expr.span, start: expr.span.start + match.index, end: expr.span.start + match.index + name.length };
+  return {
+    ...expr.span,
+    start: expr.span.start + match.index,
+    end: expr.span.start + match.index + name.length,
+  };
 }
 
 function wordAt(source: string, offset: number): string | undefined {

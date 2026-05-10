@@ -109,12 +109,12 @@ Deno.test("golden WAT for literal function clauses", async () => {
 Deno.test("golden WAT lowers optimized const-param calls directly", async () => {
   assertEquals(
     await watFromSource(`
-      type fn box() { let Box = {value: i32}; struct(Box) }
-      type fn functor(F: type) { let Functor = {map: fn(x: F) -> F}; struct(Functor) }
-      fn map_box(x: box) -> box { {value: x.value + 1} }
-      const box_functor: functor(box) = {map: map_box};
-      fn mapped(const dict: functor(box), x: box) -> box { dict.map(x) }
-      pub fn main() -> box { mapped(box_functor, {value: 41}) }
+      type fn Box() { let Box = {value: i32}; struct(Box) }
+      type fn Functor(f: type) { let Functor = {map: fn(x: f) -> f}; struct(Functor) }
+      fn map_box(x: Box) -> Box { {value: x.value + 1} }
+      const box_functor: Functor(box) = {map: map_box};
+      fn mapped(const dict: Functor(box), x: Box) -> Box { dict.map(x) }
+      pub fn main() -> Box { mapped(box_functor, {value: 41}) }
     `),
     `(module
   (func $map_box (param $x$value i32) (result i32)
@@ -132,14 +132,14 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
 
 Deno.test("WAT specializes perf array const dictionary dispatch", async () => {
   const wat = await watFromSource(`
-    type fn scalar_box() { let ScalarBox = {value: i32}; struct(ScalarBox) }
-    type fn map4(T: type) { let Map4 = {apply: fn(x: T) -> T}; struct(Map4) }
-    fn add1_box(x: scalar_box) -> scalar_box { {value: x.value + 1} }
-    const scalar_map4: map4(scalar_box) = {apply: add1_box};
-    fn apply_tile(const ops: map4(scalar_box), x: scalar_box) -> scalar_box {
+    type fn ScalarBox() { let ScalarBox = {value: i32}; struct(ScalarBox) }
+    type fn Map4(t: type) { let Map4 = {apply: fn(x: t) -> t}; struct(Map4) }
+    fn add1_box(x: ScalarBox) -> ScalarBox { {value: x.value + 1} }
+    const scalar_map4: Map4(scalar_box) = {apply: add1_box};
+    fn apply_tile(const ops: Map4(scalar_box), x: ScalarBox) -> ScalarBox {
       ops.apply(ops.apply(ops.apply(ops.apply(x))))
     }
-    pub fn main() -> scalar_box { apply_tile(scalar_map4, {value: 1}) }
+    pub fn main() -> ScalarBox { apply_tile(scalar_map4, {value: 1}) }
   `);
 
   assert(wat.includes("(func $apply_tile__scalar_map4 (param $x$value i32) (result i32)"));

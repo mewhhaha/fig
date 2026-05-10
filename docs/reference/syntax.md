@@ -1,17 +1,17 @@
 # Fig Syntax
 
-Fig source files use the `.fig` extension. A program is a sequence of `type fn`, `const`, `fn`,
+Fig source files use the `.fig` extension. a program is a sequence of `type fn`, `const`, `fn`,
 `pub fn`, and top-level `let` declarations.
 
 ## Names
 
 Lowercase identifiers match `[a-z_][a-z0-9_]*` and are used for functions, locals, fields,
 capabilities, imports, primitive type names, and type functions. PascalCase identifiers match
-`[A-Z][A-Za-z0-9]*` and are used for product constructors, union variants, and type-level local
+`[a-Z][a-Za-z0-9]*` and are used for product constructors, union variants, and type-level local
 shape bindings.
 
-Qualified names use dots, for example `std.option_map`, `point.eql`, or
-`geometry.layout.vertex2d_i32`. Literal tags begin with `#`, for example `#field`, `#Some`, and
+Qualified names use dots, for example `std.option_map`, `Point.eql`, or
+`Geometry.Layout.vertex2d_i32`. Literal tags begin with `#`, for example `#field`, `#Some`, and
 `#infixl`.
 
 ## Doc Comments
@@ -35,17 +35,17 @@ fn add(
   sum
 }
 
-/// A generic point product.
-type fn point(
+/// a generic point product.
+type fn Point(
   /// Coordinate type.
-  A: type
+  a: type
 ) -> struct {
   /// Product payload shape.
   let Point = {
     /// Horizontal coordinate.
-    x: A,
+    x: a,
     /// Vertical coordinate.
-    y: A,
+    y: a,
   };
   struct(Point)
 }
@@ -74,7 +74,7 @@ const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");
 
 Destructured import entries are plain declaration names. Aliases, dotted names, annotations, and
 non-`@import` right-hand sides are rejected. Namespace imports can qualify nested imports, so a
-module imported as `std` can expose names such as `std.array.layout.lane4_i32`.
+module imported as `std` can expose names such as `std.array.Layout.lane4_i32`.
 
 Host imports are top-level consts whose value is `@capability("name")` and whose type is a function
 type:
@@ -115,7 +115,7 @@ pub fn main() -> i32 { add(40, 2) }
 Attached member functions use dotted names and are visible to type reflection:
 
 ```fig
-fn point.eql(a: point, b: point) -> bool { a.x == b.x }
+fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }
 ```
 
 Repeated functions with the same name are ordered clauses. Clauses must keep compatible visibility,
@@ -133,8 +133,8 @@ fn f(x: i32) -> i32 { x }
 fn g(const f: fn(x: i32) -> i32, x: i32) -> i32 { f(x) }
 fn h(1: i32) -> i32 { 10 }
 fn ignore(_: i32) -> i32 { 0 }
-fn variant(Some(value): option(i32)) -> i32 { value }
-fn tuple([left, right]: pair) -> i32 { left + right }
+fn variant(Some(value): Option(i32)) -> i32 { value }
+fn tuple([left, right]: Pair) -> i32 { left + right }
 ```
 
 `const` parameters are compile-time parameters. They specialize at call sites and are erased from
@@ -147,7 +147,7 @@ Blocks contain `let` statements, local proof consts, and an optional final expre
 ```fig
 {
   let x = 1;
-  const Proof = eq(i32);
+  const Proof = Eq(i32);
   x + 1
 }
 ```
@@ -193,11 +193,10 @@ false
 
 Fenced text literals use triple backticks and are useful for shader source.
 
-## Deprecated Syntax
+## Rejected Syntax
 
-`static for` blocks still parse for compatibility, but they are deprecated and emit diagnostics.
-Prefer tail-recursive helpers or the supported record/product static slot syntax where a
-compile-time shape expands fields.
+`static for` statement blocks are not supported. Use tail-recursive helpers or the supported
+record/product static slot syntax where a compile-time shape expands fields.
 
 Array-comprehension-style literals such as `[for i in 0 .. 3: expr]` are rejected. Use tuple/list
 literals, inline-array helpers, or record/product static slots instead.

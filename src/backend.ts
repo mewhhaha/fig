@@ -18,6 +18,7 @@ import {
   intrinsicWrapperId,
   isIntrinsicWrapper,
 } from "./primitives.ts";
+import { wgslShaderId } from "./wgsl.ts";
 
 interface BackendModule {
   imports: BackendImport[];
@@ -98,6 +99,11 @@ interface LowerContext {
   tailCallMode?: TailCallMode;
   frozenData?: BackendData[];
   nextDataOffset?: number;
+  ownership?: OwnershipIr;
+}
+
+interface OwnershipIr {
+  forkAliases: Map<string, { source: string; type?: string }>;
 }
 
 interface LayoutEnv {
@@ -179,6 +185,7 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
     tempLocals: [],
     currentFn: fn,
     localTypes: new Map(fn.params.map((param) => [param.name, param.type])),
+    ownership: { forkAliases: new Map() },
   };
   const tailCalls = analyzeTailCalls(fn);
   if (
@@ -234,15 +241,6 @@ function collectBlockLocals(block: BlockExpr, locals: BackendLocal[], ctx: Lower
     } else if (stmt.kind === "destructure_let") {
       for (const binding of statementLocalBindings(stmt, ctx)) locals.push(binding);
       collectExprLocals(stmt.value, locals, ctx);
-    } else if (stmt.kind === "fork_let") {
-      for (const name of stmt.names) {
-        locals.push(
-          ...flattenBinding(name, stmt.sourceType, ctx.layouts).map((slot) => ({
-            name: slot.name,
-            type: slot.wat,
-          })),
-        );
-      }
     }
   }
   if (block.expr) collectExprLocals(block.expr, locals, ctx);
@@ -325,21 +323,14 @@ function lowerStatement(
   if (stmt.kind === "proof_const") return [];
   if (stmt.kind === "fork_let") {
     stmt.sourceType ??= varType(stmt.source, ctx);
-    const sourceSlots = flattenBinding(baseName(stmt.source), stmt.sourceType, ctx.layouts);
     for (const name of stmt.names) {
       if (stmt.sourceType) ctx.localTypes?.set(name, stmt.sourceType);
-    }
-    return stmt.names.flatMap((name) => {
-      const targetSlots = flattenBinding(name, stmt.sourceType, ctx.layouts);
-      return sourceSlots.flatMap((source, index) => {
-        const target = targetSlots[index]?.name ?? name;
-        locals.add(target);
-        return [
-          { op: "local.get", name: source.name } as Instr,
-          { op: "local.set", name: target } as Instr,
-        ];
+      ctx.ownership?.forkAliases.set(name, {
+        source: resolveForkAliasName(stmt.source, ctx),
+        type: stmt.sourceType,
       });
-    });
+    }
+    return [];
   }
   if (stmt.kind === "destructure_let") {
     const bindings = statementLocalBindings(stmt, ctx);
@@ -356,7 +347,6 @@ function lowerStatement(
       })),
     ];
   }
-  if (stmt.kind === "static_for") return [];
   stmt.type ??= exprTypeWithLocals(stmt.value, ctx);
   if (!usedLater.has(stmt.name) && !hasRuntimeEffect(stmt.value, ctx.functions)) return [];
   const bindings = statementLocalBindings(stmt, ctx);
@@ -586,11 +576,12 @@ function lowerTailStepMatch(
 }
 
 function isIndexCursorNextCallee(name: string): boolean {
-  return name.endsWith("index_cursor.next") || name.includes("index_cursor_next__");
+  return name.endsWith("IndexCursor.next") || name.includes("index_cursor_next__") ||
+    name.includes("IndexCursor_next__");
 }
 
 function constSpecializedCursorBound(name: string): Expr | undefined {
-  const match = name.match(/index_cursor_next__([0-9]+)/);
+  const match = name.match(/(?:index_cursor_next|IndexCursor_next)__([0-9]+)/);
   return match ? { kind: "literal", literalKind: "number", value: match[1] } : undefined;
 }
 
@@ -604,13 +595,13 @@ function lowerExpr(
   if (folded !== expr) return lowerExpr(folded, ctx, locals, expectedType);
   switch (expr.kind) {
     case "literal":
-      return lowerLiteral(expr);
+      return lowerLiteral(expr, expectedType);
     case "var":
       {
         const frozenProjection = lowerFrozenVarIndex(expr.name, ctx, locals);
         if (frozenProjection) return frozenProjection;
       }
-      return lowerVar(expr.name, ctx.layouts, locals, expectedType);
+      return lowerVar(expr.name, ctx, locals, expectedType);
     case "borrow":
       return lowerExpr(expr.value, ctx, locals, stripBorrowType(expectedType));
     case "placeholder":
@@ -628,6 +619,10 @@ function lowerExpr(
       if (pointer) return pointer;
       const builder = lowerInlineArrayBuilderPrimitive(expr, ctx, locals, expectedType);
       if (builder) return builder;
+      const componentSlotPut = lowerComponentSlotPut(expr, ctx, locals);
+      if (componentSlotPut) return componentSlotPut;
+      const componentStoreGet = lowerComponentStoreGet(expr, ctx, locals, expectedType);
+      if (componentStoreGet) return componentStoreGet;
       const callee = ctx.signatures.get(expr.callee.name);
       if (!callee) {
         if (!hasRuntimeEffect(expr, ctx.functions)) return [{ op: "const", type: "i32", value: 0 }];
@@ -675,7 +670,12 @@ function lowerExpr(
       return lowerShapeStorage(expr.slots, expectedType, ctx, locals);
     case "product_constructor":
       if (expr.slots.length === 0) return [{ op: "const", type: "i32", value: 0 }];
-      return lowerShapeStorage(expr.slots, expectedType, ctx, locals);
+      return lowerShapeStorage(
+        expr.slots,
+        expectedType ?? productConstructorType(expr.constructor, ctx.layouts),
+        ctx,
+        locals,
+      );
     case "range":
       return [
         ...lowerExpr(expr.start, ctx, locals),
@@ -686,12 +686,137 @@ function lowerExpr(
     case "field":
       if (expr.value.kind === "var" && expr.key.kind === "literal") {
         const key = expr.key.value.replace(/^#/, "").replace(/^"|"$/g, "");
-        return lowerVar(`${expr.value.name}.${key}`, ctx.layouts, locals, expectedType);
+        return lowerVar(`${expr.value.name}.${key}`, ctx, locals, expectedType);
       }
       throw new Error("backend cannot lower unresolved @field");
     case "block":
       return lowerBlock(expr, ctx, locals, expectedType);
   }
+}
+
+function lowerComponentSlotPut(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var" || !expr.callee.name.includes("component_slot_put_typed")) {
+    return undefined;
+  }
+  const [slot, index, present, value] = expr.args;
+  if (expr.args.length !== 4 || slot?.kind !== "var" || !index || !present || !value) {
+    return undefined;
+  }
+  const localBase = resolveForkAliasName(slot.name, ctx).replaceAll(".", "$");
+  const valueSlots = (item: number) => {
+    const direct = `${localBase}$values$${item}`;
+    if (locals.has(direct)) return [direct];
+    return [...locals].filter((name) => name.startsWith(`${direct}$`));
+  };
+  const itemWidth = valueSlots(0).length;
+  if (!itemWidth) return undefined;
+  const fullValue = lowerExpr(value, ctx, locals);
+  if (fullValue.length !== itemWidth) return undefined;
+  const select = (item: number, thenBody: Instr[], elseBody: Instr[]): Instr[] => [
+    ...lowerExpr(index, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: item },
+    { op: "binary", wasm: "i32.eq" },
+    { op: "if", results: ["i32"], thenBody, elseBody },
+  ];
+  return [
+    ...[0, 1, 2].flatMap((item) =>
+      select(item, lowerExpr(present, ctx, locals, "bool"), [
+        { op: "local.get", name: `${localBase}$present$${item}` },
+      ])
+    ),
+    ...[0, 1, 2].flatMap((item) =>
+      valueSlots(item).flatMap((oldSlot, slotIndex) =>
+        select(item, [fullValue[slotIndex]!], [{ op: "local.get", name: oldSlot }])
+      )
+    ),
+  ];
+}
+
+function lowerComponentStoreGet(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var" || !expr.callee.name.includes("component_store_get_typed")) {
+    return undefined;
+  }
+  if (expr.args.length !== 2 || expr.args[0]?.kind !== "var") return undefined;
+  const storeType = varType(expr.args[0].name, ctx);
+  const itemType = expectedType && !unresolvedTypeParam(expectedType)
+    ? expectedType
+    : inlineArrayLikeTypeArgs(storeType, ctx.layouts)?.[1] ??
+      sparseWorldComponentStoreItemType(expr.args[0].name, ctx);
+  if (!itemType || unresolvedTypeParam(itemType)) {
+    return lowerRuntimeInlineArrayIndexFromLocalSlots(
+      expr.args[0].name,
+      expr.args[1]!,
+      3,
+      ctx,
+      locals,
+    );
+  }
+  return lowerRuntimeInlineArrayIndex(
+    expr.args[0].name,
+    expr.args[1]!,
+    3,
+    itemType,
+    ctx,
+    locals,
+  );
+}
+
+function lowerRuntimeInlineArrayIndexFromLocalSlots(
+  target: string,
+  index: Expr,
+  capacity: number,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  const localBase = resolveForkAliasName(target, ctx).replaceAll(".", "$");
+  const itemSlots = (item: number) => {
+    const direct = `${localBase}$${item}`;
+    if (locals.has(direct)) return [direct];
+    return [...locals].filter((slot) => slot.startsWith(`${direct}$`));
+  };
+  const fallbackSlots = itemSlots(Math.max(0, capacity - 1));
+  if (!fallbackSlots.length) return undefined;
+  const results = fallbackSlots.map(() => "i32" as const);
+  let body: Instr[] = fallbackSlots.map((name) => ({ op: "local.get", name }));
+  for (let item = capacity - 2; item >= 0; item--) {
+    const slots = itemSlots(item);
+    if (slots.length !== fallbackSlots.length) return undefined;
+    body = [
+      ...lowerExpr(index, ctx, locals, "i32"),
+      { op: "const", type: "i32", value: item },
+      { op: "binary", wasm: "i32.eq" },
+      {
+        op: "if",
+        results,
+        thenBody: slots.map((name) => ({ op: "local.get", name })),
+        elseBody: body,
+      },
+    ];
+  }
+  return body;
+}
+
+function sparseWorldComponentStoreItemType(target: string, ctx: LowerContext): string | undefined {
+  target = resolveForkAliasName(target, ctx);
+  const parts = target.split(".");
+  if (parts.length < 3 || parts[2] !== "values") return undefined;
+  const worldType = resolveAlias(ctx.localTypes?.get(baseName(parts[0] ?? "")), ctx.layouts);
+  const unqualified = worldType?.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)+/, "");
+  const sparseArgs = unqualified ? typeCallArgs(unqualified, "SparseWorld") : undefined;
+  if (!sparseArgs) return undefined;
+  const [, componentsName] = splitTypeArgs(sparseArgs);
+  const components = componentsName ? ctx.layouts.constShapes.get(componentsName.trim()) : undefined;
+  const component = components?.slots.find((slot) => slot.label === parts[1])?.value;
+  return component?.kind === "var" ? component.name : undefined;
 }
 
 function lowerInlineArrayBuilderPrimitive(
@@ -951,7 +1076,10 @@ function foldBinary(op: string, a: number, b: number): number | boolean | undefi
   }
 }
 
-function lowerLiteral(expr: Extract<Expr, { kind: "literal" }>): Instr[] {
+function lowerLiteral(expr: Extract<Expr, { kind: "literal" }>, expectedType?: string): Instr[] {
+  if (literalTypeMembers(expr.inferredType) || literalTypeMembers(expectedType)) {
+    return [{ op: "const", type: "i32", value: literalExprRuntimeValue(expr) ?? 0 }];
+  }
   if (expr.literalKind === "bool") {
     return [{ op: "const", type: "i32", value: expr.value === "true" ? 1 : 0 }];
   }
@@ -961,6 +1089,9 @@ function lowerLiteral(expr: Extract<Expr, { kind: "literal" }>): Instr[] {
       type: watType(expr.inferredType),
       value: Number.parseInt(expr.value, 10),
     }];
+  }
+  if (expr.literalKind === "char") {
+    return [{ op: "const", type: "i32", value: literalExprRuntimeValue(expr) ?? 0 }];
   }
   throw new Error(`backend does not support ${expr.literalKind} literals yet`);
 }
@@ -978,7 +1109,7 @@ function lowerIndex(
     return lowerFrozenIndex(expr, stripFrozenType(targetType), ctx, locals);
   }
   if (expr.target.kind === "var" && expr.index.kind === "literal") {
-    return lowerVar(`${expr.target.name}[${expr.index.value}]`, ctx.layouts, locals, expectedType);
+    return lowerVar(`${expr.target.name}[${expr.index.value}]`, ctx, locals, expectedType);
   }
   if (expr.target.kind === "var") {
     const targetType = varType(expr.target.name, ctx);
@@ -1003,16 +1134,17 @@ function lowerIndex(
   }
   const fieldTarget = fieldAccessName(expr.target);
   if (fieldTarget) {
+    const storageTarget = resolveForkAliasName(fieldTarget, ctx);
     const targetType = exprTypeWithLocals(expr.target, ctx);
     const arrayArgs = inlineArrayLikeTypeArgs(targetType, ctx.layouts);
     const [rawCapacity, itemType] = arrayArgs ?? [Number.NaN, expectedType ?? "i32"];
     const capacity = Number.isFinite(rawCapacity)
       ? rawCapacity
-      : inlineArrayCapacityFromLocals(fieldTarget, locals);
+      : inlineArrayCapacityFromLocals(storageTarget, locals);
     if (capacity > 0) {
       const elementType = unresolvedTypeParam(itemType) ? expectedType ?? itemType : itemType;
       return lowerRuntimeInlineArrayIndex(
-        fieldTarget,
+        storageTarget,
         expr.index,
         capacity,
         elementType,
@@ -1082,7 +1214,7 @@ function lowerFrozenVarIndex(
   const itemType = arrayArgs?.[1] ?? "i32";
   const itemSize = Math.max(4, byteSizeOf(itemType, ctx.layouts));
   return [
-    ...lowerVar(targetName, ctx.layouts, locals, targetType),
+    ...lowerVar(targetName, ctx, locals, targetType),
     { op: "const", type: "i32", value: Number.parseInt(match[2] ?? "0", 10) * itemSize },
     { op: "binary", wasm: "i32.add" },
     { op: "load", type: watType(itemType), align: Math.min(itemSize, 4), offset: 0 },
@@ -1139,12 +1271,7 @@ function lowerRuntimeInlineArrayIndex(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
-  const fallback = lowerVar(
-    `${target}[${Math.max(0, capacity - 1)}]`,
-    ctx.layouts,
-    locals,
-    itemType,
-  );
+  const fallback = lowerVar(`${target}[${Math.max(0, capacity - 1)}]`, ctx, locals, itemType);
   const flattened = flattenType(itemType, ctx.layouts).map((slot) => slot.wat);
   const results = fallback.length > flattened.length
     ? fallback.map(() => "i32" as const)
@@ -1158,7 +1285,7 @@ function lowerRuntimeInlineArrayIndex(
       {
         op: "if",
         results,
-        thenBody: lowerVar(`${target}[${item}]`, ctx.layouts, locals, itemType),
+        thenBody: lowerVar(`${target}[${item}]`, ctx, locals, itemType),
         elseBody: body,
       },
     ];
@@ -1167,6 +1294,7 @@ function lowerRuntimeInlineArrayIndex(
 }
 
 function varType(name: string, ctx: LowerContext): string | undefined {
+  name = resolveForkAliasName(name, ctx);
   const [base, ...fields] = name.split(".");
   let current = ctx.localTypes?.get(baseName(base));
   for (const field of fields) {
@@ -1178,13 +1306,25 @@ function varType(name: string, ctx: LowerContext): string | undefined {
   return current;
 }
 
+function productConstructorType(constructor: string, layouts: LayoutEnv): string | undefined {
+  const found = [...layouts.types.values()].find((decl) =>
+    decl.normalized?.kind === "product" &&
+    terminalName(decl.normalized.constructor) === terminalName(constructor)
+  );
+  return found?.name;
+}
+
+function terminalName(name: string): string {
+  return name.split(".").at(-1) ?? name;
+}
+
 function inlineArrayTypeArgs(
   type: string | undefined,
   layouts: LayoutEnv,
 ): [number, string] | undefined {
   const resolved = resolveAlias(stripFrozenType(type), layouts);
   const unqualified = resolved?.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)+/, "");
-  const args = unqualified ? typeCallArgs(unqualified, "inline_array") : undefined;
+  const args = unqualified ? typeCallArgs(unqualified, "InlineArray") : undefined;
   if (!args) return undefined;
   const [count, itemType] = splitTypeArgs(args);
   return [Number.parseInt(count ?? "0", 10), itemType?.trim() ?? "i32"];
@@ -1200,10 +1340,10 @@ function inlineArrayLikeTypeArgs(
   let args: string | undefined;
   for (const candidate of candidates) {
     const unqualified = candidate.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)+/, "");
-    args = typeCallArgs(unqualified, "inline_array") ??
-      typeCallArgs(unqualified, "inline_array_list") ??
-      typeCallArgs(unqualified, "inline_array_builder") ??
-      typeCallArgs(unqualified, "component_store");
+    args = typeCallArgs(unqualified, "InlineArray") ??
+      typeCallArgs(unqualified, "InlineArrayList") ??
+      typeCallArgs(unqualified, "InlineArrayBuilder") ??
+      typeCallArgs(unqualified, "ComponentStore");
     if (args) break;
   }
   if (!args) return undefined;
@@ -1211,12 +1351,28 @@ function inlineArrayLikeTypeArgs(
   return [Number.parseInt(count ?? "0", 10), itemType?.trim() ?? "i32"];
 }
 
+function resolveForkAliasName(name: string, ctx: LowerContext): string {
+  const originalBase = baseName(name);
+  const suffix = name.slice(originalBase.length);
+  let base = originalBase;
+  const seen = new Set<string>();
+  while (!seen.has(base)) {
+    seen.add(base);
+    const alias = ctx.ownership?.forkAliases.get(base);
+    if (!alias) break;
+    base = alias.source;
+  }
+  return `${base}${suffix}`;
+}
+
 function lowerVar(
   name: string,
-  layouts: LayoutEnv,
+  ctx: LowerContext,
   locals: Set<string>,
   expectedType?: string,
 ): Instr[] {
+  name = resolveForkAliasName(name, ctx);
+  const layouts = ctx.layouts;
   const base = baseName(name);
   const projection = projectionSuffix(name);
   if (projection) {
@@ -1446,6 +1602,21 @@ function lowerPatternTest(pattern: ParamPattern): Instr[] {
     return [{ op: "const", type: "i32", value: 1 }, { op: "binary", wasm: "i32.eq" }];
   }
   if (text === "false") return [{ op: "binary", wasm: "i32.eqz" }];
+  if (pattern.kind === "literal") {
+    const member = pattern.literalKind === "string"
+      ? { kind: "string" as const, value: pattern.value.slice(1, -1) }
+      : pattern.literalKind === "char"
+      ? { kind: "char" as const, value: JSON.parse(`"${pattern.value.slice(1, -1)}"`) }
+      : pattern.literalKind === "literalType"
+      ? { kind: "literal" as const, value: pattern.value.slice(1) }
+      : undefined;
+    if (member) {
+      return [{ op: "const", type: "i32", value: literalRuntimeValue(member) }, {
+        op: "binary",
+        wasm: "i32.eq",
+      }];
+    }
+  }
   const value = Number.parseInt(text, 10);
   if (Number.isFinite(value)) {
     return [{ op: "const", type: "i32", value }, { op: "binary", wasm: "i32.eq" }];
@@ -1511,7 +1682,6 @@ function statementHasSelfCall(stmt: Statement, name: string): boolean {
       return exprHasSelfCall(stmt.value, name);
     case "proof_const":
     case "fork_let":
-    case "static_for":
       return false;
   }
 }
@@ -2229,19 +2399,101 @@ function laneBinaryOp(op: string): SimdOp | undefined {
 
 function isLane4I32(type: string | undefined, layouts: LayoutEnv): boolean {
   const resolved = resolveAlias(type, layouts);
-  if (!resolved?.startsWith("inline_array(")) return false;
-  const args = splitTypeArgs(resolved.slice("inline_array(".length, -1));
+  if (!resolved?.startsWith("InlineArray(")) return false;
+  const args = splitTypeArgs(resolved.slice("InlineArray(".length, -1));
   return Number.parseInt(args[0] ?? "0", 10) === 4 && (args[1]?.trim() ?? "i32") === "i32";
 }
 
 function watType(type: string | Param | undefined): ValueType {
   const source = typeof type === "string" || type === undefined ? type : type.type;
+  if (literalTypeMembers(source)) return "i32";
   if (source === "i64" || source === "u64" || (unsignedBitWidth(source ?? "") ?? 0) > 32) {
     return "i64";
   }
   if (source === "f32") return "f32";
   if (source === "f64") return "f64";
   return "i32";
+}
+
+type LiteralTypeMember = {
+  kind: "number" | "bool" | "string" | "char" | "literal";
+  value: string;
+};
+
+function literalTypeMembers(type: string | undefined): LiteralTypeMember[] | undefined {
+  if (!type) return undefined;
+  const parts = splitLiteralUnion(type);
+  if (!parts.length) return undefined;
+  const members = parts.map(parseLiteralTypeMember);
+  return members.every((member): member is LiteralTypeMember => member !== undefined)
+    ? members
+    : undefined;
+}
+
+function splitLiteralUnion(type: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: '"' | "'" | undefined;
+  for (let index = 0; index < type.length; index++) {
+    const char = type[index];
+    if (quote) {
+      if (char === "\\") index++;
+      else if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === "(" || char === "{" || char === "[") {
+      depth++;
+    } else if (char === ")" || char === "}" || char === "]") {
+      depth--;
+    } else if (char === "|" && depth === 0) {
+      parts.push(type.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  parts.push(type.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+function parseLiteralTypeMember(source: string): LiteralTypeMember | undefined {
+  if (/^[0-9]+(?:\.[0-9]+)?(?:i32|u32|i64|u64|f32|f64)?$/.test(source)) {
+    return { kind: "number", value: source };
+  }
+  if (source === "true" || source === "false") return { kind: "bool", value: source };
+  if (/^#([a-z_][a-z0-9_]*|[A-Z][A-Za-z0-9]*)$/.test(source)) {
+    return { kind: "literal", value: source.slice(1) };
+  }
+  if (source.startsWith('"') && source.endsWith('"')) {
+    return { kind: "string", value: JSON.parse(source) };
+  }
+  if (source.startsWith("'") && source.endsWith("'")) {
+    return { kind: "char", value: JSON.parse(`"${source.slice(1, -1)}"`) };
+  }
+  return undefined;
+}
+
+function literalRuntimeValue(member: LiteralTypeMember): number {
+  if (member.kind === "bool") return member.value === "true" ? 1 : 0;
+  if (member.kind === "number") return Number.parseInt(member.value, 10);
+  if (member.kind === "char") return member.value.codePointAt(0) ?? 0;
+  return wgslShaderId(`${member.kind}:${member.value}`);
+}
+
+function literalExprRuntimeValue(expr: Extract<Expr, { kind: "literal" }>): number | undefined {
+  const member = expr.literalKind === "number"
+    ? { kind: "number" as const, value: expr.value }
+    : expr.literalKind === "bool"
+    ? { kind: "bool" as const, value: expr.value }
+    : expr.literalKind === "string"
+    ? { kind: "string" as const, value: expr.value.slice(1, -1) }
+    : expr.literalKind === "char"
+    ? { kind: "char" as const, value: JSON.parse(`"${expr.value.slice(1, -1)}"`) }
+    : expr.literalKind === "literalType"
+    ? { kind: "literal" as const, value: expr.value.slice(1) }
+    : undefined;
+  return member ? literalRuntimeValue(member) : undefined;
 }
 
 interface FlatSlot {
@@ -2327,14 +2579,14 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
   if (resolved === "memory") return [];
   if (isPtrType(resolved)) return [{ suffix: "", type: resolved, wat: "i32" }];
   if (isPrimitiveType(resolved)) return [{ suffix: "", type: resolved, wat: watType(resolved) }];
-  const inlineArrayArgs = typeCallArgs(resolved, "inline_array");
+  const inlineArrayArgs = typeCallArgs(resolved, "InlineArray");
   if (inlineArrayArgs) {
     const args = splitTypeArgs(inlineArrayArgs);
     const count = Number.parseInt(args[0] ?? "1", 10);
     const itemType = args[1]?.trim() ?? "i32";
     return repeatSlots(count, itemType, layouts);
   }
-  const inlineArrayBuilderArgs = typeCallArgs(resolved, "inline_array_builder");
+  const inlineArrayBuilderArgs = typeCallArgs(resolved, "InlineArrayBuilder");
   if (inlineArrayBuilderArgs) {
     const args = splitTypeArgs(inlineArrayBuilderArgs);
     const count = Number.parseInt(args[0] ?? "1", 10);
@@ -2348,7 +2600,10 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
     const shape = constShapeFromTypeArg(structArgs, layouts);
     if (shape) {
       return flattenShape(
-        shape.slots.map((slot) => ({ label: slot.label, type: componentSpecType(slot.value) ?? "i32" })),
+        shape.slots.map((slot) => ({
+          label: slot.label,
+          type: componentSpecType(slot.value) ?? "i32",
+        })),
         layouts,
       );
     }
@@ -2358,7 +2613,8 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
   const ergonomicRowArgs = typeCallArgs(resolved, "row");
   const rowArgs = queryRowArgs ?? ergonomicRowArgs;
   const valuesArgs = typeCallArgs(resolved, "values");
-  const componentValuesArgs = typeCallArgs(resolved, "component_values") ?? valuesArgs ?? refsArgs ?? rowArgs;
+  const componentValuesArgs = typeCallArgs(resolved, "component_values") ?? valuesArgs ??
+    refsArgs ?? rowArgs;
   if (componentValuesArgs) {
     const args = splitTypeArgs(componentValuesArgs);
     const shapeName = ergonomicRowArgs ? args[0]?.trim() : args.at(-1)?.trim();
@@ -2369,7 +2625,10 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
         type: refsArgs ? "i32" : componentSpecType(slot.value) ?? "i32",
       }));
       if (rowArgs) {
-        slots.unshift({ label: "entity", type: ergonomicRowArgs ? "i32" : args[0]?.trim() ?? "i32" });
+        slots.unshift({
+          label: "entity",
+          type: ergonomicRowArgs ? "i32" : args[0]?.trim() ?? "i32",
+        });
       }
       return flattenShape(slots, layouts);
     }
@@ -2407,11 +2666,11 @@ function flattenStaticShapeType(
     const count = args[0]?.trim() ?? "1";
     const component = args[1]?.trim() ?? "i32";
     return flattenShape([
-      { label: "present", type: `inline_array(${count}, bool)` },
-      { label: "values", type: `inline_array(${count}, ${component})` },
+      { label: "present", type: `InlineArray(${count}, bool)` },
+      { label: "values", type: `InlineArray(${count}, ${component})` },
     ], layouts);
   }
-  const sparseWorldArgs = typeCallArgs(type, "sparse_world");
+  const sparseWorldArgs = typeCallArgs(type, "SparseWorld");
   if (sparseWorldArgs) {
     const args = splitTypeArgs(sparseWorldArgs);
     const count = args[0]?.trim() ?? "1";
@@ -2420,10 +2679,10 @@ function flattenStaticShapeType(
     if (!shape) return undefined;
     const slots = [
       { label: "next_entity_id", type: "i32" },
-      { label: "defaults", type: `component_values(${shapeArg})` },
+      { label: "defaults", type: `ComponentValues(${shapeArg})` },
       ...shape.slots.map((slot) => ({
         label: slot.label,
-        type: `component_slot(${componentSpecCount(slot.value) ?? count}, ${
+        type: `ComponentSlot(${componentSpecCount(slot.value) ?? count}, ${
           componentSpecType(slot.value) ?? "i32"
         })`,
       })),
@@ -2440,11 +2699,11 @@ function flattenStaticShapeType(
       { label: "component_next", type: "i32" },
       {
         label: "entities",
-        type: `inline_array(${args[0]?.trim() ?? "1"}, ${args[2]?.trim() ?? "i32"})`,
+        type: `InlineArray(${args[0]?.trim() ?? "1"}, ${args[2]?.trim() ?? "i32"})`,
       },
       ...shape.slots.map((slot) => ({
         label: slot.label,
-        type: `inline_array(${componentSpecCount(slot.value) ?? "1"}, ${
+        type: `InlineArray(${componentSpecCount(slot.value) ?? "1"}, ${
           componentSpecType(slot.value) ?? "i32"
         })`,
       })),
@@ -2465,7 +2724,9 @@ function flattenStaticShapeType(
     label: slot.label,
     type: refsArgs ? "i32" : componentSpecType(slot.value) ?? "i32",
   }));
-  if (rowArgs) slots.unshift({ label: "entity", type: ergonomicRowArgs ? "i32" : args[0]?.trim() ?? "i32" });
+  if (rowArgs) {
+    slots.unshift({ label: "entity", type: ergonomicRowArgs ? "i32" : args[0]?.trim() ?? "i32" });
+  }
   return flattenShape(slots, layouts);
 }
 
@@ -2710,7 +2971,7 @@ function shapeSlotTypes(type: string | undefined, layouts: LayoutEnv): string[] 
   const resolved = resolveAlias(type, layouts);
   if (!resolved) return [];
   const unqualified = resolved.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)+/, "");
-  const inlineArrayArgs = typeCallArgs(unqualified, "inline_array");
+  const inlineArrayArgs = typeCallArgs(unqualified, "InlineArray");
   if (inlineArrayArgs) {
     const args = splitTypeArgs(inlineArrayArgs);
     return Array.from(
@@ -2718,7 +2979,7 @@ function shapeSlotTypes(type: string | undefined, layouts: LayoutEnv): string[] 
       () => args[1]?.trim() ?? "i32",
     );
   }
-  const inlineArrayListArgs = typeCallArgs(unqualified, "inline_array_list");
+  const inlineArrayListArgs = typeCallArgs(unqualified, "InlineArrayList");
   if (inlineArrayListArgs) {
     const args = splitTypeArgs(inlineArrayListArgs);
     return Array.from(
@@ -2761,7 +3022,7 @@ function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
   }
   if (expr.kind === "shape" && expr.syntax === "frozen_collection") {
     const first = expr.slots[0] ? exprTypeWithLocals(expr.slots[0].value, ctx) ?? "i32" : "i32";
-    return `#(inline_array(${expr.slots.length}, ${first}))`;
+    return `#(InlineArray(${expr.slots.length}, ${first}))`;
   }
   if (expr.kind === "match") {
     const types = expr.arms.map((arm) => exprTypeWithLocals(arm.value, ctx));
@@ -2888,7 +3149,6 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
         for (const name of item.names) names.add(name);
         return;
       case "proof_const":
-      case "static_for":
         return;
       case "var":
         names.add(baseName(item.name));
@@ -2998,7 +3258,6 @@ function usesMemoryIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
         return visit(item.value);
       case "fork_let":
       case "proof_const":
-      case "static_for":
       case "literal":
       case "var":
       case "placeholder":

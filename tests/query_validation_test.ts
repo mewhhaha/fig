@@ -60,7 +60,7 @@ Deno.test("highlight query captures shape field identifiers", async () => {
   const parser = new Parser();
   parser.setLanguage(language);
   const source = `
-type fn point() -> struct {
+type fn Point() -> struct {
   let Point = {x: i32, y: i32};
   struct(Point)
 }
@@ -98,6 +98,31 @@ Deno.test("highlight query captures static builtin identifiers", async () => {
     captures.some(({ name, text }) =>
       name === "function.builtin" && text === "inline_array_builder_start"
     ),
+    true,
+  );
+});
+
+Deno.test("highlight query captures type identifiers inside union types", async () => {
+  await Parser.init();
+  const language = await Language.load(parserUrl.pathname);
+  const parser = new Parser();
+  parser.setLanguage(language);
+  const source = `fn Choose(x: left | right | result) -> left { x }`;
+  const tree = parser.parse(source);
+  if (!tree) throw new Error("failed to parse union highlight smoke source");
+  const query = new Query(language, await Deno.readTextFile(new URL("highlights.scm", queriesUrl)));
+
+  const captures = query.captures(tree.rootNode).map((capture) => ({
+    name: capture.name,
+    text: capture.node.text,
+  }));
+
+  assertEquals(
+    captures.filter((capture) => capture.name === "type").map((capture) => capture.text),
+    ["left", "right", "left"],
+  );
+  assertEquals(
+    captures.some(({ name, text }) => name === "type.parameter" && text === "result"),
     true,
   );
 });

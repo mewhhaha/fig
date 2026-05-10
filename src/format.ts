@@ -2,7 +2,7 @@ import { parse as parseSyntax, type ParseNode, type RuleParseNode } from "../gen
 import { lex, type Token } from "../generated/baba-workbench/tokenizer.ts";
 import { fail } from "./diagnostics.ts";
 
-type Item = TokenItem | CommentItem;
+type item = TokenItem | CommentItem;
 type BraceMode = "block" | "effectRow";
 type Delimiter = "(" | "[" | "{" | "<";
 type TopLevelDeclKind = "ConstDecl" | "TopLetDecl" | "FnDecl" | "TypeFnDecl";
@@ -74,7 +74,7 @@ export function formatSource(source: string): string {
 
   const tokens = lex(normalized).filter((token) => token.kind !== "eof");
   const comments = scanComments(normalized, tokens, lineStarts);
-  const items: Item[] = [
+  const items: item[] = [
     ...tokens.map((token): TokenItem => ({
       kind: "token",
       token,
@@ -85,6 +85,7 @@ export function formatSource(source: string): string {
   ].sort((a, b) => startOf(a) - startOf(b));
   const matchBraceStarts = collectMatchBraceStarts(items);
   const collectionDelimiterStarts = collectCollectionDelimiterStarts(parsed.tree);
+  const flatBraceCandidateStarts = collectFlatBraceCandidateStarts(parsed.tree, normalized);
 
   const writer = new Writer();
   let previousToken: TokenItem | undefined;
@@ -145,7 +146,10 @@ export function formatSource(source: string): string {
       writer.dedent();
       writer.lineStart();
     }
-    if (token.text === "}" && !closingEffectRowBrace) {
+    if (
+      token.text === "}" && !closingEffectRowBrace &&
+      !(closingDelimiter?.delimiter === "{" && !closingDelimiter.broken)
+    ) {
       if (!writer.atLineStart()) writer.newline();
       writer.dedent();
       writer.lineStart();
@@ -169,15 +173,29 @@ export function formatSource(source: string): string {
       const mode: BraceMode = previousToken?.text === "!" ? "effectRow" : "block";
       braceModes.push(mode);
       if (mode === "block") {
-        const shouldBreak = matchBraceStarts.has(token.token.span.start) || groupWouldOverflow(writer, items, index);
+        const canStayFlat = flatBraceCandidateStarts.has(token.token.span.start);
+        const shouldBreak = !canStayFlat || matchBraceStarts.has(token.token.span.start) ||
+          groupHasLineBreak(normalized, items, index) || groupWouldOverflow(writer, items, index) ||
+          groupContainsBreakingNestedGroup(
+            items,
+            index,
+            matchBraceStarts,
+            collectionDelimiterStarts,
+            writer.currentColumn(),
+          );
         delimiterContexts.push({
           delimiter: token.text,
           broken: shouldBreak,
-          indented: true,
+          indented: shouldBreak,
+          commaBreaks: canStayFlat || matchBraceStarts.has(token.token.span.start),
         });
-        writer.indent();
-        writer.newline();
-        previousToken = undefined;
+        if (shouldBreak) {
+          writer.indent();
+          writer.newline();
+          previousToken = undefined;
+        } else {
+          previousToken = token;
+        }
       } else {
         previousToken = token;
       }
@@ -189,10 +207,14 @@ export function formatSource(source: string): string {
         delimiter: token.text,
         broken: shouldBreak,
         indented: shouldBreak,
+        commaBreaks: true,
       });
       if (shouldBreak) writer.breakAfterOpenDelimiter();
     }
-    if (token.text === ")" || token.text === "]" || (token.text === ">" && closingDelimiter?.delimiter === "<")) {
+    if (
+      closingDelimiter && (token.text === ")" || token.text === "]" || token.text === ">") &&
+      closingDelimiter.delimiter === matchingOpen(token.text)
+    ) {
       delimiterContexts.pop();
     }
     if (token.text === ";" && !nextItemIsTrailingComment(items, index, token.line)) {
@@ -243,6 +265,7 @@ interface DelimiterContext {
   delimiter: Delimiter;
   broken: boolean;
   indented: boolean;
+  commaBreaks: boolean;
 }
 
 interface SeparateContext {
@@ -251,7 +274,7 @@ interface SeparateContext {
   topLevel?: boolean;
   previousTopLevelDecl?: TopLevelDecl;
   nextTopLevelDecl?: TopLevelDecl;
-  items?: Item[];
+  items?: item[];
   rightIndex?: number;
 }
 
@@ -367,8 +390,10 @@ function separate(
     return;
   }
   if (left.text === ",") {
+    const flatBrace = delimiterContext?.delimiter === "{" && !delimiterContext.broken;
     if (
-      delimiterContext?.broken || writer.currentColumn() > 55 ||
+      (delimiterContext?.commaBreaks && delimiterContext.broken) ||
+      (!flatBrace && writer.currentColumn() > 55) ||
       writer.wouldOverflow(` ${right.text}`)
     ) {
       if (delimiterContext && !delimiterContext.indented) {
@@ -390,6 +415,7 @@ function separate(
   }
   if (delimiterContext?.delimiter === "<" && (left.text === "<" || right.text === ">")) return;
   if (right.text === "[" && opensBracketWithoutSpace(left)) return;
+  if (left.text === "{" && delimiterContext?.delimiter === "{" && !delimiterContext.broken) return;
   if (left.text === "{" || left.text === ";") {
     writer.newline();
     return;
@@ -562,11 +588,11 @@ function lineFor(lineStarts: number[], offset: number): number {
   return low;
 }
 
-function startOf(item: Item): number {
+function startOf(item: item): number {
   return item.kind === "token" ? item.token.span.start : item.span.start;
 }
 
-function nextStartsDeclaration(items: Item[], current: TokenItem): boolean {
+function nextStartsDeclaration(items: item[], current: TokenItem): boolean {
   const index = items.indexOf(current);
   const next = items.slice(index + 1).find((item) => item.kind === "token") as
     | TokenItem
@@ -574,12 +600,12 @@ function nextStartsDeclaration(items: Item[], current: TokenItem): boolean {
   return !!next && declarationKeywords.has(next.text);
 }
 
-function nextItemIsTrailingComment(items: Item[], index: number, line: number): boolean {
+function nextItemIsTrailingComment(items: item[], index: number, line: number): boolean {
   const next = items[index + 1];
   return next?.kind === "comment" && next.trailing && next.line === line;
 }
 
-function nextStartsTopLevelItem(items: Item[], index: number): boolean {
+function nextStartsTopLevelItem(items: item[], index: number): boolean {
   const next = items.slice(index + 1).find((item) => item.kind === "token") as
     | TokenItem
     | undefined;
@@ -588,7 +614,7 @@ function nextStartsTopLevelItem(items: Item[], index: number): boolean {
 }
 
 function nextTopLevelDecl(
-  items: Item[],
+  items: item[],
   index: number,
   declsByStart: Map<number, TopLevelDecl>,
 ): TopLevelDecl | undefined {
@@ -610,7 +636,7 @@ function shouldBlankBeforeNextTopLevelDecl(
   return true;
 }
 
-function hasFinalExpressionBeforeBlockClose(items: Item[], semicolonIndex: number): boolean {
+function hasFinalExpressionBeforeBlockClose(items: item[], semicolonIndex: number): boolean {
   let braceDepth = 0;
   let delimiterDepth = 0;
   let sawToken = false;
@@ -638,7 +664,7 @@ function hasFinalExpressionBeforeBlockClose(items: Item[], semicolonIndex: numbe
   return false;
 }
 
-function collectMatchBraceStarts(items: Item[]): Set<number> {
+function collectMatchBraceStarts(items: item[]): Set<number> {
   const starts = new Set<number>();
   const pendingMatchDepths: number[] = [];
   let depth = 0;
@@ -684,7 +710,17 @@ function collectMatchBraceStarts(items: Item[]): Set<number> {
   return starts;
 }
 
-function groupWouldOverflow(writer: Writer, items: Item[], openIndex: number): boolean {
+function collectFlatBraceCandidateStarts(root: RuleParseNode | null, source: string): Set<number> {
+  const starts = new Set<number>();
+  if (!root) return starts;
+  for (const node of descendants(root)) {
+    if (node.kind !== "rule" || (node.name !== "ShapeValue" && node.name !== "TypeShape")) continue;
+    if (source[node.span.start] === "{") starts.add(node.span.start);
+  }
+  return starts;
+}
+
+function groupWouldOverflow(writer: Writer, items: item[], openIndex: number): boolean {
   const open = items[openIndex];
   if (open?.kind !== "token" || (open.text !== "(" && open.text !== "[" && open.text !== "{")) {
     return false;
@@ -725,6 +761,123 @@ function groupWouldOverflow(writer: Writer, items: Item[], openIndex: number): b
   return false;
 }
 
+function groupHasLineBreak(source: string, items: item[], openIndex: number): boolean {
+  const open = items[openIndex];
+  if (open?.kind !== "token" || (open.text !== "(" && open.text !== "[" && open.text !== "{")) {
+    return false;
+  }
+  const close = open.text === "(" ? ")" : open.text === "[" ? "]" : "}";
+  let depth = 0;
+  for (let index = openIndex + 1; index < items.length; index++) {
+    const item = items[index];
+    if (item.kind !== "token") continue;
+    if (item.text === close) {
+      if (depth === 0) return source.slice(open.token.span.start, item.token.span.end).includes("\n");
+      depth--;
+    } else if (item.text === "(" || item.text === "[" || item.text === "{") {
+      depth++;
+    } else if ((item.text === ")" || item.text === "]" || item.text === "}") && depth > 0) {
+      depth--;
+    }
+  }
+  return false;
+}
+
+function groupContainsBreakingNestedGroup(
+  items: item[],
+  openIndex: number,
+  matchBraceStarts: Set<number>,
+  collectionDelimiterStarts: Set<number>,
+  baseColumn: number,
+): boolean {
+  const open = items[openIndex];
+  if (open?.kind !== "token" || (open.text !== "(" && open.text !== "[" && open.text !== "{")) {
+    return false;
+  }
+  const close = open.text === "(" ? ")" : open.text === "[" ? "]" : "}";
+  let depth = 0;
+  let flatLength = 0;
+  let previous: TokenItem | undefined;
+  for (let index = openIndex + 1; index < items.length; index++) {
+    const item = items[index];
+    if (item.kind !== "token") continue;
+    if (item.text === close) {
+      if (depth === 0) return false;
+    }
+    if (
+      depth === 0 &&
+      isOpeningGroupToken(item, collectionDelimiterStarts) &&
+      (matchBraceStarts.has(item.token.span.start) ||
+        nestedGroupWouldBreak(items, index, baseColumn + flatLength, collectionDelimiterStarts))
+    ) {
+      return true;
+    }
+    if (previous) flatLength += flatSeparatorLength(previous, item);
+    flatLength += item.text.length;
+    previous = item;
+
+    if (isOpeningGroupToken(item, collectionDelimiterStarts)) {
+      depth++;
+    } else if (isClosingGroupToken(item, collectionDelimiterStarts) && depth > 0) {
+      depth--;
+    }
+  }
+  return false;
+}
+
+function nestedGroupWouldBreak(
+  items: item[],
+  openIndex: number,
+  prefixLength: number,
+  collectionDelimiterStarts: Set<number>,
+): boolean {
+  const open = items[openIndex];
+  if (open?.kind !== "token" || !isOpeningGroupToken(open, collectionDelimiterStarts)) {
+    return false;
+  }
+  const close = matchingClose(open.text);
+  let depth = 0;
+  let hasComma = false;
+  let hasField = false;
+  let flatLength = 0;
+  let previous: TokenItem | undefined;
+  for (let index = openIndex + 1; index < items.length; index++) {
+    const item = items[index];
+    if (item.kind === "comment") return true;
+    if (item.text === close) {
+      if (depth === 0) return (hasComma || hasField) && prefixLength + flatLength > 55;
+      depth--;
+    } else if (isOpeningGroupToken(item, collectionDelimiterStarts)) {
+      depth++;
+    } else if (isClosingGroupToken(item, collectionDelimiterStarts) && depth > 0) {
+      depth--;
+    }
+    if (item.text === "," && depth === 0) hasComma = true;
+    if (item.text === ":" && depth === 0) hasField = true;
+    if (previous) flatLength += flatSeparatorLength(previous, item);
+    flatLength += item.text.length;
+    previous = item;
+  }
+  return false;
+}
+
+function isOpeningGroupToken(item: TokenItem, collectionDelimiterStarts: Set<number>): boolean {
+  return item.text === "(" || item.text === "[" || item.text === "{" ||
+    (item.text === "<" && collectionDelimiterStarts.has(item.token.span.start));
+}
+
+function isClosingGroupToken(item: TokenItem, collectionDelimiterStarts: Set<number>): boolean {
+  return item.text === ")" || item.text === "]" || item.text === "}" ||
+    (item.text === ">" && collectionDelimiterStarts.size > 0);
+}
+
+function matchingClose(open: string): string {
+  if (open === "(") return ")";
+  if (open === "[") return "]";
+  if (open === "<") return ">";
+  return "}";
+}
+
 function flatSeparatorLength(left: TokenItem, right: TokenItem): number {
   if (
     right.text === "]" || right.text === ")" || right.text === "," || right.text === "." ||
@@ -741,7 +894,7 @@ function flatSeparatorLength(left: TokenItem, right: TokenItem): number {
   return 1;
 }
 
-function pipeChainWouldBreak(writer: Writer, items: Item[], slashIndex: number): boolean {
+function pipeChainWouldBreak(writer: Writer, items: item[], slashIndex: number): boolean {
   const slash = items[slashIndex];
   if (slash?.kind !== "token" || slash.text !== "\\") return false;
 
@@ -766,7 +919,7 @@ function pipeChainWouldBreak(writer: Writer, items: Item[], slashIndex: number):
   return writer.currentColumn() + flatLength > 55 || writer.wouldOverflow(" ".repeat(flatLength));
 }
 
-function callChainWouldBreak(writer: Writer, items: Item[], dotIndex: number): boolean {
+function callChainWouldBreak(writer: Writer, items: item[], dotIndex: number): boolean {
   const dot = items[dotIndex];
   if (dot?.kind !== "token" || dot.text !== ".") return false;
 
@@ -813,7 +966,7 @@ function callChainWouldBreak(writer: Writer, items: Item[], dotIndex: number): b
       writer.wouldOverflow(" ".repeat(flatLength)));
 }
 
-function callChainStart(items: Item[], dotIndex: number): number {
+function callChainStart(items: item[], dotIndex: number): number {
   let startIndex = dotIndex;
   let backwardDepth = 0;
   for (let index = dotIndex - 1; index >= 0; index--) {
@@ -833,7 +986,7 @@ function callChainStart(items: Item[], dotIndex: number): number {
   return startIndex;
 }
 
-function binaryChainWouldBreak(writer: Writer, items: Item[], operatorIndex: number): boolean {
+function binaryChainWouldBreak(writer: Writer, items: item[], operatorIndex: number): boolean {
   const operator = items[operatorIndex];
   if (operator?.kind !== "token" || !binaryOperators.has(operator.text)) return false;
 

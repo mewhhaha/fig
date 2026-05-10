@@ -45,7 +45,7 @@ Doc comments attach only to the immediately following binding when there is no b
 join with `\n`; the leading `///` and at most one following space are stripped.
 
 ```fig
-/// Adds two values.
+/// Adds two Values.
 fn add(
   /// Left operand.
   a: i32,
@@ -57,17 +57,17 @@ fn add(
   sum
 }
 
-/// A generic point type.
-type fn point(
+/// a generic point type.
+type fn Point(
   /// Coordinate type.
-  A: type
+  a: type
 ) -> struct {
   /// Product shape.
   let Point = {
     /// Horizontal coordinate.
-    x: A,
+    x: a,
     /// Vertical coordinate.
-    y: A,
+    y: a,
   };
   struct(Point)
 }
@@ -92,12 +92,12 @@ Generated grammar/parser updates require `deno task codegen`.
 
 ## Source Files and Modules
 
-Write Fig files with `.fig` extension. A program is a sequence of declarations:
+Write Fig files with `.fig` extension. a program is a sequence of declarations:
 
 - `type fn` declarations for compile-time type functions.
 - `const` declarations for compile-time constants, dictionaries, capabilities, and imports.
 - `fn` or `pub fn` declarations for value functions.
-- Top-level `let` declarations for simple values.
+- Top-level `let` declarations for simple Values.
 
 Import modules with namespace aliases:
 
@@ -107,7 +107,7 @@ const local = @import("./local_module.fig");
 ```
 
 Imported declarations are qualified through the alias, including nested imports such as
-`std.array.layout.lane4_i32`. The alias is an ordinary namespace alias; it does not merge imported
+`std.array.Layout.lane4_i32`. The alias is an ordinary namespace alias; it does not merge imported
 names into the current scope. Duplicate aliases are rejected.
 
 Use destructured source imports only for exact top-level declarations:
@@ -121,10 +121,10 @@ right-hand sides.
 
 ## Names and Visibility
 
-- Type function names are lowercase, including type constructor references such as `pair(i32)`.
+- Type function names are lowercase, including type constructor references such as `Pair(i32)`.
 - Product constructor names are PascalCase and are introduced by `struct(Shape)`.
-- Runtime function names are lowercase and may be qualified as attached members, such as `point.eql`
-  or `box.map`.
+- Runtime function names are lowercase and may be qualified as attached members, such as `Point.eql`
+  or `Box.map`.
 - `pub fn` exports through the Wasm backend and must include an explicit return signature.
 - Non-public helper functions may omit `pub` but still need parseable parameter and return forms
   when used by the checker.
@@ -136,7 +136,7 @@ Use these literal forms:
 - Numbers: `42`, `42i32`, `1u32`, `1i64`, `1u64`, `1.0f32`, `1.0f64`.
 - Booleans: `true`, `false`.
 - Characters and strings: `'x'`, `"fig"`.
-- Fenced text: triple backticks, useful for WGSL shader source.
+- Fenced text: Triple backticks, useful for WGSL shader source.
 - Literal type tags: `#Tag`, `#field`, `#infixl`.
 - Tuple and repeat values: `[1, true]`, `[0; 4]`.
 - Target-typed collection literals: `<1, 2, 3>`, including spread such as `<0, ...rest>`.
@@ -160,7 +160,7 @@ Parameter forms include:
 - `name: Type`
 - `const name: Type` for static function/dictionary/type parameters.
 - `name: &(Type)` for call-scoped borrowed parameters.
-- Literal clauses such as `fn choose(1: i32) -> i32 { 10 }` ordered before broader clauses.
+- Literal clauses such as `fn Choose(1: i32) -> i32 { 10 }` ordered before broader clauses.
 - `_ : Type` placeholders.
 - Pattern identifiers for sum variants and tuple destructuring in supported clause contexts.
 
@@ -172,7 +172,7 @@ generated runtime parameters.
 Function types use `fn(...) -> Type`; const function parameters enable compile-time specialization:
 
 ```fig
-fn map4(const f: fn(x: i32) -> i32, xs: {4*i32}) -> {4*i32} {
+fn Map4(const f: fn(x: i32) -> i32, xs: {4*i32}) -> {4*i32} {
   [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
 }
 ```
@@ -184,7 +184,7 @@ Blocks contain `let` statements, local proof `const` declarations, and a final e
 ```fig
 pub fn main() -> i32 {
   let x = 1;
-  const Proof = eq(point);
+  const Proof = Eq(point);
   x + 1
 }
 ```
@@ -192,7 +192,7 @@ pub fn main() -> i32 {
 Supported expressions include:
 
 - Function calls: `f(x)`.
-- Field access: `point.x`.
+- Field access: `Point.x`.
 - Indexing: `xs[0]`.
 - Product construction: `Point {x: 1, y: 2}` with labeled, positioned, punned, spread, or static
   generated slots.
@@ -211,12 +211,12 @@ There is no `if`; use `match` on `bool`. There is no assignment statement; bind 
 
 ## Pattern Matching and Ordered Clauses
 
-Use `match` instead of `if`. A `match` expression has one scrutinee expression and ordered arms.
+Use `match` instead of `if`. a `match` expression has one scrutinee expression and ordered arms.
 Patterns support `_`, literals, lowercase bindings, PascalCase variant names, and variant payload
 deconstruction:
 
 ```fig
-fn unwrap_or(value: option(i32), fallback: i32) -> i32 {
+fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
   match value { Some(inner) => inner, None => fallback }
 }
 ```
@@ -239,14 +239,14 @@ over static values and types.
 Define concrete product and sum layouts with type functions:
 
 ```fig
-type fn point() -> struct {
+type fn Point() -> struct {
   let Point = {x: i32, y: i32};
   struct(Point)
 }
 
-type fn option(A: type) -> union {
+type fn Option(a: type) -> union {
   let None = {};
-  let Some = {value: A};
+  let Some = {value: a};
   union(None, Some)
 }
 ```
@@ -254,27 +254,27 @@ type fn option(A: type) -> union {
 Shape slots may be labeled or anonymous. Counted inline arrays use repeat syntax:
 
 ```fig
-type fn inline_array(N: count, A: type) -> type {
-  let InlineArray = {N*A};
+type fn InlineArray(n: count, a: type) -> type {
+  let InlineArray = {n*a};
   struct(InlineArray)
 }
 ```
 
-Indexing a fixed inline array with a literal is bounds-checked. Dynamic indexing requires an
-`index(N)` proof type matching the array length; otherwise use a checked helper that returns an
+Indexing a fixed inline array with a literal is bounds-Checked. Dynamic indexing requires an
+`Index(N)` proof type matching the array length; otherwise use a checked helper that returns an
 `option`.
 
 Tuple types use brackets, such as `[i32, bool]` and `[i32; 4]`. Shape and product types use braces.
-Borrowed and frozen types use `&(T)` and `#(T)`.
+Borrowed and frozen types use `&(t)` and `#(t)`.
 
 ## Type Functions
 
 Type functions run at compile time and return `type`, `struct`, `union`, or `operator`:
 
 ```fig
-type fn id() -> type { i32 }
-type fn pair(A: type, B: type) -> struct {
-  let Pair = {first: A, second: B};
+type fn Id() -> type { i32 }
+type fn Pair(a: type, b: type) -> struct {
+  let Pair = {first: a, second: b};
   struct(Pair)
 }
 ```
@@ -284,11 +284,11 @@ Parameter kinds include:
 - `type`
 - `count`
 - `const`
-- type constructors such as `type fn(A: type) -> type`
-- result-constrained constructors such as `type fn(A: type) -> struct`
+- type constructors such as `type fn(a: type) -> type`
+- result-constrained constructors such as `type fn(a: type) -> struct`
 
 Use PascalCase names for type parameters. Literal and wildcard clauses are allowed for ordered type
-function dispatch, for example `type fn choose(i32: type) -> type { bool }`.
+function dispatch, for example `type fn Choose(i32: type) -> type { bool }`.
 
 Inside type functions:
 
@@ -303,15 +303,15 @@ When choosing a type-function pattern:
 - If you intend to define a runtime data layout, write a `type fn`, bind a PascalCase shape, and
   return `struct(Shape)` or `union(...)`.
 - If you intend to require behavior on a type, write a contract `type fn` with `@require` and
-  attached members such as `T.eql`, `T.append`, or `T.map`.
+  attached members such as `t.eql`, `t.append`, or `t.map`.
 - If you intend generic runtime helpers with no runtime proof cost, pass `const _proof:
-  contract(T)` and call attached members through `T.member(...)`.
-- If you intend to abstract over a unary type constructor, accept `T: type fn(A: type) -> type`,
-  use values as `T(A)`, and reflect members on `T`.
-- If you intend type-directed construction or dispatch, pass the type as `const T` or
-  `const t: type`; avoid modeling types as runtime values.
-- If ordinary value parameters already determine the type, prefer inference. Pass `const T`
-  explicitly only for otherwise unpinned cases such as `empty(T)`, `pure(T, ...)`, or explicit
+  contract(t)` and call attached members through `t.member(...)`.
+- If you intend to abstract over a unary type constructor, accept `t: type fn(a: type) -> type`,
+  use values as `t(a)`, and reflect members on `t`.
+- If you intend type-directed construction or dispatch, pass the type as `const t` or
+  `const t: type`; avoid modeling types as runtime Values.
+- If ordinary value parameters already determine the type, prefer inference. Pass `const t`
+  explicitly only for otherwise unpinned cases such as `Empty(t)`, `pure(t, ...)`, or explicit
   static dispatch.
 - If you intend static layout/count specialization, use `const n: count`, `const a: type`, or
   another `const` parameter.
@@ -320,11 +320,11 @@ When choosing a type-function pattern:
 
 Use static builtins only with the `@` prefix. Current reflection helpers include:
 
-- Type predicates: `@type_is_product(T)`, `@type_has_slot(T, #field)`,
-  `@type_has_variant(T, #Some)`, `@type_variant_has_slot(T, #Some, #value)`,
-  `@type_has_member(T, #map)`.
-- Type lookup: `@type_slot_type(T, #field)`, `@type_member_type(T, #member)`, `@type_slots(T)`,
-  `@type_variants(T)`, `@type_variant_slots(T, #Variant)`.
+- Type predicates: `@type_is_product(t)`, `@type_has_slot(t, #field)`,
+  `@type_has_variant(t, #Some)`, `@type_variant_has_slot(t, #Some, #value)`,
+  `@type_has_member(t, #map)`.
+- Type lookup: `@type_slot_type(t, #field)`, `@type_member_type(t, #member)`, `@type_slots(t)`,
+  `@type_variants(t)`, `@type_variant_slots(t, #Variant)`.
 - Shape operations: `@shape_has_slot`, `@shape_slot`, `@shape_count`, `@shape_first_key`,
   `@shape_tail`, `@shape_pick`, `@shape_omit`, `@shape_intersect`, `@shape_difference`,
   `@shape_rename`, `@shape_map`, `@shape_map_with_key`, `@shape_filter`, `@shape_concat`.
@@ -338,24 +338,24 @@ must be labeled, and duplicate generated labels are rejected.
 Model typeclasses as ordinary type functions plus attached member functions:
 
 ```fig
-fn point.eql(a: point, b: point) -> bool { a.x == b.x }
+fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }
 
-type fn eq(T: type) -> type {
-  let Expected = fn(a: T, b: T) -> bool;
-  @require(@type_has_member(T, #eql), "Eq requires eql");
-  @require(@type_member_type(T, #eql) == Expected, "Eq.eql has wrong type");
-  T
+type fn Eq(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #eql), "Eq requires eql");
+  @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
+  t
 }
 ```
 
 Attached members use qualified function names, are discoverable through type reflection, and can be
-called statically as `T.map(...)` inside generic code. Local proof consts such as
-`const Mapper = functor(T);` are erased after they prove the contract.
+called statically as `t.map(...)` inside generic code. Local proof consts such as
+`const Mapper = Functor(t);` are erased after they prove the contract.
 
 Const dictionaries are product-shaped constants whose fields are function references:
 
 ```fig
-const point_eq: eq(point) = {eql: point.eql, neq: point.neq};
+const point_eq: Eq(point) = {eql: Point.eql, neq: Point.neq};
 ```
 
 Fields must match the annotated product shape, and slot values must be function references rather
@@ -369,7 +369,7 @@ Prefer ordinary Fig functions plus erased static contracts for functional abstra
 Use const function parameters for higher-order helpers. They specialize away at call sites:
 
 ```fig
-fn twice(value: A, const f: fn(x: A) -> A) -> A {
+fn twice(value: a, const f: fn(x: a) -> a) -> a {
   f(f(value))
 }
 
@@ -383,56 +383,56 @@ Use point-free helpers from `prelude.function` or `prelude.std` for small compos
 Define functor-like types by attaching a `map` member to a unary type constructor:
 
 ```fig
-type fn box(A: type) -> type {
-  let Box = {value: A};
+type fn Box(a: type) -> type {
+  let Box = {value: a};
   struct(Box)
 }
 
-fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
+fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
 fn inc(x: i32) -> i32 { x + 1 }
 
 pub fn main() -> i32 {
-  fmap(Box {value: 1}, inc, functor(box)).value
+  fmap(Box {value: 1}, inc, Functor(box)).value
 }
 ```
 
 Define monad-like types by attaching both `map` and `bind`:
 
 ```fig
-fn box.bind(v: box(A), const f: fn(x: A) -> box(B)) -> box(B) {
+fn Box.bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
   f(v.value)
 }
 
-fn wrap(x: i32) -> box(i32) {
+fn wrap(x: i32) -> Box(i32) {
   Box {value: x + 10}
 }
 
 pub fn main() -> i32 {
-  bind(fmap(Box {value: 1}, inc, functor(box)), wrap, monad(box)).value
+  bind(fmap(Box {value: 1}, inc, Functor(box)), wrap, Monad(box)).value
 }
 ```
 
 Define applicative-like types with `map`, `pure`, and `apply`:
 
 ```fig
-fn box.pure(value: A) -> box(A) { Box {value: value} }
-fn box.apply(v: box(fn(x: A) -> B), x: box(A)) -> box(B) { Box {value: v.value(x.value)} }
-fn proof(const _proof: applicative(box)) -> i32 { 0 }
+fn Box.pure(value: a) -> Box(a) { Box {value: value} }
+fn Box.apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) { Box {value: v.value(x.value)} }
+fn Proof(const _proof: Applicative(box)) -> i32 { 0 }
 ```
 
 Use semigroup/monoid patterns for append and empty operations on concrete types:
 
 ```fig
-fn point.append(a: point, b: point) -> point {
+fn Point.append(a: Point, b: Point) -> Point {
   Point {x: a.x + b.x, y: a.y + b.y}
 }
-fn point.empty() -> point { Point {x: 0, y: 0} }
+fn Point.empty() -> Point { Point {x: 0, y: 0} }
 
 pub fn main() -> i32 {
-  let total = append(point, semigroup(point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
+  let total = append(point, Semigroup(point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
   total.x + total.y
 }
 ```
@@ -440,14 +440,14 @@ pub fn main() -> i32 {
 Use `option` and `result` helpers for branchless success/failure pipelines:
 
 ```fig
-const option = @import("prelude.option");
+const option = @import("prelude.Option");
 
 fn inc(x: i32) -> i32 { x + 1 }
-fn next(x: i32) -> option.core.option(i32) { option.some(x + 1) }
+fn next(x: i32) -> Option.core.Option(i32) { Option.some(x + 1) }
 
 pub fn main() -> i32 {
-  let maybe = option.option_and_then(option.option_map(option.some(1), inc), next);
-  option.option_unwrap_or(maybe, 0)
+  let maybe = Option.option_and_then(Option.option_map(Option.some(1), inc), next);
+  Option.option_unwrap_or(maybe, 0)
 }
 ```
 
@@ -461,7 +461,7 @@ fn inc(x: i32) -> i32 { x + 1 }
 fn sum(acc: i32, x: i32) -> i32 { acc + x }
 
 pub fn main() -> i32 {
-  let xs: array.layout.lane4_i32 = [1, 2, 3, 4];
+  let xs: array.Layout.lane4_i32 = [1, 2, 3, 4];
   let ys = array.map4_i32(inc, xs);
   array.fold4_i32(sum, 0, ys)
 }
@@ -473,8 +473,8 @@ Functional operator forms lower to attached members:
 ```fig
 const merge = @import("prelude.std");
 
-pub fn mapped() -> box(i32) { inc <$> Box {value: 1} }
-pub fn bound() -> box(i32) { Box {value: 1} >>= wrap }
+pub fn mapped() -> Box(i32) { inc <$> Box {value: 1} }
+pub fn bound() -> Box(i32) { Box {value: 1} >>= wrap }
 ```
 
 When implementing new abstractions, keep the contract as a `type fn`, attach runtime behavior with
@@ -496,8 +496,8 @@ Runtime operator calls are resolved through visible operator descriptors. Define
 type function returning `operator`:
 
 ```fig
-type fn op_add(T: type) -> operator {
-  operator(#infixl, 60, "+", T.add)
+type fn OpAdd(t: type) -> operator {
+  operator(#infixl, 60, "+", t.add)
 }
 ```
 
@@ -507,7 +507,7 @@ usually `#infix`, `#infixl`, or `#infixr`. The prelude exposes common operator d
 
 ## Ownership and Forking
 
-Fig tracks moves for values. Passing a value to a function consumes it unless the operation is known
+Fig tracks moves for Values. Passing a value to a function consumes it unless the operation is known
 to borrow it. Reusing a moved local is rejected.
 
 Use `&value` only for a call-scoped borrow into an `&(Type)` parameter:
@@ -533,7 +533,7 @@ also uses multi-bind:
 let first, second = make_pair();
 ```
 
-The arity must match the flattened product result.
+The arity must match the flattened product Result.
 
 ## Effects and Capabilities
 
@@ -554,12 +554,12 @@ The backend targets WebAssembly and supports explicit memory tokens and pointer 
 wrappers use normal Fig functions whose body is a compiler primitive:
 
 ```fig
-fn memory.load_i32(mem: memory, p: ptr(i32)) -> i32 { @memory_load_i32(mem, p) }
-fn memory.store_i32(mem: memory, p: ptr(i32), value: i32) -> memory {
+fn memory.load_i32(mem: memory, p: Ptr(i32)) -> i32 { @memory_load_i32(mem, p) }
+fn memory.store_i32(mem: memory, p: Ptr(i32), value: i32) -> memory {
   @memory_store_i32(mem, p, value)
 }
-fn ptr.from_i32(addr: i32) -> ptr(A) { @ptr_from_i32(addr) }
-fn ptr.add(p: ptr(A), bytes: i32) -> ptr(A) { @ptr_add(p, bytes) }
+fn Ptr.from_i32(addr: i32) -> Ptr(a) { @ptr_from_i32(addr) }
+fn Ptr.add(p: Ptr(a), bytes: i32) -> Ptr(a) { @ptr_add(p, bytes) }
 ```
 
 Loads borrow the memory token; stores consume and return a new memory token. Lane intrinsics such as
@@ -589,14 +589,14 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
 
 - `prelude.core`: `eq`, `semigroup`, `monoid`, `copyable`, `option`, `result`, tuples, `index`,
   `ptr`, memory helpers.
-- `prelude.layout`: scalar, lane, tile, matrix, pointer-oriented layout aliases.
-- `prelude.array_static`: fixed `lane4_i32` helpers, map/zip/fold/reduce, checked get, bounds, range
+- `prelude.layout`: Scalar, lane, tile, matrix, pointer-oriented layout aliases.
+- `prelude.array_static`: Fixed `lane4_i32` helpers, map/zip/fold/reduce, checked get, bounds, range
   iterators, compact arrays, and iterator map/filter/fold/collect.
 - `prelude.function`: `functor`, `applicative`, `monad`, `fmap`, `bind`, `pipe`, `flip`.
 - `prelude.operators`: common operator descriptors.
 - `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.bool`, `prelude.num`,
   `prelude.order`, and `prelude.schedule`.
-- `prelude.geometry2d`: fixed 2D vector, color, vertex, quad, and geometry helpers.
+- `prelude.geometry2d`: Fixed 2D vector, color, vertex, quad, and geometry helpers.
 
 Prelude modules are pure and do not declare host capabilities. Heap-backed lists, growable vectors,
 allocation-backed append, `push`, `pop`, and `reserve` are intentionally absent.
@@ -612,4 +612,4 @@ compiler shader manifest.
 
 Use `type fn` for type-level computation, `match` for branching, attached members for namespaced
 operations, `@import` for modules, and `@capability` for host imports. Model dictionaries and
-typeclass-like evidence as ordinary `type fn` product builders plus `const` values.
+typeclass-like evidence as ordinary `type fn` product builders plus `const` Values.

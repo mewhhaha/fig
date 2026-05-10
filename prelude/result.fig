@@ -1,33 +1,33 @@
 const core = @import("prelude.core");
 
-fn ok(value: A) -> core.result(A, E) {
+fn ok(value: a) -> core.Result(a, e) {
   value
 }
 
-fn err(error: E) -> core.result(A, E) {
+fn err(error: e) -> core.Result(a, e) {
   error
 }
 
-fn result_is_ok(value: core.result(A, E)) -> bool {
+fn result_is_ok(value: core.Result(a, e)) -> bool {
   match value { Ok => true, Err => false }
 }
 
-fn result_is_err(value: core.result(A, E)) -> bool {
+fn result_is_err(value: core.Result(a, e)) -> bool {
   match value { Ok => false, Err => true }
 }
 
-fn result_unwrap_or(value: core.result(A, E), fallback: A) -> A {
+fn result_unwrap_or(value: core.Result(a, e), fallback: a) -> a {
   match value { Ok(inner) => inner, Err => fallback }
 }
 
-fn result_map(value: core.result(A, E), const f: fn(x: A) -> B) -> core.result(B, E) {
+fn result_map(value: core.Result(a, e), const f: fn(x: a) -> b) -> core.Result(b, e) {
   match value { Ok(inner) => ok(f(inner)), Err(error) => err(error) }
 }
 
-fn result_map_err(value: core.result(A, E), const f: fn(x: E) -> F) -> core.result(A, F) {
+fn result_map_err(value: core.Result(a, e), const f: fn(x: e) -> f) -> core.Result(a, f) {
   match value { Ok(inner) => ok(inner), Err(error) => err(f(error)) }
 }
 
-fn result_and_then(value: core.result(A, E), const f: fn(x: A) -> core.result(B, E)) -> core.result(B, E) {
+fn result_and_then(value: core.Result(a, e), const f: fn(x: a) -> core.Result(b, e)) -> core.Result(b, e) {
   match value { Ok(inner) => f(inner), Err(error) => err(error) }
 }

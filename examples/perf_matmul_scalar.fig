@@ -1,10 +1,10 @@
-type fn inline_array(N: count, A: type) -> type {
-  let InlineArray = {N*A};
+type fn InlineArray(n: count, a: type) -> type {
+  let InlineArray = {n*a};
   struct(InlineArray)
 }
 
-type fn mat4_i32() -> type {
-  inline_array(16, i32)
+type fn Mat4I32() -> type {
+  InlineArray(16, i32)
 }
 
 pub fn main(
@@ -16,7 +16,7 @@ pub fn main(
   b01: i32, b11: i32, b21: i32, b31: i32,
   b02: i32, b12: i32, b22: i32, b32: i32,
   b03: i32, b13: i32, b23: i32, b33: i32
-) -> mat4_i32 {
+) -> Mat4I32 {
   <
     (a00 * b00) + (a01 * b10) + (a02 * b20) + (a03 * b30),
     (a00 * b01) + (a01 * b11) + (a02 * b21) + (a03 * b31),

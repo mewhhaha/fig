@@ -122,7 +122,8 @@ async function resolveSourceImports(
   async function mergeImports(program: Program): Promise<Program> {
     const importedPrograms: Program[] = [];
     const aliasedImports: { alias: string; program: Program }[] = [];
-    const destructuredImports: { alias: string; sourceImport: SourceImport; program: Program }[] = [];
+    const destructuredImports: { alias: string; sourceImport: SourceImport; program: Program }[] =
+      [];
     const aliases = new Set<string>();
     const reservedNames = new Set(program.declarations.map(declarationName));
     let hiddenImportIndex = 0;
@@ -168,10 +169,15 @@ async function resolveSourceImports(
           sourceImport: item,
           program: imported,
         });
-      }
-      else importedPrograms.push(imported);
+      } else importedPrograms.push(imported);
     }
-    return mergePrograms(importedPrograms, aliasedImports, destructuredImports, program, diagnostics);
+    return mergePrograms(
+      importedPrograms,
+      aliasedImports,
+      destructuredImports,
+      program,
+      diagnostics,
+    );
   }
 
   const merged = await mergeImports(root);
@@ -246,7 +252,9 @@ function destructureImportedDeclarations(
       });
       continue;
     }
-    selected.push(unqualifiedSelectedDeclaration(qualifyDeclaration(decl, alias, names), binding.name));
+    selected.push(
+      unqualifiedSelectedDeclaration(qualifyDeclaration(decl, alias, names), binding.name),
+    );
   }
   return [...hiddenDecls, ...selected];
 }
@@ -294,7 +302,11 @@ function qualifyImportedDeclarations(declarations: Declaration[], alias: string)
 
 function collectDeclarationNames(decl: Declaration): string[] {
   if (decl.kind !== "type") return [decl.name];
-  return [decl.name, ...collectTypeBlockNames(decl.body), ...(decl.clauses ?? []).flatMap(collectDeclarationNames)];
+  return [
+    decl.name,
+    ...collectTypeBlockNames(decl.body),
+    ...(decl.clauses ?? []).flatMap(collectDeclarationNames),
+  ];
 }
 
 function collectTypeBlockNames(block: TypeBlock): string[] {
@@ -332,11 +344,11 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
   });
 }
 
-function qualifyConstLike<T extends ConstDecl | LetDecl>(
-  decl: T,
+function qualifyConstLike<t extends ConstDecl | LetDecl>(
+  decl: t,
   alias: string,
   names: Set<string>,
-): T {
+): t {
   return withMeta(decl, {
     ...decl,
     name: qualifyName(decl.name, alias),
@@ -359,11 +371,13 @@ function qualifyTypeDecl(decl: TypeDecl, alias: string, names: Set<string>): Typ
 function qualifyTypeBlock(block: TypeBlock, alias: string, names: Set<string>): TypeBlock {
   return withMeta(block, {
     kind: "type_block",
-    statements: block.statements.map((stmt) => withMeta(stmt, {
-      ...stmt,
-      name: qualifyName(stmt.name, alias),
-      value: qualifyTypeExpr(stmt.value, alias, names),
-    })),
+    statements: block.statements.map((stmt) =>
+      withMeta(stmt, {
+        ...stmt,
+        name: qualifyName(stmt.name, alias),
+        value: qualifyTypeExpr(stmt.value, alias, names),
+      })
+    ),
     expr: block.expr ? qualifyTypeExpr(block.expr, alias, names) : undefined,
   });
 }
@@ -402,15 +416,19 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
       return withMeta(expr, {
         ...expr,
         value: qualifyExpr(expr.value, alias, names),
-        arms: expr.arms.map((arm) => withMeta(arm, { ...arm, value: qualifyExpr(arm.value, alias, names) })),
+        arms: expr.arms.map((arm) =>
+          withMeta(arm, { ...arm, value: qualifyExpr(arm.value, alias, names) })
+        ),
       });
     case "shape":
       return withMeta(expr, {
         ...expr,
-        slots: expr.slots.map((slot) => withMeta(slot, {
-          ...slot,
-          value: qualifyExpr(slot.value, alias, names),
-        })),
+        slots: expr.slots.map((slot) =>
+          withMeta(slot, {
+            ...slot,
+            value: qualifyExpr(slot.value, alias, names),
+          })
+        ),
       });
     case "static_for_slots":
       return withMeta(expr, {
@@ -422,10 +440,12 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
       return withMeta(expr, {
         ...expr,
         constructor: qualifyReference(expr.constructor, alias, names),
-        slots: expr.slots.map((slot) => withMeta(slot, {
-          ...slot,
-          value: qualifyExpr(slot.value, alias, names),
-        })),
+        slots: expr.slots.map((slot) =>
+          withMeta(slot, {
+            ...slot,
+            value: qualifyExpr(slot.value, alias, names),
+          })
+        ),
       });
     case "range":
       return withMeta(expr, {
@@ -456,19 +476,6 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
           if (stmt.kind === "fork_let") {
             return withMeta(stmt, { ...stmt, source: qualifyReference(stmt.source, alias, names) });
           }
-          if (stmt.kind === "static_for") {
-            return withMeta(stmt, {
-              ...stmt,
-              source: qualifyStaticForSource(stmt.source, alias, names),
-              body: stmt.body.map((inner) =>
-                inner.kind === "let" || inner.kind === "destructure_let"
-                  ? withMeta(inner, { ...inner, value: qualifyExpr(inner.value, alias, names) })
-                  : inner.kind === "proof_const"
-                  ? withMeta(inner, { ...inner, value: qualifyTypeExpr(inner.value, alias, names) })
-                  : inner
-              ),
-            });
-          }
           if (stmt.kind === "proof_const") {
             return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
           }
@@ -498,10 +505,12 @@ function qualifyTypeExpr(expr: TypeExpr, alias: string, names: Set<string>): Typ
       return withMeta(expr, {
         ...expr,
         value: qualifyTypeExpr(expr.value, alias, names),
-        arms: expr.arms.map((arm) => withMeta(arm, {
-          pattern: qualifyTypePattern(arm.pattern, alias, names),
-          value: qualifyTypeExpr(arm.value, alias, names),
-        })),
+        arms: expr.arms.map((arm) =>
+          withMeta(arm, {
+            pattern: qualifyTypePattern(arm.pattern, alias, names),
+            value: qualifyTypeExpr(arm.value, alias, names),
+          })
+        ),
       });
     case "type_binary":
       return withMeta(expr, {
@@ -522,6 +531,7 @@ function qualifyTypeExpr(expr: TypeExpr, alias: string, names: Set<string>): Typ
     case "type_static_ref":
     case "type_bool":
     case "type_number":
+    case "type_char":
     case "type_string":
     case "type_literal":
       return expr;
@@ -544,11 +554,13 @@ function qualifyStaticForSource(
 
 function qualifyTypeShape(shape: TypeShape, alias: string, names: Set<string>): TypeShape {
   return withMeta(shape, {
-    slots: shape.slots.map((slot) => withMeta(slot, {
-      ...slot,
-      type: qualifyTypeExpr(slot.type, alias, names),
-      repeat: slot.repeat ? qualifyTypeCountExpr(slot.repeat, alias, names) : undefined,
-    })),
+    slots: shape.slots.map((slot) =>
+      withMeta(slot, {
+        ...slot,
+        type: qualifyTypeExpr(slot.type, alias, names),
+        repeat: slot.repeat ? qualifyTypeCountExpr(slot.repeat, alias, names) : undefined,
+      })
+    ),
     members: shape.members?.map((member) => qualifyTypeMember(member, alias, names)),
   });
 }
@@ -609,7 +621,7 @@ function qualifyTypePattern(pattern: TypePattern, alias: string, names: Set<stri
     : pattern;
 }
 
-function withMeta<T extends object>(source: unknown, target: T): T {
+function withMeta<t extends object>(source: unknown, target: t): t {
   return copyAstMetadata(target, source);
 }
 

@@ -22,23 +22,23 @@ dispatching internally; source code should keep it.
 ## Type Reflection
 
 These builtins take a type value as their first argument and run during type evaluation. Most also
-work during const evaluation when their arguments are compile-time values.
+work during const evaluation when their arguments are compile-time Values.
 
 | Builtin                  | Arguments                                                      | Returns                                     |
 | ------------------------ | -------------------------------------------------------------- | ------------------------------------------- |
-| `@type_is_product`       | `T: type`                                                      | `bool`                                      |
-| `@type_is_sum`           | `T: type`                                                      | `bool`                                      |
-| `@type_is_alias`         | `T: type`                                                      | `bool`                                      |
-| `@type_has_slot`         | `T: type`, `slot: #literal/string`                             | `bool`                                      |
-| `@type_slot_type`        | `T: type`, `slot: #literal/string`                             | slot `type`, or diagnostic                  |
-| `@type_has_member`       | `T: type`, `member: #literal/string`                           | `bool`                                      |
-| `@type_member_type`      | `T: type`, `member: #literal/string`                           | member function `type`, or diagnostic       |
-| `@type_has_variant`      | `T: type`, `variant: #literal/string`                          | `bool`                                      |
-| `@type_variant_has_slot` | `T: type`, `variant: #literal/string`, `slot: #literal/string` | `bool`                                      |
-| `@type_slots`            | `T: type`                                                      | shape of product slots                      |
-| `@type_slot_count`       | `T: type`                                                      | numeric slot count; non-products return `0` |
-| `@type_variant_slots`    | `T: type`, `variant: #literal/string`                          | shape of variant slots                      |
-| `@type_variants`         | `T: type`                                                      | shape describing variants                   |
+| `@type_is_product`       | `t: type`                                                      | `bool`                                      |
+| `@type_is_sum`           | `t: type`                                                      | `bool`                                      |
+| `@type_is_alias`         | `t: type`                                                      | `bool`                                      |
+| `@type_has_slot`         | `t: type`, `slot: #literal/string`                             | `bool`                                      |
+| `@type_slot_type`        | `t: type`, `slot: #literal/string`                             | slot `type`, or diagnostic                  |
+| `@type_has_member`       | `t: type`, `member: #literal/string`                           | `bool`                                      |
+| `@type_member_type`      | `t: type`, `member: #literal/string`                           | member function `type`, or diagnostic       |
+| `@type_has_variant`      | `t: type`, `variant: #literal/string`                          | `bool`                                      |
+| `@type_variant_has_slot` | `t: type`, `variant: #literal/string`, `slot: #literal/string` | `bool`                                      |
+| `@type_slots`            | `t: type`                                                      | shape of product slots                      |
+| `@type_slot_count`       | `t: type`                                                      | numeric slot count; non-products return `0` |
+| `@type_variant_slots`    | `t: type`, `variant: #literal/string`                          | shape of variant slots                      |
+| `@type_variants`         | `t: type`                                                      | shape describing variants                   |
 
 ## Shape Builtins
 
@@ -75,12 +75,12 @@ The compiler records shader manifest entries when these helpers are evaluated.
 
 These builtins are compiler-recognized expression primitives used by the `prelude.layout`
 `inline_array` helpers. They generate fixed structural product slots during const specialization;
-source code should prefer the public `inline_array.tabulate`, `tabulate_with`, `imap`,
+source code should prefer the public `InlineArray.tabulate`, `tabulate_with`, `imap`,
 `imap_with_state`, `fill`, `map`, `set`, and `update` APIs.
 
 | Builtin                         | Purpose                                      |
 | ------------------------------- | -------------------------------------------- |
-| `@inline_array_tabulate`        | build each slot from its `core.index(N)`     |
+| `@inline_array_tabulate`        | build each slot from its `core.Index(N)`     |
 | `@inline_array_tabulate_with`   | tabulate with an explicit state value        |
 | `@inline_array_map`             | map slots with the current value             |
 | `@inline_array_imap`            | map slots with index and current value       |

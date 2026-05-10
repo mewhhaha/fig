@@ -1,69 +1,69 @@
-fn identity(x: A) -> A {
+fn identity(x: a) -> a {
   x
 }
 
-fn constant(value: A, _ignored: B) -> A {
+fn constant(value: a, _ignored: b) -> a {
   value
 }
 
-fn compose(const f: fn(x: B) -> C, const g: fn(x: A) -> B, value: A) -> C {
+fn compose(const f: fn(x: b) -> c, const g: fn(x: a) -> b, value: a) -> c {
   f(g(value))
 }
 
-fn pipe(value: A, const f: fn(x: A) -> B) -> B {
+fn pipe(value: a, const f: fn(x: a) -> b) -> b {
   f(value)
 }
 
-fn apply_to(value: A, const f: fn(x: A) -> B) -> B {
+fn apply_to(value: a, const f: fn(x: a) -> b) -> b {
   f(value)
 }
 
-fn flip(const f: fn(a: A, b: B) -> C, b: B, a: A) -> C {
+fn flip(const f: fn(a: a, b: b) -> c, b: b, a: a) -> c {
   f(a, b)
 }
 
-type fn functor(T: type fn(A: type) -> type) -> type {
-  let Expected = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
-  @require(@type_has_member(T, #map), "Functor requires map");
-  @require(@type_member_type(T, #map) == Expected, "Functor.map has wrong type");
-  T
+type fn Functor(t: type fn(a: type) -> type) -> type {
+  let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
+  @require(@type_has_member(t, #map), "Functor requires map");
+  @require(@type_member_type(t, #map) == Expected, "Functor.map has wrong type");
+  t
 }
 
-fn fmap(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
-  T.map(f, v)
+fn fmap(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
+  t.map(f, v)
 }
 
-type fn applicative(T: type fn(A: type) -> type) -> type {
-  let Map = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
-  let Pure = fn(value: A) -> T(A);
-  let Apply = fn(v: T(fn(x: A) -> B), x: T(A)) -> T(B);
-  @require(@type_has_member(T, #map), "Applicative requires map");
-  @require(@type_member_type(T, #map) == Map, "Applicative.map has wrong type");
-  @require(@type_has_member(T, #pure), "Applicative requires pure");
-  @require(@type_has_member(T, #apply), "Applicative requires apply");
-  @require(@type_member_type(T, #pure) == Pure, "Applicative.pure has wrong type");
-  @require(@type_member_type(T, #apply) == Apply, "Applicative.apply has wrong type");
-  T
+type fn Applicative(t: type fn(a: type) -> type) -> type {
+  let Map = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
+  let Pure = fn(value: a) -> t(a);
+  let Apply = fn(v: t(fn(x: a) -> b), x: t(a)) -> t(b);
+  @require(@type_has_member(t, #map), "Applicative requires map");
+  @require(@type_member_type(t, #map) == Map, "Applicative.map has wrong type");
+  @require(@type_has_member(t, #pure), "Applicative requires pure");
+  @require(@type_has_member(t, #apply), "Applicative requires apply");
+  @require(@type_member_type(t, #pure) == Pure, "Applicative.pure has wrong type");
+  @require(@type_member_type(t, #apply) == Apply, "Applicative.apply has wrong type");
+  t
 }
 
-fn pure(const T, value: A, const _proof: applicative(T)) -> T(A) {
-  T.pure(value)
+fn pure(const t, value: a, const _proof: Applicative(t)) -> t(a) {
+  t.pure(value)
 }
 
-fn apply(v: T(fn(x: A) -> B), x: T(A), const _proof: applicative(T)) -> T(B) {
-  T.apply(v, x)
+fn apply(v: t(fn(x: a) -> b), x: t(a), const _proof: Applicative(t)) -> t(b) {
+  t.apply(v, x)
 }
 
-type fn monad(T: type fn(A: type) -> type) -> type {
-  let Map = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
-  let Bind = fn(v: T(A), const f: fn(x: A) -> T(B)) -> T(B);
-  @require(@type_has_member(T, #map), "Monad requires map");
-  @require(@type_member_type(T, #map) == Map, "Monad.map has wrong type");
-  @require(@type_has_member(T, #bind), "Monad requires bind");
-  @require(@type_member_type(T, #bind) == Bind, "Monad.bind has wrong type");
-  T
+type fn Monad(t: type fn(a: type) -> type) -> type {
+  let Map = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
+  let Bind = fn(v: t(a), const f: fn(x: a) -> t(b)) -> t(b);
+  @require(@type_has_member(t, #map), "Monad requires map");
+  @require(@type_member_type(t, #map) == Map, "Monad.map has wrong type");
+  @require(@type_has_member(t, #bind), "Monad requires bind");
+  @require(@type_member_type(t, #bind) == Bind, "Monad.bind has wrong type");
+  t
 }
 
-fn bind(v: T(A), const f: fn(x: A) -> T(B), const _proof: monad(T)) -> T(B) {
-  T.bind(v, f)
+fn bind(v: t(a), const f: fn(x: a) -> t(b), const _proof: Monad(t)) -> t(b) {
+  t.bind(v, f)
 }

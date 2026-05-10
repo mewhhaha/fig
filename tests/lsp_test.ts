@@ -71,7 +71,7 @@ Deno.test("LSP analysis recovers known call return type after bad argument", asy
   cache.open(
     uri,
     1,
-    "fn id(x: i32) -> i32 { x }\npub fn main() -> i32 { let y = id($); y }",
+    "fn Id(x: i32) -> i32 { x }\npub fn main() -> i32 { let y = Id($); y }",
   );
   const result = await cache.reanalyze(uri);
   assert(result);
@@ -90,8 +90,8 @@ Deno.test("LSP analysis recovers product slot facts after bad constructor slot",
     uri,
     1,
     [
-      "type fn point() -> struct { let Point = {x: i32, y: i32}; struct(Point) }",
-      "pub fn main() -> i32 { let p: point = Point {x: $, y: 1}; p.x }",
+      "type fn Point() -> struct { let Point = {x: i32, y: i32}; struct(Point) }",
+      "pub fn main() -> i32 { let p: Point = Point {x: $, y: 1}; p.x }",
     ].join("\n"),
   );
   const result = await cache.reanalyze(uri);
@@ -112,8 +112,8 @@ Deno.test("LSP analysis recovers projected field type after bad call argument", 
     uri,
     1,
     [
-      "type fn point() -> struct { let Point = {x: i32, y: i32}; struct(Point) }",
-      "fn make_point(x: i32, y: i32) -> point { Point {x: x, y: y} }",
+      "type fn Point() -> struct { let Point = {x: i32, y: i32}; struct(Point) }",
+      "fn make_point(x: i32, y: i32) -> Point { Point {x: x, y: y} }",
       "pub fn main() -> i32 { let tmp = make_point($, 1); let y = tmp.x; y }",
     ].join("\n"),
   );
@@ -138,7 +138,7 @@ Deno.test("LSP analysis checks pipe-bind body against annotated result after bad
   cache.open(
     uri,
     1,
-    "fn bad(x: i32) -> i32 { x }\npub fn main() -> i32 { let y: i32 = bad($) \\value -> 1; let z = y; z }",
+    "fn Bad(x: i32) -> i32 { x }\npub fn main() -> i32 { let y: i32 = Bad($) \\value -> 1; let z = y; z }",
   );
   const result = await cache.reanalyze(uri);
   assert(result);
@@ -192,11 +192,11 @@ Deno.test("LSP diagnostics use compile-time caller spans", async () => {
     uri,
     1,
     `
-      type fn point() { let Point = {x: i32, y: i32}; struct(Point) }
-      type fn eq(T: type) {
-        @require(@type_has_member(T, #eql), "Eq requires eql");
+      type fn Point() { let Point = {x: i32, y: i32}; struct(Point) }
+      type fn Eq(t: type) {
+        @require(@type_has_member(t, #eql), "Eq requires eql");
       }
-      fn same(proof: eq(point)) -> bool { true }
+      fn same(proof: Eq(point)) -> bool { true }
     `,
   );
   const result = await cache.reanalyze(uri);
@@ -208,6 +208,60 @@ Deno.test("LSP diagnostics use compile-time caller spans", async () => {
     JSON.stringify(diagnostic.range),
   );
   assertEquals(diagnostic.range.start.line, 5);
+});
+
+Deno.test("LSP diagnostics use compile-time builtin argument spans", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const source = [
+    "type fn Bad(a: type) -> type {",
+    "  let Count = @shape_count(a);",
+    "  let Out = {Count*i32};",
+    "  struct(Out)",
+    "}",
+    "pub fn f(x: Bad(i32)) -> i32 { 0 }",
+  ].join("\n");
+  const cache = new AnalysisCache();
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+  const diagnostic = result.diagnostics.find((item) => item.code === "type.shape_builtin_arg");
+  assert(diagnostic);
+  const offset = source.indexOf("@shape_count(a)") + "@shape_count(".length;
+  assertEquals(diagnostic.range.start, new PositionMapper(source).positionAt(offset));
+});
+
+Deno.test("LSP diagnostics use const evaluation argument spans", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const source = [
+    "const bad = shape_slot({x: i32}, #missing);",
+    "pub fn main() -> i32 { 0 }",
+  ].join("\n");
+  const cache = new AnalysisCache();
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+  const diagnostic = result.diagnostics.find((item) => item.code === "type.unknown_shape_slot");
+  assert(diagnostic);
+  assertEquals(
+    diagnostic.range.start,
+    new PositionMapper(source).positionAt(source.indexOf("#missing")),
+  );
+});
+
+Deno.test("LSP diagnostics use const parameter argument spans", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const source = [
+    "fn needs_type(const value: type, x: i32) -> i32 { x }",
+    "fn Bad(runtime_dict: i32) -> i32 { needs_type(runtime_dict, 1) }",
+  ].join("\n");
+  const cache = new AnalysisCache();
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+  const diagnostic = result.diagnostics.find((item) => item.code === "const.static_param_arg");
+  assert(diagnostic);
+  const offset = source.indexOf("needs_type(runtime_dict") + "needs_type(".length;
+  assertEquals(diagnostic.range.start, new PositionMapper(source).positionAt(offset));
 });
 
 Deno.test("LSP code actions convert nested calls to pipe-bind pipelines", async () => {
@@ -223,10 +277,13 @@ Deno.test("LSP code actions convert nested calls to pipe-bind pipelines", async 
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const actions = codeActions(result, new PositionMapper(source).range(
-    source.indexOf("inc(1)"),
-    source.indexOf("inc(1)"),
-  ));
+  const actions = codeActions(
+    result,
+    new PositionMapper(source).range(
+      source.indexOf("inc(1)"),
+      source.indexOf("inc(1)"),
+    ),
+  );
   const action = actions.find((item) => item.title === "Convert nested call to pipe-bind pipeline");
   assert(action);
   assertEquals(action.edit?.changes[uri]?.[0].newText, "inc(1) \\$ -> add($, 2) \\$ -> wrap($)");
@@ -247,10 +304,13 @@ Deno.test("LSP code actions combine nested matches into tuple match", async () =
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const actions = codeActions(result, new PositionMapper(source).range(
-    source.indexOf("match a"),
-    source.indexOf("match a"),
-  ));
+  const actions = codeActions(
+    result,
+    new PositionMapper(source).range(
+      source.indexOf("match a"),
+      source.indexOf("match a"),
+    ),
+  );
   const action = actions.find((item) => item.title === "Combine nested matches into tuple match");
   assert(action);
   assertEquals(
@@ -380,7 +440,11 @@ Deno.test("LSP rename edits imported declaration and importer references", async
   const rootUri = pathToUri("/tmp/project/main.fig");
   const importedUri = pathToUri("/tmp/project/math.fig");
   const cache = new AnalysisCache();
-  cache.open(importedUri, 1, "fn add_one(x: i32) -> i32 { x + 1 }\nfn local() -> i32 { add_one(1) }");
+  cache.open(
+    importedUri,
+    1,
+    "fn add_one(x: i32) -> i32 { x + 1 }\nfn local() -> i32 { add_one(1) }",
+  );
   cache.open(
     rootUri,
     1,
@@ -393,6 +457,69 @@ Deno.test("LSP rename edits imported declaration and importer references", async
   assert(edit);
   assertEquals(edit.changes[importedUri]?.length, 2);
   assertEquals(edit.changes[rootUri]?.length, 1);
+});
+
+Deno.test("LSP definitions resolve imported and qualified targets", async () => {
+  const rootUri = pathToUri("/tmp/project/main.fig");
+  const importedUri = pathToUri("/tmp/project/math.fig");
+  const cache = new AnalysisCache();
+  const imported = "fn add_one(x: i32) -> i32 { x + 1 }\nfn local() -> i32 { add_one(1) }";
+  const source =
+    'const math = @import("./math.fig");\npub fn main() -> i32 { add_one(1) + math.local() }';
+  cache.open(importedUri, 1, imported);
+  cache.open(rootUri, 1, source);
+  const result = await cache.reanalyze(rootUri);
+  assert(result);
+
+  const unqualified = definitionAt(result, positionIn(source, "add_one(1)", 1))[0];
+  assertEquals(unqualified?.uri, importedUri);
+  assertEquals(
+    unqualified?.range.start,
+    new PositionMapper(imported).positionAt(imported.indexOf("add_one")),
+  );
+
+  const qualifiedPrefix = definitionAt(result, positionIn(source, "math.local", 1))[0];
+  assertEquals(qualifiedPrefix?.uri, rootUri);
+  assertEquals(
+    qualifiedPrefix?.range.start,
+    new PositionMapper(source).positionAt(source.indexOf("math")),
+  );
+
+  const qualifiedMember = definitionAt(
+    result,
+    positionIn(source, "math.local", "math.".length + 1),
+  )[0];
+  assertEquals(qualifiedMember?.uri, importedUri);
+  assertEquals(
+    qualifiedMember?.range.start,
+    new PositionMapper(imported).positionAt(imported.indexOf("local")),
+  );
+});
+
+Deno.test("LSP definitions prefer pipeline binders over same-named params", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "type fn World() -> struct { let World = {count: i32}; struct(World) }",
+    "fn step(value: World) -> World { World {count: value.count + 1} }",
+    "pub fn main(seed: World) -> World {",
+    "  seed",
+    "    \\value -> step(value)",
+    "}",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const definition = definitionAt(
+    result,
+    positionIn(source, "\\value -> step(value)", "\\value -> step(".length),
+  )[0];
+  assertEquals(definition?.uri, uri);
+  assertEquals(
+    definition?.range.start,
+    new PositionMapper(source).positionAt(source.indexOf("\\value") + 1),
+  );
 });
 
 Deno.test("LSP rename reads unopened imported files", async () => {
@@ -502,9 +629,11 @@ Deno.test("LSP hover renders capability signatures and inferred let results firs
   assert(result);
 
   const capabilityHover = hoverAt(result, { line: 0, character: 7 });
-  assert(capabilityHover?.contents.value.startsWith(
-    "```fig\nconst clock: fn() -> i32 !{time}\n```",
-  ));
+  assert(
+    capabilityHover?.contents.value.startsWith(
+      "```fig\nconst clock: fn() -> i32 !{time}\n```",
+    ),
+  );
 
   const nowHover = hoverAt(result, { line: 2, character: 7 });
   assert(nowHover?.contents.value.startsWith("```fig\nnow: i32\n```"));
@@ -546,11 +675,11 @@ Deno.test("LSP hover renders structural types for inferred const records", async
     uri,
     1,
     [
-      "type fn transform2d() -> struct { let Transform2d = {x: i32}; struct(Transform2d) }",
-      "type fn velocity2d() -> struct { let Velocity2d = {x: i32}; struct(Velocity2d) }",
+      "type fn Transform2d() -> struct { let Transform2d = {x: i32}; struct(Transform2d) }",
+      "type fn Velocity2d() -> struct { let Velocity2d = {x: i32}; struct(Velocity2d) }",
       "const movement_query = {",
-      "  transforms: { count: 3, component: transform2d },",
-      "  velocities: { count: 3, component: velocity2d },",
+      "  transforms: { count: 3, component: Transform2d },",
+      "  velocities: { count: 3, component: Velocity2d },",
       "}",
     ].join("\n"),
   );
@@ -558,9 +687,11 @@ Deno.test("LSP hover renders structural types for inferred const records", async
   assert(result);
 
   const hover = hoverAt(result, { line: 2, character: 7 });
-  assert(hover?.contents.value.startsWith(
-    "```fig\nconst movement_query: {transforms: {count: i32, component: type fn transform2d() -> struct}, velocities: {count: i32, component: type fn velocity2d() -> struct}}\n```",
-  ));
+  assert(
+    hover?.contents.value.startsWith(
+      "```fig\nconst movement_query: {transforms: {count: i32, component: type fn Transform2d() -> struct}, velocities: {count: i32, component: type fn Velocity2d() -> struct}}\n```",
+    ),
+  );
 });
 
 Deno.test("LSP hover renders field and expression type details", async () => {
@@ -570,7 +701,7 @@ Deno.test("LSP hover renders field and expression type details", async () => {
     uri,
     1,
     [
-      "type fn point() -> struct {",
+      "type fn Point() -> struct {",
       "  let Point = {",
       "    /// horizontal position",
       "    x: i32,",
@@ -578,7 +709,7 @@ Deno.test("LSP hover renders field and expression type details", async () => {
       "  };",
       "  struct(Point)",
       "}",
-      "fn make_point() -> point { Point {x: 1, y: 2} }",
+      "fn make_point() -> Point { Point {x: 1, y: 2} }",
       "pub fn main() -> i32 { let p = make_point(); p.x }",
     ].join("\n"),
   );
@@ -586,13 +717,13 @@ Deno.test("LSP hover renders field and expression type details", async () => {
   assert(result);
 
   const fnUseHover = hoverAt(result, { line: 9, character: 34 });
-  assertStringIncludes(fnUseHover?.contents.value ?? "", "fn make_point() -> point");
+  assertStringIncludes(fnUseHover?.contents.value ?? "", "fn make_point() -> Point");
 
   const callHover = hoverAt(result, { line: 9, character: 42 });
-  assertStringIncludes(callHover?.contents.value ?? "", "make_point(...): point");
+  assertStringIncludes(callHover?.contents.value ?? "", "make_point(...): Point");
 
   const constructorHover = hoverAt(result, { line: 8, character: 28 });
-  assertStringIncludes(constructorHover?.contents.value ?? "", "Point: point");
+  assertStringIncludes(constructorHover?.contents.value ?? "", "Point: Point");
 
   const fieldHover = hoverAt(result, { line: 9, character: 47 });
   assertStringIncludes(fieldHover?.contents.value ?? "", "x: i32");
@@ -603,7 +734,7 @@ Deno.test("LSP hover resolves individual dotted value segments", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   const source = [
-    "type fn geometry() -> struct {",
+    "type fn Geometry() -> struct {",
     "  let Geometry = {",
     "    vertices: i32,",
     "    /// total vertex count",
@@ -611,76 +742,85 @@ Deno.test("LSP hover resolves individual dotted value segments", async () => {
     "  };",
     "  struct(Geometry)",
     "}",
-    "fn count(geometry: geometry) -> i32 { geometry.vertex_count }",
+    "fn count(geometry: Geometry) -> i32 { Geometry.vertex_count }",
   ].join("\n");
   cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const use = "geometry.vertex_count";
+  const use = "Geometry.vertex_count";
   const baseHover = hoverAt(result, positionIn(source, use, 1));
-  assertStringIncludes(baseHover?.contents.value ?? "", "```fig\ngeometry: geometry\n```");
-  assertEquals(baseHover?.range, new PositionMapper(source).range(
-    source.indexOf(use),
-    source.indexOf(use) + "geometry".length,
-  ));
+  assertStringIncludes(baseHover?.contents.value ?? "", "```fig\ngeometry: Geometry\n```");
+  assertEquals(
+    baseHover?.range,
+    new PositionMapper(source).range(
+      source.indexOf(use),
+      source.indexOf(use) + "geometry".length,
+    ),
+  );
 
-  const fieldHover = hoverAt(result, positionIn(source, use, "geometry.".length + 1));
+  const fieldHover = hoverAt(result, positionIn(source, use, "Geometry.".length + 1));
   assertStringIncludes(fieldHover?.contents.value ?? "", "```fig\nvertex_count: i32\n```");
   assertStringIncludes(fieldHover?.contents.value ?? "", "total vertex count");
-  assertEquals(fieldHover?.range, new PositionMapper(source).range(
-    source.indexOf(use) + "geometry.".length,
-    source.indexOf(use) + use.length,
-  ));
+  assertEquals(
+    fieldHover?.range,
+    new PositionMapper(source).range(
+      source.indexOf(use) + "Geometry.".length,
+      source.indexOf(use) + use.length,
+    ),
+  );
 });
 
 Deno.test("LSP hover prefers dotted value bases over same-named types", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   const source = [
-    "type fn thing() -> struct { let Thing = {value: i32}; struct(Thing) }",
-    "fn read(thing: thing) -> i32 { thing.value }",
+    "type fn Thing() -> struct { let Thing = {value: i32}; struct(Thing) }",
+    "fn read(thing: Thing) -> i32 { Thing.value }",
   ].join("\n");
   cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const valueHover = hoverAt(result, positionIn(source, "thing.value", 1));
-  assertStringIncludes(valueHover?.contents.value ?? "", "```fig\nthing: thing\n```");
-  assert(!valueHover?.contents.value.includes("type fn thing"));
+  const valueHover = hoverAt(result, positionIn(source, "Thing.value", 1));
+  assertStringIncludes(valueHover?.contents.value ?? "", "```fig\nthing: Thing\n```");
+  assert(!valueHover?.contents.value.includes("type fn Thing"));
 
   const annotationHover = hoverAt(result, positionIn(source, "thing) ->", 1));
-  assertStringIncludes(annotationHover?.contents.value ?? "", "type fn thing()");
+  assertStringIncludes(annotationHover?.contents.value ?? "", "type fn Thing()");
 });
 
 Deno.test("LSP hover walks nested dotted value chains by segment", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   const source = [
-    "type fn component_next() -> struct {",
+    "type fn ComponentNext() -> struct {",
     "  let ComponentNext = {transforms: i32};",
     "  struct(ComponentNext)",
     "}",
-    "type fn world() -> struct {",
-    "  let World = {component_next: component_next};",
+    "type fn World() -> struct {",
+    "  let World = {component_next: ComponentNext};",
     "  struct(World)",
     "}",
-    "fn read(world: world) -> i32 { world.component_next.transforms }",
+    "fn read(world: World) -> i32 { World.ComponentNext.transforms }",
   ].join("\n");
   cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const use = "world.component_next.transforms";
+  const use = "World.ComponentNext.transforms";
   const worldHover = hoverAt(result, positionIn(source, use, 1));
-  assertStringIncludes(worldHover?.contents.value ?? "", "```fig\nworld: world\n```");
+  assertStringIncludes(worldHover?.contents.value ?? "", "```fig\nworld: World\n```");
 
-  const nextHover = hoverAt(result, positionIn(source, use, "world.".length + 1));
-  assertStringIncludes(nextHover?.contents.value ?? "", "```fig\ncomponent_next: component_next\n```");
+  const nextHover = hoverAt(result, positionIn(source, use, "World.".length + 1));
+  assertStringIncludes(
+    nextHover?.contents.value ?? "",
+    "```fig\ncomponent_next: ComponentNext\n```",
+  );
 
   const transformsHover = hoverAt(
     result,
-    positionIn(source, use, "world.component_next.".length + 1),
+    positionIn(source, use, "World.ComponentNext.".length + 1),
   );
   assertStringIncludes(transformsHover?.contents.value ?? "", "```fig\ntransforms: i32\n```");
 });
@@ -691,12 +831,85 @@ Deno.test("LSP hover falls back to raw malformed TSDoc", async () => {
   cache.open(
     uri,
     1,
-    "/// Broken {@link\nfn bad() -> i32 { 0 }\npub fn main() -> i32 { bad() }",
+    "/// Broken {@link\nfn Bad() -> i32 { 0 }\npub fn main() -> i32 { Bad() }",
   );
   const result = await cache.reanalyze(uri);
   assert(result);
   const hover = hoverAt(result, { line: 1, character: 3 });
   assertStringIncludes(hover?.contents.value ?? "", "Broken {@link");
+});
+
+Deno.test("LSP hover resolves pipeline step binder types", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "type fn World() -> struct {",
+    "  let World = {count: i32};",
+    "  struct(World)",
+    "}",
+    "fn start() -> World { World {count: 1} }",
+    "fn step(value: World) -> World { World {count: value.count + 1} }",
+    "fn finish(value: World) -> i32 { value.count }",
+    "pub fn main() -> i32 {",
+    "  start()",
+    "    \\w -> step(w)",
+    "    \\w -> finish(w)",
+    "}",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const firstBinder = hoverAt(result, positionIn(source, "\\w -> step", 1));
+  assertStringIncludes(firstBinder?.contents.value ?? "", "```fig\nw: World\n```");
+  const firstUse = hoverAt(result, positionIn(source, "step(w)", "step(".length));
+  assertStringIncludes(firstUse?.contents.value ?? "", "```fig\nw: World\n```");
+  const secondBinder = hoverAt(result, positionIn(source, "\\w -> finish", 1));
+  assertStringIncludes(secondBinder?.contents.value ?? "", "```fig\nw: World\n```");
+});
+
+Deno.test("LSP hover keeps qualified pipeline return types across final i32 step", async () => {
+  const rootUri = pathToUri("/tmp/project/main.fig");
+  const ecsUri = pathToUri("/tmp/project/ecs.fig");
+  const cache = new AnalysisCache();
+  cache.open(
+    ecsUri,
+    1,
+    "fn run(w: PlaygroundWorld, events: i32, system: fn(w: PlaygroundWorld) -> PlaygroundWorld) -> PlaygroundWorld { w }",
+  );
+  const source = [
+    'const ecs = @import("./ecs.fig");',
+    "type fn PlaygroundWorld() -> struct {",
+    "  let World = {count: i32};",
+    "  struct(World)",
+    "}",
+    "fn seed_world() -> PlaygroundWorld { World {count: 1} }",
+    "fn movement_system(w: PlaygroundWorld) -> PlaygroundWorld { w }",
+    "fn velocity_system(w: PlaygroundWorld) -> PlaygroundWorld { w }",
+    "fn render_system(w: PlaygroundWorld) -> i32 { w.count }",
+    "pub fn main(events: i32) -> i32 {",
+    "  seed_world()",
+    "    \\w -> ecs.run(w, events, movement_system)",
+    "    \\w -> ecs.run(w, events, velocity_system)",
+    "    \\w -> render_system(w)",
+    "}",
+  ].join("\n");
+  cache.open(rootUri, 1, source);
+  const result = await cache.reanalyze(rootUri);
+  assert(result);
+
+  const firstRun = hoverAt(
+    result,
+    positionIn(source, "\\w -> ecs.run(w, events, movement_system)", 1),
+  );
+  assertStringIncludes(firstRun?.contents.value ?? "", "```fig\nw: PlaygroundWorld\n```");
+  const secondRun = hoverAt(
+    result,
+    positionIn(source, "\\w -> ecs.run(w, events, velocity_system)", 1),
+  );
+  assertStringIncludes(secondRun?.contents.value ?? "", "```fig\nw: PlaygroundWorld\n```");
+  const render = hoverAt(result, positionIn(source, "\\w -> render_system(w)", 1));
+  assertStringIncludes(render?.contents.value ?? "", "```fig\nw: PlaygroundWorld\n```");
 });
 
 Deno.test("LSP hover covers checked AST syntax nodes without symbol hovers", async () => {
@@ -705,15 +918,15 @@ Deno.test("LSP hover covers checked AST syntax nodes without symbol hovers", asy
   const source = [
     'const std = @import("prelude.std");',
     'const clock: fn() -> i32 !{time} = @capability("clock");',
-    "type fn pair() -> struct {",
+    "type fn Pair() -> struct {",
     "  let Pair = {first: i32, second: i32};",
     "  struct(Pair)",
     "}",
-    "type fn checked(T: type) -> type {",
-    '  @require(@type_is_product(pair), "pair");',
-    "  T",
+    "type fn Checked(t: type) -> type {",
+    '  @require(@type_is_product(Pair), "pair");',
+    "  t",
     "}",
-    "fn make_pair() -> pair { Pair {first: 2, second: 3} }",
+    "fn make_pair() -> Pair { Pair {first: 2, second: 3} }",
     "fn read(flag: bool) -> i32 !{time} {",
     "  let left, right = make_pair();",
     "  let a, b = fork(left);",
@@ -746,11 +959,11 @@ Deno.test("LSP hover covers type expressions slots patterns and count expression
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   const source = [
-    "type fn choose(Key: const, N: count, A: type) -> type {",
-    "  let Pick = match Key { #x => A, _ => {N*A} };",
+    "type fn Choose(key: const, n: count, a: type) -> type {",
+    "  let Pick = match key { #x => a, _ => {n*a} };",
     "  Pick",
     "}",
-    "type fn use_choose() -> type { choose(#x, 2, i32) }",
+    "type fn UseChoose() -> type { Choose(#x, 2, i32) }",
   ].join("\n");
   cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
@@ -764,9 +977,9 @@ Deno.test("LSP hover covers type expressions slots patterns and count expression
   expectHover("match Key", 1, "type match");
   expectHover("#x =>", 1, "type pattern");
   expectHover("_ =>", 0, "type pattern");
-  expectHover("N*A", 0, "```fig\nN: count expression\n```");
-  expectHover("{N*A}", 0, "shape type");
-  expectHover("choose(#x, 2, i32)", "choose(#x".length, "choose(...): type");
+  expectHover("N*a", 0, "```fig\nN: count expression\n```");
+  expectHover("{N*a}", 0, "shape type");
+  expectHover("Choose(#x, 2, i32)", "Choose(#x".length, "Choose(...): type");
 });
 
 Deno.test("LSP server handles initialize open hover completion and document symbols", async () => {
@@ -835,7 +1048,7 @@ Deno.test("LSP completions filter checked product members after dot", async () =
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   const lines = [
-    "type fn point() -> struct {",
+    "type fn Point() -> struct {",
     "  let Point = {",
     "    /// horizontal position",
     "    x: i32,",
@@ -844,7 +1057,7 @@ Deno.test("LSP completions filter checked product members after dot", async () =
     "  struct(Point)",
     "}",
     "fn unrelated() -> i32 { 0 }",
-    "pub fn main() -> i32 { let p: point = Point {x: 1, y: 2}; p.y }",
+    "pub fn main() -> i32 { let p: Point = Point {x: 1, y: 2}; p.y }",
   ];
   cache.open(uri, 1, lines.join("\n"));
 
@@ -868,20 +1081,20 @@ Deno.test("LSP completions include checked attached type members after dot", asy
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   const lines = [
-    "type fn point() -> struct { let Point = {x: i32}; struct(Point) }",
+    "type fn Point() -> struct { let Point = {x: i32}; struct(Point) }",
     "/// equality member",
-    "fn point.eql(a: point, b: point) -> bool { a.x == b.x }",
-    "pub fn main() -> i32 { point. }",
+    "fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }",
+    "pub fn main() -> i32 { Point. }",
   ];
   cache.open(uri, 1, lines.join("\n"));
 
   const items = await cache.completionsAt(uri, {
     line: 3,
-    character: lines[3].indexOf("point.") + 6,
+    character: lines[3].indexOf("Point.") + 6,
   });
   assert(items.some((item) =>
     item.label === "eql" &&
-    item.detail === "fn(a: point, b: point) -> bool" &&
+    item.detail === "fn(a: Point, b: Point) -> bool" &&
     item.documentation?.includes("equality member")
   ));
 });
@@ -892,7 +1105,10 @@ Deno.test("LSP completions fall back when member receiver cannot be checked", as
   const line = "pub fn main() -> i32 { missing. }";
   cache.open(uri, 1, line);
 
-  const items = await cache.completionsAt(uri, { line: 0, character: line.indexOf("missing.") + 8 });
+  const items = await cache.completionsAt(uri, {
+    line: 0,
+    character: line.indexOf("missing.") + 8,
+  });
   assert(items.some((item) => item.label === "@import"));
   assert(items.some((item) => item.label === "fn"));
 });
@@ -903,7 +1119,7 @@ Deno.test("LSP inlay hints render inferred local let types", async () => {
   cache.open(
     uri,
     1,
-    "pub fn main() -> i32 { let y = 0 .. 3; let explicit: range_i32 = y; let z = y; 1 }",
+    "pub fn main() -> i32 { let y = 0 .. 3; let explicit: RangeI32 = y; let z = y; 1 }",
   );
   const result = await cache.reanalyze(uri);
   assert(result);
@@ -912,14 +1128,14 @@ Deno.test("LSP inlay hints render inferred local let types", async () => {
     start: { line: 0, character: 0 },
     end: { line: 0, character: 80 },
   });
-  assertEquals(hints.map((hint) => hint.label), [": range_i32", ": range_i32"]);
+  assertEquals(hints.map((hint) => hint.label), [": RangeI32", ": RangeI32"]);
   assertEquals(hints.map((hint) => hint.kind), [1, 1]);
 
   const firstHintOnly = inlayHintsAt(result, {
     start: { line: 0, character: 24 },
     end: { line: 0, character: 35 },
   });
-  assertEquals(firstHintOnly.map((hint) => hint.label), [": range_i32"]);
+  assertEquals(firstHintOnly.map((hint) => hint.label), [": RangeI32"]);
 });
 
 Deno.test("LSP server advertises and returns inlay hints", async () => {
@@ -942,7 +1158,7 @@ Deno.test("LSP server advertises and returns inlay hints", async () => {
     textDocument: { uri },
     range: { start: { line: 0, character: 0 }, end: { line: 0, character: 80 } },
   }) as { label: string }[];
-  assertEquals(hints.map((hint) => hint.label), [": range_i32"]);
+  assertEquals(hints.map((hint) => hint.label), [": RangeI32"]);
 });
 
 Deno.test("LSP inlay hints return empty for invalid documents", async () => {

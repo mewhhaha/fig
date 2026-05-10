@@ -12,7 +12,7 @@ The language server is usable for Helix-first IntelliSense today. It supports di
 completion, go-to definition, references, prepare rename, rename, signature help, semantic tokens,
 document symbols, workspace symbols, code actions, and formatting. The implementation keeps its
 editor metadata in `src/lsp/` and combines parser/checker declarations with source spans for an
-LSP-owned semantic index.
+LSP-owned semantic Index.
 
 ## Helix
 
@@ -39,7 +39,7 @@ own language-server configuration.
 
 The current server provides:
 
-- A stdio LSP server launched with `deno task lsp`.
+- a stdio LSP server launched with `deno task lsp`.
 - `initialize` and `shutdown` handling.
 - Full-document text synchronization.
 - Diagnostics from parsing, checking, and module resolution.

@@ -1,15 +1,15 @@
 const merge = @import("prelude.std");
 
-type fn box(A: type) -> type {
-  let Box = {value: A};
+type fn Box(a: type) -> type {
+  let Box = {value: a};
   struct(Box)
 }
 
-fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
+fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
-fn box.bind(v: box(A), const f: fn(x: A) -> box(B)) -> box(B) {
+fn Box.bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
   f(v.value)
 }
 
@@ -17,19 +17,19 @@ fn inc(x: i32) -> i32 {
   x + 1
 }
 
-fn wrap(x: i32) -> box(i32) {
+fn wrap(x: i32) -> Box(i32) {
   Box {value: x + 10}
 }
 
-fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
-  T.map(f, v)
+fn Mapper(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
+  t.map(f, v)
 }
 
-fn binder(v: T(A), const f: fn(x: A) -> T(B), const _proof: monad(T)) -> T(B) {
-  T.bind(v, f)
+fn binder(v: t(a), const f: fn(x: a) -> t(b), const _proof: Monad(t)) -> t(b) {
+  t.bind(v, f)
 }
 
 pub fn main() -> i32 {
-  let mapped = fmap(Box {value: 1}, inc, functor(box));
-  bind(mapped, wrap, monad(box)).value
+  let mapped = fmap(Box {value: 1}, inc, Functor(box));
+  bind(mapped, wrap, Monad(box)).value
 }

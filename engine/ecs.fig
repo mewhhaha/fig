@@ -1,63 +1,63 @@
-type fn inline_array(N: count, Component: type) -> type {
-  let InlineArray = {N*Component};
+type fn InlineArray(n: count, component: type) -> type {
+  let InlineArray = {n*component};
   struct(InlineArray)
 }
 
-type fn component_store(N: count, Component: type) -> type {
-  inline_array(N, Component)
+type fn ComponentStore(n: count, component: type) -> type {
+  InlineArray(n, component)
 }
 
-type fn component_count_for(Spec: const) -> type {
+type fn ComponentCountFor(spec: const) -> type {
   3
 }
 
-type fn component_slot(N: count, Component: type) -> type {
+type fn ComponentSlot(n: count, component: type) -> type {
   let ComponentSlot = {
-    present: component_store(N, bool),
-    values: component_store(N, Component)
+    present: ComponentStore(n, bool),
+    values: ComponentStore(n, component)
   };
   struct(ComponentSlot)
 }
 
-type fn component_slot_for(Spec: const) -> type {
-  component_slot(component_count_for(Spec), component_value_for(Spec))
+type fn ComponentSlotFor(spec: const) -> type {
+  ComponentSlot(ComponentCountFor(spec), ComponentValueFor(spec))
 }
 
-type fn component_value_for(Spec: const) -> type {
-  Spec
+type fn ComponentValueFor(spec: const) -> type {
+  spec
 }
 
-type fn component_values(Selected: const) -> type {
-  let ComponentValues = @shape_map(Selected, component_value_for);
+type fn ComponentValues(selected: const) -> type {
+  let ComponentValues = @shape_map(selected, ComponentValueFor);
   struct(ComponentValues)
 }
 
-type fn sparse_world(EntityCount: count, Components: const) -> type {
+type fn SparseWorld(entity_count: count, components: const) -> type {
   let Base = {
     next_entity_id: i32,
-    defaults: component_values(Components)
+    defaults: ComponentValues(components)
   };
-  let Slots = @shape_map(Components, component_slot_for);
+  let Slots = @shape_map(components, ComponentSlotFor);
   let SparseWorld = @shape_concat(Base, Slots);
   struct(SparseWorld)
 }
 
-type fn query_row(E: type, Selected: const) -> type {
-  let QueryRow = @shape_concat({entity: E}, @shape_map(Selected, component_value_for));
+type fn QueryRow(e: type, selected: const) -> type {
+  let QueryRow = @shape_concat({entity: e}, @shape_map(selected, ComponentValueFor));
   struct(QueryRow)
 }
 
-type fn row(Selected: const) -> type {
-  query_row(i32, Selected)
+type fn Row(selected: const) -> type {
+  QueryRow(i32, selected)
 }
 
-type fn values(Selected: const) -> type {
-  component_values(Selected)
+type fn Values(selected: const) -> type {
+  ComponentValues(selected)
 }
 
-type fn entity_row(Components: const, Row: type) -> type {
-  let RowSlots = @type_slots(Row);
-  let Matched = @shape_intersect(Components, RowSlots);
+type fn EntityRow(components: const, row: type) -> type {
+  let RowSlots = @type_slots(row);
+  let Matched = @shape_intersect(components, RowSlots);
   let ComponentCountOk = @require(
     @shape_count(Matched) == @shape_count(RowSlots),
     "entity row field is not a world component"
@@ -66,13 +66,13 @@ type fn entity_row(Components: const, Row: type) -> type {
     Matched == RowSlots,
     "entity row field type must match component type"
   );
-  Row
+  row
 }
 
-fn component_store.get_typed(
+fn ComponentStore.get_typed(
   const n: count,
   const component: type,
-  store: component_store(n, component),
+  store: ComponentStore(n, component),
   index: i32
 ) -> component {
   match index == 0 {
@@ -84,12 +84,16 @@ fn component_store.get_typed(
   }
 }
 
-fn component_slot.set_typed(
+fn ComponentStore.get_present(store: ComponentStore(3, bool), index: i32) -> bool {
+  ComponentStore.get_typed(3, bool, store, index)
+}
+
+fn ComponentSlot.set_typed(
   const component: type,
-  slot: component_slot(3, component),
+  slot: ComponentSlot(3, component),
   index: i32,
   value: component
-) -> component_slot(3, component) {
+) -> ComponentSlot(3, component) {
   let value0, value12 = fork(value);
   let value1, value2 = fork(value12);
   {
@@ -102,13 +106,13 @@ fn component_slot.set_typed(
   }
 }
 
-fn component_slot.put_typed(
+fn ComponentSlot.put_typed(
   const component: type,
-  slot: component_slot(3, component),
+  slot: ComponentSlot(3, component),
   index: i32,
   present: bool,
   value: component
-) -> component_slot(3, component) {
+) -> ComponentSlot(3, component) {
   {
     present: <
       match index == 0 { true => present, false => slot.present[0] },
@@ -123,7 +127,7 @@ fn component_slot.put_typed(
   }
 }
 
-fn sparse_world.empty(const components: const) -> sparse_world(3, components) {
+fn SparseWorld.empty(const components) -> SparseWorld(3, components) {
   {
     next_entity_id: 0,
     defaults: {
@@ -140,30 +144,30 @@ fn sparse_world.empty(const components: const) -> sparse_world(3, components) {
   }
 }
 
-fn entity.add(world: sparse_world(3, Components), entity_values: Row) -> sparse_world(3, Components) {
-  const RowOk = entity_row(Components, Row);
-  let index = world.next_entity_id;
+fn entity.add(world: SparseWorld(3, Components), entity_values: Row) -> SparseWorld(3, Components) {
+  const RowOk = EntityRow(Components, Row);
+  let index = World.next_entity_id;
   {
-    next_entity_id: index + 1,
+    next_entity_id: Index + 1,
     defaults: {
-      for Key, Spec in Components: @field(world.defaults, Key),
+      for Key, Spec in Components: @field(World.defaults, Key),
     },
-    for Key, Spec in Components: component_slot.put_typed(
-      @shape_slot(Components, Key),
-      @field(world, Key),
+    for Key, Spec in Components: ComponentSlot.put_typed(
+      Spec,
+      @field(World, Key),
       index,
       @shape_has_slot(@type_slots(Row), Key),
       match @shape_has_slot(@type_slots(Row), Key) {
         true => @field(entity_values, Key),
-        false => @field(world.defaults, Key),
+        false => @field(World.defaults, Key),
       }
     ),
   }
 }
 
-type fn sparse_query(W: type, Selected: const) -> type {
-  let WorldSlots = @type_slots(W);
-  let SelectedSlots = @shape_map(Selected, component_slot_for);
+type fn SparseQuery(w: type, selected: const) -> type {
+  let WorldSlots = @type_slots(w);
+  let SelectedSlots = @shape_map(selected, ComponentSlotFor);
   let Matched = @shape_intersect(WorldSlots, SelectedSlots);
   let SlotCountOk = @require(
     @shape_count(Matched) == @shape_count(SelectedSlots),
@@ -171,7 +175,7 @@ type fn sparse_query(W: type, Selected: const) -> type {
   );
   let SlotTypesOk = @require(
     Matched == SelectedSlots,
-    "sparse query selected slots must match world slot types and order"
+    "sparse query selected slots must match World slot types and order"
   );
   let Query = {};
   struct(Query)
@@ -184,136 +188,195 @@ fn bool_and(a: bool, b: bool) -> bool {
   }
 }
 
-fn selected_present(const selected: const, const world_type: type, world: world_type, entity: i32) -> bool {
+fn selected_present(const selected, world: W, entity: i32) -> bool {
+  let world_for_one, world_for_rest = fork(world);
+  let world_for_two, world_for_three = fork(world_for_rest);
+  let entity_for_one, entity_for_rest = fork(entity);
+  let entity_for_two, entity_for_three = fork(entity_for_rest);
   match @shape_count(selected) {
     0 => true,
-    _ => selected_present_nonempty(selected, world_type, world, entity),
+    1 => selected_present_one(selected, world_for_one, entity_for_one),
+    2 => selected_present_two(selected, world_for_two, entity_for_two),
+    _ => selected_present_three(selected, world_for_three, entity_for_three),
   }
 }
 
-fn selected_present_nonempty(const selected: const, const world_type: type, world: world_type, entity: i32) -> bool {
-  let world_for_slot, world_for_tail = fork(world);
-  let entity_for_slot, entity_for_tail = fork(entity);
+fn selected_present_one(const selected, world: W, entity: i32) -> bool {
+  ComponentStore.get_present(@field(@field(World, @shape_first_key(selected)), #present), entity)
+}
+
+fn selected_present_two(const selected, world: W, entity: i32) -> bool {
+  let world_for_first, world_for_second = fork(world);
+  let entity_for_first, entity_for_second = fork(entity);
   bool_and(
-    component_store.get_typed(3, bool, @field(@field(world_for_slot, @shape_first_key(selected)), #present), entity_for_slot),
-    selected_present(@shape_tail(selected), world_type, world_for_tail, entity_for_tail)
+    ComponentStore.get_present(@field(@field(world_for_first, @shape_first_key(selected)), #present), entity_for_first),
+    ComponentStore.get_present(@field(@field(world_for_second, @shape_first_key(@shape_tail(selected))), #present), entity_for_second)
   )
 }
 
-fn selected_row(const selected: const, const world_type: type, world: world_type, entity: i32) -> row(selected) {
+fn selected_present_three(const selected, world: W, entity: i32) -> bool {
+  let world_for_first, world_for_rest = fork(world);
+  let world_for_second, world_for_third = fork(world_for_rest);
+  let entity_for_first, entity_for_rest = fork(entity);
+  let entity_for_second, entity_for_third = fork(entity_for_rest);
+  bool_and(
+    ComponentStore.get_present(@field(@field(world_for_first, @shape_first_key(selected)), #present), entity_for_first),
+    bool_and(
+      ComponentStore.get_present(@field(@field(world_for_second, @shape_first_key(@shape_tail(selected))), #present), entity_for_second),
+      ComponentStore.get_present(@field(@field(world_for_third, @shape_first_key(@shape_tail(@shape_tail(selected)))), #present), entity_for_third)
+    )
+  )
+}
+
+fn selected_row(const selected, world: W, entity: i32) -> Row(selected) {
   {
     entity: entity,
-    for Key, Spec in selected: component_store.get_typed(
+    for Key, Spec in selected: ComponentStore.get_typed(
       3,
-      @shape_slot(selected, Key),
-      @field(@field(world, Key), #values),
+      Spec,
+      @field(@field(World, Key), #values),
       entity
     ),
   }
 }
 
-fn apply_writes(const world_type: type, const writes: const, world: world_type, entity: i32, write_values: values(writes)) -> world_type {
+fn apply_writes(const writes, world: W, entity: i32, write_values: Values(writes)) -> W {
   match @shape_count(writes) {
-    0 => world,
-    _ => apply_writes_nonempty(world_type, writes, world, entity, write_values),
+    0 => World,
+    _ => apply_writes_nonempty(writes, world, entity, write_values),
   }
 }
 
-fn apply_writes_nonempty(const world_type: type, const writes: const, world: world_type, entity: i32, write_values: values(writes)) -> world_type {
+fn apply_writes_nonempty(const writes, world: W, entity: i32, write_values: Values(writes)) -> W {
   let world_for_slot, world_rest = fork(world);
   let values_for_value, values_for_tail = fork(write_values);
-  let next_slot = component_slot.set_typed(
+  let next_slot = ComponentSlot.set_typed(
     @shape_slot(writes, @shape_first_key(writes)),
     @field(world_for_slot, @shape_first_key(writes)),
     entity,
     @field(values_for_value, @shape_first_key(writes))
   );
-  let next_world: world_type = {
-    for Key, Slot in @type_slots(world_type): match Key == @shape_first_key(writes) {
+  let next_world: W = {
+    for Key, Slot in @type_slots(W): match Key == @shape_first_key(writes) {
       true => {
         present: @field(next_slot, #present),
-        values: @field(next_slot, #values),
+        values: @field(next_slot, #Values),
       },
       false => @field(world_rest, Key),
     },
   };
   match @shape_count(@shape_tail(writes)) {
-    0 => apply_writes(world_type, @shape_tail(writes), next_world, entity, {}),
-    _ => apply_writes(world_type, @shape_tail(writes), next_world, entity, values_for_tail),
+    0 => next_world,
+    _ => apply_writes(@shape_tail(writes), next_world, entity, values_for_tail),
   }
 }
 
 fn each_loop(
   const i: count,
   const n: count,
-  const reads: const,
-  const writes: const,
-  const world_type: type,
-  const events_type: type,
-  world: world_type,
-  events: &(events_type),
-  const step: fn(row: row(reads), events: &(events_type)) -> values(writes)
-) -> world_type {
+  world: W,
+  events: &(Events),
+  const step: fn(row: Row(Reads), events: &(Events)) -> Values(Writes)
+) -> W {
   match i == n {
-    true => world,
-    false => each_step(i, n, reads, writes, world_type, events_type, world, events, step),
+    true => World,
+    false => each_step(i, n, world, events, step),
   }
 }
 
 fn each_step(
   const i: count,
   const n: count,
-  const reads: const,
-  const writes: const,
-  const world_type: type,
-  const events_type: type,
-  world: world_type,
-  events: &(events_type),
-  const step: fn(row: row(reads), events: &(events_type)) -> values(writes)
-) -> world_type {
+  world: W,
+  events: &(Events),
+  const step: fn(row: Row(Reads), events: &(Events)) -> Values(Writes)
+) -> W {
   let world_for_read, world_for_update = fork(world);
   let world_for_condition, world_for_row = fork(world_for_read);
   let world_for_update_true, world_for_update_false = fork(world_for_update);
-  match bool_and(i < world_for_condition.next_entity_id, selected_present(reads, world_type, world_for_condition, i)) {
-    true => each_step_present(i, n, reads, writes, world_type, events_type, world_for_row, world_for_update_true, events, step),
-    false => each_loop(i + 1, n, reads, writes, world_type, events_type, world_for_update_false, events, step),
+  match bool_and(i < world_for_condition.next_entity_id, selected_present(Reads, world_for_condition, i)) {
+    true => each_step_present(i, n, world_for_row, world_for_update_true, events, step),
+    false => each_loop(i + 1, n, world_for_update_false, events, step),
   }
 }
 
 fn each_step_present(
   const i: count,
   const n: count,
-  const reads: const,
-  const writes: const,
-  const world_type: type,
-  const events_type: type,
-  world_for_read: world_type,
-  world_for_update: world_type,
-  events: &(events_type),
-  const step: fn(row: row(reads), events: &(events_type)) -> values(writes)
-) -> world_type {
-  let selected_values = selected_row(reads, world_type, world_for_read, i);
+  world_for_read: W,
+  world_for_update: W,
+  events: &(Events),
+  const step: fn(row: Row(Reads), events: &(Events)) -> Values(Writes)
+) -> W {
+  let selected_values = selected_row(Reads, world_for_read, i);
   let write_values = step(selected_values, events);
-  let next_world = apply_writes(world_type, writes, world_for_update, i, write_values);
-  each_loop(i + 1, n, reads, writes, world_type, events_type, next_world, events, step)
+  let next_world = apply_writes(Writes, world_for_update, i, write_values);
+  each_loop(i + 1, n, next_world, events, step)
 }
 
 fn each(
-  const reads: const,
-  const writes: const,
   world: W,
   events: &(Events),
-  const step: fn(row: row(reads), events: &(Events)) -> values(writes)
+  const step: fn(row: Row(Reads), events: &(Events)) -> Values(Writes)
 ) -> W {
-  each_loop(0, 3, reads, writes, W, Events, world, events, step)
+  each_loop(0, 3, world, events, step)
+}
+
+fn fold_loop(
+  const i: count,
+  const n: count,
+  world: W,
+  acc: Acc,
+  const step: fn(acc: Acc, row: Row(Reads)) -> Acc
+) -> Acc {
+  match i == n {
+    true => acc,
+    false => fold_step(i, n, world, acc, step),
+  }
+}
+
+fn fold_step(
+  const i: count,
+  const n: count,
+  world: W,
+  acc: Acc,
+  const step: fn(acc: Acc, row: Row(Reads)) -> Acc
+) -> Acc {
+  let world_for_condition, world_for_rest = fork(world);
+  let world_for_row, world_for_next = fork(world_for_rest);
+  let world_for_present_next, world_for_absent_next = fork(world_for_next);
+  let acc_for_present, acc_for_absent = fork(acc);
+  match bool_and(i < world_for_condition.next_entity_id, selected_present(Reads, world_for_condition, i)) {
+    true => fold_step_present(i, n, world_for_row, world_for_present_next, acc_for_present, step),
+    false => fold_loop(i + 1, n, world_for_absent_next, acc_for_absent, step),
+  }
+}
+
+fn fold_step_present(
+  const i: count,
+  const n: count,
+  world_for_row: W,
+  world_for_next: W,
+  acc: Acc,
+  const step: fn(acc: Acc, row: Row(Reads)) -> Acc
+) -> Acc {
+  let selected_values = selected_row(Reads, world_for_row, i);
+  let next_acc = step(acc, selected_values);
+  fold_loop(i + 1, n, world_for_next, next_acc, step)
+}
+
+fn fold(
+  world: W,
+  initial: Acc,
+  const step: fn(acc: Acc, row: Row(Reads)) -> Acc
+) -> Acc {
+  fold_loop(0, 3, world, initial, step)
 }
 
 fn run(
-  const w: type,
-  const e: type,
-  world: w,
-  events: &(e),
-  const system: fn(world: w, events: &(e)) -> w
-) -> w {
+  world: W,
+  events: &(Events),
+  const system: fn(world: W, events: &(Events)) -> W
+) -> W {
   system(world, events)
 }

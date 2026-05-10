@@ -1,28 +1,28 @@
 const merge = @import("prelude.std");
 
-type fn point() -> type {
+type fn Point() -> type {
   let Point = {x: i32, y: i32};
   struct(Point)
 }
 
-fn point.eql(a: point, b: point) -> bool {
+fn Point.eql(a: Point, b: Point) -> bool {
   a.x == b.x
 }
 
-fn point.append(a: point, b: point) -> point {
+fn Point.append(a: Point, b: Point) -> Point {
   Point {x: a.x + b.x, y: a.y + b.y}
 }
 
-type fn box(A: type) -> type {
-  let Box = {value: A};
+type fn Box(a: type) -> type {
+  let Box = {value: a};
   struct(Box)
 }
 
-fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
+fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
-fn box.bind(v: box(A), const f: fn(x: A) -> box(B)) -> box(B) {
+fn Box.bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
   f(v.value)
 }
 
@@ -30,12 +30,12 @@ fn inc(x: i32) -> i32 {
   x + 1
 }
 
-fn wrap(x: i32) -> box(i32) {
+fn wrap(x: i32) -> Box(i32) {
   Box {value: x + 10}
 }
 
 pub fn main() -> i32 {
-  let point_total = append(point, semigroup(point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
-  let boxed = bind(fmap(Box {value: 1}, inc, functor(box)), wrap, monad(box));
+  let point_total = append(point, Semigroup(point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
+  let boxed = bind(fmap(Box {value: 1}, inc, Functor(box)), wrap, Monad(box));
   point_total.x + point_total.y + boxed.value
 }

@@ -4,8 +4,8 @@
 (Call (Primary (ForkBuiltin) @function.builtin) "(")
 (Primary (StaticBuiltin (LowerIdent) @function.builtin))
 (TypePrimary (StaticBuiltin (LowerIdent) @function.builtin))
-(Type (LowerIdent) @type)
-(Type (PascalIdent) @type.parameter)
+(TypeAtom (LowerIdent) @type)
+(TypeAtom (PascalIdent) @type.parameter)
 (TypePrimary (LowerIdent) @type)
 (TypePrimary (PascalIdent) @type.parameter)
 (TypeFnDecl (LowerIdent) @type.definition)
@@ -48,7 +48,6 @@
 "_" @keyword
 "for" @keyword
 "in" @keyword
-"static" @keyword
 "zip" @keyword
 "!" @operator
 "%" @operator

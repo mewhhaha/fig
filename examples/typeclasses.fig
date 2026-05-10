@@ -1,54 +1,54 @@
-fn eql_point(a: point, b: point) -> bool {
+fn eql_point(a: Point, b: Point) -> bool {
   a.x == b.x
 }
 
-fn neq_point(a: point, b: point) -> bool {
+fn neq_point(a: Point, b: Point) -> bool {
   a.x != b.x
 }
 
-type fn point() {
+type fn Point() {
   let Point = {x: i32, y: i32};
   struct(Point)
 }
 
-type fn eq(T: type) {
-  let Expected = fn(a: T, b: T) -> bool;
-  @require(@type_has_member(T, #eql), "Eq requires eql");
-  @require(@type_member_type(T, #eql) == Expected, "Eq.eql has wrong type");
+type fn Eq(t: type) {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #eql), "Eq requires eql");
+  @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
 }
 
-type fn box(A: type) -> type {
-  let Box = {value: A};
+type fn Box(a: type) -> type {
+  let Box = {value: a};
   struct(Box)
 }
 
-fn box.map(const f: fn(x: A) -> B, v: box(A)) -> box(B) {
+fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
-type fn functor(T: type fn(A: type) -> type) -> type {
-  let Expected = fn(const f: fn(x: A) -> B, v: T(A)) -> T(B);
-  @require(@type_has_member(T, #map), "Functor requires map");
-  @require(@type_member_type(T, #map) == Expected, "Functor.map has wrong type");
-  T
+type fn Functor(t: type fn(a: type) -> type) -> type {
+  let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
+  @require(@type_has_member(t, #map), "Functor requires map");
+  @require(@type_member_type(t, #map) == Expected, "Functor.map has wrong type");
+  t
 }
 
 fn inc(x: i32) -> i32 {
   x + 1
 }
 
-fn same(const T, const _proof: eq(T), a: T, b: T) -> i32 {
-  match T.eql(A, B) {
+fn same(const t, const _proof: Eq(t), a: t, b: t) -> i32 {
+  match t.eql(a, b) {
     true => 1,
     false => 0,
   }
 }
 
-fn mapper(v: T(A), const f: fn(x: A) -> B, const _proof: functor(T)) -> T(B) {
-  T.map(f, v)
+fn Mapper(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
+  t.map(f, v)
 }
 
 pub fn main() -> i32 {
-  let mapped = mapper(Box {value: 1}, inc, functor(box));
-  same(point, eq(point), Point {x: 1, y: 2}, Point {x: 1, y: 2}) + mapped.value
+  let mapped = Mapper(Box {value: 1}, inc, Functor(box));
+  same(point, Eq(point), Point {x: 1, y: 2}, Point {x: 1, y: 2}) + mapped.value
 }

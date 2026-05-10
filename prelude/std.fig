@@ -3,107 +3,107 @@ const fun = @import("prelude.function");
 const operators = @import("prelude.operators");
 const schedule = @import("prelude.schedule");
 
-fn some(value: A) -> array.layout.core.option(A) {
+fn some(value: a) -> array.layout.core.Option(a) {
   value
 }
 
-fn none() -> array.layout.core.option(A) {
+fn none() -> array.layout.core.Option(a) {
   0
 }
 
-fn option_is_some(value: array.layout.core.option(A)) -> bool {
+fn option_is_some(value: array.layout.core.Option(a)) -> bool {
   match value { Some => true, None => false }
 }
 
-fn option_is_none(value: array.layout.core.option(A)) -> bool {
+fn option_is_none(value: array.layout.core.Option(a)) -> bool {
   match value { Some => false, None => true }
 }
 
-fn option_unwrap_or(value: array.layout.core.option(A), fallback: A) -> A {
+fn option_unwrap_or(value: array.layout.core.Option(a), fallback: a) -> a {
   match value { Some(inner) => inner, None => fallback }
 }
 
-fn option_map(value: array.layout.core.option(A), const f: fn(x: A) -> B) -> array.layout.core.option(B) {
+fn option_map(value: array.layout.core.Option(a), const f: fn(x: a) -> b) -> array.layout.core.Option(b) {
   match value { Some(inner) => f(inner), None => none() }
 }
 
-fn option_and_then(value: array.layout.core.option(A), const f: fn(x: A) -> array.layout.core.option(B)) -> array.layout.core.option(B) {
+fn option_and_then(value: array.layout.core.Option(a), const f: fn(x: a) -> array.layout.core.Option(b)) -> array.layout.core.Option(b) {
   match value { Some(inner) => f(inner), None => none() }
 }
 
-fn option_or(value: array.layout.core.option(A), fallback: array.layout.core.option(A)) -> array.layout.core.option(A) {
+fn option_or(value: array.layout.core.Option(a), fallback: array.layout.core.Option(a)) -> array.layout.core.Option(a) {
   match value { Some => value, None => fallback }
 }
 
-fn option_or_else(value: array.layout.core.option(A), const fallback: fn() -> array.layout.core.option(A)) -> array.layout.core.option(A) {
+fn option_or_else(value: array.layout.core.Option(a), const fallback: fn() -> array.layout.core.Option(a)) -> array.layout.core.Option(a) {
   match value { Some => value, None => fallback() }
 }
 
-fn ok(value: A) -> array.layout.core.result(A, E) {
+fn ok(value: a) -> array.layout.core.Result(a, e) {
   value
 }
 
-fn err(error: E) -> array.layout.core.result(A, E) {
+fn err(error: e) -> array.layout.core.Result(a, e) {
   error
 }
 
-fn result_is_ok(value: array.layout.core.result(A, E)) -> bool {
+fn result_is_ok(value: array.layout.core.Result(a, e)) -> bool {
   match value { Ok => true, Err => false }
 }
 
-fn result_is_err(value: array.layout.core.result(A, E)) -> bool {
+fn result_is_err(value: array.layout.core.Result(a, e)) -> bool {
   match value { Ok => false, Err => true }
 }
 
-fn result_unwrap_or(value: array.layout.core.result(A, E), fallback: A) -> A {
+fn result_unwrap_or(value: array.layout.core.Result(a, e), fallback: a) -> a {
   match value { Ok(inner) => inner, Err => fallback }
 }
 
-fn result_map(value: array.layout.core.result(A, E), const f: fn(x: A) -> B) -> array.layout.core.result(B, E) {
+fn result_map(value: array.layout.core.Result(a, e), const f: fn(x: a) -> b) -> array.layout.core.Result(b, e) {
   match value { Ok(inner) => ok(f(inner)), Err(error) => err(error) }
 }
 
-fn result_map_err(value: array.layout.core.result(A, E), const f: fn(x: E) -> F) -> array.layout.core.result(A, F) {
+fn result_map_err(value: array.layout.core.Result(a, e), const f: fn(x: e) -> f) -> array.layout.core.Result(a, f) {
   match value { Ok(inner) => ok(inner), Err(error) => err(f(error)) }
 }
 
-fn result_and_then(value: array.layout.core.result(A, E), const f: fn(x: A) -> array.layout.core.result(B, E)) -> array.layout.core.result(B, E) {
+fn result_and_then(value: array.layout.core.Result(a, e), const f: fn(x: a) -> array.layout.core.Result(b, e)) -> array.layout.core.Result(b, e) {
   match value { Ok(inner) => f(inner), Err(error) => err(error) }
 }
 
-fn pair_first(value: array.layout.core.pair(A, B)) -> A {
+fn pair_first(value: array.layout.core.Pair(a, b)) -> a {
   value.first
 }
 
-fn pair_second(value: array.layout.core.pair(A, B)) -> B {
+fn pair_second(value: array.layout.core.Pair(a, b)) -> b {
   value.second
 }
 
-fn pair_swap(value: array.layout.core.pair(A, B)) -> array.layout.core.pair(B, A) {
+fn pair_swap(value: array.layout.core.Pair(a, b)) -> array.layout.core.Pair(b, a) {
   Pair {first: value.second, second: value.first}
 }
 
-fn pair_map_first(value: array.layout.core.pair(A, B), const f: fn(x: A) -> C) -> array.layout.core.pair(C, B) {
+fn pair_map_first(value: array.layout.core.Pair(a, b), const f: fn(x: a) -> c) -> array.layout.core.Pair(c, b) {
   Pair {first: f(value.first), second: value.second}
 }
 
-fn pair_map_second(value: array.layout.core.pair(A, B), const f: fn(x: B) -> C) -> array.layout.core.pair(A, C) {
+fn pair_map_second(value: array.layout.core.Pair(a, b), const f: fn(x: b) -> c) -> array.layout.core.Pair(a, c) {
   Pair {first: value.first, second: f(value.second)}
 }
 
-fn pair_map(value: array.layout.core.pair(A, B), const f: fn(x: A) -> C, const g: fn(x: B) -> D) -> array.layout.core.pair(C, D) {
+fn pair_map(value: array.layout.core.Pair(a, b), const f: fn(x: a) -> c, const g: fn(x: b) -> D) -> array.layout.core.Pair(c, D) {
   Pair {first: f(value.first), second: g(value.second)}
 }
 
-fn tuple3_first(value: array.layout.core.tuple3(A, B, C)) -> A {
+fn tuple3_first(value: array.layout.core.Tuple3(a, b, c)) -> a {
   value.first
 }
 
-fn tuple3_second(value: array.layout.core.tuple3(A, B, C)) -> B {
+fn tuple3_second(value: array.layout.core.Tuple3(a, b, c)) -> b {
   value.second
 }
 
-fn tuple3_third(value: array.layout.core.tuple3(A, B, C)) -> C {
+fn tuple3_third(value: array.layout.core.Tuple3(a, b, c)) -> c {
   value.third
 }
 
@@ -126,7 +126,7 @@ fn bool_xor(a: bool, b: bool) -> bool {
   }
 }
 
-fn select(cond: bool, when_true: A, when_false: A) -> A {
+fn select(cond: bool, when_true: a, when_false: a) -> a {
   match cond { true => when_true, false => when_false }
 }
 
@@ -158,14 +158,14 @@ fn square_i32(value: i32) -> i32 {
   value * value
 }
 
-fn pipe(value: A, const f: fn(x: A) -> B) -> B {
+fn pipe(value: a, const f: fn(x: a) -> b) -> b {
   f(value)
 }
 
-fn apply_to(value: A, const f: fn(x: A) -> B) -> B {
+fn apply_to(value: a, const f: fn(x: a) -> b) -> b {
   f(value)
 }
 
-fn flip(const f: fn(a: A, b: B) -> C, b: B, a: A) -> C {
+fn flip(const f: fn(a: a, b: b) -> c, b: b, a: a) -> c {
   f(a, b)
 }

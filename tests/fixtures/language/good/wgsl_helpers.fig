@@ -5,8 +5,8 @@ const shader_id: i32 = @wgsl_shader_id(```wgsl
 @vertex fn vs(@location(0) pos: vec2<f32>) -> @location(0) vec4<f32> { return vec4<f32>(); }
 ```);
 
-type fn layout() -> type {
-  canvas.shader_layout(```wgsl
+type fn Layout() -> type {
+  canvas.ShaderLayout(```wgsl
 @group(0) @binding(1) var<uniform> camera: mat4x4<f32>;
 @vertex fn vs(@location(0) pos: vec2<f32>) -> @location(0) vec4<f32> { return vec4<f32>(); }
 ```)

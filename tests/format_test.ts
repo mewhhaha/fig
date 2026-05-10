@@ -31,19 +31,19 @@ const std=@import("prelude.std");
 const clock:fn()->i32!{time}=@capability("clock");
 pub fn main()->i32!{time}{clock()}`,
     expected:
-      '/// import docs\nconst std = @import("prelude.std");\n/// capability docs\nconst clock: fn() -> i32 !{time} = @capability("clock");\n\npub fn main() -> i32 !{time} {\n  clock()\n}\n',
+      "/// import docs\nconst std = @import(\"prelude.std\");\n/// capability docs\nconst clock: fn() -> i32 !{time} = @capability(\"clock\");\n\npub fn main() -> i32 !{time} {\n  clock()\n}\n",
   },
   {
     name: "destructured source imports",
     input: `const{map4_i32,lane4_add_i32}=@import("prelude.array_static");`,
-    expected: 'const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");\n',
+    expected: "const { map4_i32, lane4_add_i32 } = @import(\"prelude.array_static\");\n",
   },
   {
     name: "const group before type function",
     input:
-      `const std=@import("prelude.std");const limit=4;type fn sized(A:type)->struct{let Row={value:A};struct(Row)}`,
+      `const std=@import("prelude.std");const limit=4;type fn Sized(a:type)->struct{let Row={value:a};struct(Row)}`,
     expected:
-      'const std = @import("prelude.std");\nconst limit = 4;\n\ntype fn sized(A: type) -> struct {\n  let Row = {\n    value: A\n  };\n  struct(Row)\n}\n',
+      "const std = @import(\"prelude.std\");\nconst limit = 4;\n\ntype fn Sized(a: type) -> struct {\n  let Row = {value: a};\n  struct(Row)\n}\n",
   },
   {
     name: "empty and multi item effect rows",
@@ -52,15 +52,15 @@ pub fn main()->i32!{time}{clock()}`,
   },
   {
     name: "type function block with optional final semicolon",
-    input: "type fn option(A:type)->union{let None={};let Some={value:A};union(None,Some);}",
+    input: "type fn Option(a:type)->union{let None={};let Some={value:a};union(None,Some);}",
     expected:
-      "type fn option(A: type) -> union {\n  let None = {};\n  let Some = {\n    value: A\n  };\n  union(None, Some);\n}\n",
+      "type fn Option(a: type) -> union {\n  let None = {};\n  let Some = {value: a};\n  union(None, Some);\n}\n",
   },
   {
     name: "fields calls shapes matches and pipe bind",
-    input: "fn main()->i32{let point={x:1,y:2};match point.x{1=>2,// arm\n_=>3}\\value->value}",
+    input: "fn main()->i32{let point={x:1,y:2};match Point.x{1=>2,// arm\n_=>3}\\value->value}",
     expected:
-      "fn main() -> i32 {\n  let point = {\n    x: 1, y: 2\n  };\n  match point.x {\n    1 => 2, // arm\n    _ => 3\n  } \\value -> value\n}\n",
+      "fn main() -> i32 {\n  let point = {x: 1, y: 2};\n  match Point.x {\n    1 => 2, // arm\n    _ => 3\n  } \\value -> value\n}\n",
   },
   {
     name: "operators fields indexing and literal tags",
@@ -78,48 +78,48 @@ pub fn main()->i32!{time}{clock()}`,
   {
     name: "wrapped collections verticalize every item",
     input:
-      "fn defaults()->world{{velocities:[default_velocity(),default_velocity(),default_velocity()]}}",
+      "fn defaults()->World{{velocities:[default_velocity(),default_velocity(),default_velocity()]}}",
     expected:
-      "fn defaults() -> world {\n  {\n    velocities: [\n      default_velocity(),\n      default_velocity(),\n      default_velocity()\n    ]\n  }\n}\n",
+      "fn defaults() -> World {\n  {\n    velocities: [\n      default_velocity(),\n      default_velocity(),\n      default_velocity()\n    ]\n  }\n}\n",
   },
   {
     name: "nested blocks matches and shapes",
-    input: "fn main()->i32{let box={value:match 1{0=>{x:1},_=>{x:2}}};box.value.x}",
+    input: "fn main()->i32{let box={value:match 1{0=>{x:1},_=>{x:2}}};Box.value.x}",
     expected:
-      "fn main() -> i32 {\n  let box = {\n    value: match 1 {\n      0 => {\n        x: 1\n      },\n      _ => {\n        x: 2\n      }\n    }\n  };\n  box.value.x\n}\n",
+      "fn main() -> i32 {\n  let box = {\n    value: match 1 {\n      0 => {x: 1},\n      _ => {x: 2}\n    }\n  };\n  Box.value.x\n}\n",
   },
   {
     name: "type repeat prefixes",
     input:
-      "type fn fixed(N:count,A:type)->struct{let Fixed={N*A};let Mixed={header:i32,3*bool,tail:A};struct(Mixed)}",
+      "type fn Fixed(n:count,a:type)->struct{let Fixed={n*a};let Mixed={header:i32,3*bool,tail:a};struct(Mixed)}",
     expected:
-      "type fn fixed(N: count, A: type) -> struct {\n  let Fixed = {\n    N*A\n  };\n  let Mixed = {\n    header: i32, 3*bool, tail: A\n  };\n  struct(Mixed)\n}\n",
+      "type fn Fixed(n: count, a: type) -> struct {\n  let Fixed = {n*a};\n  let Mixed = {header: i32, 3*bool, tail: a};\n  struct(Mixed)\n}\n",
   },
   {
     name: "collection literals stay bracketed",
     input: "fn main()->i32{let xs=[0,1,2];let rows=[{value:0},{value:1}];rows[1].value + xs[2]}",
     expected:
-      "fn main() -> i32 {\n  let xs = [0, 1, 2];\n  let rows = [{\n    value: 0\n  }, {\n    value: 1\n  }];\n  rows[1].value + xs[2]\n}\n",
+      "fn main() -> i32 {\n  let xs = [0, 1, 2];\n  let rows = [{value: 0}, {value: 1}];\n  rows[1].value + xs[2]\n}\n",
   },
   {
     name: "shape and type reflection helpers",
     input:
-      'type fn shaped()->type{let Base={x:i32,y:bool,z:i32};let Picked=@shape_pick(Base,{x:true,y:true});let Out=@shape_concat(Picked,{count:@shape_count(Picked)});@require(@shape_has_slot(Out,#count),"count");struct(Out)}',
+      'type fn Shaped()->type{let Base={x:i32,y:bool,z:i32};let Picked=@shape_pick(Base,{x:true,y:true});let Out=@shape_concat(Picked,{count:@shape_count(Picked)});@require(@shape_has_slot(Out,#count),"count");struct(Out)}',
     expected:
-      'type fn shaped() -> type {\n  let Base = {\n    x: i32, y: bool, z: i32\n  };\n  let Picked = @shape_pick(Base, {\n    x: true, y: true\n  });\n  let Out = @shape_concat(\n    Picked,\n    {\n      count: @shape_count(Picked)\n    }\n  );\n  @require(@shape_has_slot(Out, #count), "count");\n  struct(Out)\n}\n',
+      "type fn Shaped() -> type {\n  let Base = {x: i32, y: bool, z: i32};\n  let Picked = @shape_pick(Base, {x: true, y: true});\n  let Out = @shape_concat(\n    Picked,\n    {count: @shape_count(Picked)}\n  );\n  @require(@shape_has_slot(Out, #count), \"count\");\n  struct(Out)\n}\n",
   },
   {
     name: "shape index call and constructor ambiguity",
     input:
-      "fn main(xs:{3*i32})->i32{let box=Box {x:1};let y=xs [ 0 ];let z=f( { x:1 } );let shape=@shape_concat(Base,{x:A});y + box.x + z.x}",
+      "fn main(xs:{3*i32})->i32{let box=Box {x:1};let y=xs [ 0 ];let z=f( { x:1 } );let shape=@shape_concat(Base,{x:a});y + Box.x + z.x}",
     expected:
-      "fn main(xs: {\n  3*i32\n}) -> i32 {\n  let box = Box {\n    x: 1\n  };\n  let y = xs[0];\n  let z = f({\n    x: 1\n  });\n  let shape = @shape_concat(Base, {\n    x: A\n  });\n  y + box.x + z.x\n}\n",
+      "fn main(xs: {\n  3*i32\n}) -> i32 {\n  let box = Box {x: 1};\n  let y = xs[0];\n  let z = f({x: 1});\n  let shape = @shape_concat(Base, {x: a});\n  y + Box.x + z.x\n}\n",
   },
   {
     name: "record and collection fields",
-    input: "fn make()->world{World { component_next:{next:0},entities:[default_entity]}}",
+    input: "fn make()->World{World { component_next:{next:0},entities:[default_entity]}}",
     expected:
-      "fn make() -> world {\n  World {\n    component_next: {\n      next: 0\n    }, entities: [default_entity]\n  }\n}\n",
+      "fn make() -> World {\n  World {component_next: {next: 0}, entities: [default_entity]}\n}\n",
   },
   {
     name: "inline one line nested match expressions",
@@ -140,33 +140,33 @@ pub fn main()->i32!{time}{clock()}`,
     input: `/// import docs
 const std=@import("prelude.std"); // import tail
 /// type docs
-type fn row(A:type)->struct{
+type fn Row(a:type)->struct{
 // slot docs
-let Row={x:A, // x tail
+let Row={x:a, // x tail
 };
 struct(Row) // final expr tail
 }
-fn make()->world{World {defaults:@field(default_components,#key) // tail
+fn make()->World{World {defaults:@field(default_components,#key) // tail
 }}
 fn classify(x:i32)->i32{match x{
 0=>1, // zero
 _=>2 // fallback
 }}`,
     expected:
-      '/// import docs\nconst std = @import("prelude.std"); // import tail\n/// type docs\ntype fn row(A: type) -> struct {\n  // slot docs\n  let Row = {\n    x: A, // x tail\n  };\n  struct(Row) // final expr tail\n}\n\nfn make() -> world {\n  World {\n    defaults: @field(default_components, #key) // tail\n  }\n}\n\nfn classify(x: i32) -> i32 {\n  match x {\n    0 => 1, // zero\n    _ => 2 // fallback\n  }\n}\n',
+      "/// import docs\nconst std = @import(\"prelude.std\"); // import tail\n/// type docs\ntype fn Row(a: type) -> struct {\n  // slot docs\n  let Row = {\n    x: a, // x tail\n  };\n  struct(Row) // final expr tail\n}\n\nfn make() -> World {\n  World {\n    defaults: @field(default_components, #key) // tail\n  }\n}\n\nfn classify(x: i32) -> i32 {\n  match x {\n    0 => 1, // zero\n    _ => 2 // fallback\n  }\n}\n",
   },
   {
     name: "function clauses and custom operators",
     input:
-      "fn choose(0)->i32{0} fn choose(_)->i32{1} fn box.append(a:box,b:box)->box{Box {value:a.value <> b.value}}",
+      "fn Choose(0)->i32{0} fn Choose(_)->i32{1} fn Box.append(a:Box,b:Box)->Box{Box {value:a.value <> b.value}}",
     expected:
-      "fn choose(0) -> i32 {\n  0\n}\nfn choose(_) -> i32 {\n  1\n}\n\nfn box.append(a: box, b: box) -> box {\n  Box {\n    value: a.value <> b.value\n  }\n}\n",
+      "fn Choose(0) -> i32 {\n  0\n}\nfn Choose(_) -> i32 {\n  1\n}\n\nfn Box.append(a: Box, b: Box) -> Box {\n  Box {value: a.value <> b.value}\n}\n",
   },
   {
     name: "dotted function clauses stay grouped",
-    input: "fn box.append(0)->i32{0} fn box.append(_)->i32{1} fn box.clear()->i32{0}",
+    input: "fn Box.append(0)->i32{0} fn Box.append(_)->i32{1} fn Box.clear()->i32{0}",
     expected:
-      "fn box.append(0) -> i32 {\n  0\n}\nfn box.append(_) -> i32 {\n  1\n}\n\nfn box.clear() -> i32 {\n  0\n}\n",
+      "fn Box.append(0) -> i32 {\n  0\n}\nfn Box.append(_) -> i32 {\n  1\n}\n\nfn Box.clear() -> i32 {\n  0\n}\n",
   },
   {
     name: "strings chars fenced text and comment markers inside literals",
@@ -185,21 +185,21 @@ _=>2 // fallback
     input:
       'const canvas=@import("web.canvas");const shader:string=```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;pub fn main()->i32!{gpu}{canvas.gpu_create_shader(canvas.shader_id(shader))}',
     expected:
-      'const canvas = @import("web.canvas");\nconst shader: string = ```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;\n\npub fn main() -> i32 !{gpu} {\n  canvas.gpu_create_shader(canvas.shader_id(shader))\n}\n',
+      "const canvas = @import(\"web.canvas\");\nconst shader: string = ```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;\n\npub fn main() -> i32 !{gpu} {\n  canvas.gpu_create_shader(canvas.shader_id(shader))\n}\n",
   },
   {
     name: "fork destructuring and local proof consts",
     input:
-      "fn main(x:i32)->i32{let left,right=fork(x);let a,b=fork(left);const Proof=semigroup(i32);append(i32,Proof,a,b)+right}",
+      "fn main(x:i32)->i32{let left,right=fork(x);let a,b=fork(left);const proof=Semigroup(i32);append(i32,proof,a,b)+right}",
     expected:
-      "fn main(x: i32) -> i32 {\n  let left, right = fork(x);\n  let a, b = fork(left);\n  const Proof = semigroup(i32);\n  append(i32, Proof, a, b) + right\n}\n",
+      "fn main(x: i32) -> i32 {\n  let left, right = fork(x);\n  let a, b = fork(left);\n  const proof = Semigroup(i32);\n  append(i32, proof, a, b) + right\n}\n",
   },
   {
     name: "pipe placeholder and fluent chains",
     input:
-      "fn main()->i32{inline_array.iter([1,2,3,4])\\$->$.map(double).filter(keep).fold(0,add)}",
+      "fn main()->i32{InlineArray.Iter([1,2,3,4])\\$->$.map(double).filter(keep).fold(0,add)}",
     expected:
-      "fn main() -> i32 {\n  inline_array.iter([1, 2, 3, 4])\n    \\$ -> $.map(double)\n    .filter(keep)\n    .fold(0, add)\n}\n",
+      "fn main() -> i32 {\n  InlineArray.Iter([1, 2, 3, 4])\n    \\$ -> $.map(double)\n    .filter(keep)\n    .fold(0, add)\n}\n",
   },
   {
     name: "wrapped fluent call chains verticalize every call",
@@ -225,60 +225,60 @@ _=>2 // fallback
   {
     name: "wrapped operators preserve member chains",
     input:
-      "fn vertex_sum(geometry:geometry)->i32{geometry.vertex_count + geometry.vertices[0].x + geometry.vertices[0].y + geometry.vertices[0].rgba}",
+      "fn vertex_sum(geometry:Geometry)->i32{Geometry.vertex_count + Geometry.vertices[0].x + Geometry.vertices[0].y + Geometry.vertices[0].rgba}",
     expected:
-      "fn vertex_sum(geometry: geometry) -> i32 {\n  geometry.vertex_count\n    + geometry.vertices[0].x\n    + geometry.vertices[0].y\n    + geometry.vertices[0].rgba\n}\n",
+      "fn vertex_sum(geometry: Geometry) -> i32 {\n  Geometry.vertex_count\n    + Geometry.vertices[0].x\n    + Geometry.vertices[0].y\n    + Geometry.vertices[0].rgba\n}\n",
   },
   {
     name: "operator descriptors",
     input:
-      'type fn op_add(T:type)->operator{operator(#infixl,60,"+",T.add)} type fn op_bind(T:type)->operator{operator(#infixl,10,">>=",T.bind)}',
+      'type fn OpAdd(t:type)->operator{operator(#infixl,60,"+",t.add)} type fn OpBind(t:type)->operator{operator(#infixl,10,">>=",t.bind)}',
     expected:
-      'type fn op_add(T: type) -> operator {\n  operator(#infixl, 60, "+", T.add)\n}\n\ntype fn op_bind(T: type) -> operator {\n  operator(#infixl, 10, ">>=", T.bind)\n}\n',
+      "type fn OpAdd(t: type) -> operator {\n  operator(#infixl, 60, \"+\", t.add)\n}\n\ntype fn OpBind(t: type) -> operator {\n  operator(#infixl, 10, \">>=\", t.bind)\n}\n",
   },
   {
     name: "type reflection helper surface",
     input:
-      "type fn reflected()->type{let Slots=@type_slots(point);let Variants=@type_variants(option(i32));let SomeSlots=@type_variant_slots(option(i32),#Some);let Renamed=@shape_rename(Slots,{x:#left});let Mapped=@shape_map(Renamed,wrap);let WithKey=@shape_map_with_key(Mapped,relabel);let Filtered=@shape_filter(WithKey,keep);struct(@shape_concat(Filtered,{tag:@shape_slot(Variants,#Some),value:@shape_slot(SomeSlots,#value)}))}",
+      "type fn Reflected()->type{let Slots=@type_slots(Point);let Variants=@type_variants(Option(i32));let SomeSlots=@type_variant_slots(Option(i32),#Some);let Renamed=@shape_rename(Slots,{x:#left});let Mapped=@shape_map(Renamed,wrap);let WithKey=@shape_map_with_key(Mapped,relabel);let Filtered=@shape_filter(WithKey,keep);struct(@shape_concat(Filtered,{tag:@shape_slot(Variants,#Some),value:@shape_slot(SomeSlots,#value)}))}",
     expected:
-      "type fn reflected() -> type {\n  let Slots = @type_slots(point);\n  let Variants = @type_variants(option(i32));\n  let SomeSlots = @type_variant_slots(\n    option(i32),\n    #Some\n  );\n  let Renamed = @shape_rename(Slots, {\n    x: #left\n  });\n  let Mapped = @shape_map(Renamed, wrap);\n  let WithKey = @shape_map_with_key(Mapped, relabel);\n  let Filtered = @shape_filter(WithKey, keep);\n  struct(@shape_concat(\n    Filtered,\n    {\n      tag: @shape_slot(Variants, #Some), value: @shape_slot(\n        SomeSlots,\n        #value\n      )\n    }\n  ))\n}\n",
+      "type fn Reflected() -> type {\n  let Slots = @type_slots(Point);\n  let Variants = @type_variants(Option(i32));\n  let SomeSlots = @type_variant_slots(\n    Option(i32),\n    #Some\n  );\n  let Renamed = @shape_rename(Slots, {x: #left});\n  let Mapped = @shape_map(Renamed, wrap);\n  let WithKey = @shape_map_with_key(Mapped, relabel);\n  let Filtered = @shape_filter(WithKey, keep);\n  struct(@shape_concat(\n    Filtered,\n    {\n      tag: @shape_slot(Variants, #Some),\n      value: @shape_slot(SomeSlots, #value)\n    }\n  ))\n}\n",
   },
   {
     name: "union constructors and payload match arms",
     input:
-      "type fn option(A:type)->union{let None=[];let Some={value:A};union(None,Some)} fn unwrap(value:option(i32))->i32{match value{Some(inner)=>inner,None=>0}}",
+      "type fn Option(a:type)->union{let None=[];let Some={value:a};union(None,Some)} fn unwrap(value:Option(i32))->i32{match value{Some(inner)=>inner,None=>0}}",
     expected:
-      "type fn option(A: type) -> union {\n  let None = [];\n  let Some = {\n    value: A\n  };\n  union(None, Some)\n}\n\nfn unwrap(value: option(i32)) -> i32 {\n  match value {\n    Some(inner) => inner,\n    None => 0\n  }\n}\n",
+      "type fn Option(a: type) -> union {\n  let None = [];\n  let Some = {value: a};\n  union(None, Some)\n}\n\nfn unwrap(value: Option(i32)) -> i32 {\n  match value {\n    Some(inner) => inner,\n    None => 0\n  }\n}\n",
   },
   {
     name: "docs on params slots and explicit records",
-    input: `type fn row(
+    input: `type fn Row(
 /// param docs
-A:type
+a:type
 )->struct{
 /// slot docs
-let Row={value:A};
+let Row={value:a};
 struct(Row)
 }
-fn make()->world{World {
+fn make()->World{World {
 defaults:@field(defaults,#key)
 }}`,
     expected:
-      "type fn row(\n/// param docs\nA: type) -> struct {\n  /// slot docs\n  let Row = {\n    value: A\n  };\n  struct(Row)\n}\n\nfn make() -> world {\n  World {\n    defaults: @field(defaults, #key)\n  }\n}\n",
+      "type fn Row(\n/// param docs\nA: type) -> struct {\n  /// slot docs\n  let Row = {value: a};\n  struct(Row)\n}\n\nfn make() -> World {\n  World {\n    defaults: @field(defaults, #key)\n  }\n}\n",
   },
   {
     name: "const dictionaries and typeclass helper contracts",
     input:
-      "type fn eq(T:type){let Eq={eql:fn(a:T,b:T)->bool,neq:fn(a:T,b:T)->bool};struct(Eq)} fn eql_point(a:point,b:point)->bool{a.x==b.x} fn neq_point(a:point,b:point)->bool{a.x!=b.x} const point_eq:eq(point)={eql:eql_point,neq:neq_point};",
+      "type fn Eq(t:type){let Eq={eql:fn(a:t,b:t)->bool,neq:fn(a:t,b:t)->bool};struct(Eq)} fn eql_point(a:Point,b:Point)->bool{a.x==b.x} fn neq_point(a:Point,b:Point)->bool{a.x!=b.x} const point_eq:Eq(point)={eql:eql_point,neq:neq_point};",
     expected:
-      "type fn eq(T: type) {\n  let Eq = {\n    eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool\n  };\n  struct(Eq)\n}\n\nfn eql_point(a: point, b: point) -> bool {\n  a.x == b.x\n}\n\nfn neq_point(a: point, b: point) -> bool {\n  a.x != b.x\n}\n\nconst point_eq: eq(point) = {\n  eql: eql_point, neq: neq_point\n};\n",
+      "type fn Eq(t: type) {\n  let Eq = {\n    eql: fn(a: t, b: t) -> bool,\n    neq: fn(a: t, b: t) -> bool\n  };\n  struct(Eq)\n}\n\nfn eql_point(a: Point, b: Point) -> bool {\n  a.x == b.x\n}\n\nfn neq_point(a: Point, b: Point) -> bool {\n  a.x != b.x\n}\n\nconst point_eq: Eq(point) = {eql: eql_point, neq: neq_point};\n",
   },
   {
     name: "constructor pattern parameters and attached members",
     input:
-      "fn choose(Some(value))->i32{value} fn choose(None)->i32{0} fn world.tick(world:world,dt_ms:i32)->world{world.step(dt_ms)} fn world.render(world:world)->geometry{geometry.empty()}",
+      "fn Choose(Some(value))->i32{value} fn Choose(None)->i32{0} fn World.tick(world:World,dt_ms:i32)->World{World.step(dt_ms)} fn World.render(world:World)->Geometry{Geometry.empty()}",
     expected:
-      "fn choose(Some(value)) -> i32 {\n  value\n}\nfn choose(None) -> i32 {\n  0\n}\n\nfn world.tick(world: world, dt_ms: i32) -> world {\n  world.step(dt_ms)\n}\n\nfn world.render(world: world) -> geometry {\n  geometry.empty()\n}\n",
+      "fn Choose(Some(value)) -> i32 {\n  value\n}\nfn Choose(None) -> i32 {\n  0\n}\n\nfn World.tick(world: World, dt_ms: i32) -> World {\n  World.step(dt_ms)\n}\n\nfn World.render(world: World) -> Geometry {\n  Geometry.empty()\n}\n",
   },
   {
     name: "newline separated const declarations without semicolons",
@@ -290,26 +290,26 @@ defaults:@field(defaults,#key)
   {
     name: "ecs style static shapes and field helpers",
     input:
-      "fn add_entity(world:world2d(EC,Components,E),const selected,values:component_values(selected))->world2d(EC,Components,E){{next_entity_id:world.next_entity_id+1,component_next:{transforms:world.component_next.transforms+1,velocities:world.component_next.velocities+1,sprites:world.component_next.sprites+1},entities:entity_store_set(world.entities,world.next_entity_id,entity_for_store),transforms:transform_store_set(world.transforms,world.component_next.transforms,values.transforms)}}",
+      "fn add_entity(world:World2d(EC,Components,e),const selected,values:ComponentValues(selected))->World2d(EC,Components,e){{next_entity_id:World.next_entity_id+1,component_next:{transforms:World.ComponentNext.transforms+1,velocities:World.ComponentNext.velocities+1,sprites:World.ComponentNext.sprites+1},entities:entity_store_set(World.entities,World.next_entity_id,entity_for_store),transforms:transform_store_set(World.transforms,World.ComponentNext.transforms,values.transforms)}}",
     expected:
-      "fn add_entity(\n  world: world2d(EC, Components, E),\n  const selected,\n  values: component_values(selected)\n) -> world2d(EC, Components, E) {\n  {\n    next_entity_id: world.next_entity_id + 1,\n    component_next: {\n      transforms: world.component_next.transforms + 1,\n      velocities: world.component_next.velocities + 1,\n      sprites: world.component_next.sprites + 1\n    },\n    entities: entity_store_set(\n      world.entities,\n      world.next_entity_id,\n      entity_for_store\n    ),\n    transforms: transform_store_set(\n      world.transforms,\n      world.component_next.transforms,\n      values.transforms\n    )\n  }\n}\n",
+      "fn add_entity(\n  world: World2d(EC, Components, e),\n  const selected,\n  values: ComponentValues(selected)\n) -> World2d(EC, Components, e) {\n  {\n    next_entity_id: World.next_entity_id + 1,\n    component_next: {\n      transforms: World.ComponentNext.transforms + 1,\n      velocities: World.ComponentNext.velocities + 1,\n      sprites: World.ComponentNext.sprites + 1\n    },\n    entities: entity_store_set(\n      World.entities,\n      World.next_entity_id,\n      entity_for_store\n    ),\n    transforms: transform_store_set(\n      World.transforms,\n      World.ComponentNext.transforms,\n      values.transforms\n    )\n  }\n}\n",
   },
   {
     name: "comments around type params and const static params",
-    input: `type fn pair(
+    input: `type fn Pair(
 /// left type
-A:type,
+a:type,
 /// right type
-B:type
-)->struct{let Pair={left:A,right:B};struct(Pair)}
+b:type
+)->struct{let Pair={left:a,right:b};struct(Pair)}
 fn map(
 /// dictionary
-const Dict:eq(point),
+const Dict:Eq(point),
 /// value
-value:point
-)->point{Dict.map(value)}`,
+value:Point
+)->Point{Dict.map(value)}`,
     expected:
-      "type fn pair(\n/// left type\nA: type,\n/// right type\nB: type) -> struct {\n  let Pair = {\n    left: A, right: B\n  };\n  struct(Pair)\n}\n\nfn map(\n/// dictionary\nconst Dict: eq(point),\n/// value\nvalue: point) -> point {\n  Dict.map(value)\n}\n",
+      "type fn Pair(\n/// left type\nA: type,\n/// right type\nB: type) -> struct {\n  let Pair = {left: a, right: b};\n  struct(Pair)\n}\n\nfn map(\n/// dictionary\nconst Dict: Eq(point),\n/// value\nvalue: Point) -> Point {\n  Dict.map(value)\n}\n",
   },
 ];
 
@@ -323,6 +323,31 @@ Deno.test("formatter removes destructured import trailing comma", () => {
   assertEquals(
     formatSource('const { map4_i32, lane4_add_i32, } = @import("prelude.array_static");'),
     'const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");\n',
+  );
+});
+
+Deno.test("formatter keeps short flat records on one line", () => {
+  assertEquals(
+    formatSource("type fn Player()->struct{let Player2d = { tag : i32 };struct(Player2d)}"),
+    "type fn Player() -> struct {\n  let Player2d = {tag: i32};\n  struct(Player2d)\n}\n",
+  );
+  assertEquals(
+    formatSource("fn make()->World{World { component_next:{next:0},entities:[default_entity]}}"),
+    "fn make() -> World {\n  World {component_next: {next: 0}, entities: [default_entity]}\n}\n",
+  );
+});
+
+Deno.test("formatter preserves vertically written records", () => {
+  assertEquals(
+    formatSource("type fn Player()->struct{let Player2d = {\n tag : i32\n};struct(Player2d)}"),
+    "type fn Player() -> struct {\n  let Player2d = {\n    tag: i32\n  };\n  struct(Player2d)\n}\n",
+  );
+});
+
+Deno.test("formatter breaks records when nested groups wrap", () => {
+  assertEquals(
+    formatSource("fn make()->World{World { component_next:{next:0},defaults:@field(defaults,#key)}}"),
+    "fn make() -> World {\n  World {\n    component_next: {next: 0},\n    defaults: @field(defaults, #key)\n  }\n}\n",
   );
 });
 
@@ -341,8 +366,8 @@ Deno.test("formatter preserves syntax for messy whitespace snippets", async () =
   const snippets = [
     "fn main( ) -> i32 !{ time } { let point = { x : 1 , y : 2 } ; point . x }",
     "fn main(xs:{3*i32} )->i32{ xs [ 0 ] + f ( { x : 1 } ) . x }",
-    "type fn shaped( A : type ) -> type { let Out = @shape_concat ( Base , { x : A } ) ; struct ( Out ) }",
-    "fn make()->world{World { component_next : { next : 0 } , defaults : @field ( defaults , #key ) }}",
+    "type fn Shaped( a : type ) -> type { let Out = @shape_concat ( Base , { x : a } ) ; struct ( Out ) }",
+    "fn make()->World{World { component_next : { next : 0 } , defaults : @field ( defaults , #key ) }}",
     "fn both(a:bool,b:bool)->bool{ match a { true => match b { true => false , false => true } , false => false } }",
     "fn last()->i32{ let x = 1 ; x // keep final expression comment\n}",
   ];
@@ -351,10 +376,10 @@ Deno.test("formatter preserves syntax for messy whitespace snippets", async () =
 
 Deno.test("formatter preserves syntax for generated whitespace and comment variants", async () => {
   const snippets = [
-    "fn main() -> i32 { let point = {x: 1, y: 2}; point.x }",
-    "fn choose(x: i32) -> i32 { match x { 0 => 1, _ => 2 } }",
-    "type fn row(A: type, B: type) -> struct { let Row = {left: A, right: B}; struct(Row) }",
-    "fn make() -> world { World {defaults: @field(defaults, #key)} }",
+    "fn main() -> i32 { let point = {x: 1, y: 2}; Point.x }",
+    "fn Choose(x: i32) -> i32 { match x { 0 => 1, _ => 2 } }",
+    "type fn Row(a: type, b: type) -> struct { let Row = {left: a, right: b}; struct(Row) }",
+    "fn make() -> World { World {defaults: @field(defaults, #key)} }",
     "fn work() -> i32 !{time, gpu} { clock() + 1 }",
   ];
 
@@ -367,11 +392,11 @@ Deno.test("formatter preserves syntax for generated whitespace and comment varia
 
 Deno.test("formatter preserves comments in punctuation-sensitive locations", async () => {
   const snippets = [
-    "type fn row(A: type) -> struct { let Row = {value: A // slot tail\n}; struct(Row) }",
+    "type fn Row(a: type) -> struct { let Row = {value: a // slot tail\n}; struct(Row) }",
     "fn classify(x: i32) -> i32 { match x { 0 => 1, // zero\n_ => 2 // fallback\n} }",
     "fn main() -> i32 { let x = 1; x // final expression tail\n}",
-    "type fn pair(/// left type\nA: type, /// right type\nB: type) -> struct { let Pair = {left: A, right: B}; struct(Pair) }",
-    "fn make() -> world { World {defaults: @field(defaults, #key) // tail\n} }",
+    "type fn Pair(/// left type\nA: type, /// right type\nB: type) -> struct { let Pair = {left: a, right: b}; struct(Pair) }",
+    "fn make() -> World { World {defaults: @field(defaults, #key) // tail\n} }",
     "fn main() -> i32 { let x = 1; // statement tail\nx }",
   ];
 
@@ -395,7 +420,7 @@ Deno.test("formatter wraps long lines at safe syntax boundaries", async () => {
   const snippets = [
     "fn compute_really_long_signature(alpha_value:i32,beta_value:i32,gamma_value:i32,delta_value:i32,epsilon_value:i32)->result(i32,string){alpha_value+beta_value+gamma_value+delta_value+epsilon_value}",
     "fn call()->i32{combine(first_argument_name,second_argument_name,third_argument_name,fourth_argument_name,fifth_argument_name,sixth_argument_name)}",
-    "type fn row(A:type,B:type,C:type,D:type,E:type)->struct{let Row={first:A,second:B,third:C,fourth:D,fifth:E};struct(Row)}",
+    "type fn Row(a:type,b:type,c:type,d:type,e:type)->struct{let Row={first:a,second:b,third:c,fourth:d,fifth:e};struct(Row)}",
     "fn classify(x:i32)->i32{match x{0=>very_long_name + another_long_name + third_long_name + fourth_long_name,_=>fallback_value + other_fallback_value}}",
     "fn pipe()->i32{load_extremely_long_input_name()\\value->value.map(first_transform).filter(second_transform).fold(third_transform,fourth_transform)}",
   ];

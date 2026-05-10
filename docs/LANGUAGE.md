@@ -26,12 +26,12 @@ truth: use `grammar.ebnf`, `src/check.ts`, `src/primitives.ts`, and the tested f
 ```fig
 const std = @import("prelude.std");
 
-type fn point() -> struct {
+type fn Point() -> struct {
   let Point = {x: i32, y: i32};
   struct(Point)
 }
 
-fn point.add(a: point, b: point) -> point {
+fn Point.add(a: Point, b: Point) -> Point {
   Point {x: a.x + b.x, y: a.y + b.y}
 }
 

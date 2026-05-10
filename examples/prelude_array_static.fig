@@ -13,6 +13,6 @@ fn keep_gt_two(x: i32) -> bool {
 }
 
 pub fn main() -> i32 {
-  let xs: merge.array.layout.lane4_i32 = <1, 2, 3, 4>;
+  let xs: merge.array.layout.Lane4I32 = <1, 2, 3, 4>;
   merge.array.fold4_i32(add, 0, merge.array.map4_i32(inc, xs))
 }

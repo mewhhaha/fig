@@ -1,142 +1,142 @@
 const clock: fn() -> i64 !{time} = @capability("clock");
 const random: fn() -> i32 !{entropy} = @capability("random");
-type fn id() {
+type fn Id() {
   i32
 }
 
-type fn pair(A: type) {
-  let Pair = {fst: A, snd: A};
+type fn Pair(a: type) {
+  let Pair = {fst: a, snd: a};
   struct(Pair)
 }
 
-type fn point() {
+type fn Point() {
   let Point = {x: i32, y: i32};
   struct(Point)
 }
 
-type fn box() {
+type fn Box() {
   let Box = {value: i32};
   struct(Box)
 }
 
-type fn buffer(N: count) {
-  let Buffer = {N*i32};
+type fn Buffer(n: count) {
+  let Buffer = {n*i32};
   struct(Buffer)
 }
 
-type fn weird() {
+type fn Weird() {
   let Weird = {fst: i32, 4*i32, 1*i32};
   struct(Weird)
 }
 
-type fn thunk() {
+type fn Thunk() {
   fn() -> i32
 }
 
-type fn option(A: type) {
+type fn Option(a: type) {
   let None = {};
-  let Some = {value: A};
+  let Some = {value: a};
   union(None, Some)
 }
 
-type fn result(A: type) {
-  let Ok = {value: A};
+type fn Result(a: type) {
+  let Ok = {value: a};
   let Err = {message: string};
   union(Ok, Err)
 }
 
-type fn eq(T: type) {
-  let Eq = {eql: fn(a: T, b: T) -> bool, neq: fn(a: T, b: T) -> bool};
-  match @type_is_product(T) {
-    true => struct(Eq), false => @compile_error("eq requires a product type"),
+type fn Eq(t: type) {
+  let Eq = {eql: fn(a: t, b: t) -> bool, neq: fn(a: t, b: t) -> bool};
+  match @type_is_product(t) {
+    true => struct(Eq), false => @compile_error("Eq requires a product type"),
   }
 }
 
-type fn functor(F: type) {
-  let Functor = {map: fn(x: F) -> F};
-  match @type_has_slot(F, #value) {
-    true => struct(Functor), false => @compile_error("functor requires value slot"),
+type fn Functor(f: type) {
+  let Functor = {map: fn(x: f) -> f};
+  match @type_has_slot(f, #value) {
+    true => struct(Functor), false => @compile_error("Functor requires value slot"),
   }
 }
 
-type fn applicative(F: type) {
-  let Applicative = {pure: fn(x: i32) -> F, apply: fn(f: F, x: F) -> F};
-  match @type_slot_type(F, #value) {
-    i32 => struct(Applicative), _ => @compile_error("applicative requires i32 value"),
+type fn Applicative(f: type) {
+  let Applicative = {pure: fn(x: i32) -> f, apply: fn(f: f, x: f) -> f};
+  match @type_slot_type(f, #value) {
+    i32 => struct(Applicative), _ => @compile_error("Applicative requires i32 value"),
   }
 }
 
-type fn monad(F: type) {
-  let Monad = {bind: fn(x: F) -> F};
-  match @type_is_product(F) {
-    true => struct(Monad), false => @compile_error("monad requires product type"),
+type fn Monad(f: type) {
+  let Monad = {bind: fn(x: f) -> f};
+  match @type_is_product(f) {
+    true => struct(Monad), false => @compile_error("Monad requires product type"),
   }
 }
 
-fn eql_point(a: point, b: point) -> bool {
+fn eql_point(a: Point, b: Point) -> bool {
   a.x == b.x
 }
 
-fn neq_point(a: point, b: point) -> bool {
+fn neq_point(a: Point, b: Point) -> bool {
   a.x != b.x
 }
 
-fn map_box(x: box) -> box {
+fn map_box(x: Box) -> Box {
   {value: x.value + 1}
 }
 
-fn pure_box(x: i32) -> box {
+fn pure_box(x: i32) -> Box {
   {value: x}
 }
 
-fn apply_box(f: box, x: box) -> box {
+fn apply_box(f: Box, x: Box) -> Box {
   {value: f.value + x.value}
 }
 
-fn bind_box(x: box) -> box {
+fn bind_box(x: Box) -> Box {
   {value: x.value + 10}
 }
 
-const point_eq: eq(point) = {eql: eql_point, neq: neq_point};
-const box_functor: functor(box) = {map: map_box};
-const box_applicative: applicative(box) = {pure: pure_box, apply: apply_box};
-const box_monad: monad(box) = {bind: bind_box};
+const point_eq: Eq(point) = {eql: eql_point, neq: neq_point};
+const box_functor: Functor(box) = {map: map_box};
+const box_applicative: Applicative(box) = {pure: pure_box, apply: apply_box};
+const box_monad: Monad(box) = {bind: bind_box};
 let module_tag = #Demo;
 fn sink(x: i32) -> i32 {
   x
 }
 
-fn pair_first(pair: pair(i32)) -> i32 {
+fn pair_first(pair: Pair(i32)) -> i32 {
   1
 }
 
-fn record_score(point: point) -> i32 {
-  point.x
+fn record_score(point: Point) -> i32 {
+  Point.x
 }
 
-fn shape_first(weird: weird) -> i32 {
+fn shape_first(weird: Weird) -> i32 {
   weird[0]
 }
 
-fn same(dict: eq(point), a: point, b: point) -> i32 {
+fn same(dict: Eq(point), a: Point, b: Point) -> i32 {
   match dict.eql(a, b) {
     true => 1, false => 0,
   }
 }
 
-fn mapped(dict: functor(box), x: box) -> i32 {
+fn mapped(dict: Functor(box), x: Box) -> i32 {
   dict.map(x).value
 }
 
-fn applied(dict: applicative(box), x: i32) -> i32 {
+fn applied(dict: Applicative(box), x: i32) -> i32 {
   dict.apply(dict.pure(x), {value: 2}).value
 }
 
-fn bound(dict: monad(box), x: box) -> i32 {
+fn bound(dict: Monad(box), x: Box) -> i32 {
   dict.bind(x).value
 }
 
-fn choose(flag: bool) -> i32 {
+fn Choose(flag: bool) -> i32 {
   match flag {
     true => 1, false => 0,
   }
@@ -149,11 +149,11 @@ fn classify(x: i32) -> i32 {
 }
 
 pub fn main() -> i32 !{time, entropy} {
-  let n: id = 40;
-  let point: point = Point {x: 1, y: 2};
-  let xs: buffer(i32) = <1, 2, 3, 4>;
-  let pair: pair(i32) = {fst: 1, snd: 2};
-  let weird: weird = {fst: 1, [0]: 2, [1]: 3, [2]: 4, [3]: 5, [4]: 6};
+  let n: Id = 40;
+  let point: Point = Point {x: 1, y: 2};
+  let xs: Buffer(i32) = <1, 2, 3, 4>;
+  let pair: Pair(i32) = {fst: 1, snd: 2};
+  let weird: Weird = {fst: 1, [0]: 2, [1]: 3, [2]: 4, [3]: 5, [4]: 6};
   let label = "fig";
   let letter = 's';
   let text = ```multi
@@ -171,5 +171,5 @@ line```;
   let mapped_value = mapped(box_functor, {value: 1});
   let applied_value = applied(box_applicative, 2);
   let bound_value = bound(box_monad, {value: 3});
-  choose(ok) + classify(1) + pair_first(pair) + record_score(point) + forked + sunk + matched + mapped_value + applied_value + bound_value + n + 2
+  Choose(ok) + classify(1) + pair_first(pair) + record_score(point) + forked + sunk + matched + mapped_value + applied_value + bound_value + n + 2
 }

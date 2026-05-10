@@ -17,6 +17,6 @@ fn bool_xor(a: bool, b: bool) -> bool {
   }
 }
 
-fn select(cond: bool, when_true: A, when_false: A) -> A {
+fn select(cond: bool, when_true: a, when_false: a) -> a {
   match cond { true => when_true, false => when_false }
 }

@@ -1,58 +1,58 @@
 // This example shows static layout and static dispatch with today's backend.
 // It does not claim WebAssembly SIMD lowering yet.
 
-type fn inline_array(N: count, A: type) {
-  let InlineArray = {N*A};
+type fn InlineArray(n: count, a: type) {
+  let InlineArray = {n*a};
   struct(InlineArray)
 }
 
-type fn scalar_box() {
+type fn ScalarBox() {
   let ScalarBox = {value: i32};
   struct(ScalarBox)
 }
 
-type fn words8() -> type {
-  inline_array(8, i32)
+type fn Words8() -> type {
+  InlineArray(8, i32)
 }
 
-type fn strided_view_i32_8x2() {
-  let StridedViewI32x8x2 = {base: words8, len: i32, stride: i32};
+type fn StridedViewI328x2() {
+  let StridedViewI32x8x2 = {base: Words8, len: i32, stride: i32};
   struct(StridedViewI32x8x2)
 }
 
-type fn lane4_i32() -> type {
-  inline_array(4, i32)
+type fn Lane4I32() -> type {
+  InlineArray(4, i32)
 }
 
-type fn tile2x4_i32() -> type {
-  inline_array(2, lane4_i32)
+type fn Tile2x4I32() -> type {
+  InlineArray(2, Lane4I32)
 }
 
-type fn map4(T: type) {
-  let Map4 = {apply: fn(x: T) -> T};
+type fn Map4(t: type) {
+  let Map4 = {apply: fn(x: t) -> t};
   struct(Map4)
 }
 
-fn add1_box(x: scalar_box) -> scalar_box {
+fn add1_box(x: ScalarBox) -> ScalarBox {
   {value: x.value + 1}
 }
 
-const scalar_map4: map4(scalar_box) = {apply: add1_box};
+const scalar_map4: Map4(scalar_box) = {apply: add1_box};
 
-fn apply_tile(const ops: map4(scalar_box), x: scalar_box) -> scalar_box {
+fn apply_tile(const ops: Map4(scalar_box), x: ScalarBox) -> ScalarBox {
   ops.apply(ops.apply(ops.apply(ops.apply(x))))
 }
 
-fn view_base(view: strided_view_i32_8x2) -> i32 {
+fn view_base(view: StridedViewI328x2) -> i32 {
   view.base[0]
 }
 
-fn first_lane(tile: tile2x4_i32) -> i32 {
+fn first_lane(tile: Tile2x4I32) -> i32 {
   tile[0][0]
 }
 
 pub fn main() -> i32 {
-  let view: strided_view_i32_8x2 = {base: <1, 2, 3, 4, 5, 6, 7, 8>, len: 8, stride: 2};
-  let tile: tile2x4_i32 = <<1, 2, 3, 4>, <5, 6, 7, 8>>;
+  let view: StridedViewI328x2 = {base: <1, 2, 3, 4, 5, 6, 7, 8>, len: 8, stride: 2};
+  let tile: Tile2x4I32 = <<1, 2, 3, 4>, <5, 6, 7, 8>>;
   apply_tile(scalar_map4, {value: view_base(view) + first_lane(tile)}).value
 }
