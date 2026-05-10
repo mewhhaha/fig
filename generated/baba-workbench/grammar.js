@@ -60,7 +60,7 @@ export default grammar({
     StaticForSource: $ => $.Expr,
     BlockLetDecl: $ => seq("let", choice(seq($.TuplePattern, "=", $.Expr, ";"), seq($.FieldName, $.Type, "=", $.Expr, ";"), seq($.LowerIdent, $.BlockLetTail))),
     BlockLetTail: $ => choice(seq(optional($.TypeAnn), "=", $.Expr, ";"), seq(repeat1(seq(",", $.LowerIdent)), "=", $.Expr, ";")),
-    BlockProofConstDecl: $ => seq("const", $.PascalIdent, "=", $.TypeExpr, ";"),
+    BlockProofConstDecl: $ => seq("const", $.LowerIdent, "=", $.TypeExpr, ";"),
     Expr: $ => $.PipeBind,
     PipeBind: $ => seq($.PipeBindAtom, repeat(seq("\\", $.PipeBindName, "->", $.PipeBindAtom))),
     PipeBindAtom: $ => choice($.MatchExpr, $.Binary),

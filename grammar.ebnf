@@ -54,7 +54,7 @@ StaticForBinders = (LowerIdent | PascalIdent) ("," (LowerIdent | PascalIdent))? 
 StaticForSource = Expr ;
 BlockLetDecl = "let" (TuplePattern "=" Expr ";" | FieldName Type "=" Expr ";" | LowerIdent BlockLetTail) ;
 BlockLetTail = TypeAnn? "=" Expr ";" | ("," LowerIdent)+ "=" Expr ";" ;
-BlockProofConstDecl = "const" PascalIdent "=" TypeExpr ";" ;
+BlockProofConstDecl = "const" LowerIdent "=" TypeExpr ";" ;
 Expr = PipeBind ;
 PipeBind = PipeBindAtom ("\\" PipeBindName "->" PipeBindAtom)* ;
 PipeBindAtom = MatchExpr | Binary ;

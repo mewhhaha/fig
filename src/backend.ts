@@ -699,7 +699,12 @@ function lowerComponentSlotPut(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] | undefined {
-  if (expr.callee.kind !== "var" || !expr.callee.name.includes("component_slot_put_typed")) {
+  if (
+    expr.callee.kind !== "var" ||
+    (!expr.callee.name.includes("component_slot_put_typed") &&
+      !expr.callee.name.includes("ComponentSlot_put_typed") &&
+      !expr.callee.name.includes("ComponentSlot.put_typed"))
+  ) {
     return undefined;
   }
   const [slot, index, present, value] = expr.args;
@@ -742,7 +747,12 @@ function lowerComponentStoreGet(
   locals: Set<string>,
   expectedType?: string,
 ): Instr[] | undefined {
-  if (expr.callee.kind !== "var" || !expr.callee.name.includes("component_store_get_typed")) {
+  if (
+    expr.callee.kind !== "var" ||
+    (!expr.callee.name.includes("component_store_get_typed") &&
+      !expr.callee.name.includes("ComponentStore_get_typed") &&
+      !expr.callee.name.includes("ComponentStore.get_typed"))
+  ) {
     return undefined;
   }
   if (expr.args.length !== 2 || expr.args[0]?.kind !== "var") return undefined;
@@ -2608,12 +2618,12 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
       );
     }
   }
-  const refsArgs = typeCallArgs(resolved, "component_refs");
-  const queryRowArgs = typeCallArgs(resolved, "query_row");
-  const ergonomicRowArgs = typeCallArgs(resolved, "row");
+  const refsArgs = typeCallArgs(resolved, "ComponentRefs");
+  const queryRowArgs = typeCallArgs(resolved, "QueryRow");
+  const ergonomicRowArgs = typeCallArgs(resolved, "Row");
   const rowArgs = queryRowArgs ?? ergonomicRowArgs;
-  const valuesArgs = typeCallArgs(resolved, "values");
-  const componentValuesArgs = typeCallArgs(resolved, "component_values") ?? valuesArgs ??
+  const valuesArgs = typeCallArgs(resolved, "Values");
+  const componentValuesArgs = typeCallArgs(resolved, "ComponentValues") ?? valuesArgs ??
     refsArgs ?? rowArgs;
   if (componentValuesArgs) {
     const args = splitTypeArgs(componentValuesArgs);
@@ -2659,8 +2669,8 @@ function flattenStaticShapeType(
     const expanded = flattenStaticShapeType(alias.normalized.type, layouts);
     if (expanded) return expanded;
   }
-  const refsArgs = typeCallArgs(type, "component_refs");
-  const slotArgs = typeCallArgs(type, "component_slot");
+  const refsArgs = typeCallArgs(type, "ComponentRefs");
+  const slotArgs = typeCallArgs(type, "ComponentSlot");
   if (slotArgs) {
     const args = splitTypeArgs(slotArgs);
     const count = args[0]?.trim() ?? "1";
@@ -2689,7 +2699,7 @@ function flattenStaticShapeType(
     ];
     return flattenShape(slots, layouts);
   }
-  const worldArgs = typeCallArgs(type, "world2d");
+  const worldArgs = typeCallArgs(type, "World2d");
   if (worldArgs) {
     const args = splitTypeArgs(worldArgs);
     const shape = layouts.constShapes.get(args[1]?.trim() ?? "");
@@ -2710,11 +2720,11 @@ function flattenStaticShapeType(
     ];
     return flattenShape(slots, layouts);
   }
-  const queryRowArgs = typeCallArgs(type, "query_row");
-  const ergonomicRowArgs = typeCallArgs(type, "row");
+  const queryRowArgs = typeCallArgs(type, "QueryRow");
+  const ergonomicRowArgs = typeCallArgs(type, "Row");
   const rowArgs = queryRowArgs ?? ergonomicRowArgs;
-  const valuesArgs = typeCallArgs(type, "values");
-  const argsText = typeCallArgs(type, "component_values") ?? valuesArgs ?? refsArgs ?? rowArgs;
+  const valuesArgs = typeCallArgs(type, "Values");
+  const argsText = typeCallArgs(type, "ComponentValues") ?? valuesArgs ?? refsArgs ?? rowArgs;
   if (!argsText) return undefined;
   const args = splitTypeArgs(argsText);
   const shapeName = ergonomicRowArgs ? args[0]?.trim() : args.at(-1)?.trim();

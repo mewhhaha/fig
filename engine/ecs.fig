@@ -144,22 +144,21 @@ fn SparseWorld.empty(const components) -> SparseWorld(3, components) {
   }
 }
 
-fn entity.add(world: SparseWorld(3, Components), entity_values: Row) -> SparseWorld(3, Components) {
-  const RowOk = EntityRow(Components, Row);
-  let index = World.next_entity_id;
+fn entity.add(world: SparseWorld(3, components), entity_values: row) -> SparseWorld(3, components) {
+  const row_ok = EntityRow(components, row);
   {
-    next_entity_id: Index + 1,
+    next_entity_id: world.next_entity_id + 1,
     defaults: {
-      for Key, Spec in Components: @field(World.defaults, Key),
+      for key, spec in components: @field(world.defaults, key),
     },
-    for Key, Spec in Components: ComponentSlot.put_typed(
-      Spec,
-      @field(World, Key),
-      index,
-      @shape_has_slot(@type_slots(Row), Key),
-      match @shape_has_slot(@type_slots(Row), Key) {
-        true => @field(entity_values, Key),
-        false => @field(World.defaults, Key),
+    for key, spec in components: ComponentSlot.put_typed(
+      spec,
+      @field(world, key),
+      world.next_entity_id,
+      @shape_has_slot(@type_slots(row), key),
+      match @shape_has_slot(@type_slots(row), key) {
+        true => @field(entity_values, key),
+        false => @field(world.defaults, key),
       }
     ),
   }

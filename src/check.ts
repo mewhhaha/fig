@@ -8207,7 +8207,7 @@ function checkStatement(
 function forkBlockedReason(type: string | undefined): string | undefined {
   if (isBorrowType(type)) return "borrowed";
   const name = terminalName(typeNameOf(type ?? ""));
-  if (name === "memory" || name === "frozen_arena") return "linear";
+  if (name === "memory" || name === "FrozenArena") return "linear";
   return undefined;
 }
 
@@ -9202,7 +9202,7 @@ function bindPatternName(
 }
 
 function parseIterStepType(type: string | undefined): { state: string; item: string } | undefined {
-  const args = typeCallArgsForBase(type?.trim() ?? "", "iter_step");
+  const args = typeCallArgsForBase(type?.trim() ?? "", "IterStep");
   if (!args) return undefined;
   const [state, item] = splitTypeArgs(args);
   return state && item ? { state: state.trim(), item: item.trim() } : undefined;
@@ -9229,7 +9229,7 @@ function checkDirectIndex(
     return;
   }
   const indexType = expr.index.kind === "var" ? env.get(expr.index.name)?.type : undefined;
-  const proof = indexType?.match(/^index\((\d+)\)$/);
+  const proof = indexType?.match(/^Index\((\d+)\)$/);
   if (proof && Number.parseInt(proof[1], 10) === capacity) return;
   if (indexType === undefined || indexType === "i32") return;
   diagnostics.push({

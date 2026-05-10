@@ -903,10 +903,11 @@ function patternBindingNames(pattern: ParamPattern): string[] {
 }
 
 function lowerProofConst(node: Node): ProofConstDecl {
-  const name = text(first(node, "PascalIdent"), "proof const name");
+  const nameNode = first(node, "LowerIdent");
+  const name = text(nameNode, "proof const name");
   return {
     kind: "proof_const",
-    ...meta(node, first(node, "PascalIdent")),
+    ...meta(node, nameNode),
     ...doc(node),
     name,
     value: lowerTypeExpr(first(node, "TypeExpr")),
