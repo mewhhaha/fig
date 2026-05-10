@@ -24,8 +24,8 @@ expose it as `array.layout` through its own namespace import.
 | Import                 | Role                                                                                                                             |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `prelude.std`          | Common merged pure surface for functions, operators, options/results, tuples, arrays, numeric/order/bool helpers, and schedules. |
-| `prelude.core`         | Core static contracts, option/result roots, tuples, index proofs, pointer and memory helpers.                                    |
-| `prelude.layout`       | Scalar, lane, tile, matrix, fixed inline-array layouts, collector members, and pointer-oriented layout aliases.                   |
+| `prelude.core`         | Core static contracts, option/result roots, tuples, and index proofs.                                                           |
+| `prelude.layout`       | Scalar, lane, tile, matrix, fixed inline-array layouts, and collector members.                                                   |
 | `prelude.array_static` | Fixed inline array, lane, range iterator, map/zip/fold/reduce, checked get, and compact array helpers.                           |
 | `prelude.function`     | Function composition and typeclass-like `functor`, `applicative`, and `monad` helpers.                                           |
 | `prelude.operators`    | Operator descriptors for arithmetic, comparison, boolean, append, functor, applicative, and monad syntax.                        |

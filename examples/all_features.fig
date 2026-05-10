@@ -97,10 +97,10 @@ fn bind_box(x: Box) -> Box {
   {value: x.value + 10}
 }
 
-const point_eq: Eq(point) = {eql: eql_point, neq: neq_point};
-const box_functor: Functor(box) = {map: map_box};
-const box_applicative: Applicative(box) = {pure: pure_box, apply: apply_box};
-const box_monad: Monad(box) = {bind: bind_box};
+const point_eq: Eq(Point) = {eql: eql_point, neq: neq_point};
+const box_functor: Functor(Box) = {map: map_box};
+const box_applicative: Applicative(Box) = {pure: pure_box, apply: apply_box};
+const box_monad: Monad(Box) = {bind: bind_box};
 let module_tag = #Demo;
 fn sink(x: i32) -> i32 {
   x
@@ -118,21 +118,21 @@ fn shape_first(weird: Weird) -> i32 {
   weird[0]
 }
 
-fn same(dict: Eq(point), a: Point, b: Point) -> i32 {
+fn same(dict: Eq(Point), a: Point, b: Point) -> i32 {
   match dict.eql(a, b) {
     true => 1, false => 0,
   }
 }
 
-fn mapped(dict: Functor(box), x: Box) -> i32 {
+fn mapped(dict: Functor(Box), x: Box) -> i32 {
   dict.map(x).value
 }
 
-fn applied(dict: Applicative(box), x: i32) -> i32 {
+fn applied(dict: Applicative(Box), x: i32) -> i32 {
   dict.apply(dict.pure(x), {value: 2}).value
 }
 
-fn bound(dict: Monad(box), x: Box) -> i32 {
+fn bound(dict: Monad(Box), x: Box) -> i32 {
   dict.bind(x).value
 }
 
@@ -165,11 +165,10 @@ line```;
   let now = clock();
   let entropy = random();
   let owned = 7;
-  let forked, copied = fork(owned);
-  let sunk = sink(copied);
+  let sunk = sink(owned);
   let matched = same(point_eq, Point {x: 1, y: 2}, Point {x: 1, y: 2});
   let mapped_value = mapped(box_functor, {value: 1});
   let applied_value = applied(box_applicative, 2);
   let bound_value = bound(box_monad, {value: 3});
-  Choose(ok) + classify(1) + pair_first(pair) + record_score(point) + forked + sunk + matched + mapped_value + applied_value + bound_value + n + 2
+  Choose(ok) + classify(1) + pair_first(pair) + record_score(point) + owned + sunk + matched + mapped_value + applied_value + bound_value + n + 2
 }

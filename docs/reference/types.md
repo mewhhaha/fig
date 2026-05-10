@@ -1,25 +1,22 @@
 # Fig Types
 
 Value type annotations use primitive names, function types, record/shape syntax, tuple syntax,
-counted repeats, type function calls, borrow types, and frozen types:
+counted repeats, and type function calls:
 
 ```fig
 i32
 bool
-memory
 std.core.Option(i32)
 fn(x: i32) -> i32
 {x: i32, y: i32}
 {4*i32}
 [i32, bool]
 [i32; 4]
-&(point)
-#(Layout.InlineArray(3, i32))
 type
 ```
 
 Primitive scalar types currently include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`,
-`memory`, and unsigned widths `u1` through `u64`.
+and unsigned widths `u1` through `u64`.
 
 Function types are `fn(params) -> Type`. Effect rows are part of function declarations and typed
 capabilities, written as `!{effect, other}` or `!{}`.
@@ -86,25 +83,3 @@ Point {x: 1, y: 2}
 ```
 
 Union constructors use the PascalCase variant names introduced by `union`.
-
-## Borrowed and Frozen Types
-
-Borrowed parameter types are written as `&(t)`. a value can be borrowed only at a call site that
-expects a borrowed parameter:
-
-```fig
-fn sum_twice(p: &(point)) -> i32 { p.x + p.x }
-let total = sum_twice(&p);
-```
-
-Borrowed values cannot be stored in locals, returned, or passed to owned parameters.
-
-Frozen references are written as `#(t)`. Static frozen collection literals use `#[...]` and require
-an expected frozen inline-array-like type:
-
-```fig
-let xs: #(Layout.InlineArray(3, i32)) = #[10, 20, 30];
-```
-
-Frozen references can be indexed and projected, but they cannot be used where an owned value is
-required. Owned values can be frozen through the explicit arena API in `prelude.core`.

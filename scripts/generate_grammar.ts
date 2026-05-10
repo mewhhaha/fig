@@ -16,6 +16,16 @@ for (const file of bundle.files) {
   if (file.path === "grammar.js") {
     content = content.replace("Comment: $ => /\\\\/\\\\/[^\\n]*/", "Comment: $ => /\\/\\/[^\\n]*/");
   }
+  if (file.path === "queries/highlights.scm") {
+    content = content
+      .replace("(TypeAtom (LowerIdent) @type)", "(TypeAtom (LowerIdent) @type.parameter)")
+      .replace("(TypeAtom (PascalIdent) @type.parameter)\n", "")
+      .replace("(TypePrimary (LowerIdent) @type)\n", "")
+      .replace("(TypePrimary (PascalIdent) @type.parameter)\n", "")
+      .replace("(TypeFnDecl (LowerIdent) @type.definition)\n", "")
+      .replace("(TypeLetDecl (PascalIdent) @type)\n", "")
+      .replace("(BlockProofConstDecl (PascalIdent) @type)\n", "");
+  }
   await Deno.writeTextFile(path, content);
 }
 
@@ -36,7 +46,6 @@ const tokenKinds = [
   "const",
   "fn",
   "let",
-  "fork",
   "match",
   "pub",
   "bool",

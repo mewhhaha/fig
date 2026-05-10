@@ -188,11 +188,11 @@ _=>2 // fallback
       "const canvas = @import(\"web.canvas\");\nconst shader: string = ```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;\n\npub fn main() -> i32 !{gpu} {\n  canvas.gpu_create_shader(canvas.shader_id(shader))\n}\n",
   },
   {
-    name: "fork destructuring and local proof consts",
+    name: "destructuring and local proof consts",
     input:
-      "fn main(x:i32)->i32{let left,right=fork(x);let a,b=fork(left);const proof=Semigroup(i32);append(i32,proof,a,b)+right}",
+      "fn pair()->[i32,i32]{[1,2]} fn main(x:i32)->i32{let a,b=pair();const proof=Semigroup(i32);append(i32,proof,a,b)+x}",
     expected:
-      "fn main(x: i32) -> i32 {\n  let left, right = fork(x);\n  let a, b = fork(left);\n  const proof = Semigroup(i32);\n  append(i32, proof, a, b) + right\n}\n",
+      "fn pair() -> [i32, i32] {\n  [1, 2]\n}\n\nfn main(x: i32) -> i32 {\n  let a, b = pair();\n  const proof = Semigroup(i32);\n  append(i32, proof, a, b) + x\n}\n",
   },
   {
     name: "pipe placeholder and fluent chains",
@@ -264,14 +264,14 @@ fn make()->World{World {
 defaults:@field(defaults,#key)
 }}`,
     expected:
-      "type fn Row(\n/// param docs\nA: type) -> struct {\n  /// slot docs\n  let Row = {value: a};\n  struct(Row)\n}\n\nfn make() -> World {\n  World {\n    defaults: @field(defaults, #key)\n  }\n}\n",
+      "type fn Row(\n/// param docs\na: type) -> struct {\n  /// slot docs\n  let Row = {value: a};\n  struct(Row)\n}\n\nfn make() -> World {\n  World {\n    defaults: @field(defaults, #key)\n  }\n}\n",
   },
   {
     name: "const dictionaries and typeclass helper contracts",
     input:
-      "type fn Eq(t:type){let Eq={eql:fn(a:t,b:t)->bool,neq:fn(a:t,b:t)->bool};struct(Eq)} fn eql_point(a:Point,b:Point)->bool{a.x==b.x} fn neq_point(a:Point,b:Point)->bool{a.x!=b.x} const point_eq:Eq(point)={eql:eql_point,neq:neq_point};",
+      "type fn Eq(t:type){let Eq={eql:fn(a:t,b:t)->bool,neq:fn(a:t,b:t)->bool};struct(Eq)} fn eql_point(a:Point,b:Point)->bool{a.x==b.x} fn neq_point(a:Point,b:Point)->bool{a.x!=b.x} const point_eq:Eq(Point)={eql:eql_point,neq:neq_point};",
     expected:
-      "type fn Eq(t: type) {\n  let Eq = {\n    eql: fn(a: t, b: t) -> bool,\n    neq: fn(a: t, b: t) -> bool\n  };\n  struct(Eq)\n}\n\nfn eql_point(a: Point, b: Point) -> bool {\n  a.x == b.x\n}\n\nfn neq_point(a: Point, b: Point) -> bool {\n  a.x != b.x\n}\n\nconst point_eq: Eq(point) = {eql: eql_point, neq: neq_point};\n",
+      "type fn Eq(t: type) {\n  let Eq = {\n    eql: fn(a: t, b: t) -> bool,\n    neq: fn(a: t, b: t) -> bool\n  };\n  struct(Eq)\n}\n\nfn eql_point(a: Point, b: Point) -> bool {\n  a.x == b.x\n}\n\nfn neq_point(a: Point, b: Point) -> bool {\n  a.x != b.x\n}\n\nconst point_eq: Eq(Point) = {eql: eql_point, neq: neq_point};\n",
   },
   {
     name: "constructor pattern parameters and attached members",
@@ -304,12 +304,12 @@ b:type
 )->struct{let Pair={left:a,right:b};struct(Pair)}
 fn map(
 /// dictionary
-const Dict:Eq(point),
+const Dict:Eq(Point),
 /// value
 value:Point
 )->Point{Dict.map(value)}`,
     expected:
-      "type fn Pair(\n/// left type\nA: type,\n/// right type\nB: type) -> struct {\n  let Pair = {left: a, right: b};\n  struct(Pair)\n}\n\nfn map(\n/// dictionary\nconst Dict: Eq(point),\n/// value\nvalue: Point) -> Point {\n  Dict.map(value)\n}\n",
+      "type fn Pair(\n/// left type\na: type,\n/// right type\nb: type) -> struct {\n  let Pair = {left: a, right: b};\n  struct(Pair)\n}\n\nfn map(\n/// dictionary\nconst Dict: Eq(Point),\n/// value\nvalue: Point) -> Point {\n  Dict.map(value)\n}\n",
   },
 ];
 
@@ -395,7 +395,7 @@ Deno.test("formatter preserves comments in punctuation-sensitive locations", asy
     "type fn Row(a: type) -> struct { let Row = {value: a // slot tail\n}; struct(Row) }",
     "fn classify(x: i32) -> i32 { match x { 0 => 1, // zero\n_ => 2 // fallback\n} }",
     "fn main() -> i32 { let x = 1; x // final expression tail\n}",
-    "type fn Pair(/// left type\nA: type, /// right type\nB: type) -> struct { let Pair = {left: a, right: b}; struct(Pair) }",
+    "type fn Pair(/// left type\na: type, /// right type\nb: type) -> struct { let Pair = {left: a, right: b}; struct(Pair) }",
     "fn make() -> World { World {defaults: @field(defaults, #key) // tail\n} }",
     "fn main() -> i32 { let x = 1; // statement tail\nx }",
   ];

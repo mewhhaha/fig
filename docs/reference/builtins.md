@@ -78,27 +78,35 @@ These builtins are compiler-recognized expression primitives used by the `prelud
 source code should prefer the public `InlineArray.tabulate`, `tabulate_with`, `imap`,
 `imap_with_state`, `fill`, `map`, `set`, and `update` APIs.
 
-| Builtin                         | Purpose                                      |
-| ------------------------------- | -------------------------------------------- |
-| `@inline_array_tabulate`        | build each slot from its `core.Index(N)`     |
-| `@inline_array_tabulate_with`   | tabulate with an explicit state value        |
-| `@inline_array_map`             | map slots with the current value             |
-| `@inline_array_imap`            | map slots with index and current value       |
-| `@inline_array_imap_with_state` | indexed map with an explicit state value     |
-| `@inline_array_fill`            | repeat one value into every slot             |
-| `@inline_array_set`             | rebuild with one slot replaced               |
-| `@inline_array_update`          | rebuild with one slot transformed            |
+| Builtin                         | Purpose                                  |
+| ------------------------------- | ---------------------------------------- |
+| `@inline_array_tabulate`        | build each slot from its `core.Index(N)` |
+| `@inline_array_tabulate_with`   | tabulate with an explicit state value    |
+| `@inline_array_map`             | map slots with the current value         |
+| `@inline_array_imap`            | map slots with index and current value   |
+| `@inline_array_imap_with_state` | indexed map with an explicit state value |
+| `@inline_array_fill`            | repeat one value into every slot         |
+| `@inline_array_set`             | rebuild with one slot replaced           |
+| `@inline_array_update`          | rebuild with one slot transformed        |
 
 ## Backend Intrinsics
 
 Backend intrinsics are recognized when a normal Fig function wraps a single intrinsic call. The
-wrapper function supplies the public API and types.
+wrapper function supplies the public API and types. The public backend surface is limited to hidden
+heap-handle support and fixed inline-array construction helpers; explicit memory and pointer
+intrinsics are not source-facing Fig builtins.
 
-| Intrinsic                 | Arguments                          | Returns         |
-| ------------------------- | ---------------------------------- | --------------- |
-| `@memory_load_i32`        | `memory`, pointer                  | `i32`           |
-| `@memory_store_i32`       | `memory`, pointer, `i32`           | `memory`        |
-| `@memory_load_lane4_i32`  | `memory`, pointer                  | lane4 value     |
-| `@memory_store_lane4_i32` | `memory`, pointer, lane4 value     | `memory`        |
-| `@ptr_from_i32`           | `i32`                              | pointer wrapper |
-| `@ptr_add`                | pointer wrapper, byte offset `i32` | pointer wrapper |
+| Intrinsic                 | Arguments                     | Returns        |
+| ------------------------- | ----------------------------- | -------------- |
+| `@branch_handle`          | pointer `i32`                 | branch handle  |
+| `@branch_handle_ptr`      | branch handle                 | pointer `i32`  |
+| `@branch_mark`            | branch handle                 | branch handle  |
+| `@branch_is_branched`     | branch handle                 | bool           |
+| `@branch_ensure_editable` | branch handle                 | branch handle  |
+| `@branch_materialize`     | branch handle                 | branch handle  |
+| `@temporal_handle`        | pointer `i32`, revision `i32` | packed handle  |
+| `@temporal_handle_ptr`    | packed handle                 | pointer `i32`  |
+| `@temporal_handle_rev`    | packed handle                 | revision `i32` |
+
+The `@branch_*` intrinsics are accepted in `branch` and `branch-debug` memory modes. The
+`@temporal_*` intrinsics are compatibility-only and are accepted in `temporal` memory mode.

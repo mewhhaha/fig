@@ -37,9 +37,9 @@ fn add1_box(x: ScalarBox) -> ScalarBox {
   {value: x.value + 1}
 }
 
-const scalar_map4: Map4(scalar_box) = {apply: add1_box};
+const scalar_map4: Map4(ScalarBox) = {apply: add1_box};
 
-fn apply_tile(const ops: Map4(scalar_box), x: ScalarBox) -> ScalarBox {
+fn apply_tile(const ops: Map4(ScalarBox), x: ScalarBox) -> ScalarBox {
   ops.apply(ops.apply(ops.apply(ops.apply(x))))
 }
 

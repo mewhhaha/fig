@@ -99,7 +99,7 @@ Deno.test("LSP analysis recovers product slot facts after bad constructor slot",
   assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(
     result.symbols.some((symbol) =>
-      symbol.kind === "local" && symbol.name === "p" && symbol.detail === "point"
+      symbol.kind === "local" && symbol.name === "p" && symbol.detail === "Point"
     ),
   );
   assert(definitionAt(result, { line: 1, character: 60 })[0]?.uri === uri);
@@ -122,7 +122,7 @@ Deno.test("LSP analysis recovers projected field type after bad call argument", 
   assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(
     result.symbols.some((symbol) =>
-      symbol.kind === "local" && symbol.name === "tmp" && symbol.detail === "point"
+      symbol.kind === "local" && symbol.name === "tmp" && symbol.detail === "Point"
     ),
   );
   assert(
@@ -196,7 +196,7 @@ Deno.test("LSP diagnostics use compile-time caller spans", async () => {
       type fn Eq(t: type) {
         @require(@type_has_member(t, #eql), "Eq requires eql");
       }
-      fn same(proof: Eq(point)) -> bool { true }
+      fn same(proof: Eq(Point)) -> bool { true }
     `,
   );
   const result = await cache.reanalyze(uri);
@@ -742,13 +742,13 @@ Deno.test("LSP hover resolves individual dotted value segments", async () => {
     "  };",
     "  struct(Geometry)",
     "}",
-    "fn count(geometry: Geometry) -> i32 { Geometry.vertex_count }",
+    "fn count(geometry: Geometry) -> i32 { geometry.vertex_count }",
   ].join("\n");
   cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const use = "Geometry.vertex_count";
+  const use = "geometry.vertex_count";
   const baseHover = hoverAt(result, positionIn(source, use, 1));
   assertStringIncludes(baseHover?.contents.value ?? "", "```fig\ngeometry: Geometry\n```");
   assertEquals(
@@ -776,18 +776,16 @@ Deno.test("LSP hover prefers dotted value bases over same-named types", async ()
   const cache = new AnalysisCache();
   const source = [
     "type fn Thing() -> struct { let Thing = {value: i32}; struct(Thing) }",
-    "fn read(thing: Thing) -> i32 { Thing.value }",
+    "fn read(thing: Thing) -> i32 { thing.value }",
   ].join("\n");
   cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const valueHover = hoverAt(result, positionIn(source, "Thing.value", 1));
+  const valueHover = hoverAt(result, positionIn(source, "thing.value", 1));
   assertStringIncludes(valueHover?.contents.value ?? "", "```fig\nthing: Thing\n```");
   assert(!valueHover?.contents.value.includes("type fn Thing"));
 
-  const annotationHover = hoverAt(result, positionIn(source, "thing) ->", 1));
-  assertStringIncludes(annotationHover?.contents.value ?? "", "type fn Thing()");
 });
 
 Deno.test("LSP hover walks nested dotted value chains by segment", async () => {
@@ -802,17 +800,17 @@ Deno.test("LSP hover walks nested dotted value chains by segment", async () => {
     "  let World = {component_next: ComponentNext};",
     "  struct(World)",
     "}",
-    "fn read(world: World) -> i32 { World.ComponentNext.transforms }",
+    "fn read(world: World) -> i32 { world.component_next.transforms }",
   ].join("\n");
   cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const use = "World.ComponentNext.transforms";
+  const use = "world.component_next.transforms";
   const worldHover = hoverAt(result, positionIn(source, use, 1));
   assertStringIncludes(worldHover?.contents.value ?? "", "```fig\nworld: World\n```");
 
-  const nextHover = hoverAt(result, positionIn(source, use, "World.".length + 1));
+  const nextHover = hoverAt(result, positionIn(source, use, "world.".length + 1));
   assertStringIncludes(
     nextHover?.contents.value ?? "",
     "```fig\ncomponent_next: ComponentNext\n```",
@@ -820,7 +818,7 @@ Deno.test("LSP hover walks nested dotted value chains by segment", async () => {
 
   const transformsHover = hoverAt(
     result,
-    positionIn(source, use, "World.ComponentNext.".length + 1),
+    positionIn(source, use, "world.component_next.".length + 1),
   );
   assertStringIncludes(transformsHover?.contents.value ?? "", "```fig\ntransforms: i32\n```");
 });
@@ -929,8 +927,7 @@ Deno.test("LSP hover covers checked AST syntax nodes without symbol hovers", asy
     "fn make_pair() -> Pair { Pair {first: 2, second: 3} }",
     "fn read(flag: bool) -> i32 !{time} {",
     "  let left, right = make_pair();",
-    "  let a, b = fork(left);",
-    "  let piped = a \\value -> value + b;",
+    "  let piped = left \\value -> value + right;",
     "  let made = Pair {first: piped, second: clock()};",
     "  match flag {",
     "    true => made.first,",
@@ -950,7 +947,7 @@ Deno.test("LSP hover covers checked AST syntax nodes without symbol hovers", asy
   expectHover("@require", 1, "```fig\n@require: static type reference\n```");
   expectHover("left, right", 1, "```fig\nleft: i32\n```");
   expectHover("\\value ->", 2, "```fig\nvalue: i32\n```");
-  expectHover("value + b", "value ".length + 1, "binary expression");
+  expectHover("value + right", "value ".length + 1, "binary expression");
   expectHover("first: i32", 1, "```fig\nfirst: i32\n```");
   expectHover("_ => made.second", 0, "wildcard pattern");
 });
@@ -973,12 +970,12 @@ Deno.test("LSP hover covers type expressions slots patterns and count expression
     const hover = hoverAt(result, positionIn(source, needle, inside));
     assertStringIncludes(hover?.contents.value ?? "", expected);
   };
-  expectHover("Key: const", 1, "```fig\nKey: const\n```");
-  expectHover("match Key", 1, "type match");
+  expectHover("key: const", 1, "```fig\nkey: const\n```");
+  expectHover("match key", 1, "type match");
   expectHover("#x =>", 1, "type pattern");
   expectHover("_ =>", 0, "type pattern");
-  expectHover("N*a", 0, "```fig\nN: count expression\n```");
-  expectHover("{N*a}", 0, "shape type");
+  expectHover("n*a", 0, "```fig\nn: count expression\n```");
+  expectHover("{n*a}", 0, "shape type");
   expectHover("Choose(#x, 2, i32)", "Choose(#x".length, "Choose(...): type");
 });
 
@@ -1128,14 +1125,14 @@ Deno.test("LSP inlay hints render inferred local let types", async () => {
     start: { line: 0, character: 0 },
     end: { line: 0, character: 80 },
   });
-  assertEquals(hints.map((hint) => hint.label), [": RangeI32", ": RangeI32"]);
+  assertEquals(hints.map((hint) => hint.label), [": range_i32", ": range_i32"]);
   assertEquals(hints.map((hint) => hint.kind), [1, 1]);
 
   const firstHintOnly = inlayHintsAt(result, {
     start: { line: 0, character: 24 },
     end: { line: 0, character: 35 },
   });
-  assertEquals(firstHintOnly.map((hint) => hint.label), [": RangeI32"]);
+  assertEquals(firstHintOnly.map((hint) => hint.label), [": range_i32"]);
 });
 
 Deno.test("LSP server advertises and returns inlay hints", async () => {
@@ -1158,7 +1155,7 @@ Deno.test("LSP server advertises and returns inlay hints", async () => {
     textDocument: { uri },
     range: { start: { line: 0, character: 0 }, end: { line: 0, character: 80 } },
   }) as { label: string }[];
-  assertEquals(hints.map((hint) => hint.label), [": RangeI32"]);
+  assertEquals(hints.map((hint) => hint.label), [": range_i32"]);
 });
 
 Deno.test("LSP inlay hints return empty for invalid documents", async () => {

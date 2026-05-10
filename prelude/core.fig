@@ -103,34 +103,3 @@ type fn ScalarI32() {
   let ScalarI32 = {value: i32};
   struct(ScalarI32)
 }
-
-type fn Ptr(a: type) -> type {
-  let Ptr = {addr: i32};
-  struct(Ptr)
-}
-
-type fn FrozenArena() -> type {
-  i32
-}
-
-type fn FreezeResult(t: type) -> type {
-  let FreezeResult = {arena: FrozenArena, value: #(t)};
-  struct(FreezeResult)
-}
-
-fn freeze(const t: type, arena: FrozenArena, value: t) -> FreezeResult(t) {
-  @freeze(arena, value)
-}
-
-fn memory.load_i32(mem: memory, p: Ptr(i32)) -> i32 {
-  @memory_load_i32(mem, p)
-}
-fn memory.store_i32(mem: memory, p: Ptr(i32), value: i32) -> memory {
-  @memory_store_i32(mem, p, value)
-}
-fn Ptr.from_i32(addr: i32) -> Ptr(a) {
-  @ptr_from_i32(addr)
-}
-fn Ptr.add(p: Ptr(a), bytes: i32) -> Ptr(a) {
-  @ptr_add(p, bytes)
-}

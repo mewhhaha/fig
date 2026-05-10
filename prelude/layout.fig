@@ -66,7 +66,8 @@ fn InlineArray.tabulate_loop(
   builder: InlineArrayBuilder(n, a),
   const f: fn(i: core.Index(n)) -> a
 ) -> InlineArray(n, a) {
-  let builder_then, builder_else = fork(builder);
+  let builder_then = builder;
+let builder_else = builder;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => InlineArray.tabulate_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_then, i, f(i)), f),
     Done => InlineArrayBuilder.finish(n, a, builder_else),
@@ -92,9 +93,12 @@ fn InlineArray.tabulate_with_loop(
   state_value: state,
   const f: fn(i: core.Index(n), state_value: state) -> a
 ) -> InlineArray(n, a) {
-  let builder_then, builder_else = fork(builder);
-  let state_then, state_else = fork(state_value);
-  let state_call, state_next = fork(state_then);
+  let builder_then = builder;
+let builder_else = builder;
+  let state_then = state_value;
+let state_else = state_value;
+  let state_call = state_then;
+let state_next = state_then;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => InlineArray.tabulate_with_loop(n, a, state, next, InlineArrayBuilder.push(n, a, builder_then, i, f(i, state_call)), state_next, f),
     Done => InlineArrayBuilder.finish(n, a, builder_else),
@@ -112,9 +116,12 @@ fn InlineArray.fill_loop(
   builder: InlineArrayBuilder(n, a),
   value: a
 ) -> InlineArray(n, a) {
-  let builder_then, builder_else = fork(builder);
-  let value_then, value_else = fork(value);
-  let value_push, value_next = fork(value_then);
+  let builder_then = builder;
+let builder_else = builder;
+  let value_then = value;
+let value_else = value;
+  let value_push = value_then;
+let value_next = value_then;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => InlineArray.fill_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_then, i, value_push), value_next),
     Done => InlineArrayBuilder.finish(n, a, builder_else),
@@ -140,9 +147,12 @@ fn InlineArray.map_loop(
   xs: InlineArray(n, a),
   const f: fn(x: a) -> b
 ) -> InlineArray(n, b) {
-  let builder_then, builder_else = fork(builder);
-  let xs_then, xs_else = fork(xs);
-  let xs_current, xs_next = fork(xs_then);
+  let builder_then = builder;
+let builder_else = builder;
+  let xs_then = xs;
+let xs_else = xs;
+  let xs_current = xs_then;
+let xs_next = xs_then;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => InlineArray.map_loop(n, a, b, next, InlineArrayBuilder.push(n, b, builder_then, i, f(xs_current[i])), xs_next, f),
     Done => InlineArrayBuilder.finish(n, b, builder_else),
@@ -168,9 +178,12 @@ fn InlineArray.imap_loop(
   xs: InlineArray(n, a),
   const f: fn(i: core.Index(n), x: a) -> b
 ) -> InlineArray(n, b) {
-  let builder_then, builder_else = fork(builder);
-  let xs_then, xs_else = fork(xs);
-  let xs_current, xs_next = fork(xs_then);
+  let builder_then = builder;
+let builder_else = builder;
+  let xs_then = xs;
+let xs_else = xs;
+  let xs_current = xs_then;
+let xs_next = xs_then;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => InlineArray.imap_loop(n, a, b, next, InlineArrayBuilder.push(n, b, builder_then, i, f(i, xs_current[i])), xs_next, f),
     Done => InlineArrayBuilder.finish(n, b, builder_else),
@@ -200,11 +213,16 @@ fn InlineArray.imap_with_state_loop(
   state_value: state,
   const f: fn(i: core.Index(n), x: a, state_value: state) -> b
 ) -> InlineArray(n, b) {
-  let builder_then, builder_else = fork(builder);
-  let xs_then, xs_else = fork(xs);
-  let state_then, state_else = fork(state_value);
-  let xs_current, xs_next = fork(xs_then);
-  let state_call, state_next = fork(state_then);
+  let builder_then = builder;
+let builder_else = builder;
+  let xs_then = xs;
+let xs_else = xs;
+  let state_then = state_value;
+let state_else = state_value;
+  let xs_current = xs_then;
+let xs_next = xs_then;
+  let state_call = state_then;
+let state_next = state_then;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => InlineArray.imap_with_state_loop(n, a, b, state, next, InlineArrayBuilder.push(n, b, builder_then, i, f(i, xs_current[i], state_call)), xs_next, state_next, f),
     Done => InlineArrayBuilder.finish(n, b, builder_else),
@@ -224,16 +242,26 @@ fn InlineArray.set_loop(
   index: core.Index(n),
   value: a
 ) -> InlineArray(n, a) {
-  let builder_then, builder_else = fork(builder);
-  let xs_then, xs_else = fork(xs);
-  let value_then, value_else = fork(value);
-  let builder_true, builder_false = fork(builder_then);
-  let xs_current, xs_next = fork(xs_then);
-  let xs_true_next, xs_false_next = fork(xs_next);
-  let value_current, value_next = fork(value_then);
-  let value_true_next, value_false_next = fork(value_next);
-  let index_test, index_next = fork(index);
-  let index_true_next, index_false_next = fork(index_next);
+  let builder_then = builder;
+let builder_else = builder;
+  let xs_then = xs;
+let xs_else = xs;
+  let value_then = value;
+let value_else = value;
+  let builder_true = builder_then;
+let builder_false = builder_then;
+  let xs_current = xs_then;
+let xs_next = xs_then;
+  let xs_true_next = xs_next;
+let xs_false_next = xs_next;
+  let value_current = value_then;
+let value_next = value_then;
+  let value_true_next = value_next;
+let value_false_next = value_next;
+  let index_test = index;
+let index_next = index;
+  let index_true_next = index_next;
+let index_false_next = index_next;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => match i == index_test {
       true => InlineArray.set_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_true, i, value_current), xs_true_next, index_true_next, value_true_next),
@@ -262,13 +290,20 @@ fn InlineArray.update_loop(
   index: core.Index(n),
   const f: fn(x: a) -> a
 ) -> InlineArray(n, a) {
-  let builder_then, builder_else = fork(builder);
-  let xs_then, xs_else = fork(xs);
-  let builder_true, builder_false = fork(builder_then);
-  let xs_current, xs_next = fork(xs_then);
-  let xs_update, xs_false_next = fork(xs_next);
-  let index_test, index_next = fork(index);
-  let index_true_next, index_false_next = fork(index_next);
+  let builder_then = builder;
+let builder_else = builder;
+  let xs_then = xs;
+let xs_else = xs;
+  let builder_true = builder_then;
+let builder_false = builder_then;
+  let xs_current = xs_then;
+let xs_next = xs_then;
+  let xs_update = xs_next;
+let xs_false_next = xs_next;
+  let index_test = index;
+let index_next = index;
+  let index_true_next = index_next;
+let index_false_next = index_next;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => match i == index_test {
       true => InlineArray.update_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_true, i, f(xs_current[i])), xs_update, index_true_next, f),
@@ -285,7 +320,8 @@ fn InlineArray.fold_indices(
   acc: acc_type,
   const f: fn(acc: acc_type, i: core.Index(n)) -> acc_type
 ) -> acc_type {
-  let acc_then, acc_else = fork(acc);
+  let acc_then = acc;
+let acc_else = acc;
   match core.IndexCursor.next(n, cursor) {
     Yield(i, next) => InlineArray.fold_indices(n, acc_type, next, f(acc_then, i), f),
     Done => acc_else,
@@ -298,18 +334,6 @@ type fn Lane4I32() -> type {
 
 type fn Lane4Bool() -> type {
   InlineArray(4, bool)
-}
-
-fn memory.load_lane4_i32(mem: memory, p: core.Ptr(Lane4I32)) -> Lane4I32 {
-  @memory_load_lane4_i32(mem, p)
-}
-
-fn memory.store_lane4_i32(
-  mem: memory,
-  p: core.Ptr(Lane4I32),
-  value: Lane4I32
-) -> memory {
-  @memory_store_lane4_i32(mem, p, value)
 }
 
 type fn Lane4ScalarI32() -> type {

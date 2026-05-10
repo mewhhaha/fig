@@ -1,6 +1,6 @@
 ---
 name: fig-language
-description: Complete reference for Fig language syntax, typing, compile-time type functions, ownership, effects, imports, standard prelude modules, WebAssembly lowering, and current compiler constraints. Use when Codex needs to write, read, debug, test, document, or explain .fig programs in this repository.
+description: Complete reference for Fig language syntax, typing, compile-time type functions, Branch-Bit values, effects, imports, standard prelude modules, WebAssembly lowering, and current compiler constraints. Use when Codex needs to write, read, debug, test, document, or explain .fig programs in this repository.
 ---
 
 # Fig Language
@@ -14,15 +14,15 @@ summarizes the current supported surface.
 - Use `docs/LANGUAGE.md` as the language index and reading order.
 - Use `docs/reference/syntax.md` for declarations, params, blocks, patterns, literals, imports, and
   capabilities.
-- Use `docs/reference/types.md` for primitive, function, tuple, shape/product/union, repeat, borrow,
-  frozen, and constructor types.
-- Use `docs/reference/expressions.md` for calls, constructors, tuples, collections, borrows, match,
-  operators, pipe-bind, `$`, `fork`, and destructuring.
+- Use `docs/reference/types.md` for primitive, function, tuple, shape/product/union, repeat, and
+  constructor types.
+- Use `docs/reference/expressions.md` for calls, constructors, tuples, collections, match,
+  operators, pipe-bind, `$`, shadowing, and destructuring.
 - Use `docs/reference/type-functions.md` for type blocks, result kinds, parameters, `struct`,
   `union`, `operator`, and type matches.
 - Use `docs/reference/builtins.md` for every `@...` compiler builtin and backend intrinsic.
-- Use `docs/reference/semantics.md` for ownership, effects, const evaluation, reflection, and Wasm
-  portability constraints.
+- Use `docs/reference/semantics.md` for Branch-Bit values, effects, const evaluation, reflection,
+  and Wasm portability constraints.
 - Use `docs/reference/modules.md` for prelude/web/engine module roles.
 - Use `docs/EXAMPLES.md` and `tests/fixtures/language` for tested good/bad reference examples.
 - Start with `grammar.ebnf` for accepted syntax.
@@ -35,10 +35,10 @@ summarizes the current supported surface.
 
 ## Doc Comments
 
-Use `///` doc comments when writing Fig declarations or bindings that should carry markdown
-metadata for editor hovers. The compiler stores the stripped text on the checked AST, and the LSP
-renders it below the symbol signature when available. Well-formed TSDoc-style tags are accepted by
-the hover renderer.
+Use `///` doc comments when writing Fig declarations or bindings that should carry markdown metadata
+for editor hovers. The compiler stores the stripped text on the checked AST, and the LSP renders it
+below the symbol signature when available. Well-formed TSDoc-style tags are accepted by the hover
+renderer.
 
 Doc comments attach only to the immediately following binding when there is no blank line, ordinary
 `//` comment, or code between the comment block and the binding. Multiple contiguous `///` lines
@@ -74,8 +74,8 @@ type fn Point(
 ```
 
 Prefer `///` for top-level `fn`, `type fn`, `const`, and `let`; function params; type params;
-type-block lets; local lets and proof consts; and shape fields. Use ordinary `//` only for
-non-hover implementation notes.
+type-block lets; local lets and proof consts; and shape fields. Use ordinary `//` only for non-hover
+implementation notes.
 
 ## Verification
 
@@ -121,7 +121,7 @@ right-hand sides.
 
 ## Names and Visibility
 
-- Type function names are lowercase, including type constructor references such as `Pair(i32)`.
+- Type function names are UpperCamelCase, including type constructor references such as `Pair(i32)`.
 - Product constructor names are PascalCase and are introduced by `struct(Shape)`.
 - Runtime function names are lowercase and may be qualified as attached members, such as `Point.eql`
   or `Box.map`.
@@ -140,11 +140,10 @@ Use these literal forms:
 - Literal type tags: `#Tag`, `#field`, `#infixl`.
 - Tuple and repeat values: `[1, true]`, `[0; 4]`.
 - Target-typed collection literals: `<1, 2, 3>`, including spread such as `<0, ...rest>`.
-- Frozen collection literals: `#[1, 2, 3]` when the expected type is frozen.
 
 Unsuffixed integer literals default from context, commonly to `i32`. Current primitive scalar types
-include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`, `memory`, and arbitrary unsigned
-integer widths `u1` through `u64`. Narrow unsigned fields may be storage-packed in product layouts.
+include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`, and arbitrary unsigned integer
+widths `u1` through `u64`. Narrow unsigned fields may be storage-packed in product layouts.
 
 ## Functions
 
@@ -159,7 +158,6 @@ Parameter forms include:
 
 - `name: Type`
 - `const name: Type` for static function/dictionary/type parameters.
-- `name: &(Type)` for call-scoped borrowed parameters.
 - Literal clauses such as `fn Choose(1: i32) -> i32 { 10 }` ordered before broader clauses.
 - `_ : Type` placeholders.
 - Pattern identifiers for sum variants and tuple destructuring in supported clause contexts.
@@ -184,7 +182,7 @@ Blocks contain `let` statements, local proof `const` declarations, and a final e
 ```fig
 pub fn main() -> i32 {
   let x = 1;
-  const Proof = Eq(point);
+  const Proof = Eq(Point);
   x + 1
 }
 ```
@@ -200,7 +198,6 @@ Supported expressions include:
   `{for Key, Spec in (fields): value}`.
 - Tuple and repeat values: `[1, 2]`, `[0; 4]`.
 - Target-typed collection literals: `<1, 2, 3>`, `<0, ...rest>`.
-- Borrow expressions: `&value` for `&(Type)` parameters.
 - `match value { pattern => expr, _ => fallback }`.
 - Binary operators listed in `grammar.ebnf`.
 - Ranges: `start .. end`.
@@ -265,7 +262,6 @@ Indexing a fixed inline array with a literal is bounds-Checked. Dynamic indexing
 `option`.
 
 Tuple types use brackets, such as `[i32, bool]` and `[i32; 4]`. Shape and product types use braces.
-Borrowed and frozen types use `&(t)` and `#(t)`.
 
 ## Type Functions
 
@@ -287,12 +283,12 @@ Parameter kinds include:
 - type constructors such as `type fn(a: type) -> type`
 - result-constrained constructors such as `type fn(a: type) -> struct`
 
-Use PascalCase names for type parameters. Literal and wildcard clauses are allowed for ordered type
+Use lowercase names for type parameters. Literal and wildcard clauses are allowed for ordered type
 function dispatch, for example `type fn Choose(i32: type) -> type { bool }`.
 
 Inside type functions:
 
-- Use `let` or `const` with PascalCase local names.
+- Use `let` or `const` bindings for intermediate type expressions.
 - Return a final type expression.
 - Use `match` for static branching.
 - Use `@compile_error("message")` or `@require(condition, "message")` for diagnostics.
@@ -304,10 +300,11 @@ When choosing a type-function pattern:
   return `struct(Shape)` or `union(...)`.
 - If you intend to require behavior on a type, write a contract `type fn` with `@require` and
   attached members such as `t.eql`, `t.append`, or `t.map`.
-- If you intend generic runtime helpers with no runtime proof cost, pass `const _proof:
+- If you intend generic runtime helpers with no runtime proof cost, pass
+  `const _proof:
   contract(t)` and call attached members through `t.member(...)`.
-- If you intend to abstract over a unary type constructor, accept `t: type fn(a: type) -> type`,
-  use values as `t(a)`, and reflect members on `t`.
+- If you intend to abstract over a unary type constructor, accept `t: type fn(a: type) -> type`, use
+  values as `t(a)`, and reflect members on `t`.
 - If you intend type-directed construction or dispatch, pass the type as `const t` or
   `const t: type`; avoid modeling types as runtime Values.
 - If ordinary value parameters already determine the type, prefer inference. Pass `const t`
@@ -355,7 +352,7 @@ called statically as `t.map(...)` inside generic code. Local proof consts such a
 Const dictionaries are product-shaped constants whose fields are function references:
 
 ```fig
-const point_eq: Eq(point) = {eql: Point.eql, neq: Point.neq};
+const point_eq: Eq(Point) = {eql: Point.eql, neq: Point.neq};
 ```
 
 Fields must match the annotated product shape, and slot values must be function references rather
@@ -395,7 +392,7 @@ fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
 fn inc(x: i32) -> i32 { x + 1 }
 
 pub fn main() -> i32 {
-  fmap(Box {value: 1}, inc, Functor(box)).value
+  fmap(Box {value: 1}, inc, Functor(Box)).value
 }
 ```
 
@@ -411,7 +408,7 @@ fn wrap(x: i32) -> Box(i32) {
 }
 
 pub fn main() -> i32 {
-  bind(fmap(Box {value: 1}, inc, Functor(box)), wrap, Monad(box)).value
+  bind(fmap(Box {value: 1}, inc, Functor(Box)), wrap, Monad(Box)).value
 }
 ```
 
@@ -420,7 +417,7 @@ Define applicative-like types with `map`, `pure`, and `apply`:
 ```fig
 fn Box.pure(value: a) -> Box(a) { Box {value: value} }
 fn Box.apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) { Box {value: v.value(x.value)} }
-fn Proof(const _proof: Applicative(box)) -> i32 { 0 }
+fn Proof(const _proof: Applicative(Box)) -> i32 { 0 }
 ```
 
 Use semigroup/monoid patterns for append and empty operations on concrete types:
@@ -432,7 +429,7 @@ fn Point.append(a: Point, b: Point) -> Point {
 fn Point.empty() -> Point { Point {x: 0, y: 0} }
 
 pub fn main() -> i32 {
-  let total = append(point, Semigroup(point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
+  let total = append(Point, Semigroup(Point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
   total.x + total.y
 }
 ```
@@ -505,29 +502,20 @@ Current expression syntax resolves user-defined binary operators through visible
 usually `#infix`, `#infixl`, or `#infixr`. The prelude exposes common operator descriptors in
 `prelude.operators` and through `prelude.std`.
 
-## Ownership and Forking
+## Branch-Bit Values and Shadowing
 
-Fig tracks moves for Values. Passing a value to a function consumes it unless the operation is known
-to borrow it. Reusing a moved local is rejected.
-
-Use `&value` only for a call-scoped borrow into an `&(Type)` parameter:
-
-```fig
-fn sum(p: &(point)) -> i32 { p.x + p.y }
-let total = sum(&point);
-```
-
-Borrowed values cannot be stored, returned, or passed as owned parameters.
-
-Use `fork(value)` to create multiple owned copies:
+Fig uses Branch-Bit values: ordinary values are immutable, reusable, and can be passed to multiple
+functions without explicit borrowing or copying syntax. Repeated `let` bindings are the canonical
+way to carry the latest logical version of a value:
 
 ```fig
-let original = 1;
-let a, b, c = fork(original);
+let world = step(world);
+let world = update_player(world);
+world
 ```
 
-Only a local variable may be forked. Forking consumes the original. Product-return destructuring
-also uses multi-bind:
+The right-hand side sees the previous binding, and later expressions see the new one. Product-return
+destructuring uses multi-bind:
 
 ```fig
 let first, second = make_pair();
@@ -548,22 +536,17 @@ Calling an effectful host function from a pure function is rejected. Effect rows
 `!{}` and must cover the host capabilities used by the function. Capabilities lower to Wasm imports
 from module `env`.
 
-## Memory and Wasm Intrinsics
+## Heap Runtime Intrinsics
 
-The backend targets WebAssembly and supports explicit memory tokens and pointer wrappers. Intrinsic
-wrappers use normal Fig functions whose body is a compiler primitive:
+The backend targets WebAssembly and uses internal branch memories for heap values: `fig_objects` and
+`fig_buffers`. Public Fig code should model data as values and fixed inline arrays; explicit
+source-level memory tokens, pointer wrappers, and memory load/store intrinsics are no longer part of
+the language surface.
 
-```fig
-fn memory.load_i32(mem: memory, p: Ptr(i32)) -> i32 { @memory_load_i32(mem, p) }
-fn memory.store_i32(mem: memory, p: Ptr(i32), value: i32) -> memory {
-  @memory_store_i32(mem, p, value)
-}
-fn Ptr.from_i32(addr: i32) -> Ptr(a) { @ptr_from_i32(addr) }
-fn Ptr.add(p: Ptr(a), bytes: i32) -> Ptr(a) { @ptr_add(p, bytes) }
-```
-
-Loads borrow the memory token; stores consume and return a new memory token. Lane intrinsics such as
-`@memory_load_lane4_i32` and `@memory_store_lane4_i32` are available for fixed lanes.
+Compiler-recognized branch intrinsics such as `@branch_handle`, `@branch_mark`, and
+`@branch_ensure_editable` may appear behind narrow internal wrappers while the runtime scaffold is
+being built. Temporal intrinsics remain compatibility-only in temporal memory mode. Ordinary Fig
+modules should prefer prelude APIs and host capabilities.
 
 ## Placeholder and Pipe Sugar
 
@@ -587,9 +570,8 @@ expressions.
 
 Prefer `const std = @import("prelude.std");` for normal programs. It imports common pure fragments:
 
-- `prelude.core`: `eq`, `semigroup`, `monoid`, `copyable`, `option`, `result`, tuples, `index`,
-  `ptr`, memory helpers.
-- `prelude.layout`: Scalar, lane, tile, matrix, pointer-oriented layout aliases.
+- `prelude.core`: `eq`, `semigroup`, `monoid`, `copyable`, `option`, `result`, tuples, and `index`.
+- `prelude.layout`: Scalar, lane, tile, matrix, and fixed inline-array layout aliases.
 - `prelude.array_static`: Fixed `lane4_i32` helpers, map/zip/fold/reduce, checked get, bounds, range
   iterators, compact arrays, and iterator map/filter/fold/collect.
 - `prelude.function`: `functor`, `applicative`, `monad`, `fmap`, `bind`, `pipe`, `flip`.

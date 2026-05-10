@@ -1,20 +1,30 @@
 # Fig Semantics
 
-## Ownership
+## Branch-Bit Values
 
-Fig tracks moves for Values. Passing a value to a function consumes it unless the operation is known
-to borrow it. Reusing a moved local is rejected. Memory load intrinsics borrow the memory argument;
-stores consume and return memory.
+Fig's intended value model is Branch-Bit values: ordinary values are immutable, passing or assigning
+a value is conceptually cheap, and updating a value returns a new logical value while the old value
+remains valid. Heap values use hidden branch handles and copy-before-write when a physical object is
+observed through multiple logical values, but pointer identity is not part of the ordinary value
+semantics.
 
-Call-scoped borrows use `&value` with a parameter type written `&(t)`. a borrowed argument is not
-moved by the call, but the borrowed value cannot be stored, returned, or accepted as an owned
-parameter.
+Repeated `let` bindings are the canonical surface form for carrying the latest version of a value:
 
-`fork(local)` consumes a local variable and creates multiple owned copies through multi-bind.
-Forking an unknown name or a non-local expression is rejected.
+```fig
+let world = step(world);
+let world = update_player(world);
+world
+```
 
-Frozen values use frozen types such as `#(t)` and frozen literals such as `#[1, 2, 3]`. Frozen
-values are immutable and are checked against their frozen expected type.
+The right-hand side sees the previous `world`; subsequent expressions see the new one.
+
+The source language does not expose borrow, fork, frozen-reference, pointer, or explicit memory
+tokens. Reusing a value is ordinary Fig code; use shadowing when a name should represent a newer
+logical value. Product-return destructuring still uses multi-bind:
+
+```fig
+let left, right = split(value);
+```
 
 ## Effects
 
@@ -34,8 +44,8 @@ Top-level constants, type-function bodies, const parameters, local proof consts,
 are evaluated at compile time. Static reflection exposes product slots, sum variants, attached
 members, shape transforms, and selected WGSL metadata.
 
-Compile-time expressions are intentionally smaller than runtime expressions. `fork` is not
-const-evaluable or type-evaluable, and unsupported static forms report focused diagnostics.
+Compile-time expressions are intentionally smaller than runtime expressions. Unsupported static
+forms report focused diagnostics.
 
 Static slots in records and product constructors evaluate a compile-time shape and generate one
 field per key. Static `for` statement blocks and array-comprehension-style `[for ...]` literals are
@@ -48,5 +58,17 @@ Deno. Safari/WebKit support is not required unless a task explicitly asks for it
 
 Prefer the browser and Deno supported subset when adding backend behavior. Heap-backed growable
 collections and allocation-backed append APIs are intentionally not part of the current standard
-prelude. Use fixed inline arrays, explicit memory tokens, and host capabilities for lower-level
-work.
+prelude. Use fixed inline arrays and host capabilities for lower-level work.
+
+The Branch-Bit runtime uses multiple internal memories for ordinary heap values: object data and
+large byte buffers. Branch code emits `fig_objects` and `fig_buffers` memories and currently packs
+branch handles as an `i64` whose high 32 bits are zero and low 32 bits contain the object pointer.
+The old source-facing exported `memory` ABI is not part of Fig's public value model.
+
+## Temporal Compatibility
+
+The earlier Temporal Values runtime remains available behind the backend memory mode
+`--memory temporal` while migration tests compare both implementations. Temporal compatibility code
+emits `fig_objects`, `fig_logs`, and `fig_buffers` memories and packs temporal handles as an `i64`
+containing `{ptr: i32, rev: i32}`. Temporal intrinsics are rejected when compiling in `branch` or
+`branch-debug` memory mode.

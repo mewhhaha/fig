@@ -23,8 +23,14 @@ import { wgslShaderId } from "./wgsl.ts";
 interface BackendModule {
   imports: BackendImport[];
   functions: BackendFunction[];
-  memory: boolean;
+  memories: BackendMemory[];
   data: BackendData[];
+}
+
+interface BackendMemory {
+  name: string;
+  exportName: string;
+  minPages: number;
 }
 
 interface BackendData {
@@ -58,12 +64,14 @@ type Instr =
   | { op: "const"; type: ValueType; value: number }
   | { op: "local.get"; name: string }
   | { op: "local.set"; name: string }
+  | { op: "local.tee"; name: string }
   | { op: "call"; name: string }
   | { op: "return_call"; name: string }
+  | { op: "unary"; wasm: string }
   | { op: "binary"; wasm: string }
   | { op: "simd"; wasm: SimdOp; lane?: number; lanes?: number[] }
-  | { op: "load"; type: ValueType; align: number; offset: number }
-  | { op: "store"; type: ValueType; align: number; offset: number }
+  | { op: "load"; type: ValueType; align: number; offset: number; memory?: string }
+  | { op: "store"; type: ValueType; align: number; offset: number; memory?: string }
   | { op: "drop" }
   | { op: "unreachable" }
   | { op: "if"; results: ValueType[]; thenBody: Instr[]; elseBody: Instr[] }
@@ -97,13 +105,8 @@ interface LowerContext {
   currentFn?: FnDecl;
   localTypes?: Map<string, string>;
   tailCallMode?: TailCallMode;
-  frozenData?: BackendData[];
+  memoryModel: MemoryModel;
   nextDataOffset?: number;
-  ownership?: OwnershipIr;
-}
-
-interface OwnershipIr {
-  forkAliases: Map<string, { source: string; type?: string }>;
 }
 
 interface LayoutEnv {
@@ -112,10 +115,29 @@ interface LayoutEnv {
 }
 
 export type TailCallMode = "opcode";
+export type MemoryModel = "temporal" | "branch-debug" | "branch";
 
 export interface BackendOptions {
   tailCallMode?: TailCallMode;
+  memoryModel?: MemoryModel;
 }
+
+const EXPLICIT_MEMORY: BackendMemory = {
+  name: "memory",
+  exportName: "memory",
+  minPages: 1,
+};
+
+const TEMPORAL_MEMORIES: BackendMemory[] = [
+  { name: "fig_objects", exportName: "fig_objects", minPages: 1 },
+  { name: "fig_logs", exportName: "fig_logs", minPages: 1 },
+  { name: "fig_buffers", exportName: "fig_buffers", minPages: 1 },
+];
+
+const BRANCH_MEMORIES: BackendMemory[] = [
+  { name: "fig_objects", exportName: "fig_objects", minPages: 1 },
+  { name: "fig_buffers", exportName: "fig_buffers", minPages: 1 },
+];
 
 export function emitWat(program: Program, options: BackendOptions = {}): string {
   return backendModuleToWat(lowerBackendModule(program, options));
@@ -129,6 +151,13 @@ export function emitWasm(
 }
 
 function lowerBackendModule(program: Program, options: BackendOptions = {}): BackendModule {
+  const memoryModel = options.memoryModel ?? "temporal";
+  if (!isMemoryModel(memoryModel)) {
+    throw new CompileError([{
+      code: "backend.memory_model",
+      message: `unknown memory model ${memoryModel}`,
+    }]);
+  }
   const optimized = optimizeProgram(program);
   const layouts = createLayoutEnv(optimized);
   const imports = optimized.imports.map((item) => importAsFn(item));
@@ -150,11 +179,20 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
     tempIndex: 0,
     tempLocals: [],
     tailCallMode: options.tailCallMode,
-    frozenData: [],
+    memoryModel,
     nextDataOffset: 1024,
   };
 
   const loweredFunctions = functions.map((fn) => lowerFunction(fn, ctx));
+  const needsTemporalMemory = functions.some((fn) => usesTemporalIntrinsic(fn.body, ctx.functions));
+  const needsBranchMemory = memoryModel !== "temporal" ||
+    functions.some((fn) => usesBranchIntrinsic(fn.body, ctx.functions));
+  if (memoryModel !== "temporal" && needsTemporalMemory) {
+    throw new CompileError([{
+      code: "backend.temporal_in_branch_mode",
+      message: `temporal intrinsics are only available with --memory temporal`,
+    }]);
+  }
   return {
     imports: imports.map((fn) => ({
       name: fn.name,
@@ -164,10 +202,19 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
       results: flattenType(fn.returnType, layouts).map((slot) => slot.wat),
     })),
     functions: loweredFunctions,
-    memory: functions.some((fn) => usesMemoryIntrinsic(fn.body, ctx.functions)) ||
-      (ctx.frozenData?.length ?? 0) > 0,
-    data: ctx.frozenData ?? [],
+    memories: [
+      ...(memoryModel === "temporal"
+        ? needsTemporalMemory ? TEMPORAL_MEMORIES : []
+        : needsBranchMemory
+        ? BRANCH_MEMORIES
+        : []),
+    ],
+    data: [],
   };
+}
+
+function isMemoryModel(value: string): value is MemoryModel {
+  return value === "temporal" || value === "branch-debug" || value === "branch";
 }
 
 function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
@@ -185,8 +232,12 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
     tempLocals: [],
     currentFn: fn,
     localTypes: new Map(fn.params.map((param) => [param.name, param.type])),
-    ownership: { forkAliases: new Map() },
   };
+  const laneParamVectors = materializedLane4I32Params(fn, fnCtx);
+  for (const name of laneParamVectors) {
+    fnCtx.tempLocals.push({ name, type: "v128" });
+    localNames.add(name);
+  }
   const tailCalls = analyzeTailCalls(fn);
   if (
     ctx.tailCallMode === "opcode" && tailCalls.hasDirectSelfCall &&
@@ -197,18 +248,22 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
       message: `function ${fn.name} is not eligible for tail-call opcode lowering`,
     }]);
   }
-  const body = ctx.tailCallMode === "opcode" && tailCalls.hasOnlyTailDirectSelfCalls
+  const loweredBody = ctx.tailCallMode === "opcode" && tailCalls.hasOnlyTailDirectSelfCalls
     ? lowerTailOpcodeBlock(fn.body, fn, fnCtx, localNames)
     : tailCalls.hasOnlyTailDirectSelfCalls
     ? lowerTailLoopBlock(fn.body, fn, fnCtx, localNames)
     : lowerBlock(fn.body, fnCtx, localNames, fn.returnType);
+  const prologue = laneParamVectors.flatMap((name): Instr[] => [
+    ...packProjectedLane4I32FromScalars(name),
+    { op: "local.set", name },
+  ]);
+  const body = cleanupInstrs([...prologue, ...loweredBody]);
+  const bodyLocals = instrLocalNames(body);
   const locals = [...collectIrLocals(fn.body, fnCtx), ...fnCtx.tempLocals].filter((local) =>
-    (!paramNames.has(local.name) &&
-      usedNames(fn.body).has(local.name.split("$")[0] ?? local.name)) ||
+    (!paramNames.has(local.name) && bodyLocals.has(local.name)) ||
     local.name.startsWith("__simd_tmp") ||
     local.name.startsWith("__tail_tmp") ||
-    local.name.startsWith("__slot_tmp") ||
-    local.name.startsWith("__freeze_tmp")
+    local.name.startsWith("__slot_tmp")
   );
   return {
     name: fn.name,
@@ -218,6 +273,139 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
     locals,
     body,
   };
+}
+
+function materializedLane4I32Params(fn: FnDecl, ctx: LowerContext): string[] {
+  const counts = dot4LaneUseCounts(fn.body);
+  return fn.params
+    .filter((param) => isLane4I32(param.type, ctx.layouts) && (counts.get(param.name) ?? 0) > 1)
+    .map((param) => param.name);
+}
+
+function dot4LaneUseCounts(block: BlockExpr): Map<string, number> {
+  const counts = new Map<string, number>();
+  const countBase = (name: string) => counts.set(name, (counts.get(name) ?? 0) + 1);
+  const visit = (item: Expr | Statement | undefined) => {
+    if (!item) return;
+    switch (item.kind) {
+      case "let":
+      case "destructure_let":
+        visit(item.value);
+        return;
+      case "proof_const":
+      case "literal":
+      case "var":
+      case "placeholder":
+        return;
+      case "binary": {
+        const dot = dot4I32Pattern(item);
+        if (dot) {
+          countBase(dot.left);
+          countBase(dot.right);
+        }
+        visit(item.left);
+        visit(item.right);
+        return;
+      }
+      case "call":
+        visit(item.callee);
+        for (const arg of item.args) visit(arg);
+        return;
+      case "index":
+        visit(item.target);
+        visit(item.index);
+        return;
+      case "pipe_bind":
+        visit(item.value);
+        visit(item.body);
+        return;
+      case "match":
+        visit(item.value);
+        for (const arm of item.arms) visit(arm.value);
+        return;
+      case "shape":
+      case "product_constructor":
+        for (const slot of item.slots) visit(slot.value);
+        return;
+      case "range":
+        visit(item.start);
+        visit(item.end);
+        return;
+      case "static_for_slots":
+        visit(item.value);
+        return;
+      case "field":
+        visit(item.value);
+        visit(item.key);
+        return;
+      case "block":
+        for (const stmt of item.statements) visit(stmt);
+        visit(item.expr);
+        return;
+    }
+  };
+  visit(block);
+  return counts;
+}
+
+function cleanupInstrs(instrs: Instr[]): Instr[] {
+  const cleaned: Instr[] = [];
+  for (let index = 0; index < instrs.length; index++) {
+    const instr = cleanupInstr(instrs[index]!);
+    if (instr.op === "block" && !instr.results?.length && instr.body.length === 0) continue;
+    if (instr.op === "loop" && !instr.results?.length && instr.body.length === 0) continue;
+    const previous = cleaned[cleaned.length - 1];
+    if (previous?.op === "local.set" && instr.op === "local.get" && previous.name === instr.name) {
+      cleaned[cleaned.length - 1] = { op: "local.tee", name: instr.name };
+      continue;
+    }
+    cleaned.push(instr);
+    if (isTerminator(instr)) break;
+  }
+  return cleaned;
+}
+
+function cleanupInstr(instr: Instr): Instr {
+  if (instr.op === "if") {
+    return {
+      ...instr,
+      thenBody: cleanupInstrs(instr.thenBody),
+      elseBody: cleanupInstrs(instr.elseBody),
+    };
+  }
+  if (instr.op === "block" || instr.op === "loop") {
+    return { ...instr, body: cleanupInstrs(instr.body) };
+  }
+  return instr;
+}
+
+function isTerminator(instr: Instr): boolean {
+  return instr.op === "br" || instr.op === "return_call" || instr.op === "unreachable";
+}
+
+function instrLocalNames(instrs: Instr[]): Set<string> {
+  const names = new Set<string>();
+  const visit = (instr: Instr) => {
+    switch (instr.op) {
+      case "local.get":
+      case "local.set":
+      case "local.tee":
+        names.add(instr.name);
+        return;
+      case "if":
+        instr.thenBody.forEach(visit);
+        instr.elseBody.forEach(visit);
+        return;
+      case "block":
+      case "loop":
+        instr.body.forEach(visit);
+        return;
+      default:
+        return;
+    }
+  };
+  instrs.forEach(visit);
+  return names;
 }
 
 function collectIrLocals(block: BlockExpr, ctx: LowerContext): BackendLocal[] {
@@ -248,9 +436,6 @@ function collectBlockLocals(block: BlockExpr, locals: BackendLocal[], ctx: Lower
 
 function collectExprLocals(expr: Expr, locals: BackendLocal[], ctx: LowerContext) {
   switch (expr.kind) {
-    case "borrow":
-      collectExprLocals(expr.value, locals, ctx);
-      return;
     case "block":
       collectBlockLocals(expr, locals, ctx);
       return;
@@ -321,17 +506,6 @@ function lowerStatement(
   usedLater: Set<string>,
 ): Instr[] {
   if (stmt.kind === "proof_const") return [];
-  if (stmt.kind === "fork_let") {
-    stmt.sourceType ??= varType(stmt.source, ctx);
-    for (const name of stmt.names) {
-      if (stmt.sourceType) ctx.localTypes?.set(name, stmt.sourceType);
-      ctx.ownership?.forkAliases.set(name, {
-        source: resolveForkAliasName(stmt.source, ctx),
-        type: stmt.sourceType,
-      });
-    }
-    return [];
-  }
   if (stmt.kind === "destructure_let") {
     const bindings = statementLocalBindings(stmt, ctx);
     for (const target of bindings.map((slot) => slot.name)) locals.add(target);
@@ -348,16 +522,21 @@ function lowerStatement(
     ];
   }
   stmt.type ??= exprTypeWithLocals(stmt.value, ctx);
-  if (!usedLater.has(stmt.name) && !hasRuntimeEffect(stmt.value, ctx.functions)) return [];
+  if (stmt.type) ctx.localTypes?.set(stmt.name, stmt.type);
+  const flattenedStatementType = flattenType(stmt.type, ctx.layouts);
+  const isStructuredAlias = inlineArrayLikeTypeArgs(stmt.type, ctx.layouts) !== undefined;
+  if (
+    !usedLater.has(stmt.name) && !hasRuntimeEffect(stmt.value, ctx.functions) &&
+    flattenedStatementType.length <= 1 && !isStructuredAlias
+  ) return [];
   const bindings = statementLocalBindings(stmt, ctx);
   const targets = bindings.map((slot) => slot.name);
   for (const target of targets) locals.add(target);
-  if (stmt.type) ctx.localTypes?.set(stmt.name, stmt.type);
   const value = lowerExpr(stmt.value, ctx, locals, stmt.type);
-  if (!usedLater.has(stmt.name)) {
+  if (!usedLater.has(stmt.name) && !isStructuredAlias) {
     return [
       ...value,
-      ...flattenType(exprTypeWithLocals(stmt.value, ctx), ctx.layouts).map((): Instr => ({
+      ...flattenType(stmt.type, ctx.layouts).map((): Instr => ({
         op: "drop",
       })),
     ];
@@ -433,13 +612,23 @@ function lowerTailLoopBlock(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  const statements: Instr[] = [];
+  for (let index = 0; index < block.statements.length; index++) {
+    const stmt = block.statements[index];
+    const usedLater = usedNames({
+      kind: "block",
+      statements: block.statements.slice(index + 1),
+      ...(block.expr ? { expr: block.expr } : {}),
+    });
+    statements.push(...lowerStatement(stmt, ctx, locals, usedLater));
+  }
   return [{
     op: "block",
     results: flattenType(fn.returnType, ctx.layouts).map((slot) => slot.wat),
     body: [{
       op: "loop",
       body: [
-        ...lowerBlock({ kind: "block", statements: block.statements }, ctx, locals, fn.returnType),
+        ...statements,
         ...(block.expr ? lowerTailLoopExpr(block.expr, fn, ctx, locals, 0, 1) : []),
       ],
     }, { op: "unreachable" }],
@@ -461,21 +650,11 @@ function lowerTailLoopExpr(
     const flatParams = fn.params.flatMap((param) =>
       flattenBinding(param.name, param.type, ctx.layouts)
     );
-    const temps = flatParams.map((param) => {
-      const name = `__tail_tmp${ctx.tempIndex++}`;
-      ctx.tempLocals.push({ name, type: param.wat });
-      locals.add(name);
-      return name;
-    });
     return [
       ...runtimeArgs.flatMap((arg, index) =>
         lowerExpr(arg, ctx, locals, callee?.params[index]?.type)
       ),
-      ...temps.toReversed().map((name): Instr => ({ op: "local.set", name })),
-      ...flatParams.map((param, index): Instr[] => [
-        { op: "local.get", name: temps[index] },
-        { op: "local.set", name: param.name },
-      ]).flat(),
+      ...flatParams.toReversed().map((param): Instr => ({ op: "local.set", name: param.name })),
       { op: "br", depth: continueDepth },
     ];
   }
@@ -597,13 +776,7 @@ function lowerExpr(
     case "literal":
       return lowerLiteral(expr, expectedType);
     case "var":
-      {
-        const frozenProjection = lowerFrozenVarIndex(expr.name, ctx, locals);
-        if (frozenProjection) return frozenProjection;
-      }
       return lowerVar(expr.name, ctx, locals, expectedType);
-    case "borrow":
-      return lowerExpr(expr.value, ctx, locals, stripBorrowType(expectedType));
     case "placeholder":
       throw new Error("backend cannot lower unresolved $ placeholder");
     case "call": {
@@ -611,12 +784,10 @@ function lowerExpr(
         if (expr.args.length === 0) return lowerExpr(expr.callee, ctx, locals, expectedType);
         throw new Error("backend only supports direct calls");
       }
-      const freeze = lowerFreezePrimitive(expr, ctx, locals);
-      if (freeze) return freeze;
-      const memory = lowerMemoryIntrinsic(expr, ctx, locals);
-      if (memory) return memory;
-      const pointer = lowerPointerPrimitive(expr, ctx, locals);
-      if (pointer) return pointer;
+      const branch = lowerBranchIntrinsic(expr, ctx, locals);
+      if (branch) return branch;
+      const temporal = lowerTemporalIntrinsic(expr, ctx, locals);
+      if (temporal) return temporal;
       const builder = lowerInlineArrayBuilderPrimitive(expr, ctx, locals, expectedType);
       if (builder) return builder;
       const componentSlotPut = lowerComponentSlotPut(expr, ctx, locals);
@@ -659,9 +830,6 @@ function lowerExpr(
       }
       return lowerMatchArms(expr.value, expr.arms, ctx, locals, expectedType);
     case "shape":
-      if (expr.syntax === "frozen_collection") {
-        return lowerFrozenCollectionLiteral(expr, expectedType, ctx, locals);
-      }
       if (isLane4I32(expectedType, ctx.layouts)) {
         const vector = lowerLane4I32Shape(expr, ctx, locals);
         if (vector) return extractLane4I32(vector, ctx);
@@ -711,7 +879,7 @@ function lowerComponentSlotPut(
   if (expr.args.length !== 4 || slot?.kind !== "var" || !index || !present || !value) {
     return undefined;
   }
-  const localBase = resolveForkAliasName(slot.name, ctx).replaceAll(".", "$");
+  const localBase = slot.name.replaceAll(".", "$");
   const valueSlots = (item: number) => {
     const direct = `${localBase}$values$${item}`;
     if (locals.has(direct)) return [direct];
@@ -787,7 +955,7 @@ function lowerRuntimeInlineArrayIndexFromLocalSlots(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] | undefined {
-  const localBase = resolveForkAliasName(target, ctx).replaceAll(".", "$");
+  const localBase = target.replaceAll(".", "$");
   const itemSlots = (item: number) => {
     const direct = `${localBase}$${item}`;
     if (locals.has(direct)) return [direct];
@@ -816,7 +984,6 @@ function lowerRuntimeInlineArrayIndexFromLocalSlots(
 }
 
 function sparseWorldComponentStoreItemType(target: string, ctx: LowerContext): string | undefined {
-  target = resolveForkAliasName(target, ctx);
   const parts = target.split(".");
   if (parts.length < 3 || parts[2] !== "values") return undefined;
   const worldType = resolveAlias(ctx.localTypes?.get(baseName(parts[0] ?? "")), ctx.layouts);
@@ -824,7 +991,9 @@ function sparseWorldComponentStoreItemType(target: string, ctx: LowerContext): s
   const sparseArgs = unqualified ? typeCallArgs(unqualified, "SparseWorld") : undefined;
   if (!sparseArgs) return undefined;
   const [, componentsName] = splitTypeArgs(sparseArgs);
-  const components = componentsName ? ctx.layouts.constShapes.get(componentsName.trim()) : undefined;
+  const components = componentsName
+    ? ctx.layouts.constShapes.get(componentsName.trim())
+    : undefined;
   const component = components?.slots.find((slot) => slot.label === parts[1])?.value;
   return component?.kind === "var" ? component.name : undefined;
 }
@@ -940,86 +1109,6 @@ function lowerFlattenedSlotViaTemps(
   ];
 }
 
-function lowerPointerPrimitive(
-  expr: Extract<Expr, { kind: "call" }>,
-  ctx: LowerContext,
-  locals: Set<string>,
-): Instr[] | undefined {
-  if (expr.callee.kind !== "var") return undefined;
-  const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
-  if (id === "ptr_from_i32") {
-    return lowerExpr(
-      expr.args[0] ?? { kind: "literal", literalKind: "number", value: "0" },
-      ctx,
-      locals,
-      "i32",
-    );
-  }
-  if (id === "ptr_add") {
-    return [
-      ...lowerExpr(
-        expr.args[0] ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-        "i32",
-      ),
-      ...lowerExpr(
-        expr.args[1] ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-        "i32",
-      ),
-      { op: "binary", wasm: "i32.add" },
-    ];
-  }
-  return undefined;
-}
-
-function lowerFreezePrimitive(
-  expr: Extract<Expr, { kind: "call" }>,
-  ctx: LowerContext,
-  locals: Set<string>,
-): Instr[] | undefined {
-  if (expr.callee.kind !== "var") return undefined;
-  const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
-  if (id !== "freeze") return undefined;
-  const runtimeArgs = expr.args.slice(-2);
-  const arena = runtimeArgs[0] ?? { kind: "literal", literalKind: "number", value: "0" } as Expr;
-  const value = runtimeArgs[1];
-  const valueType = value ? exprTypeWithLocals(value, ctx) : "i32";
-  const slots = flattenType(valueType, ctx.layouts);
-  const arenaTmp = `__freeze_tmp${ctx.tempIndex++}`;
-  ctx.tempLocals.push({ name: arenaTmp, type: "i32" });
-  locals.add(arenaTmp);
-
-  let offset = 0;
-  const stores = value
-    ? slots.flatMap((slot, slotIndex): Instr[] => {
-      const size = slotByteSize(slot);
-      const body: Instr[] = [
-        { op: "local.get", name: arenaTmp },
-        ...(offset === 0 ? [] : [
-          { op: "const", type: "i32", value: offset } as Instr,
-          { op: "binary", wasm: "i32.add" } as Instr,
-        ]),
-        ...lowerFlattenedValueSlot(value, valueType, slotIndex, ctx, locals),
-        { op: "store", type: slot.wat, align: size, offset: 0 },
-      ];
-      offset += size;
-      return body;
-    })
-    : [];
-  return [
-    ...lowerExpr(arena, ctx, locals, "frozen_arena"),
-    { op: "local.set", name: arenaTmp },
-    ...stores,
-    { op: "local.get", name: arenaTmp },
-    { op: "const", type: "i32", value: Math.max(offset, 4) },
-    { op: "binary", wasm: "i32.add" },
-    { op: "local.get", name: arenaTmp },
-  ];
-}
-
 function lowerPipeBind(
   expr: Extract<Expr, { kind: "pipe_bind" }>,
   ctx: LowerContext,
@@ -1115,9 +1204,6 @@ function lowerIndex(
   const targetType = expr.target.kind === "var"
     ? varType(expr.target.name, ctx)
     : exprTypeWithLocals(expr.target, ctx);
-  if (isFrozenType(targetType)) {
-    return lowerFrozenIndex(expr, stripFrozenType(targetType), ctx, locals);
-  }
   if (expr.target.kind === "var" && expr.index.kind === "literal") {
     return lowerVar(`${expr.target.name}[${expr.index.value}]`, ctx, locals, expectedType);
   }
@@ -1144,7 +1230,7 @@ function lowerIndex(
   }
   const fieldTarget = fieldAccessName(expr.target);
   if (fieldTarget) {
-    const storageTarget = resolveForkAliasName(fieldTarget, ctx);
+    const storageTarget = fieldTarget;
     const targetType = exprTypeWithLocals(expr.target, ctx);
     const arrayArgs = inlineArrayLikeTypeArgs(targetType, ctx.layouts);
     const [rawCapacity, itemType] = arrayArgs ?? [Number.NaN, expectedType ?? "i32"];
@@ -1191,88 +1277,6 @@ function unresolvedTypeParam(type: string): boolean {
   return /^[A-Z][A-Za-z0-9_]*$/.test(type.trim());
 }
 
-function lowerFrozenIndex(
-  expr: Extract<Expr, { kind: "index" }>,
-  targetType: string | undefined,
-  ctx: LowerContext,
-  locals: Set<string>,
-): Instr[] {
-  const arrayArgs = inlineArrayLikeTypeArgs(targetType, ctx.layouts);
-  const itemType = arrayArgs?.[1] ?? "i32";
-  const itemSize = Math.max(4, byteSizeOf(itemType, ctx.layouts));
-  return [
-    ...lowerExpr(expr.target, ctx, locals, `#(${targetType ?? "i32"})`),
-    ...lowerExpr(expr.index, ctx, locals, "i32"),
-    { op: "const", type: "i32", value: itemSize },
-    { op: "binary", wasm: "i32.mul" },
-    { op: "binary", wasm: "i32.add" },
-    { op: "load", type: watType(itemType), align: Math.min(itemSize, 4), offset: 0 },
-  ];
-}
-
-function lowerFrozenVarIndex(
-  name: string,
-  ctx: LowerContext,
-  locals: Set<string>,
-): Instr[] | undefined {
-  const match = name.match(/^(.*)\[([0-9]+)\]$/);
-  if (!match) return undefined;
-  const targetName = match[1] ?? "";
-  const targetType = varType(targetName, ctx);
-  if (!isFrozenType(targetType)) return undefined;
-  const arrayArgs = inlineArrayLikeTypeArgs(stripFrozenType(targetType), ctx.layouts);
-  const itemType = arrayArgs?.[1] ?? "i32";
-  const itemSize = Math.max(4, byteSizeOf(itemType, ctx.layouts));
-  return [
-    ...lowerVar(targetName, ctx, locals, targetType),
-    { op: "const", type: "i32", value: Number.parseInt(match[2] ?? "0", 10) * itemSize },
-    { op: "binary", wasm: "i32.add" },
-    { op: "load", type: watType(itemType), align: Math.min(itemSize, 4), offset: 0 },
-  ];
-}
-
-function lowerFrozenCollectionLiteral(
-  expr: Extract<Expr, { kind: "shape" }>,
-  expectedType: string | undefined,
-  ctx: LowerContext,
-  locals: Set<string>,
-): Instr[] {
-  const targetType = stripFrozenType(expectedType);
-  const itemType = inlineArrayLikeTypeArgs(targetType, ctx.layouts)?.[1] ?? "i32";
-  const bytes: number[] = [];
-  for (const slot of expr.slots) {
-    if (slot.value.kind === "literal" && slot.value.literalKind === "number") {
-      bytes.push(...i32Bytes(Number.parseInt(slot.value.value, 10)));
-    } else {
-      bytes.push(0, 0, 0, 0);
-    }
-    const size = Math.max(4, byteSizeOf(itemType, ctx.layouts));
-    while (bytes.length % size !== 0) bytes.push(0);
-  }
-  const offset = allocateFrozenData(ctx, bytes);
-  return [{ op: "const", type: "i32", value: offset }];
-}
-
-function allocateFrozenData(ctx: LowerContext, bytes: number[]): number {
-  const align = 16;
-  const start = Math.ceil((ctx.nextDataOffset ?? 1024) / align) * align;
-  ctx.frozenData?.push({ offset: start, bytes });
-  ctx.nextDataOffset = start + Math.max(bytes.length, 1);
-  return start;
-}
-
-function i32Bytes(value: number): number[] {
-  return [value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >> 24) & 0xff];
-}
-
-function byteSizeOf(type: string | undefined, layouts: LayoutEnv): number {
-  return Math.max(4, flattenType(type, layouts).length * 4);
-}
-
-function slotByteSize(slot: LayoutSlot): number {
-  return slot.wat === "v128" ? 16 : 4;
-}
-
 function lowerRuntimeInlineArrayIndex(
   target: string,
   index: Expr,
@@ -1304,7 +1308,6 @@ function lowerRuntimeInlineArrayIndex(
 }
 
 function varType(name: string, ctx: LowerContext): string | undefined {
-  name = resolveForkAliasName(name, ctx);
   const [base, ...fields] = name.split(".");
   let current = ctx.localTypes?.get(baseName(base));
   for (const field of fields) {
@@ -1332,7 +1335,7 @@ function inlineArrayTypeArgs(
   type: string | undefined,
   layouts: LayoutEnv,
 ): [number, string] | undefined {
-  const resolved = resolveAlias(stripFrozenType(type), layouts);
+  const resolved = resolveAlias(type, layouts);
   const unqualified = resolved?.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)+/, "");
   const args = unqualified ? typeCallArgs(unqualified, "InlineArray") : undefined;
   if (!args) return undefined;
@@ -1344,7 +1347,7 @@ function inlineArrayLikeTypeArgs(
   type: string | undefined,
   layouts: LayoutEnv,
 ): [number, string] | undefined {
-  const candidates = [stripFrozenType(type), resolveAlias(stripFrozenType(type), layouts)].filter(
+  const candidates = [type, resolveAlias(type, layouts)].filter(
     (candidate): candidate is string => Boolean(candidate),
   );
   let args: string | undefined;
@@ -1361,27 +1364,12 @@ function inlineArrayLikeTypeArgs(
   return [Number.parseInt(count ?? "0", 10), itemType?.trim() ?? "i32"];
 }
 
-function resolveForkAliasName(name: string, ctx: LowerContext): string {
-  const originalBase = baseName(name);
-  const suffix = name.slice(originalBase.length);
-  let base = originalBase;
-  const seen = new Set<string>();
-  while (!seen.has(base)) {
-    seen.add(base);
-    const alias = ctx.ownership?.forkAliases.get(base);
-    if (!alias) break;
-    base = alias.source;
-  }
-  return `${base}${suffix}`;
-}
-
 function lowerVar(
   name: string,
   ctx: LowerContext,
   locals: Set<string>,
   expectedType?: string,
 ): Instr[] {
-  name = resolveForkAliasName(name, ctx);
   const layouts = ctx.layouts;
   const base = baseName(name);
   const projection = projectionSuffix(name);
@@ -1609,7 +1597,7 @@ function lowerPatternTest(pattern: ParamPattern): Instr[] {
   }
   const text = pattern.kind === "literal" ? pattern.value : pattern.name;
   if (text === "true") {
-    return [{ op: "const", type: "i32", value: 1 }, { op: "binary", wasm: "i32.eq" }];
+    return [];
   }
   if (text === "false") return [{ op: "binary", wasm: "i32.eqz" }];
   if (pattern.kind === "literal") {
@@ -1691,15 +1679,12 @@ function statementHasSelfCall(stmt: Statement, name: string): boolean {
     case "destructure_let":
       return exprHasSelfCall(stmt.value, name);
     case "proof_const":
-    case "fork_let":
       return false;
   }
 }
 
 function exprHasSelfCall(expr: Expr, name: string): boolean {
   switch (expr.kind) {
-    case "borrow":
-      return exprHasSelfCall(expr.value, name);
     case "call":
       return (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprHasSelfCall(expr.callee, name) ||
@@ -1742,7 +1727,6 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
       case "destructure_let":
         visit(item.value);
         return;
-      case "fork_let":
       case "proof_const":
       case "literal":
       case "var":
@@ -1789,10 +1773,15 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
 
 function backendModuleToWat(module: BackendModule): string {
   const imports = module.imports.map((item) => emitImportWat(item));
-  const memory = module.memory ? [`  (memory (export "memory") 1)`] : [];
+  const memory = module.memories.map((item) => emitMemoryWat(item));
   const data = module.data.map((item) => emitDataWat(item));
   const functions = module.functions.map((fn) => emitFunctionWat(fn));
   return `(module\n${[...imports, ...memory, ...data, ...functions].join("\n")}\n)`;
+}
+
+function emitMemoryWat(item: BackendMemory): string {
+  if (item.name === "memory") return `  (memory (export "${item.exportName}") ${item.minPages})`;
+  return `  (memory $${watName(item.name)} (export "${item.exportName}") ${item.minPages})`;
 }
 
 function emitDataWat(item: BackendData): string {
@@ -1839,11 +1828,15 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
       return [`${prefix}local.get $${watName(instr.name)}`];
     case "local.set":
       return [`${prefix}local.set $${watName(instr.name)}`];
+    case "local.tee":
+      return [`${prefix}local.tee $${watName(instr.name)}`];
     case "call":
       return [`${prefix}call $${watName(instr.name)}`];
     case "return_call":
       return [`${prefix}return_call $${watName(instr.name)}`];
     case "binary":
+      return [`${prefix}${instr.wasm}`];
+    case "unary":
       return [`${prefix}${instr.wasm}`];
     case "simd":
       return [
@@ -1856,9 +1849,17 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
         }`,
       ];
     case "load":
-      return [`${prefix}${instr.type}.load align=${instr.align} offset=${instr.offset}`];
+      return [
+        `${prefix}${instr.type}.load${
+          watMemidx(instr.memory)
+        } align=${instr.align} offset=${instr.offset}`,
+      ];
     case "store":
-      return [`${prefix}${instr.type}.store align=${instr.align} offset=${instr.offset}`];
+      return [
+        `${prefix}${instr.type}.store${
+          watMemidx(instr.memory)
+        } align=${instr.align} offset=${instr.offset}`,
+      ];
     case "drop":
       return [`${prefix}drop`];
     case "unreachable":
@@ -1888,6 +1889,10 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
     case "br_if":
       return [`${prefix}br_if ${instr.depth}`];
   }
+}
+
+function watMemidx(memory: string | undefined): string {
+  return memory && memory !== "memory" ? ` (memory $${watName(memory)})` : "";
 }
 
 function backendModuleToWasm(module: BackendModule): Uint8Array<ArrayBuffer> {
@@ -1939,15 +1944,22 @@ function backendModuleToWasm(module: BackendModule): Uint8Array<ArrayBuffer> {
       vecItems(module.functions.map((_, index) => uleb(typeIndex[index + module.imports.length]))),
     );
   }
-  if (module.memory) {
-    section(bytes, 5, vecItems([[0x00, ...uleb(1)]]));
+  if (module.memories.length) {
+    section(
+      bytes,
+      5,
+      vecItems(module.memories.map((memory) => [0x00, ...uleb(memory.minPages)])),
+    );
   }
   const exports = module.functions.filter((fn) => fn.exportName).map((fn) => [
     ...nameBytes(fn.exportName ?? fn.name),
     0x00,
     ...uleb(funcIndex.get(fn.name) ?? 0),
   ]);
-  if (module.memory) exports.unshift([...nameBytes("memory"), 0x02, ...uleb(0)]);
+  for (let index = module.memories.length - 1; index >= 0; index--) {
+    const memory = module.memories[index]!;
+    exports.unshift([...nameBytes(memory.exportName), 0x02, ...uleb(index)]);
+  }
   if (exports.length) section(bytes, 7, vecItems(exports));
   if (module.functions.length) {
     section(
@@ -2032,6 +2044,10 @@ function encodeInstr(
       const index = locals.get(instr.name);
       return index === undefined ? [0x1a] : [0x21, ...uleb(index)];
     }
+    case "local.tee": {
+      const index = locals.get(instr.name);
+      return index === undefined ? [0x1a] : [0x22, ...uleb(index)];
+    }
     case "call": {
       const index = funcIndex.get(instr.name);
       if (index === undefined) throw new Error(`backend missing lowered callable: ${instr.name}`);
@@ -2044,6 +2060,8 @@ function encodeInstr(
     }
     case "binary":
       return [wasmBinaryOp(instr.wasm)];
+    case "unary":
+      return [wasmUnaryOp(instr.wasm)];
     case "simd":
       return simdImmediate(instr.wasm, instr.lane, instr.lanes);
     case "load":
@@ -2159,6 +2177,10 @@ function packLane4I32(exprs: Expr[], ctx: LowerContext, locals: Set<string>): In
 
 function packProjectedLane4I32(base: string, locals: Set<string>): Instr[] {
   if (locals.has(base)) return [{ op: "local.get", name: base }];
+  return packProjectedLane4I32FromScalars(base);
+}
+
+function packProjectedLane4I32FromScalars(base: string): Instr[] {
   return [
     { op: "local.get", name: `${base}$0` },
     { op: "simd", wasm: "i32x4.splat" },
@@ -2239,75 +2261,123 @@ function shuffleI32Lanes(lanes: number[]): number[] {
   return lanes.flatMap((lane) => [0, 1, 2, 3].map((byte) => lane * 4 + byte));
 }
 
-function lowerMemoryIntrinsic(
+function lowerTemporalIntrinsic(
   expr: Extract<Expr, { kind: "call" }>,
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] | undefined {
   if (expr.callee.kind !== "var") return undefined;
   const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
-  if (id === "memory_load_lane4_i32") {
-    const ptr = expr.args.length === 1 ? expr.args[0] : expr.args[1];
+  if (id === "temporal_handle") {
+    const ptr = expr.args.at(-2);
+    const rev = expr.args.at(-1);
+    return packTemporalHandle(
+      ptr ?? { kind: "literal", literalKind: "number", value: "0" },
+      rev ?? { kind: "literal", literalKind: "number", value: "0" },
+      ctx,
+      locals,
+    );
+  }
+  if (id === "temporal_alloc") {
+    const bytes = expr.args.at(-1);
+    return packTemporalHandle(
+      bytes ?? { kind: "literal", literalKind: "number", value: "0" },
+      { kind: "literal", literalKind: "number", value: "0" },
+      ctx,
+      locals,
+    );
+  }
+  if (id === "temporal_handle_ptr") {
+    const handle = expr.args.at(-1);
     return [
       ...lowerExpr(
-        ptr ?? { kind: "literal", literalKind: "number", value: "0" },
+        handle ?? { kind: "literal", literalKind: "number", value: "0" },
         ctx,
         locals,
-        "i32",
+        "i64",
       ),
-      { op: "load", type: "v128", align: 16, offset: 0 },
+      { op: "unary", wasm: "i32.wrap_i64" },
     ];
   }
-  if (id === "memory_load_i32") {
-    const ptr = expr.args.length === 1 ? expr.args[0] : expr.args[1];
+  if (id === "temporal_handle_rev") {
+    const handle = expr.args.at(-1);
     return [
       ...lowerExpr(
-        ptr ?? { kind: "literal", literalKind: "number", value: "0" },
+        handle ?? { kind: "literal", literalKind: "number", value: "0" },
         ctx,
         locals,
-        "i32",
+        "i64",
       ),
-      { op: "load", type: "i32", align: 4, offset: 0 },
-    ];
-  }
-  if (id === "memory_store_i32") {
-    const ptr = expr.args.length === 2 ? expr.args[0] : expr.args[1];
-    const value = expr.args.length === 2 ? expr.args[1] : expr.args[2];
-    return [
-      ...lowerExpr(
-        ptr ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-        "i32",
-      ),
-      ...lowerExpr(
-        value ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-        "i32",
-      ),
-      { op: "store", type: "i32", align: 4, offset: 0 },
-    ];
-  }
-  if (id === "memory_store_lane4_i32") {
-    const ptr = expr.args.length === 3 ? expr.args[1] : expr.args[0];
-    const value = expr.args.length === 3 ? expr.args[2] : expr.args[1];
-    return [
-      ...lowerExpr(
-        ptr ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-        "i32",
-      ),
-      ...lowerLane4I32Value(
-        value ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-      ),
-      { op: "store", type: "v128", align: 16, offset: 0 },
+      { op: "const", type: "i64", value: 32 },
+      { op: "binary", wasm: "i64.shr_u" },
+      { op: "unary", wasm: "i32.wrap_i64" },
     ];
   }
   return undefined;
+}
+
+function lowerBranchIntrinsic(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var") return undefined;
+  const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
+  if (!id?.startsWith("branch_")) return undefined;
+  if (ctx.memoryModel === "temporal") {
+    throw new CompileError([{
+      code: "backend.branch_in_temporal_mode",
+      message: `branch intrinsics require --memory branch or --memory branch-debug`,
+    }]);
+  }
+  const arg = expr.args.at(-1) ?? { kind: "literal", literalKind: "number", value: "0" };
+  if (id === "branch_handle") {
+    return [
+      ...lowerExpr(arg, ctx, locals, "i32"),
+      { op: "unary", wasm: "i64.extend_i32_u" },
+    ];
+  }
+  if (id === "branch_handle_ptr") {
+    return [
+      ...lowerExpr(arg, ctx, locals, "i64"),
+      { op: "unary", wasm: "i32.wrap_i64" },
+    ];
+  }
+  if (id === "branch_mark" || id === "branch_ensure_editable" || id === "branch_materialize") {
+    return lowerExpr(arg, ctx, locals, "i64");
+  }
+  if (id === "branch_is_branched") {
+    const handle = expr.args.at(-1);
+    return [
+      ...lowerExpr(
+        handle ?? { kind: "literal", literalKind: "number", value: "0" },
+        ctx,
+        locals,
+        "i64",
+      ),
+      { op: "unary", wasm: "i32.wrap_i64" },
+      { op: "const", type: "i32", value: 0 },
+      { op: "binary", wasm: "i32.ne" },
+    ];
+  }
+  return undefined;
+}
+
+function packTemporalHandle(
+  ptr: Expr,
+  rev: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  return [
+    ...lowerExpr(ptr, ctx, locals, "i32"),
+    { op: "unary", wasm: "i64.extend_i32_u" },
+    ...lowerExpr(rev, ctx, locals, "i32"),
+    { op: "unary", wasm: "i64.extend_i32_u" },
+    { op: "const", type: "i64", value: 32 },
+    { op: "binary", wasm: "i64.shl" },
+    { op: "binary", wasm: "i64.or" },
+  ];
 }
 
 function compilerCallId(name: string, intrinsicIdsByName: Map<string, string>): string | undefined {
@@ -2562,32 +2632,18 @@ function statementLocalBindings(stmt: Statement, ctx: LowerContext): BackendLoca
   }
   if (stmt.kind !== "let") return [];
   const type = stmt.type ?? exprTypeWithLocals(stmt.value, ctx);
-  if (isLane4I32(type, ctx.layouts) && isMemoryLane4Load(stmt.value, ctx.functions)) {
-    return [{ name: stmt.name, type: "v128" }];
-  }
   return flattenBinding(stmt.name, type, ctx.layouts).map((slot) => ({
     name: slot.name,
     type: slot.wat,
   }));
 }
 
-function isMemoryLane4Load(expr: Expr, functions: Map<string, FnDecl>): boolean {
-  const fn = expr.kind === "call" && expr.callee.kind === "var"
-    ? functions.get(expr.callee.name)
-    : undefined;
-  return expr.kind === "call" && expr.callee.kind === "var" &&
-    fn !== undefined && intrinsicWrapperId(fn) === "memory_load_lane4_i32";
-}
-
 function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[] {
   type = stripBorrowType(type);
-  if (isFrozenType(type)) return [{ suffix: "", type: type ?? "#(i32)", wat: "i32" }];
   const staticShape = flattenStaticShapeType(type, layouts);
   if (staticShape) return staticShape;
   const resolved = resolveAlias(type, layouts);
   if (!resolved) return [{ suffix: "", type: "i32", wat: "i32" }];
-  if (resolved === "memory") return [];
-  if (isPtrType(resolved)) return [{ suffix: "", type: resolved, wat: "i32" }];
   if (isPrimitiveType(resolved)) return [{ suffix: "", type: resolved, wat: watType(resolved) }];
   const inlineArrayArgs = typeCallArgs(resolved, "InlineArray");
   if (inlineArrayArgs) {
@@ -2873,10 +2929,6 @@ function repeatSlots(count: number, itemType: string, layouts: LayoutEnv): Layou
   return slots;
 }
 
-function isPtrType(type: string): boolean {
-  return typeName(type) === "ptr" && type.includes("(");
-}
-
 function resolveAlias(type: string | undefined, layouts: LayoutEnv): string | undefined {
   let current = stripBorrowType(type);
   const seen = new Set<string>();
@@ -2910,34 +2962,11 @@ function stripBorrowType(type: string | undefined): string | undefined {
   return current;
 }
 
-function isFrozenType(type: string | undefined): boolean {
-  return type?.trim().startsWith("#(") === true;
-}
-
-function stripFrozenType(type: string | undefined): string | undefined {
-  let current = type?.trim();
-  while (current?.startsWith("#(")) current = unwrapPrefixedType(current, "#");
-  return current;
-}
-
 function stripReferenceType(type: string | undefined): string | undefined {
-  let current = type?.trim();
-  let changed = true;
-  while (current && changed) {
-    changed = false;
-    if (current.startsWith("&")) {
-      current = stripBorrowType(current);
-      changed = true;
-    }
-    if (current?.startsWith("#(")) {
-      current = stripFrozenType(current);
-      changed = true;
-    }
-  }
-  return current;
+  return stripBorrowType(type);
 }
 
-function unwrapPrefixedType(type: string, prefix: "&" | "#"): string {
+function unwrapPrefixedType(type: string, prefix: "&"): string {
   let current = type.trim();
   if (!current.startsWith(prefix)) return current;
   current = current.slice(prefix.length).trim();
@@ -3011,10 +3040,6 @@ function shapeSlotTypes(type: string | undefined, layouts: LayoutEnv): string[] 
 }
 
 function exprType(expr: Expr, functions: Map<string, FnDecl>): string | undefined {
-  if (expr.kind === "borrow") {
-    const type = exprType(expr.value, functions);
-    return type ? `&(${stripBorrowType(type)})` : undefined;
-  }
   if (expr.kind === "call" && expr.callee.kind === "var") {
     return functions.get(expr.callee.name)?.returnType;
   }
@@ -3026,14 +3051,6 @@ function exprType(expr: Expr, functions: Map<string, FnDecl>): string | undefine
 
 function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
   if (expr.kind === "var") return varType(expr.name, ctx);
-  if (expr.kind === "borrow") {
-    const type = exprTypeWithLocals(expr.value, ctx);
-    return type ? `&(${stripBorrowType(type)})` : undefined;
-  }
-  if (expr.kind === "shape" && expr.syntax === "frozen_collection") {
-    const first = expr.slots[0] ? exprTypeWithLocals(expr.slots[0].value, ctx) ?? "i32" : "i32";
-    return `#(InlineArray(${expr.slots.length}, ${first}))`;
-  }
   if (expr.kind === "match") {
     const types = expr.arms.map((arm) => exprTypeWithLocals(arm.value, ctx));
     const first = types[0];
@@ -3154,17 +3171,10 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
         visit(item.value);
         for (const name of item.names) names.add(name);
         return;
-      case "fork_let":
-        names.add(baseName(item.source));
-        for (const name of item.names) names.add(name);
-        return;
       case "proof_const":
         return;
       case "var":
         names.add(baseName(item.name));
-        return;
-      case "borrow":
-        visit(item.value);
         return;
       case "call":
         visit(item.callee);
@@ -3216,13 +3226,7 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
 
 function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
   switch (expr.kind) {
-    case "borrow":
-      return hasRuntimeEffect(expr.value, functions);
     case "call":
-      if (
-        expr.callee.kind === "var" &&
-        isMemoryStoreIntrinsic(expr.callee.name, functions)
-      ) return true;
       return (expr.callee.kind === "var" &&
         (functions.get(expr.callee.name)?.effects.length ?? 0) > 0) ||
         hasRuntimeEffect(expr.callee, functions) ||
@@ -3258,7 +3262,7 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
   }
 }
 
-function usesMemoryIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {
+function usesTemporalIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {
   const visit = (item: Expr | Statement | undefined): boolean => {
     if (!item) return false;
     switch (item.kind) {
@@ -3266,17 +3270,14 @@ function usesMemoryIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
         return visit(item.value);
       case "destructure_let":
         return visit(item.value);
-      case "fork_let":
       case "proof_const":
       case "literal":
       case "var":
       case "placeholder":
         return false;
-      case "borrow":
-        return visit(item.value);
       case "call":
         return (item.callee.kind === "var" &&
-          isMemoryIntrinsic(item.callee.name, functions)) ||
+          isTemporalIntrinsic(item.callee.name, functions)) ||
           visit(item.callee) || item.args.some(visit);
       case "index":
         return visit(item.target) || visit(item.index);
@@ -3302,22 +3303,79 @@ function usesMemoryIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
   return visit(expr);
 }
 
-function isMemoryStoreIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
-  const fn = functions.get(name);
-  const id = fn ? intrinsicWrapperId(fn) : undefined;
-  return id === "memory_store_i32" || id === "memory_store_lane4_i32";
+function usesBranchIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {
+  const visit = (item: Expr | Statement | undefined): boolean => {
+    if (!item) return false;
+    switch (item.kind) {
+      case "let":
+        return visit(item.value);
+      case "destructure_let":
+        return visit(item.value);
+      case "proof_const":
+      case "literal":
+      case "var":
+      case "placeholder":
+        return false;
+      case "call":
+        return (item.callee.kind === "var" &&
+          isBranchIntrinsic(item.callee.name, functions)) ||
+          visit(item.callee) || item.args.some(visit);
+      case "index":
+        return visit(item.target) || visit(item.index);
+      case "binary":
+        return visit(item.left) || visit(item.right);
+      case "pipe_bind":
+        return visit(item.value) || visit(item.body);
+      case "match":
+        return visit(item.value) || item.arms.some((arm) => visit(arm.value));
+      case "shape":
+      case "product_constructor":
+        return item.slots.some((slot) => visit(slot.value));
+      case "range":
+        return visit(item.start) || visit(item.end);
+      case "static_for_slots":
+        return visit(item.value);
+      case "field":
+        return visit(item.value) || visit(item.key);
+      case "block":
+        return item.statements.some(visit) || visit(item.expr);
+    }
+  };
+  return visit(expr);
 }
 
-function isMemoryIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
+function isTemporalIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
+  if (
+    name === "@temporal_alloc" || name === "@temporal_handle" ||
+    name === "@temporal_handle_ptr" || name === "@temporal_handle_rev"
+  ) return true;
   const fn = functions.get(name);
   const id = fn ? intrinsicWrapperId(fn) : undefined;
-  return id === "memory_load_i32" || id === "memory_store_i32" ||
-    id === "memory_load_lane4_i32" || id === "memory_store_lane4_i32" ||
-    id === "freeze";
+  return id === "temporal_alloc" || id === "temporal_handle" ||
+    id === "temporal_handle_ptr" || id === "temporal_handle_rev";
+}
+
+function isBranchIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
+  if (
+    name === "@branch_handle" || name === "@branch_handle_ptr" ||
+    name === "@branch_mark" || name === "@branch_is_branched" ||
+    name === "@branch_ensure_editable" || name === "@branch_materialize"
+  ) return true;
+  const fn = functions.get(name);
+  const id = fn ? intrinsicWrapperId(fn) : undefined;
+  return id === "branch_handle" || id === "branch_handle_ptr" ||
+    id === "branch_mark" || id === "branch_is_branched" ||
+    id === "branch_ensure_editable" || id === "branch_materialize";
 }
 
 function localDecls(locals: BackendLocal[]): number[] {
-  return vecItems(locals.map((local) => [0x01, wasmType(local.type)]));
+  const groups: { type: ValueType; count: number }[] = [];
+  for (const local of locals) {
+    const previous = groups[groups.length - 1];
+    if (previous?.type === local.type) previous.count++;
+    else groups.push({ type: local.type, count: 1 });
+  }
+  return vecItems(groups.map((group) => [...uleb(group.count), wasmType(group.type)]));
 }
 
 function wasmBinaryOp(op: string): number {
@@ -3343,6 +3401,13 @@ function wasmBinaryOp(op: string): number {
     "i32.ge_s": 0x4e,
     "i32.eqz": 0x45,
   } as Record<string, number>)[op] ?? 0x6a;
+}
+
+function wasmUnaryOp(op: string): number {
+  return ({
+    "i32.wrap_i64": 0xa7,
+    "i64.extend_i32_u": 0xad,
+  } as Record<string, number>)[op] ?? 0xa7;
 }
 
 function simdImmediate(op: SimdOp, lane: number | undefined, lanes?: number[]): number[] {

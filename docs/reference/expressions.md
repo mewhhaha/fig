@@ -1,8 +1,7 @@
 # Fig Expressions
 
 Expressions include literals, variables, calls, field access, indexing, constructors, shape values,
-tuple values, collection literals, matches, binary operators, ranges, blocks, borrows, `fork`,
-pipe-bind, and `$`.
+tuple values, collection literals, matches, binary operators, ranges, blocks, pipe-bind, and `$`.
 
 ```fig
 add(1, 2)
@@ -44,15 +43,19 @@ map4_i32($ + 1, xs)
 
 The placeholder creates a unary helper where the checker can infer an expected unary const function.
 
-## Fork and Destructuring
+## Shadowing and Destructuring
 
-`fork(value)` creates multiple owned copies through multi-bind:
+Local `let` bindings may shadow earlier bindings in the same block. The initializer sees the
+previous binding, and later expressions see the new binding:
 
 ```fig
-let a, b, c = fork(original);
+let x = 1;
+let x = x + 1;
+x // 2
 ```
 
-Only a local variable may be forked. Forking consumes the original.
+This is the preferred style for update-heavy code because it keeps values immutable while allowing a
+name to track the latest logical version.
 
 Tuple and product results can be destructured with multi-bind:
 
@@ -90,7 +93,7 @@ let point = Point {for Key, Spec in (fields): 1};
 The generated key is used as the slot label. Static slots are supported in records and product
 constructors.
 
-## Tuples, Collections, and Frozen Values
+## Tuples and Collections
 
 Tuple literals use brackets. Repeat literals use a count expression after `;`:
 
@@ -106,23 +109,6 @@ expected type. a spread can append a tail collection when the expected collector
 let tail: Layout.InlineArrayList(3, i32) = <1, 2, 3>;
 let ys: Layout.InlineArrayList(4, i32) = <0, ...tail>;
 ```
-
-Frozen literals use `#` and require a frozen expected type:
-
-```fig
-let xs: #(Layout.InlineArray(3, i32)) = #[10, 20, 30];
-```
-
-## Borrows
-
-`&value` creates a call-scoped borrow for a parameter whose type is written `&(t)`:
-
-```fig
-fn sum(point: &(point2d)) -> i32 { Point.x + Point.y }
-let total = sum(&point);
-```
-
-Borrows cannot be stored or returned as owned Values.
 
 ## Operators
 

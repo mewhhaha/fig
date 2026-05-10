@@ -1229,8 +1229,6 @@ function symbolsForExpr(
           symbolsForExpr(uri, arg, source, mapper, container, program, localTypes)
         ),
       ];
-    case "borrow":
-      return symbolsForExpr(uri, expr.value, source, mapper, container, program, localTypes);
     case "index":
       return [
         ...symbolsForExpr(uri, expr.target, source, mapper, container, program, localTypes),
@@ -1343,7 +1341,6 @@ function detailForStatementName(
     const index = stmt.names.indexOf(name);
     return index >= 0 ? stmt.slotTypes?.[index] : undefined;
   }
-  if (stmt.kind === "fork_let") return stmt.sourceType;
   return undefined;
 }
 
@@ -1363,9 +1360,6 @@ function recordStatementTypes(
       if (type) localTypes.set(name, type);
     });
     return;
-  }
-  if (stmt.kind === "fork_let" && stmt.sourceType) {
-    for (const name of stmt.names) localTypes.set(name, stmt.sourceType);
   }
 }
 
@@ -1440,7 +1434,7 @@ function spanForStatementName(
   name: string,
 ): CompileDiagnostic["span"] | undefined {
   if (stmt.kind === "let" || stmt.kind === "proof_const") return stmt.nameSpan ?? stmt.span;
-  if (stmt.kind === "fork_let" || stmt.kind === "destructure_let") {
+  if (stmt.kind === "destructure_let") {
     return stmt.nameSpans?.[name] ?? stmt.span;
   }
   return undefined;
@@ -2337,8 +2331,6 @@ function checkedAstHoverAt(
         const type = stmt.slotTypes?.[index];
         if (type) localTypes.set(name, type);
       });
-    } else if (stmt.kind === "fork_let" && stmt.sourceType) {
-      for (const name of stmt.names) localTypes.set(name, stmt.sourceType);
     }
   };
   const visitStatement = (stmt: Statement, localTypes = new Map<string, string>()) => {
@@ -2362,16 +2354,6 @@ function checkedAstHoverAt(
         )
       );
       visitExpr(stmt.value, localTypes);
-    } else if (stmt.kind === "fork_let") {
-      for (const name of stmt.names) {
-        add(
-          stmt.nameSpans?.[name] ?? stmt.span,
-          name,
-          stmt.sourceType,
-          "local",
-          stmt.nameDocs?.[name],
-        );
-      }
     } else if (stmt.kind === "proof_const") {
       add(
         stmt.nameSpan ?? stmt.span,
@@ -2482,8 +2464,6 @@ function childExprs(expr: Expr): Expr[] {
       return [expr.value, ...expr.arms.map((arm) => arm.value)];
     case "call":
       return [expr.callee, ...expr.args];
-    case "borrow":
-      return [expr.value];
     case "index":
       return [expr.target, expr.index];
     case "binary":
@@ -2562,8 +2542,6 @@ function expressionSyntaxInfo(
       return { name: "placeholder", kind: "local" };
     case "call":
       return { name: renderExprName(expr), kind: "local", detail: "call expression" };
-    case "borrow":
-      return { name: renderExprName(expr), kind: "local", detail: "borrow expression" };
     case "field":
       return { name: "field projection", kind: "local" };
     case "static_for_slots":
@@ -2611,10 +2589,6 @@ function expressionType(expr: Expr, result: AnalysisResult): string | undefined 
     const type = symbolValueType(symbol);
     if (type) return type;
     return projectedVarInfo(expr.name, result)?.detail;
-  }
-  if (expr.kind === "borrow") {
-    const type = expressionType(expr.value, result);
-    return type ? `&${type.replace(/^&\s*/, "")}` : undefined;
   }
   if (expr.kind === "call") {
     const calleeName = expr.callee.kind === "var" ? expr.callee.name : undefined;
@@ -2846,7 +2820,6 @@ function renderExprName(expr: Expr): string {
   if (expr.kind === "call" && expr.callee.kind === "var") return `${expr.callee.name}(...)`;
   if (expr.kind === "product_constructor") return expr.constructor;
   if (expr.kind === "literal") return expr.value;
-  if (expr.kind === "borrow") return `&${renderExprName(expr.value)}`;
   if (expr.kind === "var") return expr.name;
   return expr.kind;
 }

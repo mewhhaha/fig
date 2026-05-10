@@ -489,7 +489,7 @@ function startsEffectRow(left: TokenItem, right: TokenItem): boolean {
 }
 
 function opensBracketWithoutSpace(left: TokenItem): boolean {
-  if (left.text === "=" || left.text === "=>" || left.text === ":") return false;
+  if (left.text === "=" || left.text === "=>" || left.text === "->" || left.text === ":") return false;
   if (startsProductConstructor(left)) return false;
   return isIndexOrCallBracket(left) || isShapeLiteralBracket(left) || isStaticForBracket(left);
 }

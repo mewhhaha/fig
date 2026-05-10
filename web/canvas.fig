@@ -1,5 +1,3 @@
-const core = @import("prelude.core");
-
 const canvas_init: fn(target: i32, width: i32, height: i32) -> i32 !{canvas} = @capability("canvas_init");
 const gpu_create_shader: fn(shader_id: i32) -> i32 !{gpu} = @capability("gpu_create_shader");
 const gpu_create_pipeline: fn(shader: i32, layout: i32) -> i32 !{gpu} = @capability("gpu_create_pipeline");
@@ -43,38 +41,34 @@ const event_wheel: i32 = 6;
 const event_resize: i32 = 7;
 const event_record_size: i32 = 32;
 
-fn event_record_addr(base: i32, index: i32) -> core.Ptr(event_record) {
-  core.Ptr.from_i32(base + index * event_record_size)
+fn event_kind(event: EventRecord) -> i32 {
+  event.kind
 }
 
-fn event_kind(mem: memory, base: i32, index: i32) -> i32 {
-  memory.load_i32(mem, event_record_addr(base, index))
+fn event_target(event: EventRecord) -> i32 {
+  event.target
 }
 
-fn event_target(mem: memory, base: i32, index: i32) -> i32 {
-  memory.load_i32(mem, core.Ptr.add(event_record_addr(base, index), 4))
+fn event_code(event: EventRecord) -> i32 {
+  event.code
 }
 
-fn event_code(mem: memory, base: i32, index: i32) -> i32 {
-  memory.load_i32(mem, core.Ptr.add(event_record_addr(base, index), 8))
+fn event_x(event: EventRecord) -> i32 {
+  event.x
 }
 
-fn event_x(mem: memory, base: i32, index: i32) -> i32 {
-  memory.load_i32(mem, core.Ptr.add(event_record_addr(base, index), 12))
+fn event_y(event: EventRecord) -> i32 {
+  event.y
 }
 
-fn event_y(mem: memory, base: i32, index: i32) -> i32 {
-  memory.load_i32(mem, core.Ptr.add(event_record_addr(base, index), 16))
+fn event_delta_x(event: EventRecord) -> i32 {
+  event.delta_x
 }
 
-fn event_delta_x(mem: memory, base: i32, index: i32) -> i32 {
-  memory.load_i32(mem, core.Ptr.add(event_record_addr(base, index), 20))
+fn event_delta_y(event: EventRecord) -> i32 {
+  event.delta_y
 }
 
-fn event_delta_y(mem: memory, base: i32, index: i32) -> i32 {
-  memory.load_i32(mem, core.Ptr.add(event_record_addr(base, index), 24))
-}
-
-fn event_flags(mem: memory, base: i32, index: i32) -> i32 {
-  memory.load_i32(mem, core.Ptr.add(event_record_addr(base, index), 28))
+fn event_flags(event: EventRecord) -> i32 {
+  event.flags
 }

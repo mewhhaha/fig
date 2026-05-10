@@ -1,15 +1,9 @@
 (FnDecl (FnTail (FnName (LowerIdent) @function)))
 (Primary (LowerIdent) @variable)
 (Call (Primary (LowerIdent) @function.call) "(")
-(Call (Primary (ForkBuiltin) @function.builtin) "(")
 (Primary (StaticBuiltin (LowerIdent) @function.builtin))
 (TypePrimary (StaticBuiltin (LowerIdent) @function.builtin))
-(TypeAtom (LowerIdent) @type)
-(TypeAtom (PascalIdent) @type.parameter)
-(TypePrimary (LowerIdent) @type)
-(TypePrimary (PascalIdent) @type.parameter)
-(TypeFnDecl (LowerIdent) @type.definition)
-(TypeLetDecl (PascalIdent) @type)
+(TypeAtom (LowerIdent) @type.parameter)
 (ConstDecl (LowerIdent) @variable)
 (ImportBindingList (ImportBindingItems (LowerIdent) @variable))
 (ConstDecl (FieldName) @variable)
@@ -18,7 +12,6 @@
 (Param (FieldName) @variable.parameter)
 (BlockLetDecl (LowerIdent) @variable)
 (BlockLetDecl (FieldName) @variable)
-(BlockProofConstDecl (PascalIdent) @type)
 (BlockLetTail (LowerIdent) @variable)
 (TopLetDecl (LowerIdent) @variable)
 (TopLetDecl (FieldName) @variable)
@@ -32,7 +25,6 @@
 "const" @keyword
 "fn" @keyword.function
 "let" @keyword
-(ForkBuiltin) @function.builtin
 "match" @keyword.control
 (Visibility) @keyword
 (TypeParamsDecl) @type.parameter
@@ -51,7 +43,6 @@
 "zip" @keyword
 "!" @operator
 "%" @operator
-"&" @operator
 "&&" @operator
 "(" @punctuation.bracket
 ")" @punctuation.bracket
@@ -84,8 +75,6 @@
 "||" @operator
 "}" @punctuation.bracket
 (fenced_text) @string.special
-(FrozenCollectionOpen) @constant
-(FrozenTypeOpen) @constant
 (CollectionOpen) @constant
 (CollectionClose) @constant
 (Char) @constant

@@ -223,25 +223,6 @@ function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]
   ) => {
     if (!type) return;
     const trimmed = type.trim();
-    if (isBorrowType(trimmed)) {
-      if (context !== "param") {
-        diagnostics.push(diagnosticAt(
-          "Borrow.position",
-          "borrowed types are only valid in function parameter positions",
-          spanLike,
-        ));
-      }
-      if (isBorrowType(stripBorrowType(trimmed))) {
-        diagnostics.push(
-          diagnosticAt("Borrow.nested", "nested borrowed types are not supported", spanLike),
-        );
-      }
-    }
-    if (isFrozenType(trimmed) && isFrozenType(stripFrozenType(trimmed))) {
-      diagnostics.push(
-        diagnosticAt("frozen.nested", "nested frozen reference types are not supported", spanLike),
-      );
-    }
     const fn = parseFnSignature(trimmed);
     if (fn) {
       for (const param of fn.params) checkType(param, "param", spanLike);
@@ -279,8 +260,6 @@ function exprChildValues(expr: Expr): Expr[] {
   switch (expr.kind) {
     case "call":
       return [expr.callee, ...expr.args];
-    case "borrow":
-      return [expr.value];
     case "index":
       return [expr.target, expr.index];
     case "binary":
@@ -403,8 +382,6 @@ function lowerResolvedOperators(
           callee: lowerExpr(expr.callee, env),
           args: expr.args.map((arg) => lowerExpr(arg, env)),
         };
-      case "borrow":
-        return { ...expr, value: lowerExpr(expr.value, env) };
       case "index":
         return { ...expr, target: lowerExpr(expr.target, env), index: lowerExpr(expr.index, env) };
       case "pipe_bind":
@@ -474,22 +451,7 @@ function lowerCollectorLiterals(
   const functions = new Map(fnDecls.map((fn) => [fn.name, fn]));
   const lowerExpr = (expr: Expr, expectedType: string | undefined): Expr => {
     switch (expr.kind) {
-      case "borrow":
-        return { ...expr, value: lowerExpr(expr.value, stripBorrowType(expectedType)) };
       case "shape": {
-        if (expr.syntax === "frozen_collection") {
-          const frozenTarget = isFrozenType(expectedType)
-            ? stripFrozenType(expectedType)
-            : undefined;
-          const inlineArray = inlineArrayLikeTypeArgs(frozenTarget, typeDecls);
-          return {
-            ...expr,
-            slots: expr.slots.map((slot) => ({
-              ...slot,
-              value: lowerExpr(slot.value, inlineArray?.itemType),
-            })),
-          };
-        }
         if (expr.syntax !== "collection") {
           const productSlots = productSlotTypes(expectedType, typeDecls, expr.slots.length);
           return {
@@ -1029,10 +991,6 @@ function inferRuntimeType(
     return localType ||
       (functions.has(expr.name) ? renderFnType(functions.get(expr.name)!) : undefined);
   }
-  if (expr.kind === "borrow") {
-    const type = inferRuntimeType(expr.value, env, functions, constructorTypes);
-    return type ? `&(${stripBorrowType(type)})` : undefined;
-  }
   if (expr.kind === "call" && expr.callee.kind === "var") {
     return functions.get(expr.callee.name)?.returnType;
   }
@@ -1068,7 +1026,7 @@ function directCompilerCallId(fn: FnDecl): string | undefined {
   if (fn.body.statements.length !== 0 || !expr || expr.kind !== "call") return undefined;
   if (expr.callee.kind !== "var" || !expr.callee.name.startsWith("@")) return undefined;
   const id = expr.callee.name.slice(1);
-  return id.startsWith("memory_") || id.startsWith("ptr_") ? id : undefined;
+  return id.startsWith("memory_") || id.startsWith("ptr_") || id === "freeze" ? id : undefined;
 }
 
 function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
@@ -1446,8 +1404,6 @@ function rewriteAttachedMembersInExpr(expr: Expr, members: Map<string, string>):
   switch (expr.kind) {
     case "var":
       return members.has(expr.name) ? { kind: "var", name: members.get(expr.name)! } : expr;
-    case "borrow":
-      return { ...expr, value: rewriteAttachedMembersInExpr(expr.value, members) };
     case "call":
       return {
         ...expr,
@@ -1875,7 +1831,7 @@ class ConstEvaluator {
     callStack: string[],
   ): ConstValue | undefined {
     if (block.statements.some((stmt) => stmt.kind !== "let" && stmt.kind !== "proof_const")) {
-      return this.unsupported("const.unsupported_expr", "fork is not const-evaluable");
+      return this.unsupported("const.unsupported_expr", "unsupported const block statement");
     }
     const ordered = orderBlockStatements(block.statements, this.diagnostics);
     for (const stmt of ordered) {
@@ -2490,13 +2446,6 @@ function specializeInferredBlock(
         }
         return { ...stmt, value, slotTypes };
       }
-      if (stmt.kind === "fork_let") {
-        const type = inferVarType(stmt.source, scoped, context.types) ?? stmt.sourceType;
-        if (type) {
-          for (const name of stmt.names) scoped.set(name, type);
-        }
-        return { ...stmt, sourceType: type };
-      }
       return stmt;
     }),
     expr: block.expr ? specializeInferredExpr(block.expr, context, scoped) : undefined,
@@ -2525,8 +2474,6 @@ function specializeInferredExpr(
       return specializeInferredCall(fn, args, context, env, callSiteSpan(expr)) ??
         { ...expr, callee, args };
     }
-    case "borrow":
-      return { ...expr, value: specializeInferredExpr(expr.value, context, env) };
     case "index":
       return {
         ...expr,
@@ -2646,9 +2593,7 @@ function specializeInferredCall(
     const types = new Map<string, string>();
     const staticArgNames: string[] = [];
     const nonConstParams = fn.params.filter((param) => !param.const);
-    const omitConstArgs = intrinsicWrapperId(fn) === "freeze" &&
-      args.length === nonConstParams.length &&
-      fn.params.some((param) => param.const);
+    const omitConstArgs = false;
     let runtimeArgIndex = 0;
     const argsByParam = fn.params.map((param, index) => {
       if (!omitConstArgs) return args[index];
@@ -2855,14 +2800,7 @@ function inferExprType(
     });
     return `struct({${slots.join(", ")}})`;
   }
-  if (expr.kind === "borrow") {
-    const type = inferExprType(expr.value, context, env);
-    return type ? `&(${stripBorrowType(type)})` : undefined;
-  }
   if (expr.kind === "call" && expr.callee.kind === "var") {
-    if (expr.callee.name === "fork" && expr.args.length === 1) {
-      return inferExprType(expr.args[0], context, env);
-    }
     return context.functions.get(expr.callee.name)?.returnType;
   }
   if (expr.kind === "pipe_bind") {
@@ -3438,8 +3376,6 @@ function specializeExpr(
       return specializeConstParamCall(direct, args, context, callSiteSpan(expr)) ??
         { ...expr, callee, args };
     }
-    case "borrow":
-      return { ...expr, value: specializeExpr(expr.value, context) };
     case "index":
       return {
         ...expr,
@@ -3654,8 +3590,6 @@ function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
       return (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprCallsFunction(expr.callee, name) ||
         expr.args.some((arg) => exprCallsFunction(arg, name));
-    case "borrow":
-      return exprCallsFunction(expr.value, name);
     case "index":
       return exprCallsFunction(expr.target, name) || exprCallsFunction(expr.index, name);
     case "binary":
@@ -3914,8 +3848,6 @@ function exprRuntimeCaptures(expr: Expr): Set<string> {
 function replacePlaceholder(expr: Expr, replacement: Expr): Expr {
   if (expr.kind === "placeholder") return cloneExpr(replacement);
   switch (expr.kind) {
-    case "borrow":
-      return { ...expr, value: replacePlaceholder(expr.value, replacement) };
     case "call":
       return {
         ...expr,
@@ -4009,8 +3941,6 @@ function replaceStaticForSourcePlaceholder(
 
 function exprChildren(expr: Expr): Expr[] {
   switch (expr.kind) {
-    case "borrow":
-      return [expr.value];
     case "call":
       return [expr.callee, ...expr.args];
     case "index":
@@ -4255,17 +4185,6 @@ function substituteSpecializedExpr(
       }
       return expr;
     }
-    case "borrow":
-      return {
-        ...expr,
-        value: substituteSpecializedExpr(
-          expr.value,
-          values,
-          staticValues,
-          staticArgNames,
-          context,
-        ),
-      };
     case "call": {
       if (expr.callee.kind === "var" && expr.callee.name.startsWith("@shape_")) {
         const staticValue = staticConstExprValue(
@@ -4489,7 +4408,6 @@ function substituteSpecializedExpr(
       const scopedStaticArgNames = new Map(staticArgNames);
       const statements: Statement[] = expr.statements.flatMap((stmt): Statement[] => {
         if (stmt.kind === "proof_const") return [];
-        if (stmt.kind === "fork_let") return [stmt];
         for (const name of boundNames(stmt)) {
           scopedValues.delete(name);
           scopedStaticValues.delete(name);
@@ -4534,7 +4452,23 @@ function substituteSpecializedExpr(
 }
 
 function cloneExpr<t extends Expr>(expr: t): t {
-  return structuredClone(expr);
+  return clonePlainExpr(expr);
+}
+
+function clonePlainExpr<t>(value: t, seen = new WeakMap<object, unknown>()): t {
+  if (!value || typeof value !== "object") return value;
+  const found = seen.get(value as object);
+  if (found) return found as t;
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    seen.set(value, out);
+    for (const item of value) out.push(clonePlainExpr(item, seen));
+    return out as t;
+  }
+  const out: Record<string, unknown> = {};
+  seen.set(value as object, out);
+  for (const [key, child] of Object.entries(value)) out[key] = clonePlainExpr(child, seen);
+  return out as t;
 }
 
 function expandSpecializedShapeSlot(
@@ -5121,6 +5055,14 @@ function diagnoseTypeRefCasing(
     });
     return;
   }
+  if (name === "memory") {
+    diagnostics.push({
+      code: "type.unknown_type",
+      message: "unknown type memory",
+      span,
+    });
+    return;
+  }
   if (typeNames.has(name) || isBuiltinTypeName(name)) return;
   if (callee && isInferredTypeVarName(name) && name.length > 1) {
     diagnostics.push({
@@ -5452,7 +5394,6 @@ function isBuiltinTypeName(name: string): boolean {
     "i32",
     "i64",
     "literal",
-    "memory",
     "numeric",
     "operator",
     "string",
@@ -5912,8 +5853,6 @@ function lowerProductConstructors(
           slots: expr.slots.map((slot) => ({ ...slot, value: lowerExpr(slot.value) })),
         };
       }
-      case "borrow":
-        return { ...expr, value: lowerExpr(expr.value) };
       case "call":
         return {
           ...expr,
@@ -6651,7 +6590,7 @@ class TypeEvaluator {
     callStack: string[],
   ): TypeEvalValue | undefined {
     if (block.statements.some((stmt) => stmt.kind !== "let" && stmt.kind !== "proof_const")) {
-      return this.unsupported("type.unsupported_expr", "fork is not type-evaluable");
+      return this.unsupported("type.unsupported_expr", "unsupported type block statement");
     }
     const ordered = orderBlockStatements(block.statements, this.diagnostics);
     for (const stmt of ordered) {
@@ -8090,8 +8029,6 @@ function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
     case "call":
       return exprContainsStaticExpansion(expr.callee) ||
         expr.args.some(exprContainsStaticExpansion);
-    case "borrow":
-      return exprContainsStaticExpansion(expr.value);
     case "index":
       return exprContainsStaticExpansion(expr.target) || exprContainsStaticExpansion(expr.index);
     case "binary":
@@ -8172,43 +8109,6 @@ function checkStatement(
     }
     return;
   }
-
-  const binding = env.get(stmt.source);
-  if (!binding) {
-    diagnostics.push({
-      code: "ownership.unknown_fork",
-      message: `cannot fork unknown value ${stmt.source}`,
-    });
-    return;
-  }
-  if (binding.moved) {
-    diagnostics.push({
-      code: "ownership.use_after_move",
-      message: `value ${stmt.source} was moved`,
-    });
-    return;
-  }
-  const forkReason = forkBlockedReason(binding.type);
-  if (forkReason) {
-    diagnostics.push({
-      code: "ownership.fork_linear",
-      message: `cannot fork ${forkReason} value ${stmt.source}`,
-    });
-    return;
-  }
-  // The checker models fork as an ownership split; backend ownership IR decides copy materialization.
-  binding.moved = true;
-  stmt.sourceType = binding.type;
-  for (const name of stmt.names) {
-    env.set(name, { moved: false, type: binding.type });
-  }
-}
-
-function forkBlockedReason(type: string | undefined): string | undefined {
-  if (isBorrowType(type)) return "borrowed";
-  const name = terminalName(typeNameOf(type ?? ""));
-  if (name === "memory" || name === "FrozenArena") return "linear";
-  return undefined;
 }
 
 function isStaticBinding(binding: { type?: string } | undefined): boolean {
@@ -8316,27 +8216,6 @@ function checkExpr(
     case "var": {
       checkProjection(expr.name, env, types, diagnostics);
       const binding = env.get(expr.name);
-      if (binding?.moved) {
-        diagnostics.push(diagnosticAt(
-          "ownership.use_after_move",
-          `value ${expr.name} was moved`,
-          expr,
-        ));
-      }
-      if (expectedType && isBorrowType(binding?.type) && !isBorrowType(expectedType)) {
-        diagnostics.push(diagnosticAt(
-          "ownership.borrow_to_owned",
-          `borrowed value ${expr.name} cannot be passed where owned ${expectedType} is expected`,
-          expr,
-        ));
-      }
-      if (expectedType && isFrozenType(binding?.type) && !isFrozenType(expectedType)) {
-        diagnostics.push(diagnosticAt(
-          "ownership.frozen_to_owned",
-          `frozen value ${expr.name} cannot be passed where owned ${expectedType} is expected`,
-          expr,
-        ));
-      }
       if (
         expectedType && binding?.type && !runtimeValueTypeAssignable(expectedType, binding.type)
       ) {
@@ -8348,34 +8227,6 @@ function checkExpr(
       }
       return;
     }
-    case "borrow": {
-      if (!isBorrowType(expectedType)) {
-        diagnostics.push(diagnosticAt(
-          "ownership.borrow_expected",
-          "borrow expression is only valid for a borrowed parameter",
-          expr,
-        ));
-      }
-      if (expr.value.kind === "borrow") {
-        diagnostics.push(diagnosticAt(
-          "ownership.borrow_nested",
-          "borrow expression cannot borrow another borrow",
-          expr,
-        ));
-      }
-      checkExpr(
-        expr.value,
-        env,
-        capabilities,
-        effects,
-        diagnostics,
-        stripBorrowType(expectedType),
-        types,
-        functions,
-        options,
-      );
-      return;
-    }
     case "placeholder":
       diagnostics.push({
         code: "const.placeholder_context",
@@ -8385,6 +8236,13 @@ function checkExpr(
     case "call": {
       const calleeName = expr.callee.kind === "var" ? expr.callee.name : undefined;
       if (calleeName !== undefined) {
+        if (calleeName === "fork") {
+          diagnostics.push(diagnosticAt(
+            "function.unknown",
+            "unknown function fork",
+            expr.callee,
+          ));
+        }
         if (
           calleeName.startsWith("RangeIter.") &&
           !functions.some((fn) => fn.name === calleeName || fn.name.endsWith(`.${calleeName}`)) &&
@@ -8404,7 +8262,6 @@ function checkExpr(
           });
         }
       }
-      const borrowArgIndexes = borrowedCallArgIndexes(expr, functions);
       const fn = calleeName ? functions.find((fn) => fn.name === calleeName) : undefined;
       const calleeSignature = !fn && calleeName
         ? parseFnSignature(projectedBindingType(calleeName, env, types) ?? "")
@@ -8430,35 +8287,6 @@ function checkExpr(
             `expected ${expected} but got ${actual}`,
             arg,
           ));
-        }
-        if (isBorrowType(expected)) {
-          if (arg.kind !== "borrow" && !isBorrowType(actual)) {
-            diagnostics.push(diagnosticAt(
-              "ownership.borrow_required",
-              `parameter ${fn?.params[index]?.name ?? index + 1} expects a borrowed ${
-                stripBorrowType(expected)
-              }`,
-              arg,
-            ));
-          }
-        } else if (isBorrowType(actual)) {
-          diagnostics.push(diagnosticAt(
-            "ownership.borrow_to_owned",
-            `borrowed value cannot be passed where owned ${expected ?? "value"} is expected`,
-            arg,
-          ));
-        } else if (isFrozenType(actual) && !isFrozenType(expected)) {
-          diagnostics.push(diagnosticAt(
-            "ownership.frozen_to_owned",
-            `frozen value cannot be passed where owned ${expected ?? "value"} is expected`,
-            arg,
-          ));
-        }
-        if (borrowArgIndexes.has(index)) continue;
-        if (arg.kind === "var" && !isBorrowType(expected)) {
-          const binding = env.get(arg.name);
-          if (isStaticBinding(binding)) continue;
-          if (binding) binding.moved = true;
         }
       }
       return;
@@ -8608,37 +8436,6 @@ function checkExpr(
       }
       return;
     case "shape":
-      if (expr.syntax === "frozen_collection") {
-        if (!isFrozenType(expectedType)) {
-          diagnostics.push(diagnosticAt(
-            "frozen.expected_type",
-            "frozen collection literal requires an expected frozen reference type",
-            expr,
-          ));
-        }
-        const itemType = inlineArrayLikeTypeArgs(stripFrozenType(expectedType), types)?.itemType;
-        for (const slot of expr.slots) {
-          if (slot.spread) {
-            diagnostics.push(diagnosticAt(
-              "frozen.spread",
-              "frozen collection literals do not support spread entries yet",
-              slot,
-            ));
-          }
-          checkExpr(
-            slot.value,
-            env,
-            capabilities,
-            effects,
-            diagnostics,
-            itemType,
-            types,
-            functions,
-            options,
-          );
-        }
-        return;
-      }
       if (expr.slots.some((slot) => slot.spread)) {
         checkInlineArraySpreadLiteral(
           expr,
@@ -8796,9 +8593,6 @@ function borrowedCallArgIndexes(
   const calleeName = expr.callee.name;
   const fn = functions.find((fn) => fn.name === calleeName);
   const intrinsicId = fn ? intrinsicWrapperId(fn) : undefined;
-  if (intrinsicId === "memory_load_i32" || intrinsicId === "memory_load_lane4_i32") {
-    return new Set([0]);
-  }
   return new Set();
 }
 
@@ -8810,19 +8604,6 @@ function exprBindingType(
   recoverTypes = false,
 ): string | undefined {
   if (expr.kind === "var") return projectedBindingType(expr.name, env, types);
-  if (expr.kind === "borrow") {
-    const borrowed = exprBindingType(expr.value, env, types, functions, recoverTypes);
-    return borrowed ? `&(${stripBorrowType(borrowed)})` : undefined;
-  }
-  if (expr.kind === "shape" && expr.syntax === "frozen_collection") {
-    const itemTypes = expr.slots.map((slot) =>
-      exprBindingType(slot.value, env, types, functions, recoverTypes)
-    );
-    const first = itemTypes[0] ?? "i32";
-    if (itemTypes.every((type) => !type || type === first)) {
-      return `#(InlineArray(${expr.slots.length}, ${first}))`;
-    }
-  }
   if (expr.kind === "call") {
     const callee = expr.callee;
     if (callee.kind === "var") return functions.find((fn) => fn.name === callee.name)?.returnType;
@@ -9291,22 +9072,30 @@ function substituteAliasTypeParams(type: string, decl: TypeDecl, args: string[])
 
 function orderBlockStatements(statements: Statement[], diagnostics: Diagnostic[]): Statement[] {
   const owners = new Map<string, number>();
-  let hasDuplicate = false;
+  let hasDuplicateInBinding = false;
+  let hasShadowing = false;
   statements.forEach((stmt, index) => {
-    for (const name of boundNames(stmt)) {
-      if (owners.has(name)) {
+    const names = boundNames(stmt);
+    const localNames = new Set<string>();
+    for (const name of names) {
+      if (localNames.has(name)) {
         diagnostics.push(diagnosticAt(
           "type.duplicate_local",
           `duplicate local binding ${name}`,
           spanForBoundName(stmt, name),
         ));
-        hasDuplicate = true;
+        hasDuplicateInBinding = true;
+        continue;
+      }
+      localNames.add(name);
+      if (owners.has(name)) {
+        hasShadowing = true;
       } else {
         owners.set(name, index);
       }
     }
   });
-  if (hasDuplicate) return statements;
+  if (hasDuplicateInBinding || hasShadowing) return statements;
 
   const dependencies = statements.map((stmt) => {
     const refs = new Set<string>();
@@ -9350,7 +9139,7 @@ function boundNames(stmt: Statement): string[] {
 
 function spanForBoundName(stmt: Statement, name: string): { span?: Span; nameSpan?: Span } {
   if (stmt.kind === "let" || stmt.kind === "proof_const") return stmt;
-  if (stmt.kind === "fork_let" || stmt.kind === "destructure_let") {
+  if (stmt.kind === "destructure_let") {
     return { span: stmt.nameSpans?.[name] ?? stmt.span };
   }
   return stmt;
@@ -9359,7 +9148,6 @@ function spanForBoundName(stmt: Statement, name: string): { span?: Span; nameSpa
 function collectStatementRefs(stmt: Statement, refs: Set<string>) {
   if (stmt.kind === "let") collectExprRefs(stmt.value, refs, new Set());
   else if (stmt.kind === "destructure_let") collectExprRefs(stmt.value, refs, new Set());
-  else if (stmt.kind === "fork_let") refs.add(stmt.source);
 }
 
 function collectExprRefs(expr: Expr, refs: Set<string>, shadowed: Set<string>) {
@@ -9417,7 +9205,6 @@ function collectBlockRefs(
   for (const stmt of block.statements) {
     if (stmt.kind === "let") collectExprRefs(stmt.value, refs, nestedShadowed);
     else if (stmt.kind === "destructure_let") collectExprRefs(stmt.value, refs, nestedShadowed);
-    else if (stmt.kind === "fork_let" && !nestedShadowed.has(stmt.source)) refs.add(stmt.source);
   }
   if (block.expr) collectExprRefs(block.expr, refs, nestedShadowed);
 }

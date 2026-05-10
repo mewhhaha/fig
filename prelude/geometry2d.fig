@@ -63,24 +63,38 @@ fn vertex2d_zero() -> Vertex2dI32 {
 
 
 fn quad2d_rect(x: i32, y: i32, w: i32, h: i32, z: i32, color: i32) -> Quad2dI32 {
-  let x0, x_for_w = fork(x);
-  let y0, y_for_h = fork(y);
-  let x_for_w_a, x_for_w_b = fork(x_for_w);
-  let w_a, w_b = fork(w);
-  let y_for_h_a, y_for_h_b = fork(y_for_h);
-  let h_a, h_b = fork(h);
-  let x00, x03 = fork(x0);
+  let x0 = x;
+let x_for_w = x;
+  let y0 = y;
+let y_for_h = y;
+  let x_for_w_a = x_for_w;
+let x_for_w_b = x_for_w;
+  let w_a = w;
+let w_b = w;
+  let y_for_h_a = y_for_h;
+let y_for_h_b = y_for_h;
+  let h_a = h;
+let h_b = h;
+  let x00 = x0;
+let x03 = x0;
   let x11 = x_for_w_a + w_a;
   let x12 = x_for_w_b + w_b;
-  let y00, y01 = fork(y0);
+  let y00 = y0;
+let y01 = y0;
   let y12 = y_for_h_a + h_a;
   let y13 = y_for_h_b + h_b;
-  let z01, z23 = fork(z);
-  let z0, z1 = fork(z01);
-  let z2, z3 = fork(z23);
-  let color01, color23 = fork(color);
-  let color0, color1 = fork(color01);
-  let color2, color3 = fork(color23);
+  let z01 = z;
+let z23 = z;
+  let z0 = z01;
+let z1 = z01;
+  let z2 = z23;
+let z3 = z23;
+  let color01 = color;
+let color23 = color;
+  let color0 = color01;
+let color1 = color01;
+  let color2 = color23;
+let color3 = color23;
   <
     vertex2d(vec3(x00, y00, z0), vec2(0, 0), color0),
     vertex2d(vec3(x11, y01, z1), vec2(1, 0), color1),
@@ -155,8 +169,10 @@ fn empty_geometry2d_batch3() -> Geometry2dBatch3I32 {
 }
 
 fn append_geometry2d(front: Geometry2dI32, back: Geometry2dI32) -> Geometry2dI32 {
-  let front_for_vertices, front_for_count = fork(front);
-  let back_for_vertices, back_for_count = fork(back);
+  let front_for_vertices = front;
+let front_for_count = front;
+  let back_for_vertices = back;
+let back_for_count = back;
   let vertices: layout.InlineArray(12, Vertex2dI32) = match front_for_vertices.vertex_count == 0 {
     true => back_for_vertices.vertices,
     false => front_for_vertices.vertices,
@@ -165,8 +181,10 @@ fn append_geometry2d(front: Geometry2dI32, back: Geometry2dI32) -> Geometry2dI32
 }
 
 fn append_geometry2d_batch3(front: Geometry2dBatch3I32, back: Geometry2dBatch3I32) -> Geometry2dBatch3I32 {
-  let front_for_count, front_for_vertices = fork(front);
-  let back_for_count, back_for_vertices = fork(back);
+  let front_for_count = front;
+let front_for_vertices = front;
+  let back_for_count = back;
+let back_for_vertices = back;
   let count = match front_for_count.vertex_count + back_for_count.vertex_count > 12 {
     true => 12,
     false => front_for_count.vertex_count + back_for_count.vertex_count,

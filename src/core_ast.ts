@@ -69,15 +69,6 @@ export interface ConstDecl extends AstNodeMeta {
   value: Expr;
 }
 
-export interface ForkLetDecl extends AstNodeMeta {
-  kind: "fork_let";
-  source: string;
-  names: string[];
-  nameSpans?: Record<string, Span>;
-  nameDocs?: Record<string, string>;
-  sourceType?: string;
-}
-
 export interface DestructureLetDecl extends AstNodeMeta {
   kind: "destructure_let";
   names: string[];
@@ -269,7 +260,7 @@ export interface BlockExpr extends AstNodeMeta {
   expr?: Expr;
 }
 
-export type Statement = LetDecl | ForkLetDecl | DestructureLetDecl | ProofConstDecl;
+export type Statement = LetDecl | DestructureLetDecl | ProofConstDecl;
 
 export type StaticForSource =
   | { kind: "range"; start: Expr; end: Expr }
@@ -283,7 +274,6 @@ export type Expr =
     inferredType?: string;
   } & AstNodeMeta)
   | ({ kind: "var"; name: string } & AstNodeMeta)
-  | ({ kind: "borrow"; value: Expr } & AstNodeMeta)
   | ({ kind: "placeholder" } & AstNodeMeta)
   | ({ kind: "pipe_bind"; value: Expr; name: string; doc?: string; body: Expr } & AstNodeMeta)
   | ({ kind: "call"; callee: Expr; args: Expr[] } & AstNodeMeta)
@@ -296,7 +286,7 @@ export type Expr =
   | (
     & {
       kind: "shape";
-      syntax?: "record" | "collection" | "frozen_collection";
+      syntax?: "record" | "collection";
       slots: (
         & {
           doc?: string;

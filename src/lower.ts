@@ -6,7 +6,6 @@ import type {
   DestructureLetDecl,
   Expr,
   FnDecl,
-  ForkLetDecl,
   LetDecl,
   Param,
   ParamPattern,
@@ -131,7 +130,7 @@ function lowerDecl(node: Node): Declaration {
       return lowerFn(decl);
     case "TopLetDecl": {
       const lowered = lowerLet(decl);
-      if (lowered.kind === "fork_let" || lowered.kind === "destructure_let") {
+      if (lowered.kind === "destructure_let") {
         fail(
           "parse.lower",
           "multi-binding let is only valid inside function bodies",
@@ -456,13 +455,6 @@ function lowerTypeExpr(node: Node): TypeExpr {
     }
     case "FnType":
       return { kind: "type_fn", ...spanOnly(expr), source: expr.text };
-    case "FrozenType":
-      return {
-        kind: "type_call",
-        ...spanOnly(expr),
-        callee: { kind: "type_ref", name: "#" },
-        args: [lowerTypeExpr(first(expr, "Type"))],
-      };
     case "Literal":
       return lowerTypeLiteral(expr);
     case "StaticBuiltin":
@@ -817,7 +809,6 @@ function knownTypeName(name: string): boolean {
     "bool",
     "char",
     "string",
-    "memory",
     "i32",
     "u32",
     "i64",
@@ -834,7 +825,7 @@ function hashText(source: string): number {
   return hash;
 }
 
-function lowerLet(node: Node): LetDecl | ForkLetDecl | DestructureLetDecl {
+function lowerLet(node: Node): LetDecl | DestructureLetDecl {
   const tuplePattern = optional(node, "TuplePattern");
   if (tuplePattern) {
     const pattern = lowerParamPattern(tuplePattern);
@@ -855,19 +846,6 @@ function lowerLet(node: Node): LetDecl | ForkLetDecl | DestructureLetDecl {
     const bindingNodes = [...ids, ...tailIds];
     const nameDocs = docsByName(bindingNodes);
     const nameSpans = spansByName(bindingNodes);
-    if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "fork") {
-      if (expr.args.length !== 1 || expr.args[0].kind !== "var") {
-        fail("parse.lower", "fork(...) source must be a binding name", spanFor(node));
-      }
-      return {
-        kind: "fork_let",
-        ...spanOnly(node),
-        names,
-        ...(nameDocs ? { nameDocs } : {}),
-        ...(nameSpans ? { nameSpans } : {}),
-        source: expr.args[0].name,
-      };
-    }
     return {
       kind: "destructure_let",
       ...spanOnly(node),
@@ -963,12 +941,6 @@ function lowerExpr(node: Node): Expr {
       return lowerCall(expr);
     case "Primary":
       return lowerPrimary(expr);
-    case "BorrowExpr":
-      return {
-        kind: "borrow",
-        ...spanOnly(expr),
-        value: lowerExpr(first(expr, "Primary")),
-      };
     case "Block":
       return lowerBlock(expr);
     default:
@@ -1088,8 +1060,6 @@ function bindDollarPlaceholders(expr: Expr): Expr {
         callee: bindDollarPlaceholders(expr.callee),
         args: expr.args.map(bindDollarPlaceholders),
       };
-    case "borrow":
-      return { ...expr, value: bindDollarPlaceholders(expr.value) };
     case "index":
       return {
         ...expr,
@@ -1287,16 +1257,8 @@ function lowerPrimary(node: Node): Expr {
   switch (child.type) {
     case "Literal":
       return lowerLiteral(child);
-    case "BorrowExpr":
-      return {
-        kind: "borrow",
-        ...spanOnly(child),
-        value: lowerExpr(first(child, "Primary")),
-      };
     case "Placeholder":
       return { kind: "placeholder", ...spanOnly(child) };
-    case "ForkBuiltin":
-      return { kind: "var", ...spanOnly(child), name: "fork" };
     case "StaticBuiltin":
       return {
         kind: "var",
@@ -1334,8 +1296,6 @@ function lowerPrimary(node: Node): Expr {
       return lowerShapeValue(child);
     case "CollectionValue":
       return lowerCollectionValue(child);
-    case "FrozenCollectionValue":
-      return lowerFrozenCollectionValue(child);
     case "TupleValue":
       return lowerTupleValue(child);
     case "Block":
@@ -1456,38 +1416,6 @@ function lowerCollectionValueTail(node: Node): Extract<Expr, { kind: "shape" }>[
   const tail = named(node).find(is("CollectionValueTail"));
   const tailItems = tail ? named(tail).find(is("CollectionValueItems")) : undefined;
   return tailItems ? lowerCollectionValueItems(tailItems) : [];
-}
-
-function lowerFrozenCollectionValue(node: Node): Expr {
-  return {
-    kind: "shape",
-    syntax: "frozen_collection",
-    ...spanOnly(node),
-    slots: lowerFrozenCollectionValueItems(optional(node, "FrozenCollectionValueItems") ?? node),
-  };
-}
-
-function lowerFrozenCollectionValueItems(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
-  const spread = named(node).find(is("SpreadSlot"));
-  if (spread) {
-    return [{
-      ...spanOnly(spread),
-      spread: true,
-      value: lowerExpr(first(spread, "Expr")),
-    }, ...lowerFrozenCollectionValueTail(node)];
-  }
-  const expr = named(node).find(is("Expr"));
-  if (!expr) return [];
-  return [{
-    ...spanOnly(expr),
-    value: lowerExpr(expr),
-  }, ...lowerFrozenCollectionValueTail(node)];
-}
-
-function lowerFrozenCollectionValueTail(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
-  const tail = named(node).find(is("FrozenCollectionValueTail"));
-  const tailItems = tail ? named(tail).find(is("FrozenCollectionValueItems")) : undefined;
-  return tailItems ? lowerFrozenCollectionValueItems(tailItems) : [];
 }
 
 function lowerTupleValue(node: Node): Expr {

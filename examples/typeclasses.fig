@@ -49,6 +49,6 @@ fn Mapper(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
 }
 
 pub fn main() -> i32 {
-  let mapped = Mapper(Box {value: 1}, inc, Functor(box));
-  same(point, Eq(point), Point {x: 1, y: 2}, Point {x: 1, y: 2}) + mapped.value
+  let mapped = Mapper(Box {value: 1}, inc, Functor(Box));
+  same(Point, Eq(Point), Point {x: 1, y: 2}, Point {x: 1, y: 2}) + mapped.value
 }

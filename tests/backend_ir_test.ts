@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert@1";
 import { wasmFromSource, watFromSource } from "../src/mod.ts";
 
 Deno.test("WAT and wasm share lowered import signatures", async () => {
@@ -53,6 +53,44 @@ Deno.test("backend does not allocate unused pure locals", async () => {
   assert(!wat.includes("i32.const 3"));
 });
 
+Deno.test("backend uses local tee for immediate set get roundtrips", async () => {
+  const wat = await watFromSource(`
+    pub fn main() -> i32 {
+      let x = 41;
+      x + 1
+    }
+  `);
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(main, "local.tee $x");
+  assert(!main.includes("local.set $x\n    local.get $x"));
+});
+
+Deno.test("backend removes unreachable instructions after branch terminators", async () => {
+  const wat = await watFromSource(`
+    fn loop_forever() -> i32 { loop_forever() }
+    pub fn main() -> i32 { loop_forever() }
+  `);
+  const loop = wat.match(/\(func \$loop_forever[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(loop, "br 0");
+  assert(!loop.includes("br 0\n        unreachable"));
+});
+
+Deno.test("optimizer simplifies numeric identities without dropping effects", async () => {
+  const pure = await watFromSource(`
+    pub fn main(x: i32) -> i32 { (x * 1) + 0 }
+  `);
+  const pureMain = pure.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(!pureMain.includes("i32.mul"));
+  assert(!pureMain.includes("i32.add"));
+
+  const effectful = await watFromSource(`
+    const clock: fn() -> i32 !{time} = @capability("clock");
+    pub fn main() -> i32 !{time} { clock() * 0 }
+  `);
+  assertStringIncludes(effectful, "call $clock");
+  assertStringIncludes(effectful, "i32.mul");
+});
+
 Deno.test("backend preserves and drops unused effectful capability calls", async () => {
   const wat = await watFromSource(`
     const clock: fn() -> i32 !{time} = @capability("clock");
@@ -72,7 +110,8 @@ Deno.test("backend removes private functions unreachable from exports", async ()
     pub fn main() -> i32 { used() }
   `);
   assert(!wat.includes("(func $unused"));
-  assertStringIncludes(wat, "(func $used");
+  assert(!wat.includes("(func $used"));
+  assert(!wat.includes("call $used"));
 });
 
 Deno.test("tail-recursive self calls lower to loops by default", async () => {
@@ -87,9 +126,22 @@ Deno.test("tail-recursive self calls lower to loops by default", async () => {
   assertStringIncludes(sum, "loop");
   assert(!sum.includes("call $sum"));
   assert(!sum.includes("return_call $sum"));
+  assert(!sum.includes("__tail_tmp"));
 
   const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
   assertEquals((instance.exports.main as CallableFunction)(), 5050);
+});
+
+Deno.test("boolean true match patterns branch directly", async () => {
+  const wat = await watFromSource(`
+    pub fn lt(x: i32, y: i32) -> i32 {
+      match x < y { true => 1, false => 0 }
+    }
+    pub fn main() -> i32 { lt(1, 2) }
+  `);
+  const lt = wat.match(/\(func \$lt[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(lt, "i32.lt_s");
+  assert(!lt.includes("i32.const 1\n    i32.eq"));
 });
 
 Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
@@ -99,9 +151,8 @@ Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
       struct(InlineArray)
     }
     fn fold_loop(xs: InlineArray(3, i32), index: i32, acc: i32) -> i32 {
-      let xs_for_get, xs_for_next = fork(xs);
       match index < 3 {
-        true => fold_loop(xs_for_next, index + 1, acc + xs_for_get[index]),
+        true => fold_loop(xs, index + 1, acc + xs[index]),
         false => acc,
       }
     }
@@ -113,6 +164,7 @@ Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
   const fold = wat.match(/\(func \$fold_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(fold, "loop");
   assert(!fold.includes("call $fold_loop"));
+  assert(!fold.includes("__tail_tmp"));
 
   const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
   assertEquals((instance.exports.main as CallableFunction)(), 6);
@@ -126,9 +178,8 @@ Deno.test("index cursor Yield item proves inline-array indexing and lowers inlin
       struct(InlineArray)
     }
     fn sum_loop(xs: InlineArray(3, i32), cursor: core.IndexCursor(3), acc: i32) -> i32 {
-      let xs_for_get, xs_for_next = fork(xs);
       match core.IndexCursor.next(3, cursor) {
-        Yield(i, next) => sum_loop(xs_for_next, next, acc + xs_for_get[i]),
+        Yield(i, next) => sum_loop(xs, next, acc + xs[i]),
         Done => acc,
       }
     }
@@ -259,20 +310,12 @@ Deno.test("opcode mode rejects direct self recursion outside tail position", asy
       struct(InlineArray)
     }
     type fn Lane4I32() -> type { InlineArray(4, i32) }
-    fn memory.load_lane4_i32(mem: memory, p: Ptr(Lane4I32)) -> Lane4I32 {
-  @memory_load_lane4_i32(mem, p)
-}
-    fn memory.store_lane4_i32(mem: memory, p: Ptr(Lane4I32), value: Lane4I32) -> memory {
-  @memory_store_lane4_i32(mem, p, value)
-}
     type fn Index(n: count) -> type { i32 }
     fn dynamic_index_target(n: i32, i: Index(4)) -> Lane4I32 {
-      let i_call, i_read = fork(i);
-      match n { 0 => [0, 0, 0, 0], _ => [dynamic_index_target(n - 1, i_call)[i_read], 0, 0, 0] }
+      match n { 0 => [0, 0, 0, 0], _ => [dynamic_index_target(n - 1, i)[i], 0, 0, 0] }
     }
     pub fn main(i: Index(4)) -> i32 {
-      let i_call, i_read = fork(i);
-      dynamic_index_target(3, i_call)[i_read]
+      dynamic_index_target(3, i)[i]
     }
   `,
   );
@@ -294,12 +337,12 @@ Deno.test("backend keeps generated forwarding wrappers inlined at call sites", a
     type fn Box() { let Box = {value: i32}; struct(Box) }
     type fn Functor(f: type) { let Functor = {map: fn(x: f) -> f}; struct(Functor) }
     fn map_box(x: Box) -> Box { {value: x.value + 1} }
-    const box_functor: Functor(box) = {map: map_box};
-    fn mapped(const dict: Functor(box), x: Box) -> Box { dict.map(x) }
+    const box_functor: Functor(Box) = {map: map_box};
+    fn mapped(const dict: Functor(Box), x: Box) -> Box { dict.map(x) }
     pub fn main() -> Box { mapped(box_functor, {value: 41}) }
   `);
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-  assertStringIncludes(main, "call $map_box");
+  assert(!main.includes("call $map_box"));
   assert(!wat.includes("(func $mapped__box_functor"));
 });
 
@@ -310,12 +353,6 @@ Deno.test("Lane4I32 public ABI stays scalar while pure lane add uses SIMD intern
       struct(InlineArray)
     }
     type fn Lane4I32() -> type { InlineArray(4, i32) }
-    fn memory.load_lane4_i32(mem: memory, p: Ptr(Lane4I32)) -> Lane4I32 {
-  @memory_load_lane4_i32(mem, p)
-}
-    fn memory.store_lane4_i32(mem: memory, p: Ptr(Lane4I32), value: Lane4I32) -> memory {
-  @memory_store_lane4_i32(mem, p, value)
-}
     pub fn main(x: Lane4I32, k: i32) -> Lane4I32 {
       [x[0] + k, x[1] + k, x[2] + k, x[3] + k]
     }
@@ -343,12 +380,6 @@ Deno.test("SIMD lane add matches scalar result", async () => {
       struct(InlineArray)
     }
     type fn Lane4I32() -> type { InlineArray(4, i32) }
-    fn memory.load_lane4_i32(mem: memory, p: Ptr(Lane4I32)) -> Lane4I32 {
-  @memory_load_lane4_i32(mem, p)
-}
-    fn memory.store_lane4_i32(mem: memory, p: Ptr(Lane4I32), value: Lane4I32) -> memory {
-  @memory_store_lane4_i32(mem, p, value)
-}
     pub fn main(x: Lane4I32, k: i32) -> Lane4I32 {
       [x[0] + k, x[1] + k, x[2] + k, x[3] + k]
     }
@@ -488,378 +519,106 @@ Deno.test("scalar matrix multiply baseline stays scalar", async () => {
   );
 });
 
-Deno.test("memory-backed SIMD matrix multiply emits and runs with wasm memory", async () => {
-  const source = await Deno.readTextFile("examples/perf_matmul_mem_simd.fig");
+Deno.test("temporal intrinsics export temporal memories and pack handles", async () => {
+  const source = `
+    fn temporal.handle(ptr: i32, rev: i32) -> i64 {
+      @temporal_handle(ptr, rev)
+    }
+    fn temporal.alloc(bytes: i32) -> i64 {
+      @temporal_alloc(bytes)
+    }
+    fn temporal.handle_ptr(handle: i64) -> i32 {
+      @temporal_handle_ptr(handle)
+    }
+    fn temporal.handle_rev(handle: i64) -> i32 {
+      @temporal_handle_rev(handle)
+    }
+    pub fn main() -> i32 {
+      temporal.handle_ptr(temporal.handle(7, 2)) +
+        temporal.handle_rev(temporal.handle(7, 2)) +
+        temporal.handle_ptr(temporal.alloc(64))
+    }
+  `;
   const wat = await watFromSource(source);
+  assertStringIncludes(wat, `(memory $fig_objects (export "fig_objects") 1)`);
+  assertStringIncludes(wat, `(memory $fig_logs (export "fig_logs") 1)`);
+  assertStringIncludes(wat, `(memory $fig_buffers (export "fig_buffers") 1)`);
+  assert(!wat.includes(`(memory (export "memory") 1)`));
+  assertStringIncludes(wat, "i64.extend_i32_u");
+  assertStringIncludes(wat, "i64.shl");
+  assertStringIncludes(wat, "i64.or");
 
-  assertStringIncludes(wat, `(memory (export "memory") 1)`);
-  assertStringIncludes(wat, "(param $a i32) (param $b i32) (param $c i32)");
-  assertStringIncludes(wat, "v128.load");
-  assertStringIncludes(wat, "v128.store");
-  assertStringIncludes(wat, "i32x4.mul");
-  assertStringIncludes(wat, "i8x16.shuffle");
-  assertStringIncludes(wat, "i32x4.add");
-  assert(!wat.includes("i32.load"));
-  assert(!wat.includes("i32.store"));
-  assert(!wat.includes("call $ptr_i32"));
-  assert(!wat.includes("call $ptr_lane4_i32"));
-  assert(!wat.includes("call $Ptr.add"));
-  assert(!wat.includes("call $load_lane4_i32"));
-  assert(!wat.includes("call $store_lane4_i32"));
-
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
-  const memory = instance.exports.memory as WebAssembly.Memory;
-  const memoryI32 = new Int32Array(memory.buffer);
-  memoryI32.set([
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    11,
-    12,
-    13,
-    14,
-    15,
-    16,
-  ], 0);
-  memoryI32.set([
-    1,
-    5,
-    9,
-    13,
-    2,
-    6,
-    10,
-    14,
-    3,
-    7,
-    11,
-    15,
-    4,
-    8,
-    12,
-    16,
-  ], 16);
-  (instance.exports.main as CallableFunction)(0, 64, 128);
-
+  const instance = await WebAssembly.instantiate(await wasmFromSource(source), {});
+  assertEquals((instance.instance.exports.main as CallableFunction)(), 73);
   assertEquals(
-    Array.from(memoryI32.slice(32, 48)),
-    [
-      90,
-      100,
-      110,
-      120,
-      202,
-      228,
-      254,
-      280,
-      314,
-      356,
-      398,
-      440,
-      426,
-      484,
-      542,
-      600,
-    ],
+    WebAssembly.Module.exports(instance.module).filter((item) => item.kind === "memory").map((
+      item,
+    ) => item.name),
+    ["fig_objects", "fig_logs", "fig_buffers"],
   );
 });
 
-Deno.test("ptr constructor helper lowers to direct memory address", async () => {
-  const wat = await watFromSource(`
-    type fn Ptr(a: type) -> type {
-      let Ptr = {addr: i32};
-      struct(Ptr)
+Deno.test("branch memory mode exports branch memories and packs transitional handles", async () => {
+  const source = `
+    fn branch.handle(ptr: i32) -> i64 {
+      @branch_handle(ptr)
     }
-    fn memory.load_i32(mem: memory, p: Ptr(i32)) -> i32 {
-  @memory_load_i32(mem, p)
-}
-    fn memory.store_i32(mem: memory, p: Ptr(i32), value: i32) -> memory {
-  @memory_store_i32(mem, p, value)
-}
-    fn Ptr.from_i32(addr: i32) -> Ptr(a) {
-  @ptr_from_i32(addr)
-}
-    fn Ptr.add(p: Ptr(a), bytes: i32) -> Ptr(a) {
-  @ptr_add(p, bytes)
-}
-    pub fn main(mem0: memory, p: i32) -> i32 {
-      memory.load_i32(mem0, Ptr.from_i32(p + 4))
+    fn branch.handle_ptr(handle: i64) -> i32 {
+      @branch_handle_ptr(handle)
     }
-  `);
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-
-  assertStringIncludes(main, "local.get $p");
-  assertStringIncludes(main, "i32.const 4");
-  assertStringIncludes(main, "i32.add");
-  assertStringIncludes(main, "i32.load");
-  assert(!wat.includes("call $ptr_i32"));
-});
-
-Deno.test("chained Ptr.add helpers lower without helper calls", async () => {
-  const wat = await watFromSource(`
-    type fn Ptr(a: type) -> type {
-      let Ptr = {addr: i32};
-      struct(Ptr)
-    }
-    fn memory.load_i32(mem: memory, p: Ptr(i32)) -> i32 {
-  @memory_load_i32(mem, p)
-}
-    fn memory.store_i32(mem: memory, p: Ptr(i32), value: i32) -> memory {
-  @memory_store_i32(mem, p, value)
-}
-    fn Ptr.from_i32(addr: i32) -> Ptr(a) {
-  @ptr_from_i32(addr)
-}
-    fn Ptr.add(p: Ptr(a), bytes: i32) -> Ptr(a) {
-  @ptr_add(p, bytes)
-}
-        pub fn main(mem0: memory, p: i32) -> i32 {
-      memory.load_i32(mem0, Ptr.add(Ptr.add(Ptr.from_i32(p), 16), 32))
-    }
-  `);
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-
-  assertStringIncludes(main, "local.get $p");
-  assertStringIncludes(main, "i32.const 16");
-  assertStringIncludes(main, "i32.const 32");
-  assertEquals(main.match(/i32.add/g)?.length, 2);
-  assertStringIncludes(main, "i32.load");
-  assert(!wat.includes("call $ptr_i32"));
-  assert(!wat.includes("call $Ptr.add"));
-});
-
-Deno.test("scalar load/store aliases lower to memory instructions without helper calls", async () => {
-  const wat = await watFromSource(`
-    type fn Ptr(a: type) -> type {
-      let Ptr = {addr: i32};
-      struct(Ptr)
-    }
-    fn memory.load_i32(mem: memory, p: Ptr(i32)) -> i32 {
-  @memory_load_i32(mem, p)
-}
-    fn memory.store_i32(mem: memory, p: Ptr(i32), value: i32) -> memory {
-  @memory_store_i32(mem, p, value)
-}
-    fn Ptr.from_i32(addr: i32) -> Ptr(a) {
-  @ptr_from_i32(addr)
-}
-    fn Ptr.add(p: Ptr(a), bytes: i32) -> Ptr(a) {
-  @ptr_add(p, bytes)
-}
-    fn load_i32(mem: memory, p: Ptr(i32)) -> i32 {
-      memory.load_i32(mem, p)
-    }
-    fn store_i32(mem: memory, p: Ptr(i32), value: i32) -> memory {
-      memory.store_i32(mem, p, value)
-    }
-    pub fn main(mem0: memory, p: i32) -> memory {
-      let base: Ptr(i32) = Ptr.from_i32(p);
-      let pp, qp = fork(base);
-      let x: i32 = memory.load_i32(mem0, pp);
-      memory.store_i32(mem0, qp, x + 1)
-    }
-  `);
-
-  assertStringIncludes(wat, `(memory (export "memory") 1)`);
-  assertStringIncludes(wat, "i32.load");
-  assertStringIncludes(wat, "i32.store");
-  assert(!wat.includes("call $load_i32"));
-  assert(!wat.includes("call $store_i32"));
-});
-
-Deno.test("ptr params locals and forks lower as scalar i32 values", async () => {
-  const wat = await watFromSource(`
-    type fn Ptr(a: type) -> type {
-      let Ptr = {addr: i32};
-      struct(Ptr)
-    }
-    fn Ptr.from_i32(addr: i32) -> Ptr(a) {
-  @ptr_from_i32(addr)
-}
-    fn Ptr.add(p: Ptr(a), bytes: i32) -> Ptr(a) {
-  @ptr_add(p, bytes)
-}
-    fn bump(p: Ptr(i32)) -> Ptr(i32) {
-      Ptr.add(p, 4)
-    }
-    pub fn main(p: i32) -> i32 {
-      let base: Ptr(i32) = Ptr.from_i32(p);
-      let p0, p1 = fork(base);
-      let moved: Ptr(i32) = bump(p0);
-      Ptr.add(moved, p1)
-    }
-  `);
-  const bump = wat.match(/\(func \$bump[\s\S]*?\n  \)/)?.[0] ?? "";
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-
-  assertStringIncludes(bump, `(func $bump (param $p i32) (result i32)`);
-  assertStringIncludes(main, `(local $base i32)`);
-  assert(!main.includes(`(local $p0 i32)`));
-  assert(!main.includes(`(local $p1 i32)`));
-  assertStringIncludes(main, `local.get $base
-    call $bump`);
-  assertStringIncludes(main, `local.get $base
-    i32.add`);
-  assert(!wat.includes("$addr"));
-  assert(!wat.includes("call $Ptr.add"));
-});
-
-Deno.test("backend lowers n-way fork aliases without eager local copies", async () => {
-  const wat = await watFromSource(`
-    fn consume(x: i32) -> i32 { x + 1 }
-    pub fn main() -> i32 {
-      let x = 10;
-      let a, b, c = fork(x);
-      consume(a) + b + c
-    }
-  `);
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-
-  assert(!main.includes(`(local $a i32)`));
-  assert(!main.includes(`(local $b i32)`));
-  assert(!main.includes(`(local $c i32)`));
-  assert(!main.includes(`local.set $a`));
-  assert(!main.includes(`local.set $b`));
-  assert(!main.includes(`local.set $c`));
-  assertEquals(main.match(/local\.get \$x/g)?.length, 3);
-});
-
-Deno.test("backend resolves fork aliases through product projections", async () => {
-  const wat = await watFromSource(`
-    type fn Pair() -> type {
-      let Pair = {left: i32, right: i32};
-      struct(Pair)
-    }
-    fn score(p: Pair) -> i32 { p.left + p.right }
-    pub fn main() -> i32 {
-      let pair: Pair = Pair {left: 2, right: 5};
-      let a, b = fork(pair);
-      score(a) + b.left
-    }
-  `);
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-
-  assert(!main.includes(`(local $a$left i32)`));
-  assert(!main.includes(`(local $a$right i32)`));
-  assert(!main.includes(`(local $b$left i32)`));
-  assert(!main.includes(`(local $b$right i32)`));
-  assertStringIncludes(main, `local.get $pair$left
-    local.get $pair$right
-    call $score`);
-  assertStringIncludes(main, `local.get $pair$left
-    i32.add`);
-});
-
-Deno.test("backend resolves fork aliases through inline-array and branch uses", async () => {
-  const wat = await watFromSource(`
-    type fn InlineArray(n: count, a: type) -> type {
-      let InlineArray = {n*a};
-      struct(InlineArray)
+    fn branch.mark(handle: i64) -> i64 {
+      @branch_mark(handle)
     }
     pub fn main() -> i32 {
-      let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
-      let a, b, c = fork(xs);
-      let x = a[0] + b[2] + c[3];
-      let cond, then_x, else_x = fork(x);
-      match cond == 0 {
-        true => then_x + 1,
-        false => else_x + 2
-      }
+      branch.handle_ptr(branch.mark(branch.handle(7)))
     }
-  `);
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  `;
+  const wat = await watFromSource(source, { memoryModel: "branch" });
+  assertStringIncludes(wat, `(memory $fig_objects (export "fig_objects") 1)`);
+  assert(!wat.includes(`fig_logs`));
+  assertStringIncludes(wat, `(memory $fig_buffers (export "fig_buffers") 1)`);
+  assertStringIncludes(wat, "i64.extend_i32_u");
+  assertStringIncludes(wat, "i32.wrap_i64");
 
-  for (const name of ["a", "b", "c", "cond", "then_x", "else_x"]) {
-    assert(!new RegExp(`\\(local \\$${name}(?:\\s|\\$)`).test(main));
-    assert(!new RegExp(`\\blocal\\.set \\$${name}(?:\\s|\\$)`).test(main));
-  }
-  assertStringIncludes(main, `local.get $xs$0`);
-  assertStringIncludes(main, `local.get $xs$2`);
-  assertStringIncludes(main, `local.get $xs$3`);
-  assertStringIncludes(main, `local.get $x`);
+  const instance = await WebAssembly.instantiate(
+    await wasmFromSource(source, { memoryModel: "branch" }),
+    {},
+  );
+  assertEquals((instance.instance.exports.main as CallableFunction)(), 7);
+  assertEquals(
+    WebAssembly.Module.exports(instance.module).filter((item) => item.kind === "memory").map((
+      item,
+    ) => item.name),
+    ["fig_objects", "fig_buffers"],
+  );
 });
 
-Deno.test("lane4 load/store aliases lower to SIMD memory instructions without helper calls", async () => {
-  const wat = await watFromSource(`
-    type fn InlineArray(n: count, a: type) -> type {
-      let InlineArray = {n*a};
-      struct(InlineArray)
+Deno.test("branch mode rejects temporal intrinsics", async () => {
+  const source = `
+    fn temporal.handle(ptr: i32, rev: i32) -> i64 {
+      @temporal_handle(ptr, rev)
     }
-    type fn Lane4I32() -> type { InlineArray(4, i32) }
-    fn memory.load_lane4_i32(mem: memory, p: Ptr(Lane4I32)) -> Lane4I32 {
-  @memory_load_lane4_i32(mem, p)
-}
-    fn memory.store_lane4_i32(mem: memory, p: Ptr(Lane4I32), value: Lane4I32) -> memory {
-  @memory_store_lane4_i32(mem, p, value)
-}
-    type fn Ptr(a: type) -> type {
-      let Ptr = {addr: i32};
-      struct(Ptr)
-    }
-    fn memory.load_i32(mem: memory, p: Ptr(i32)) -> i32 {
-  @memory_load_i32(mem, p)
-}
-    fn memory.store_i32(mem: memory, p: Ptr(i32), value: i32) -> memory {
-  @memory_store_i32(mem, p, value)
-}
-    fn Ptr.from_i32(addr: i32) -> Ptr(a) {
-  @ptr_from_i32(addr)
-}
-    fn Ptr.add(p: Ptr(a), bytes: i32) -> Ptr(a) {
-  @ptr_add(p, bytes)
-}
-    fn load_lane4_i32(mem: memory, p: Ptr(Lane4I32)) -> Lane4I32 {
-      memory.load_lane4_i32(mem, p)
-    }
-    fn store_lane4_i32(
-      mem: memory,
-      p: Ptr(Lane4I32),
-      value: Lane4I32
-    ) -> memory {
-      memory.store_lane4_i32(mem, p, value)
-    }
-    pub fn main(mem0: memory, a: i32, c: i32) -> memory {
-      let row: Lane4I32 = memory.load_lane4_i32(mem0, Ptr.from_i32(a));
-      memory.store_lane4_i32(mem0, Ptr.from_i32(c), row)
-    }
-  `);
-
-  assertStringIncludes(wat, `(memory (export "memory") 1)`);
-  assertStringIncludes(wat, "v128.load");
-  assertStringIncludes(wat, "v128.store");
-  assert(!wat.includes("call $load_lane4_i32"));
-  assert(!wat.includes("call $store_lane4_i32"));
+    pub fn main() -> i64 { temporal.handle(7, 2) }
+  `;
+  await assertRejects(
+    () => watFromSource(source, { memoryModel: "branch" }),
+    Error,
+    "temporal intrinsics are only available with --memory temporal",
+  );
 });
 
-Deno.test("memory lane intrinsics remain backend aliases", async () => {
-  const wat = await watFromSource(`
-    type fn InlineArray(n: count, a: type) -> type {
-      let InlineArray = {n*a};
-      struct(InlineArray)
+Deno.test("temporal mode rejects branch intrinsics", async () => {
+  const source = `
+    fn branch.handle(ptr: i32) -> i64 {
+      @branch_handle(ptr)
     }
-    type fn Lane4I32() -> type { InlineArray(4, i32) }
-    fn memory.load_lane4_i32(mem: memory, p: Ptr(Lane4I32)) -> Lane4I32 {
-  @memory_load_lane4_i32(mem, p)
-}
-    fn memory.store_lane4_i32(mem: memory, p: Ptr(Lane4I32), value: Lane4I32) -> memory {
-  @memory_store_lane4_i32(mem, p, value)
-}
-    pub fn main(mem0: memory, a: i32, c: i32) -> memory {
-      let row: Lane4I32 = memory.load_lane4_i32(mem0, Ptr.from_i32(a));
-      memory.store_lane4_i32(mem0, Ptr.from_i32(c), row)
-    }
-  `);
-
-  assertStringIncludes(wat, `(memory (export "memory") 1)`);
-  assertStringIncludes(wat, "v128.load");
-  assertStringIncludes(wat, "v128.store");
+    pub fn main() -> i64 { branch.handle(7) }
+  `;
+  await assertRejects(
+    () => watFromSource(source),
+    Error,
+    "branch intrinsics require --memory branch or --memory branch-debug",
+  );
 });
 
 Deno.test("unsupported lane patterns fall back to scalar WAT", async () => {
@@ -869,12 +628,6 @@ Deno.test("unsupported lane patterns fall back to scalar WAT", async () => {
       struct(InlineArray)
     }
     type fn Lane4I32() -> type { InlineArray(4, i32) }
-    fn memory.load_lane4_i32(mem: memory, p: Ptr(Lane4I32)) -> Lane4I32 {
-  @memory_load_lane4_i32(mem, p)
-}
-    fn memory.store_lane4_i32(mem: memory, p: Ptr(Lane4I32), value: Lane4I32) -> memory {
-  @memory_store_lane4_i32(mem, p, value)
-}
     pub fn main(x: Lane4I32) -> Lane4I32 {
       [x[0] + 1, x[1] + 2, x[2] + 3, x[3] + 4]
     }

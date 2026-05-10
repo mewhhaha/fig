@@ -113,15 +113,12 @@ function tailPipeline(): string {
     fn square(x: i32) -> i32 { x * x }
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     fn fold(i: i32, end: i32, acc: i32) -> i32 {
-      let i_cmp, i_even, i_square, i_next_even, i_next_odd = fork(i);
-      let end_cmp, end_next_even, end_next_odd = fork(end);
-      let acc_even, acc_odd, acc_done = fork(acc);
-      match i_cmp < end_cmp {
-        true => match even(i_even) {
-          true => fold(i_next_even + 1, end_next_even, add(acc_even, square(i_square))),
-          false => fold(i_next_odd + 1, end_next_odd, acc_odd),
+      match i < end {
+        true => match even(i) {
+          true => fold(i + 1, end, add(acc, square(i))),
+          false => fold(i + 1, end, acc),
         },
-        false => acc_done,
+        false => acc,
       }
     }
     pub fn main() -> i32 { fold(0, __N__, 0) }

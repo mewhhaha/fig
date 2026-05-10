@@ -29,7 +29,7 @@ pub fn main() -> i32 {
   let left = 1;
   let right = 2;
   let record = {left, right};
-  let point: HasEql(point) = Point {x: left, y: right};
+  let point: HasEql(Point) = Point {x: left, y: right};
   let generated = Point {for Key, Spec in (fields): 1};
   let weird: Weird = {fst: 3, [0]: 4, [1]: 5};
   let xs = map4_i32(inc, <1, 2, 3, 4>);

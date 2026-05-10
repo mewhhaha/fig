@@ -12,7 +12,6 @@ export type GeneratedTokenKind =
   | "const"
   | "fn"
   | "let"
-  | "fork"
   | "match"
   | "pub"
   | "bool"

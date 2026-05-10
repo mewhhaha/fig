@@ -1,17 +1,20 @@
 import type { Declaration, FnDecl } from "./core_ast.ts";
 
 export const intrinsicIds = [
-  "memory_load_i32",
-  "memory_store_i32",
-  "memory_load_lane4_i32",
-  "memory_store_lane4_i32",
-  "ptr_from_i32",
-  "ptr_add",
+  "temporal_alloc",
+  "temporal_handle",
+  "temporal_handle_ptr",
+  "temporal_handle_rev",
+  "branch_handle",
+  "branch_handle_ptr",
+  "branch_mark",
+  "branch_is_branched",
+  "branch_ensure_editable",
+  "branch_materialize",
   "index_cursor_next",
   "inline_array_builder_start",
   "inline_array_builder_push",
   "inline_array_builder_finish",
-  "freeze",
 ] as const;
 
 export type IntrinsicId = typeof intrinsicIds[number];
@@ -22,11 +25,16 @@ export function isKnownIntrinsicId(id: string): id is IntrinsicId {
   return intrinsicIdSet.has(id);
 }
 
-export function intrinsicCallId(name: string, intrinsicIdsByName: Map<string, string>): string | undefined {
+export function intrinsicCallId(
+  name: string,
+  intrinsicIdsByName: Map<string, string>,
+): string | undefined {
   return intrinsicIdsByName.get(name);
 }
 
-export function intrinsicIdsByFunctionName(declarations: Iterable<Declaration>): Map<string, string> {
+export function intrinsicIdsByFunctionName(
+  declarations: Iterable<Declaration>,
+): Map<string, string> {
   const byName = new Map<string, string>();
   for (const decl of declarations) {
     if (decl.kind !== "fn" || !decl.name) continue;

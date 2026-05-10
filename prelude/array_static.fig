@@ -291,13 +291,17 @@ fn Iter.drop1(xs: Iter) -> Iter {
 }
 
 fn Iter.fold(xs: Iter, init: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
-  let init_then, init_else = fork(init);
+  let init_then = init;
+let init_else = init;
   let acc0 = match xs.keep[0] { true => f(init_then, xs.items[0]), false => init_else };
-  let acc0_then, acc0_else = fork(acc0);
+  let acc0_then = acc0;
+let acc0_else = acc0;
   let acc1 = match xs.keep[1] { true => f(acc0_then, xs.items[1]), false => acc0_else };
-  let acc1_then, acc1_else = fork(acc1);
+  let acc1_then = acc1;
+let acc1_else = acc1;
   let acc2 = match xs.keep[2] { true => f(acc1_then, xs.items[2]), false => acc1_else };
-  let acc2_then, acc2_else = fork(acc2);
+  let acc2_then = acc2;
+let acc2_else = acc2;
   match xs.keep[3] { true => f(acc2_then, xs.items[3]), false => acc2_else }
 }
 
@@ -417,8 +421,11 @@ fn Iter.collect(xs: Iter) -> CompactArray(4, i32) {
   let len0 = match xs.keep[0] { true => 1, false => 0 };
   let i0 = match xs.keep[0] { true => xs.items[0], false => 0 };
 
-  let len0_for_i0, len0_for_i1, len0_for_len = fork(len0);
-  let i0_for_i0, i0_for_i1 = fork(i0);
+  let len0_for_i0 = len0;
+let len0_for_i1 = len0;
+let len0_for_len = len0;
+  let i0_for_i0 = i0;
+let i0_for_i1 = i0;
   let i0_after1 = match xs.keep[1] {
     true => match len0_for_i0 { 0 => xs.items[1], _ => i0_for_i0 },
     false => i0_for_i1,
@@ -429,9 +436,14 @@ fn Iter.collect(xs: Iter) -> CompactArray(4, i32) {
   };
   let len1 = match xs.keep[1] { true => len0_for_len + 1, false => len0_for_len };
 
-  let len1_for_i0, len1_for_i1, len1_for_i2, len1_for_len = fork(len1);
-  let i0_after1_for_i0, i0_after1_for_i1 = fork(i0_after1);
-  let i1_after1_for_i1, i1_after1_for_i2 = fork(i1_after1);
+  let len1_for_i0 = len1;
+let len1_for_i1 = len1;
+let len1_for_i2 = len1;
+let len1_for_len = len1;
+  let i0_after1_for_i0 = i0_after1;
+let i0_after1_for_i1 = i0_after1;
+  let i1_after1_for_i1 = i1_after1;
+let i1_after1_for_i2 = i1_after1;
   let i0_after2 = match xs.keep[2] {
     true => match len1_for_i0 { 0 => xs.items[2], _ => i0_after1_for_i0 },
     false => i0_after1_for_i1,
@@ -450,10 +462,17 @@ fn Iter.collect(xs: Iter) -> CompactArray(4, i32) {
   };
   let len2 = match xs.keep[2] { true => len1_for_len + 1, false => len1_for_len };
 
-  let len2_for_i0, len2_for_i1, len2_for_i2, len2_for_i3, len2_for_len = fork(len2);
-  let i0_after2_for_i0, i0_after2_for_final = fork(i0_after2);
-  let i1_after2_for_i1, i1_after2_for_final = fork(i1_after2);
-  let i2_after2_for_i2, i2_after2_for_final = fork(i2_after2);
+  let len2_for_i0 = len2;
+let len2_for_i1 = len2;
+let len2_for_i2 = len2;
+let len2_for_i3 = len2;
+let len2_for_len = len2;
+  let i0_after2_for_i0 = i0_after2;
+let i0_after2_for_final = i0_after2;
+  let i1_after2_for_i1 = i1_after2;
+let i1_after2_for_final = i1_after2;
+  let i2_after2_for_i2 = i2_after2;
+let i2_after2_for_final = i2_after2;
   let i0_final = match xs.keep[3] {
     true => match len2_for_i0 { 0 => xs.items[3], _ => i0_after2_for_i0 },
     false => i0_after2_for_final,
@@ -526,7 +545,8 @@ fn CompactArray.is_full(const n: count, const a: type, xs: CompactArray(n, a)) -
 }
 
 fn CompactArray.get(const n: count, const a: type, xs: CompactArray(n, a), i: i32) -> layout.core.Option(a) {
-  let xs_for_len, xs_for_items = fork(xs);
+  let xs_for_len = xs;
+let xs_for_items = xs;
   match 0 <= i {
     true => match i < xs_for_len.len {
       true => xs_for_items.items[i],
@@ -542,7 +562,8 @@ fn CompactArray.push(
   xs: CompactArray(n, a),
   value: a
 ) -> CompactArray(n, a) {
-  let xs_update, xs_full = fork(xs);
+  let xs_update = xs;
+let xs_full = xs;
   match xs_update.len < n {
     true => CompactArray {items: layout.InlineArrayBuilder.push(n, a, xs_update.items, xs_update.len, value), len: xs_update.len + 1},
     false => xs_full,
@@ -568,10 +589,14 @@ fn CompactArray.map_loop(
   xs: CompactArray(n, a),
   const f: fn(x: a) -> b
 ) -> CompactArray(n, b) {
-  let builder_next, builder_finish = fork(builder);
-  let builder_false, builder_done = fork(builder_finish);
-  let xs_for_len, xs_for_value = fork(xs);
-  let xs_item, xs_next = fork(xs_for_value);
+  let builder_next = builder;
+let builder_finish = builder;
+  let builder_false = builder_finish;
+let builder_done = builder_finish;
+  let xs_for_len = xs;
+let xs_for_value = xs;
+  let xs_item = xs_for_value;
+let xs_next = xs_for_value;
   match layout.core.IndexCursor.next(n, cursor) {
     Yield(i, next) => match i < xs_for_len.len {
       true => CompactArray.map_loop(n, a, b, next, CompactArray.collect_push(n, b, builder_next, f(xs_item.items[i])), xs_next, f),
@@ -601,10 +626,14 @@ fn CompactArray.fold_loop(
   state: acc,
   const f: fn(acc: acc, x: a) -> acc
 ) -> acc {
-  let xs_for_len, xs_for_value = fork(xs);
-  let xs_item, xs_next = fork(xs_for_value);
-  let state_next, state_finish = fork(state);
-  let state_false, state_done = fork(state_finish);
+  let xs_for_len = xs;
+let xs_for_value = xs;
+  let xs_item = xs_for_value;
+let xs_next = xs_for_value;
+  let state_next = state;
+let state_finish = state;
+  let state_false = state_finish;
+let state_done = state_finish;
   match layout.core.IndexCursor.next(n, cursor) {
     Yield(i, next) => match i < xs_for_len.len {
       true => CompactArray.fold_loop(n, a, acc, next, xs_next, f(state_next, xs_item.items[i]), f),
@@ -626,10 +655,14 @@ fn CompactArray.count_loop(
   const pred: fn(x: a) -> bool,
   total: i32
 ) -> i32 {
-  let xs_for_len, xs_for_value = fork(xs);
-  let xs_item, xs_next = fork(xs_for_value);
-  let total_next, total_finish = fork(total);
-  let total_false, total_done = fork(total_finish);
+  let xs_for_len = xs;
+let xs_for_value = xs;
+  let xs_item = xs_for_value;
+let xs_next = xs_for_value;
+  let total_next = total;
+let total_finish = total;
+  let total_false = total_finish;
+let total_done = total_finish;
   match layout.core.IndexCursor.next(n, cursor) {
     Yield(i, next) => match i < xs_for_len.len {
       true => CompactArray.count_loop(n, a, next, xs_next, pred, total_next + (match pred(xs_item.items[i]) { true => 1, false => 0 })),
@@ -644,7 +677,8 @@ fn CompactArray.Iter(const n: count, const a: type, xs: CompactArray(n, a)) -> C
 }
 
 fn RangeIter.fold_loop(i: i32, end: i32, acc: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
-  let acc_then, acc_else = fork(acc);
+  let acc_then = acc;
+let acc_else = acc;
   match i < end {
     true => RangeIter.fold_loop(i + 1, end, f(acc_then, i), f),
     false => acc_else,

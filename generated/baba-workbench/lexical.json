@@ -6,7 +6,6 @@
     "false",
     "fn",
     "for",
-    "fork",
     "import",
     "in",
     "let",
@@ -52,7 +51,6 @@
     "*",
     "/",
     "\\",
-    "&",
     "%",
     "+",
     "=",
@@ -63,14 +61,6 @@
     {
       "name": "CountRepeat",
       "pattern": "[0-9]+\\*"
-    },
-    {
-      "name": "FrozenCollectionOpen",
-      "pattern": "#\\["
-    },
-    {
-      "name": "FrozenTypeOpen",
-      "pattern": "#\\("
     },
     {
       "name": "CollectionOpen",

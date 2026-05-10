@@ -30,6 +30,6 @@ fn binder(v: t(a), const f: fn(x: a) -> t(b), const _proof: Monad(t)) -> t(b) {
 }
 
 pub fn main() -> i32 {
-  let mapped = fmap(Box {value: 1}, inc, Functor(box));
-  bind(mapped, wrap, Monad(box)).value
+  let mapped = fmap(Box {value: 1}, inc, Functor(Box));
+  bind(mapped, wrap, Monad(Box)).value
 }

@@ -14,8 +14,8 @@ type fn Shaped() -> type {
   let Difference = @shape_difference(Base, Intersected);
   let Renamed = @shape_rename(Difference, {z: #done});
   let Mapped = @shape_map(Renamed, ValueFor);
-  let Keyed = @shape_map_with_key(Mapped, Keyed);
-  let Filtered = @shape_filter(Keyed, KeepXy);
+  let KeyedShape = @shape_map_with_key(Mapped, Keyed);
+  let Filtered = @shape_filter(KeyedShape, KeepXy);
   let Count = @shape_count(Filtered);
   let Out = @shape_concat(Filtered, {count: Count, x_type: @shape_slot(Filtered, #x)});
   match @shape_has_slot(Out, #count) {

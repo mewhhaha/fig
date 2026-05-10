@@ -118,12 +118,8 @@ Deno.test("highlight query captures type identifiers inside union types", async 
   }));
 
   assertEquals(
-    captures.filter((capture) => capture.name === "type").map((capture) => capture.text),
-    ["left", "right", "left"],
-  );
-  assertEquals(
-    captures.some(({ name, text }) => name === "type.parameter" && text === "result"),
-    true,
+    captures.filter((capture) => capture.name === "type.parameter").map((capture) => capture.text),
+    ["left", "right", "result", "left"],
   );
 });
 

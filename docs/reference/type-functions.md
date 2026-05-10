@@ -9,7 +9,7 @@ type fn Pair(a: type, b: type) -> struct {
 }
 ```
 
-Type function bodies contain `let` or `const` PascalCase bindings and type expressions. a final type
+Type function bodies contain `let` or `const` bindings and type expressions. a final type
 expression is the Result. Result kinds are `type`, `struct`, `union`, and `operator`.
 
 ## Parameters and Clauses
@@ -37,15 +37,13 @@ type fn Choose(_: type) -> type { i32 }
 ## Type Expressions
 
 Type-level expressions include primitive type names, qualified names, type calls, literals, shape
-expressions, tuple and repeat types, borrowed and frozen types, type matches, equality comparisons,
-builtins, and operator descriptors.
+expressions, tuple and repeat types, type matches, equality comparisons, builtins, and operator
+descriptors.
 
 ```fig
 match a { i32 => bool, _ => a }
 [i32, bool]
 [i32; 4]
-&(point)
-#(Layout.InlineArray(3, i32))
 @type_has_slot(t, #x)
 operator(#infixl, 60, "+", t.add)
 ```

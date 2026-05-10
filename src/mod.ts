@@ -392,8 +392,6 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
         callee: qualifyExpr(expr.callee, alias, names),
         args: expr.args.map((arg) => qualifyExpr(arg, alias, names)),
       });
-    case "borrow":
-      return withMeta(expr, { ...expr, value: qualifyExpr(expr.value, alias, names) });
     case "index":
       return withMeta(expr, {
         ...expr,
@@ -472,9 +470,6 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
           }
           if (stmt.kind === "destructure_let") {
             return withMeta(stmt, { ...stmt, value: qualifyExpr(stmt.value, alias, names) });
-          }
-          if (stmt.kind === "fork_let") {
-            return withMeta(stmt, { ...stmt, source: qualifyReference(stmt.source, alias, names) });
           }
           if (stmt.kind === "proof_const") {
             return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });

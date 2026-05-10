@@ -7,7 +7,7 @@ type fn Pair() -> type {
 
 fn make_pair() -> Pair { [1, [2; 3]] }
 
-fn sum_pair(p: &(pair)) -> i32 {
+fn sum_pair(p: Pair) -> i32 {
   p[0] + p[1][0] + p[1][1] + p[1][2]
 }
 
@@ -18,9 +18,8 @@ fn tail() -> layout.InlineArrayList(2, i32) {
 pub fn main() -> i32 {
   let [head, values] = make_pair();
   let pair = make_pair();
-  let borrowed = sum_pair(&pair);
+  let pair_sum = sum_pair(pair);
   let list: layout.InlineArrayList(4, i32) = <1, 2, ...tail()>;
   let array = layout.InlineArray.from_list(4, i32, list);
-  let frozen: #(layout.InlineArray(3, i32)) = #[10, 20, 30];
-  head + values[0] + values[1] + values[2] + borrowed + array[3] + frozen[1]
+  head + values[0] + values[1] + values[2] + pair_sum + array[3]
 }

@@ -19,14 +19,12 @@ Deno.test("golden WAT for direct function calls", async () => {
       pub fn main() -> i32 { add1(41) }
     `),
     `(module
-  (func $add1 (param $x i32) (result i32)
-    local.get $x
+  (func $main (export "main") (result i32)
+    (local $x i32)
+    i32.const 41
+    local.tee $x
     i32.const 1
     i32.add
-  )
-  (func $main (export "main") (result i32)
-    i32.const 41
-    call $add1
   )
 )`,
   );
@@ -45,8 +43,10 @@ Deno.test("golden WAT for multi-arm match", async () => {
       pub fn main() -> i32 { classify(1) }
     `),
     `(module
-  (func $classify (param $x i32) (result i32)
-    local.get $x
+  (func $main (export "main") (result i32)
+    (local $x i32)
+    i32.const 1
+    local.tee $x
     i32.const 0
     i32.eq
     if (result i32)
@@ -62,10 +62,6 @@ Deno.test("golden WAT for multi-arm match", async () => {
       end
     end
   )
-  (func $main (export "main") (result i32)
-    i32.const 1
-    call $classify
-  )
 )`,
   );
 });
@@ -78,29 +74,17 @@ Deno.test("golden WAT for literal function clauses", async () => {
       pub fn main() -> i32 { something_n(2) }
     `),
     `(module
-  (func $something_n (param $__pattern_734601027 i32) (result i32)
-    local.get $__pattern_734601027
-    i32.const 1
-    i32.eq
+  (func $main (export "main") (result i32)
+    (local $__pattern_734601027 i32)
+    i32.const 2
+    local.tee $__pattern_734601027
     i32.const 1
     i32.eq
     if (result i32)
-      local.get $__pattern_734601027
-      call $something_n__clause_0
+      i32.const 10
     else
       local.get $__pattern_734601027
-      call $something_n__clause_1
     end
-  )
-  (func $something_n__clause_0 (param $__pattern_734601027 i32) (result i32)
-    i32.const 10
-  )
-  (func $something_n__clause_1 (param $a i32) (result i32)
-    local.get $a
-  )
-  (func $main (export "main") (result i32)
-    i32.const 2
-    call $something_n
   )
 )`,
   );
@@ -112,19 +96,17 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
       type fn Box() { let Box = {value: i32}; struct(Box) }
       type fn Functor(f: type) { let Functor = {map: fn(x: f) -> f}; struct(Functor) }
       fn map_box(x: Box) -> Box { {value: x.value + 1} }
-      const box_functor: Functor(box) = {map: map_box};
-      fn mapped(const dict: Functor(box), x: Box) -> Box { dict.map(x) }
+      const box_functor: Functor(Box) = {map: map_box};
+      fn mapped(const dict: Functor(Box), x: Box) -> Box { dict.map(x) }
       pub fn main() -> Box { mapped(box_functor, {value: 41}) }
     `),
     `(module
-  (func $map_box (param $x$value i32) (result i32)
-    local.get $x$value
+  (func $main (export "main") (result i32)
+    (local $x$value i32)
+    i32.const 41
+    local.tee $x$value
     i32.const 1
     i32.add
-  )
-  (func $main (export "main") (result i32)
-    i32.const 41
-    call $map_box
   )
 )`,
   );
@@ -135,15 +117,15 @@ Deno.test("WAT specializes perf array const dictionary dispatch", async () => {
     type fn ScalarBox() { let ScalarBox = {value: i32}; struct(ScalarBox) }
     type fn Map4(t: type) { let Map4 = {apply: fn(x: t) -> t}; struct(Map4) }
     fn add1_box(x: ScalarBox) -> ScalarBox { {value: x.value + 1} }
-    const scalar_map4: Map4(scalar_box) = {apply: add1_box};
-    fn apply_tile(const ops: Map4(scalar_box), x: ScalarBox) -> ScalarBox {
+    const scalar_map4: Map4(ScalarBox) = {apply: add1_box};
+    fn apply_tile(const ops: Map4(ScalarBox), x: ScalarBox) -> ScalarBox {
       ops.apply(ops.apply(ops.apply(ops.apply(x))))
     }
     pub fn main() -> ScalarBox { apply_tile(scalar_map4, {value: 1}) }
   `);
 
   assert(wat.includes("(func $apply_tile__scalar_map4 (param $x$value i32) (result i32)"));
-  assertEquals(wat.match(/call \$add1_box/g)?.length, 4);
+  assertEquals(wat.match(/call \$add1_box/g)?.length, 3);
   assert(!wat.includes("(func $apply_tile "));
 
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
