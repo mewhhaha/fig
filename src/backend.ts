@@ -153,7 +153,7 @@ export function emitWasm(
 }
 
 function lowerBackendModule(program: Program, options: BackendOptions = {}): BackendModule {
-  const memoryModel = options.memoryModel ?? "temporal";
+  const memoryModel = options.memoryModel ?? "branch";
   if (!isMemoryModel(memoryModel)) {
     throw new CompileError([{
       code: "backend.memory_model",
@@ -187,7 +187,7 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
 
   const loweredFunctions = functions.map((fn) => lowerFunction(fn, ctx));
   const needsTemporalMemory = functions.some((fn) => usesTemporalIntrinsic(fn.body, ctx.functions));
-  const needsBranchMemory = memoryModel !== "temporal" ||
+  const needsBranchMemory = memoryModel !== "temporal" &&
     functions.some((fn) => usesBranchIntrinsic(fn.body, ctx.functions));
   if (memoryModel !== "temporal" && needsTemporalMemory) {
     throw new CompileError([{
@@ -620,9 +620,25 @@ function cleanupInstrs(instrs: Instr[]): Instr[] {
       cleaned.splice(cleaned.length - 2, 2);
       continue;
     }
+    if (
+      beforeCurrent?.op === "const" && current?.op === "binary" &&
+      isRightIdentityConst(beforeCurrent, current.wasm)
+    ) {
+      cleaned.splice(cleaned.length - 2, 2);
+      continue;
+    }
     if (isTerminator(instr)) break;
   }
   return cleaned;
+}
+
+function isRightIdentityConst(instr: Extract<Instr, { op: "const" }>, wasm: string): boolean {
+  return (
+    instr.value === 0 &&
+    (wasm === `${instr.type}.add` || wasm === `${instr.type}.sub` || wasm === `${instr.type}.or` ||
+      wasm === `${instr.type}.xor`)
+  ) ||
+    (instr.value === 1 && (wasm === `${instr.type}.mul` || wasm.startsWith(`${instr.type}.div_`)));
 }
 
 function cleanupInstr(instr: Instr): Instr {

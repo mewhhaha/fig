@@ -8,7 +8,7 @@ Deno.test("WAT and wasm share lowered import signatures", async () => {
     pub fn main() -> i32 !{time, entropy} { clock() + random(1) }
   `;
 
-  const wat = await watFromSource(source);
+  const wat = await watFromSource(source, { memoryModel: "temporal" });
   assertStringIncludes(wat, `(func $clock (import "env" "clock") (result i32))`);
   assertStringIncludes(wat, `(func $random (import "env" "random") (param i32) (result i32))`);
 
@@ -84,12 +84,47 @@ Deno.test("optimizer simplifies numeric identities without dropping effects", as
   assert(!pureMain.includes("i32.mul"));
   assert(!pureMain.includes("i32.add"));
 
+  const samePure = await watFromSource(`
+    pub fn main(seed: i32) -> i32 { seed - seed }
+  `);
+  const samePureMain = samePure.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(samePureMain, "i32.const 0");
+  assert(!samePureMain.includes("i32.sub"));
+
   const effectful = await watFromSource(`
     const clock: fn() -> i32 !{time} = @capability("clock");
     pub fn main() -> i32 !{time} { clock() * 0 }
   `);
   assertStringIncludes(effectful, "call $clock");
   assertStringIncludes(effectful, "i32.mul");
+});
+
+Deno.test("benchmark-style internal loop calls private kernel directly", async () => {
+  const source = `
+    fn __bench_kernel(seed: i32) -> i32 {
+      let x = seed + 10;
+      x + x + x + x
+    }
+    pub fn main(seed: i32) -> i32 {
+      __bench_kernel(seed)
+    }
+    pub fn bench(iterations: i32) -> i32 {
+      bench_loop(0, iterations, 0)
+    }
+    fn bench_loop(i: i32, end: i32, checksum: i32) -> i32 {
+      match i < end {
+        true => bench_loop(i + 1, end, checksum + __bench_kernel(i)),
+        false => checksum,
+      }
+    }
+  `;
+  const wat = await watFromSource(source, { optLevel: "speed", memoryModel: "branch" });
+  const benchLoop = wat.match(/\(func \$bench_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(benchLoop, "loop");
+  assert(!benchLoop.includes("call $main"));
+  assert(!benchLoop.includes("call $bench_loop"));
+  assert(!wat.includes("fig_logs"));
+  assert(!wat.includes("fig_objects"));
 });
 
 Deno.test("backend preserves and drops unused effectful capability calls", async () => {
@@ -122,7 +157,7 @@ Deno.test("tail-recursive self calls lower to loops by default", async () => {
     }
     pub fn main() -> i32 { sum(100, 0) }
   `;
-  const wat = await watFromSource(source);
+  const wat = await watFromSource(source, { memoryModel: "temporal" });
   const sum = wat.match(/\(func \$sum[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(sum, "loop");
   assert(!sum.includes("call $sum"));
@@ -161,7 +196,7 @@ Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
       fold_loop([1, 2, 3], 0, 0)
     }
   `;
-  const wat = await watFromSource(source);
+  const wat = await watFromSource(source, { memoryModel: "temporal" });
   const fold = wat.match(/\(func \$fold_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(fold, "loop");
   assert(!fold.includes("call $fold_loop"));
@@ -540,7 +575,7 @@ Deno.test("temporal intrinsics export temporal memories and pack handles", async
         temporal.handle_ptr(temporal.alloc(64))
     }
   `;
-  const wat = await watFromSource(source);
+  const wat = await watFromSource(source, { memoryModel: "temporal" });
   assertStringIncludes(wat, `(memory $fig_objects (export "fig_objects") 1)`);
   assertStringIncludes(wat, `(memory $fig_logs (export "fig_logs") 1)`);
   assertStringIncludes(wat, `(memory $fig_buffers (export "fig_buffers") 1)`);
@@ -549,7 +584,10 @@ Deno.test("temporal intrinsics export temporal memories and pack handles", async
   assertStringIncludes(wat, "i64.shl");
   assertStringIncludes(wat, "i64.or");
 
-  const instance = await WebAssembly.instantiate(await wasmFromSource(source), {});
+  const instance = await WebAssembly.instantiate(
+    await wasmFromSource(source, { memoryModel: "temporal" }),
+    {},
+  );
   assertEquals((instance.instance.exports.main as CallableFunction)(), 73);
   assertEquals(
     WebAssembly.Module.exports(instance.module).filter((item) => item.kind === "memory").map((
@@ -670,7 +708,7 @@ Deno.test("branch mode rejects temporal intrinsics", async () => {
   );
 });
 
-Deno.test("temporal mode rejects branch intrinsics", async () => {
+Deno.test("explicit temporal mode rejects branch intrinsics", async () => {
   const source = `
     fn branch.handle(ptr: i32) -> i64 {
       @branch_handle(ptr)
@@ -678,7 +716,7 @@ Deno.test("temporal mode rejects branch intrinsics", async () => {
     pub fn main() -> i64 { branch.handle(7) }
   `;
   await assertRejects(
-    () => watFromSource(source),
+    () => watFromSource(source, { memoryModel: "temporal" }),
     Error,
     "branch intrinsics require --memory branch or --memory branch-debug",
   );

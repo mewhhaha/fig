@@ -1,24 +1,144 @@
-const merge = @import("prelude.geometry2d");
+const geometry = @import("prelude.geometry2d");
 const ecs = @import("engine.ecs");
+
 const tick_millis: fn() -> i32 !{time} = @capability("tick_millis");
 const input_axis_x: fn() -> i32 !{event} = @capability("input_axis_x");
 const input_pressed: fn() -> i32 !{event} = @capability("input_pressed");
 
-fn run_frame() -> merge.Geometry2dBatch3I32 !{time, event} {
-  let dt_ms = tick_millis();
-  let axis_x = input_axis_x();
-  let pressed = input_pressed();
-  let first = merge.emit_rect2d_batch3(12 + axis_x, 8, 16, 16, 1, 1);
-  let second = merge.emit_rect2d_batch3(24, 8 + pressed, 16, 16, 1, 2);
-  let third = merge.emit_rect2d_batch3(40 + dt_ms / 16, 8, 16, 16, 1, 3);
-  merge.append_geometry2d_batch3(merge.append_geometry2d_batch3(first, second), third)
+type fn Transform2d() -> type {
+  let Transform2d = {x: i32, y: i32, z: i32};
+  struct(Transform2d)
 }
 
-pub fn main() -> merge.Geometry2dBatch3I32 !{time, event} {
+type fn Velocity2d() -> type {
+  let Velocity2d = {x: i32, y: i32};
+  struct(Velocity2d)
+}
+
+type fn Sprite2d() -> type {
+  let Sprite2d = {w: i32, h: i32, color: i32};
+  struct(Sprite2d)
+}
+
+type fn MovementEvents() -> type {
+  let MovementEvents = {dt_ms: i32, axis_x: i32, pressed: i32};
+  struct(MovementEvents)
+}
+
+const game_components = {
+  transform: Transform2d,
+  velocity: Velocity2d,
+  sprite: Sprite2d,
+};
+
+const velocity_reads = {velocity: Velocity2d};
+const velocity_writes = {velocity: Velocity2d};
+const movement_reads = {transform: Transform2d, velocity: Velocity2d};
+const movement_writes = {transform: Transform2d};
+const render_reads = {transform: Transform2d, sprite: Sprite2d};
+
+type fn PlaygroundWorld() -> type {
+  ecs.SparseWorld(3, game_components)
+}
+
+fn seed_world() -> PlaygroundWorld {
+  ecs.SparseWorld.empty(game_components)
+    \w -> ecs.entity.add(
+      w,
+      {
+        transform: Transform2d {x: 12, y: 8, z: 1},
+        velocity: Velocity2d {x: 0, y: 0},
+        sprite: Sprite2d {w: 16, h: 16, color: 1},
+      }
+    )
+    \w -> ecs.entity.add(
+      w,
+      {
+        transform: Transform2d {x: 24, y: 8, z: 1},
+        velocity: Velocity2d {x: 0, y: 0},
+        sprite: Sprite2d {w: 16, h: 16, color: 2},
+      }
+    )
+    \w -> ecs.entity.add(
+      w,
+      {
+        transform: Transform2d {x: 40, y: 8, z: 1},
+        sprite: Sprite2d {w: 16, h: 16, color: 3},
+      }
+    )
+}
+
+fn update_velocity(row: ecs.Row(velocity_reads), events: MovementEvents) -> ecs.Values(velocity_writes) {
+  let speed = 4 + events.pressed;
+  {
+    velocity: Velocity2d {
+      x: events.axis_x * speed,
+      y: row.velocity.y,
+    },
+  }
+}
+
+fn velocity_system(world: PlaygroundWorld, events: MovementEvents) -> PlaygroundWorld {
+  ecs.each(world, events, update_velocity)
+}
+
+fn move_transform(transform: Transform2d, velocity: Velocity2d, events: MovementEvents) -> Transform2d {
+  Transform2d {
+    x: transform.x + velocity.x * events.dt_ms / 16,
+    y: transform.y + velocity.y * events.dt_ms / 16,
+    z: transform.z,
+  }
+}
+
+fn move_row(row: ecs.Row(movement_reads), events: MovementEvents) -> ecs.Values(movement_writes) {
+  {
+    transform: move_transform(row.transform, row.velocity, events),
+  }
+}
+
+fn movement_system(world: PlaygroundWorld, events: MovementEvents) -> PlaygroundWorld {
+  ecs.each(world, events, move_row)
+}
+
+fn render_box(transform: Transform2d, sprite: Sprite2d) -> geometry.Geometry2dBatch3I32 {
+  geometry.emit_rect2d_batch3(
+    transform.x,
+    transform.y,
+    sprite.w,
+    sprite.h,
+    transform.z,
+    sprite.color
+  )
+}
+
+fn render_row(
+  acc: geometry.Geometry2dBatch3I32,
+  row: ecs.Row(render_reads)
+) -> geometry.Geometry2dBatch3I32 {
+  geometry.append_geometry2d_batch3(acc, render_box(row.transform, row.sprite))
+}
+
+fn render_system(world: PlaygroundWorld) -> geometry.Geometry2dBatch3I32 {
+  ecs.fold(world, geometry.empty_geometry2d_batch3(), render_row)
+}
+
+fn run_frame() -> geometry.Geometry2dBatch3I32 !{time, event} {
+  let events: MovementEvents = MovementEvents {
+    dt_ms: tick_millis(),
+    axis_x: input_axis_x(),
+    pressed: input_pressed(),
+  };
+  seed_world()
+    \world -> ecs.run(world, events, velocity_system)
+    \world -> ecs.run(world, events, movement_system)
+    \world -> render_system(world)
+}
+
+pub fn main() -> geometry.Geometry2dBatch3I32 !{time, event} {
   run_frame()
 }
 
 pub fn playground_probe() -> i32 !{time, event} {
-  let geometry = run_frame();
-  geometry.vertex_count
+  let output = run_frame();
+  output.vertex_count
 }

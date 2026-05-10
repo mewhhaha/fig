@@ -2470,7 +2470,7 @@ function specializeInferredExpr(
       const callee = specializeInferredExpr(expr.callee, context, env);
       const args = expr.args.map((arg) => specializeInferredExpr(arg, context, env));
       const fn = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
-      if (!fn || !fnUsesInferredTypeVars(fn)) return { ...expr, callee, args };
+      if (!fn || !fnUsesInferredTypeVars(fn, context.consts)) return { ...expr, callee, args };
       return specializeInferredCall(fn, args, context, env, callSiteSpan(expr)) ??
         { ...expr, callee, args };
     }
@@ -2567,8 +2567,8 @@ function hasUnresolvedStaticTypeName(
   return false;
 }
 
-function fnUsesInferredTypeVars(fn: FnDecl): boolean {
-  return collectTypeVars(fn).size > 0;
+function fnUsesInferredTypeVars(fn: FnDecl, consts?: Map<string, ConstValue>): boolean {
+  return collectTypeVars(fn, consts).size > 0;
 }
 
 function specializeInferredCall(
@@ -2629,10 +2629,10 @@ function specializeInferredCall(
         if (arg?.kind === "var") {
           const value = context.consts.get(arg.name);
           if (value?.kind === "fn") {
-            inferFnTypeArgs(param.type, context.functions.get(value.name), types);
+            inferFnTypeArgs(param.type, context.functions.get(value.name), types, context.consts);
           }
           if (context.functions.has(arg.name)) {
-            inferFnTypeArgs(param.type, context.functions.get(arg.name), types);
+            inferFnTypeArgs(param.type, context.functions.get(arg.name), types, context.consts);
           }
           staticArgNames.push(arg.name);
         }
@@ -2647,13 +2647,18 @@ function specializeInferredCall(
             substituteTypeVars(param.type, types),
             context.functions.get(value.name),
             types,
+            context.consts,
           );
         }
         const directFn = context.functions.get(arg.name);
-        if (directFn) inferFnTypeArgs(substituteTypeVars(param.type, types), directFn, types);
+        if (directFn) {
+          inferFnTypeArgs(substituteTypeVars(param.type, types), directFn, types, context.consts);
+        }
       }
     });
-    if (![...collectTypeVars(fn)].every((name) => types.has(name))) return undefined;
+    if (![...collectTypeVars(fn, context.consts)].every((name) => types.has(name))) {
+      return undefined;
+    }
     const key = `${fn.name}\0${[...types].map(([k, v]) => `${k}=${v}`).join("\0")}\0${
       staticArgNames.join("\0")
     }`;
@@ -2734,17 +2739,29 @@ function inferFromValuePattern(
   }
   if (arg.kind === "literal") {
     const literalType = arg.inferredType ?? (arg.literalKind === "number" ? "i32" : undefined);
-    bindTypePattern(rendered, literalType, types, context.types ?? []);
+    bindTypePattern(rendered, literalType, types, context.types ?? [], context.consts);
     return;
   }
   if (arg.kind === "shape") {
-    bindTypePattern(rendered, inferExprType(arg, context, env), types, context.types ?? []);
+    bindTypePattern(
+      rendered,
+      inferExprType(arg, context, env),
+      types,
+      context.types ?? [],
+      context.consts,
+    );
     return;
   }
   if (arg.kind === "var") {
     const directFn = context.functions.get(arg.name);
-    if (directFn) inferFnTypeArgs(rendered, directFn, types);
-    bindTypePattern(rendered, inferExprType(arg, context, env), types, context.types ?? []);
+    if (directFn) inferFnTypeArgs(rendered, directFn, types, context.consts);
+    bindTypePattern(
+      rendered,
+      inferExprType(arg, context, env),
+      types,
+      context.types ?? [],
+      context.consts,
+    );
   }
 }
 
@@ -2765,7 +2782,7 @@ function renderConstructedType(
     if (!slot.label) continue;
     const expected = slots.find((item) => item.label === slot.label)?.type;
     const actual = inferExprType(slot.value, context);
-    bindTypePattern(expected, actual, bindings, context.types ?? []);
+    bindTypePattern(expected, actual, bindings, context.types ?? [], context.consts);
   }
   if (!decl.params.every((param) => bindings.has(param.name))) return decl.name;
   return `${decl.name}(${decl.params.map((param) => bindings.get(param.name)!).join(", ")})`;
@@ -2868,13 +2885,13 @@ function genericBindings(type: string, decl: TypeDecl): Map<string, string> {
   );
 }
 
-function collectTypeVars(fn: FnDecl): Set<string> {
+function collectTypeVars(fn: FnDecl, consts?: Map<string, ConstValue>): Set<string> {
   const vars = new Set<string>();
   const staticParams = new Set(
     fn.params.filter((param) => param.const).map((param) => param.name),
   );
   for (const text of [...fn.params.map((param) => param.type), fn.returnType ?? ""]) {
-    collectFreeTypeVars(text, vars, staticParams);
+    collectFreeTypeVars(text, vars, staticParams, consts);
   }
   return vars;
 }
@@ -2883,12 +2900,16 @@ function collectFreeTypeVars(
   annotation: string,
   vars: Set<string>,
   staticTypeParams = new Set<string>(),
+  consts?: Map<string, ConstValue>,
 ) {
   const parsed = parseAnnotationType(annotation);
   if (!parsed) return;
   const visit = (expr: TypeExpr, callee = false) => {
     if (expr.kind === "type_ref") {
-      if (!callee && isInferredTypeVarName(expr.name) && !staticTypeParams.has(expr.name)) {
+      if (
+        !callee && isInferredTypeVarName(expr.name) && !staticTypeParams.has(expr.name) &&
+        !consts?.has(expr.name)
+      ) {
         vars.add(expr.name);
       }
       return;
@@ -2963,14 +2984,19 @@ function stringLiteralValue(expr: Expr | undefined): string | undefined {
   return undefined;
 }
 
-function inferFnTypeArgs(expected: string, actual: FnDecl | undefined, types: Map<string, string>) {
+function inferFnTypeArgs(
+  expected: string,
+  actual: FnDecl | undefined,
+  types: Map<string, string>,
+  consts?: Map<string, ConstValue>,
+) {
   if (!actual) return;
   const expectedSig = parseFnSignature(expected);
   if (!expectedSig) return;
   expectedSig.params.forEach((type, index) =>
-    bindTypePattern(type, actual.params[index]?.type, types)
+    bindTypePattern(type, actual.params[index]?.type, types, [], consts)
   );
-  bindTypePattern(expectedSig.returnType, actual.returnType, types);
+  bindTypePattern(expectedSig.returnType, actual.returnType, types, [], consts);
 }
 
 function parseFnSignature(source: string): { params: string[]; returnType: string } | undefined {
@@ -2996,10 +3022,11 @@ function bindTypePattern(
   actual: string | undefined,
   types: Map<string, string>,
   typeDecls: TypeDecl[] = [],
+  consts?: Map<string, ConstValue>,
 ) {
   if (!pattern || !actual) return;
   if (isInferredTypeVarName(pattern)) {
-    if (isUnresolvedInferredBinding(actual)) return;
+    if (isUnresolvedInferredBinding(actual) && !consts?.has(actual.trim())) return;
     types.set(pattern, actual);
     return;
   }
@@ -3009,22 +3036,36 @@ function bindTypePattern(
     pattern.startsWith("&(") && pattern.endsWith(")") && actual.startsWith("&(") &&
     actual.endsWith(")")
   ) {
-    bindTypePattern(pattern.slice(2, -1).trim(), actual.slice(2, -1).trim(), types, typeDecls);
+    bindTypePattern(
+      pattern.slice(2, -1).trim(),
+      actual.slice(2, -1).trim(),
+      types,
+      typeDecls,
+      consts,
+    );
     return;
   }
   const pCall = pattern.match(/^([A-Za-z_][A-Za-z0-9_.]*)\((.*)\)$/);
   const aCall = actual.match(/^([A-Za-z_][A-Za-z0-9_.]*)\((.*)\)$/);
   if (pCall && aCall) {
     if (isInferredTypeVarName(pCall[1])) {
-      if (!isUnresolvedInferredBinding(aCall[1])) types.set(pCall[1], aCall[1]);
-      bindTypePattern(pCall[2].trim(), aCall[2].trim(), types, typeDecls);
+      if (!isUnresolvedInferredBinding(aCall[1]) || consts?.has(aCall[1].trim())) {
+        types.set(pCall[1], aCall[1]);
+      }
+      bindTypePattern(pCall[2].trim(), aCall[2].trim(), types, typeDecls, consts);
       return;
     }
     if (terminalName(pCall[1]) === terminalName(aCall[1])) {
       const patternArgs = splitTypeArgs(pCall[2]);
       const actualArgs = splitTypeArgs(aCall[2]);
       for (let index = 0; index < patternArgs.length; index++) {
-        bindTypePattern(patternArgs[index]?.trim(), actualArgs[index]?.trim(), types, typeDecls);
+        bindTypePattern(
+          patternArgs[index]?.trim(),
+          actualArgs[index]?.trim(),
+          types,
+          typeDecls,
+          consts,
+        );
       }
     }
     return;
@@ -3512,9 +3553,15 @@ function specializeConstParamCall(
             expectedForInference,
             context.functions.get(staticArg.value.name),
             inferredTypes,
+            context.consts,
           );
         } else if (arg.kind === "var" && context.functions.has(arg.name)) {
-          inferFnTypeArgs(expectedForInference, context.functions.get(arg.name), inferredTypes);
+          inferFnTypeArgs(
+            expectedForInference,
+            context.functions.get(arg.name),
+            inferredTypes,
+            context.consts,
+          );
         }
         if (!context.consts.has(staticArg.name)) {
           staticValues.set(staticArg.name, staticArg.value);
@@ -3658,13 +3705,33 @@ function staticConstArgValue(
     }
     if (
       evaluatedStaticValue && expectedType &&
-      constValueMatchesExpectedType(evaluatedStaticValue, expectedType)
+      (constValueMatchesExpectedType(evaluatedStaticValue, expectedType) ||
+        (expectedType === "type" && evaluatedStaticValue.kind === "shape"))
     ) {
       return { name: renderConstTypeArg(evaluatedStaticValue), value: evaluatedStaticValue };
     }
   }
+  if (arg.kind === "shape") {
+    const evaluatedStaticValue = staticConstExprValue(arg, staticValues, context);
+    if (evaluatedStaticValue && !expectedType) {
+      return { name: renderConstTypeArg(evaluatedStaticValue), value: evaluatedStaticValue };
+    }
+    if (
+      evaluatedStaticValue && expectedType &&
+      (constValueMatchesExpectedType(evaluatedStaticValue, expectedType) ||
+        (expectedType === "type" && evaluatedStaticValue.kind === "shape"))
+    ) {
+      return { name: renderConstTypeArg(evaluatedStaticValue), value: evaluatedStaticValue };
+    }
+  }
+  if (arg.kind === "call" && arg.callee.kind === "var" && isStaticBuiltinName(arg.callee.name)) {
+    return undefined;
+  }
   const proof = renderTypeProofArg(arg);
   if (proof && !expectedType) {
+    if (isInferredTypeVarName(proof) && !staticValues.has(proof) && !context.consts.has(proof)) {
+      return undefined;
+    }
     return { name: proof, value: { kind: "type", name: proof } };
   }
   if (
@@ -3672,6 +3739,9 @@ function staticConstArgValue(
     (typeProofMatchesExpected(proof, expectedType) ||
       (expectedType === "type" && isKnownTypeProof(proof, context.types)))
   ) {
+    if (isInferredTypeVarName(proof) && !staticValues.has(proof) && !context.consts.has(proof)) {
+      return undefined;
+    }
     return { name: proof, value: { kind: "type", name: proof } };
   }
   if (
@@ -3734,6 +3804,8 @@ function typeProofMatchesExpected(proof: string, expectedType: string): boolean 
 }
 
 function constValueFromKeyName(name: string): ConstValue | undefined {
+  const shape = constShapeValueFromTypeArg(name);
+  if (shape) return shape;
   if (!name.startsWith("{")) return undefined;
   try {
     const value = JSON.parse(name);
@@ -3741,6 +3813,33 @@ function constValueFromKeyName(name: string): ConstValue | undefined {
   } catch {
     return undefined;
   }
+}
+
+function constShapeValueFromTypeArg(source: string): ConstValue | undefined {
+  const trimmed = source.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return undefined;
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) return { kind: "shape", slots: [] };
+  return {
+    kind: "shape",
+    slots: splitTypeArgs(inner).map((part) => {
+      const colon = topLevelTypeColon(part);
+      if (colon < 0) return { value: constValueFromRenderedTypeArg(part.trim()) };
+      return {
+        label: part.slice(0, colon).trim(),
+        value: constValueFromRenderedTypeArg(part.slice(colon + 1).trim()),
+      };
+    }),
+  };
+}
+
+function constValueFromRenderedTypeArg(source: string): ConstValue {
+  const nestedShape = constShapeValueFromTypeArg(source);
+  if (nestedShape) return nestedShape;
+  if (source === "true" || source === "false") return { kind: "bool", value: source === "true" };
+  if (/^-?[0-9]+$/.test(source)) return { kind: "number", value: source };
+  if (source.startsWith("#")) return { kind: "literal_type", value: source.slice(1) };
+  return { kind: "type", name: source };
 }
 
 function isConstValue(value: unknown): value is ConstValue {
@@ -5104,8 +5203,8 @@ function inferKinds(
     expr.args.forEach((arg, index) => {
       const calleeKind = staticBuiltinParamKind(staticBuiltinName, index) ??
         calleeDecl?.paramKinds?.[calleeDecl.params[index]?.name] ??
-          calleeDecl?.params[index]?.kind ??
-          "type";
+        calleeDecl?.params[index]?.kind ??
+        "type";
       inferKinds(arg, decl, kinds, locals, byName, diagnostics, calleeKind);
     });
     return;
@@ -8796,7 +8895,11 @@ function inlineArrayLikeTypeArgs(
   const count = Number.parseInt(args[0]?.trim() ?? "", 10);
   const itemType = args[1]?.trim();
   if (!itemType) return undefined;
-  return { kind: base === "InlineArrayList" ? "inline_array_list" : "inline_array", count, itemType };
+  return {
+    kind: base === "InlineArrayList" ? "inline_array_list" : "inline_array",
+    count,
+    itemType,
+  };
 }
 
 function compactArrayTypeArgs(

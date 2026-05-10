@@ -436,6 +436,11 @@ function optimizeBinary(
 ): Expr {
   if (isNumberLiteral(expr.right, 0) && (expr.op === "+" || expr.op === "-")) return expr.left;
   if (isNumberLiteral(expr.left, 0) && expr.op === "+") return expr.right;
+  if (
+    expr.op === "-" && samePureExpr(expr.left, expr.right, functions)
+  ) {
+    return { kind: "literal", literalKind: "number", value: "0" };
+  }
   if (isNumberLiteral(expr.right, 1) && expr.op === "*") return expr.left;
   if (isNumberLiteral(expr.left, 1) && expr.op === "*") return expr.right;
   if (isNumberLiteral(expr.right, 1) && expr.op === "/") return expr.left;
@@ -461,6 +466,53 @@ function isNumberLiteral(expr: Expr, value: number): boolean {
 
 function isBoolLiteral(expr: Expr, value: boolean): boolean {
   return expr.kind === "literal" && expr.literalKind === "bool" && expr.value === String(value);
+}
+
+function samePureExpr(left: Expr, right: Expr, functions: Map<string, FnDecl>): boolean {
+  return !hasRuntimeEffect(left, functions) && !hasRuntimeEffect(right, functions) &&
+    stableExprKey(left) === stableExprKey(right);
+}
+
+function stableExprKey(expr: Expr): string {
+  switch (expr.kind) {
+    case "literal":
+      return `literal:${expr.literalKind}:${expr.value}`;
+    case "var":
+      return `var:${expr.name}`;
+    case "placeholder":
+      return "placeholder";
+    case "binary":
+      return `binary:${expr.op}:${stableExprKey(expr.left)}:${stableExprKey(expr.right)}`;
+    case "index":
+      return `index:${stableExprKey(expr.target)}:${stableExprKey(expr.index)}`;
+    case "field":
+      return `field:${stableExprKey(expr.value)}:${stableExprKey(expr.key)}`;
+    case "range":
+      return `range:${stableExprKey(expr.start)}:${stableExprKey(expr.end)}`;
+    case "call":
+      return `call:${stableExprKey(expr.callee)}(${expr.args.map(stableExprKey).join(",")})`;
+    case "pipe_bind":
+      return `pipe:${stableExprKey(expr.value)}:${expr.name}:${stableExprKey(expr.body)}`;
+    case "shape":
+    case "product_constructor":
+      return `${expr.kind}:${
+        expr.slots.map((slot) => `${slot.label ?? ""}=${stableExprKey(slot.value)}`).join(",")
+      }`;
+    case "match":
+      return `match:${stableExprKey(expr.value)}:${
+        expr.arms.map((arm) => `${JSON.stringify(arm.pattern)}=>${stableExprKey(arm.value)}`).join(
+          ",",
+        )
+      }`;
+    case "static_for_slots":
+      return `static_for:${JSON.stringify(expr.source)}:${stableExprKey(expr.value)}`;
+    case "block":
+      return `block:${
+        expr.statements.map((stmt) =>
+          stmt.kind === "proof_const" ? "proof" : `${stmt.kind}:${stableExprKey(stmt.value)}`
+        ).join(";")
+      }:${expr.expr ? stableExprKey(expr.expr) : ""}`;
+  }
 }
 
 function inlineStructLabels(type: string): Set<string> | undefined {
