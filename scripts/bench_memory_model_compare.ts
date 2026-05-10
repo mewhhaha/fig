@@ -6,6 +6,10 @@ interface FigScenario {
   expected: number;
   callsDivisor?: number;
   expectedShape?: ShapeExpectation;
+  forbiddenWat?: RegExp[];
+  maxWatBytes?: number;
+  maxWasmBytes?: number;
+  maxKernelWasmBytes?: number;
 }
 
 type ScenarioName =
@@ -16,9 +20,11 @@ type ScenarioName =
   | "compact_filter_collect"
   | "alias_snapshot_update"
   | "fixed_collection_update"
+  | "fixed_collection_spread_update"
   | "collision_aabb_64"
   | "path_grid_score_16"
   | "range_fold_1k"
+  | "fannkuch_redux_7"
   | "mat4_dot1"
   | "mat4_full";
 
@@ -49,17 +55,25 @@ interface ShapeExpectation {
 type PartialShapeExpectation = Partial<Record<keyof WatShape, { min?: number; max?: number }>>;
 
 interface Row {
-  runtime: "fig_wasm_external_call" | "fig_wasm_internal_loop" | "javascript" | "rust";
+  runtime:
+    | "fig_wasm_external_call"
+    | "fig_wasm_internal_loop"
+    | "fig_wasm_kernel"
+    | "javascript"
+    | "rust"
+    | "rust_wasm";
   scenario: ScenarioName;
-  calls: number;
-  checksum: number;
-  elapsed_ms: string;
-  calls_per_ms: string;
-  ns_per_call: string;
-  detail?: string;
+  calls?: number;
+  checksum?: number;
+  elapsed_ms?: string;
+  calls_per_ms?: string;
+  ns_per_call?: string;
+  wat_bytes?: number;
+  wasm_bytes?: number;
 }
 
 const iterations = Number(Deno.args.find((arg) => arg !== "--") ?? 100_000);
+const fannkuchReduxSource = await Deno.readTextFile("examples/perf_fannkuch_redux.fig");
 const simdMat4Source = await Deno.readTextFile("examples/perf_matmul_simd.fig");
 const simdDot1Source = `
   type fn InlineArray(n: count, a: type) -> type {
@@ -89,7 +103,6 @@ const resolveModule = async (moduleName: string) => {
 const compileOptions = {
   resolveModule,
   memoryModel: "branch" as const,
-  optLevel: "speed" as const,
 };
 
 const scalarFlatShape: ShapeExpectation = {
@@ -175,9 +188,19 @@ const figScenarios: FigScenario[] = [
       ...scalarFlatShape,
       module: {
         ...scalarFlatShape.module,
+        branch_materialize_calls: { max: 0 },
         fig_buffers_refs: { max: 0 },
       },
     },
+    forbiddenWat: [
+      /InlineArrayBuilder/,
+      /InlineArray\.(?:set|update)_loop/,
+      /call \$.*inline_array_update/,
+      /branch_(?:ensure_editable|materialize)/,
+      /temporal_/,
+      /fig_(?:objects|logs|buffers)/,
+    ],
+    maxWatBytes: 17_000,
     source: `
       const layout = @import("prelude.layout");
       fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
@@ -197,9 +220,18 @@ const figScenarios: FigScenario[] = [
       ...scalarFlatShape,
       module: {
         ...scalarFlatShape.module,
+        branch_materialize_calls: { max: 0 },
         fig_buffers_refs: { max: 0 },
       },
     },
+    forbiddenWat: [
+      /InlineArrayBuilder/,
+      /InlineArray\.(?:set|update)_loop/,
+      /branch_(?:ensure_editable|materialize)/,
+      /temporal_/,
+      /fig_(?:objects|logs|buffers)/,
+    ],
+    maxWatBytes: 30_000,
     source: `
       const array = @import("prelude.array_static");
       fn inc(x: i32) -> i32 { x + 1 }
@@ -252,9 +284,20 @@ const figScenarios: FigScenario[] = [
       ...scalarFlatShape,
       module: {
         ...scalarFlatShape.module,
+        branch_materialize_calls: { max: 0 },
         fig_buffers_refs: { max: 0 },
       },
     },
+    forbiddenWat: [
+      /InlineArrayBuilder/,
+      /InlineArray\.(?:set|update)_loop/,
+      /branch_(?:ensure_editable|materialize)/,
+      /temporal_/,
+      /fig_(?:objects|logs|buffers)/,
+    ],
+    maxWatBytes: 12_000,
+    maxWasmBytes: 1_319,
+    maxKernelWasmBytes: 1_319,
     source: `
       const layout = @import("prelude.layout");
       fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
@@ -262,6 +305,35 @@ const figScenarios: FigScenario[] = [
       pub fn main(seed: i32) -> i32 {
         let xs = layout.InlineArray.tabulate(16, i32, make);
         let ys = layout.InlineArray.update(16, i32, xs, seed - seed + 7, bump);
+        xs[7] + ys[7] + ys[15]
+      }
+    `,
+  },
+  {
+    name: "fixed_collection_spread_update",
+    expected: 35,
+    callsDivisor: 4,
+    expectedShape: {
+      ...scalarFlatShape,
+      module: {
+        ...scalarFlatShape.module,
+        branch_materialize_calls: { max: 0 },
+        fig_buffers_refs: { max: 0 },
+      },
+    },
+    forbiddenWat: [
+      /InlineArrayBuilder/,
+      /InlineArray\.(?:set|update)_loop/,
+      /branch_(?:ensure_editable|materialize)/,
+      /temporal_/,
+      /fig_(?:objects|logs|buffers)/,
+    ],
+    maxWatBytes: 16000,
+    source: `
+      const layout = @import("prelude.layout");
+      pub fn main(seed: i32) -> i32 {
+        let xs: layout.InlineArray(16, i32) = <1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>;
+        let ys: layout.InlineArray(16, i32) = [...xs, [7]: xs[7] + 3];
         xs[7] + ys[7] + ys[15]
       }
     `,
@@ -361,6 +433,22 @@ const figScenarios: FigScenario[] = [
         array.RangeIter.fold(array.RangeI32.Iter(seed - seed .. 1000), 0, add)
       }
     `,
+  },
+  {
+    name: "fannkuch_redux_7",
+    expected: 22_816,
+    callsDivisor: 1000,
+    expectedShape: {
+      ...scalarFlatShape,
+      module: {
+        ...scalarFlatShape.module,
+        loops: { min: 1 },
+      },
+    },
+    maxWatBytes: 39_384,
+    maxWasmBytes: 6_632,
+    maxKernelWasmBytes: 6_435,
+    source: fannkuchReduxSource,
   },
   {
     name: "mat4_dot1",
@@ -471,6 +559,12 @@ const jsScenarios: Record<ScenarioName, (seed: number) => number> = {
     ys[seed - seed + 7] += 3;
     return xs[7]! + ys[7]! + ys[15]!;
   },
+  fixed_collection_spread_update(seed: number) {
+    const xs = [1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    const ys = xs.slice();
+    ys[7] = xs[7]! + 3;
+    return xs[7]! + ys[7]! + ys[15]!;
+  },
   collision_aabb_64(seed: number) {
     const player = { x: seed - seed + 15, y: 15, w: 20, h: 20 };
     let count = 0;
@@ -498,6 +592,47 @@ const jsScenarios: Record<ScenarioName, (seed: number) => number> = {
     let acc = 0;
     for (let i = seed - seed; i < 1000; i++) acc += i;
     return acc;
+  },
+  fannkuch_redux_7(seed: number) {
+    const n = 7;
+    const perm = Array.from({ length: n }, (_unused, i) => i + seed - seed);
+    const count = Array.from({ length: n }, () => 0);
+    let r = n;
+    let index = 0;
+    let checksum = 0;
+    let maxFlips = 0;
+    while (true) {
+      while (r !== 1) {
+        count[r - 1] = r;
+        r--;
+      }
+      const working = perm.slice();
+      let flips = 0;
+      while (working[0] !== 0) {
+        let left = 0;
+        let right = working[0]!;
+        while (left < right) {
+          const tmp = working[left]!;
+          working[left] = working[right]!;
+          working[right] = tmp;
+          left++;
+          right--;
+        }
+        flips++;
+      }
+      checksum += index % 2 === 0 ? flips : -flips;
+      if (flips > maxFlips) maxFlips = flips;
+      while (true) {
+        if (r === n) return checksum * 100 + maxFlips;
+        const first = perm[0]!;
+        for (let i = 0; i < r; i++) perm[i] = perm[i + 1]!;
+        perm[r] = first;
+        count[r] = count[r]! - 1;
+        if (count[r]! > 0) break;
+        r++;
+      }
+      index++;
+    }
   },
   mat4_dot1(seed: number) {
     const rows = [
@@ -546,10 +681,47 @@ for (const scenario of figScenarios) {
   rows.push(benchJavaScript(scenario.name, scenario.expected, calls));
 }
 rows.push(...await benchRust(iterations, figScenarios));
+rows.push(...await benchRustWasmSizes(figScenarios));
 
-console.table(rows);
+printBenchmarkTables(rows, figScenarios.map((scenario) => scenario.name));
+
+function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
+  const runtimes: Row["runtime"][] = [
+    "fig_wasm_external_call",
+    "fig_wasm_internal_loop",
+    "fig_wasm_kernel",
+    "javascript",
+    "rust",
+    "rust_wasm",
+  ];
+  const metrics: (keyof Row)[] = [
+    "calls",
+    "checksum",
+    "elapsed_ms",
+    "calls_per_ms",
+    "ns_per_call",
+    "wat_bytes",
+    "wasm_bytes",
+  ];
+  for (const scenario of scenarioOrder) {
+    const byRuntime = new Map(
+      rows.filter((row) => row.scenario === scenario).map((row) => [row.runtime, row]),
+    );
+    console.log(`\n${scenario}`);
+    console.table(
+      metrics.map((metric) => {
+        const output: Record<string, string | number | undefined> = { metric };
+        for (const runtime of runtimes) output[runtime] = byRuntime.get(runtime)?.[metric] ?? "";
+        return output;
+      }),
+    );
+  }
+}
 
 async function benchFig(scenario: FigScenario, calls: number): Promise<Row[]> {
+  const kernelWat = await watFromSource(scenario.source, compileOptions);
+  const kernelWasm = await wasmFromSource(scenario.source, compileOptions);
+  checkKernelGates(scenario.name, kernelWasm, scenario);
   const source = withInternalBench(scenario.source);
   const wat = await watFromSource(source, compileOptions);
   const wasm = await wasmFromSource(source, compileOptions);
@@ -558,8 +730,7 @@ async function benchFig(scenario: FigScenario, calls: number): Promise<Row[]> {
   const bench = exports.bench as CallableFunction;
   const shape = scopedWatShape(wat);
   if (scenario.expectedShape) checkShape(scenario.name, shape, scenario.expectedShape);
-  const detail =
-    `wat=${wat.length}B calls=${shape.module.function_calls} bench_calls=${shape.benchLoop.function_calls} loops=${shape.module.loops} simd=${shape.module.simd_ops} branch=${shape.module.branch_calls} ensure=${shape.module.branch_ensure_editable_calls} temporal=${shape.module.temporal_intrinsic_calls}`;
+  checkWatGates(scenario.name, wat, wasm, scenario);
   assertExpected("fig_wasm_external_call", scenario.name, main(0) as number, scenario.expected);
   assertExpected("fig_wasm_internal_loop", scenario.name, bench(1) as number, scenario.expected);
   const external = timeCalls((seed) => main(seed) as number, calls);
@@ -567,9 +738,48 @@ async function benchFig(scenario: FigScenario, calls: number): Promise<Row[]> {
   const checksum = bench(calls) as number;
   const internal = { elapsedMs: performance.now() - start, checksum };
   return [
-    row("fig_wasm_external_call", scenario.name, calls, external, detail),
-    row("fig_wasm_internal_loop", scenario.name, calls, internal, detail),
+    row("fig_wasm_external_call", scenario.name, calls, external, wat.length, wasm.byteLength),
+    row("fig_wasm_internal_loop", scenario.name, calls, internal, wat.length, wasm.byteLength),
+    row(
+      "fig_wasm_kernel",
+      scenario.name,
+      undefined,
+      undefined,
+      kernelWat.length,
+      kernelWasm.byteLength,
+    ),
   ];
+}
+
+function checkKernelGates(
+  name: string,
+  wasm: Uint8Array<ArrayBuffer>,
+  scenario: Pick<FigScenario, "maxKernelWasmBytes">,
+) {
+  if (scenario.maxKernelWasmBytes !== undefined && wasm.byteLength > scenario.maxKernelWasmBytes) {
+    throw new Error(
+      `${name} kernel Wasm size expected <= ${scenario.maxKernelWasmBytes}B but got ${wasm.byteLength}B`,
+    );
+  }
+}
+
+function checkWatGates(
+  name: string,
+  wat: string,
+  wasm: Uint8Array<ArrayBuffer>,
+  scenario: Pick<FigScenario, "forbiddenWat" | "maxWatBytes" | "maxWasmBytes">,
+) {
+  if (scenario.maxWatBytes !== undefined && wat.length > scenario.maxWatBytes) {
+    throw new Error(`${name} WAT size expected <= ${scenario.maxWatBytes}B but got ${wat.length}B`);
+  }
+  if (scenario.maxWasmBytes !== undefined && wasm.byteLength > scenario.maxWasmBytes) {
+    throw new Error(
+      `${name} Wasm size expected <= ${scenario.maxWasmBytes}B but got ${wasm.byteLength}B`,
+    );
+  }
+  for (const pattern of scenario.forbiddenWat ?? []) {
+    if (pattern.test(wat)) throw new Error(`${name} WAT matched forbidden ${pattern}`);
+  }
 }
 
 function benchJavaScript(name: ScenarioName, expected: number, calls: number): Row {
@@ -605,6 +815,53 @@ async function benchRust(totalIterations: number, scenarios: FigScenario[]): Pro
   return parsed.filter((item) => expectedNames.has(item.scenario));
 }
 
+async function benchRustWasmSizes(scenarios: FigScenario[]): Promise<Row[]> {
+  const dir = await Deno.makeTempDir({ prefix: "fig_memory_compare_rust_wasm_" });
+  const rows: Row[] = [];
+  for (const scenario of scenarios) {
+    const sourcePath = `${dir}/${scenario.name}.rs`;
+    const wasmPath = `${dir}/${scenario.name}.wasm`;
+    await Deno.writeTextFile(sourcePath, rustWasmSource(scenario.name));
+    const compile = new Deno.Command("rustc", {
+      args: [
+        "--crate-type",
+        "cdylib",
+        "-C",
+        "opt-level=3",
+        "-C",
+        "panic=abort",
+        "-C",
+        "lto=fat",
+        "-C",
+        "codegen-units=1",
+        "-C",
+        "link-arg=--strip-all",
+        "--target",
+        "wasm32-unknown-unknown",
+        sourcePath,
+        "-o",
+        wasmPath,
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const output = await compile.output();
+    if (!output.success) {
+      throw new Error(new TextDecoder().decode(output.stderr));
+    }
+    const wasm = await Deno.readFile(wasmPath);
+    const main = new WebAssembly.Instance(new WebAssembly.Module(wasm)).exports
+      .main as CallableFunction;
+    assertExpected("rust_wasm", scenario.name, main(0) as number, scenario.expected);
+    rows.push({
+      runtime: "rust_wasm",
+      scenario: scenario.name,
+      wasm_bytes: wasm.byteLength,
+    });
+  }
+  return rows;
+}
+
 function timeCalls(
   fn: (seed: number) => number,
   calls: number,
@@ -618,19 +875,27 @@ function timeCalls(
 function row(
   runtime: Row["runtime"],
   scenario: ScenarioName,
-  calls: number,
-  timed: { elapsedMs: number; checksum: number },
-  detail?: string,
+  calls?: number,
+  timed?: { elapsedMs: number; checksum: number },
+  watBytes?: number,
+  wasmBytes?: number,
 ): Row {
   return {
     runtime,
     scenario,
-    calls,
-    checksum: timed.checksum,
-    elapsed_ms: timed.elapsedMs.toFixed(3),
-    calls_per_ms: (calls / timed.elapsedMs).toFixed(3),
-    ns_per_call: ((timed.elapsedMs * 1_000_000) / calls).toFixed(1),
-    ...(detail ? { detail } : {}),
+    ...(calls !== undefined ? { calls } : {}),
+    ...(timed
+      ? {
+        checksum: timed.checksum,
+        elapsed_ms: timed.elapsedMs.toFixed(3),
+        calls_per_ms: calls !== undefined ? (calls / timed.elapsedMs).toFixed(3) : undefined,
+        ns_per_call: calls !== undefined
+          ? ((timed.elapsedMs * 1_000_000) / calls).toFixed(1)
+          : undefined,
+      }
+      : {}),
+    ...(watBytes !== undefined ? { wat_bytes: watBytes } : {}),
+    ...(wasmBytes !== undefined ? { wasm_bytes: wasmBytes } : {}),
   };
 }
 
@@ -841,6 +1106,13 @@ fn fixed_collection_update(seed: i32) -> i32 {
     xs[7] + ys[7] + ys[15]
 }
 
+fn fixed_collection_spread_update(seed: i32) -> i32 {
+    let xs = black_box([1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    let mut ys = xs;
+    ys[7] = black_box(xs[7] + 3);
+    xs[7] + ys[7] + ys[15]
+}
+
 #[derive(Clone, Copy)]
 struct Box2 { x: i32, y: i32, w: i32, h: i32 }
 
@@ -874,6 +1146,53 @@ fn path_grid_score_16(seed: i32) -> i32 {
 
 fn range_fold_1k(seed: i32) -> i32 {
     ((seed - seed)..black_box(1000)).fold(0, |acc, x| black_box(acc + x))
+}
+
+fn fannkuch_redux_7(seed: i32) -> i32 {
+    let mut perm = black_box([seed - seed, 1, 2, 3, 4, 5, 6]);
+    let mut count = [0; 7];
+    let mut r = 7usize;
+    let mut index = 0i32;
+    let mut checksum = 0i32;
+    let mut max_flips = 0i32;
+    loop {
+        while r != 1 {
+            count[r - 1] = r as i32;
+            r -= 1;
+        }
+        let mut working = perm;
+        let mut flips = 0i32;
+        while working[0] != 0 {
+            let mut left = 0usize;
+            let mut right = working[0] as usize;
+            while left < right {
+                working.swap(left, right);
+                left += 1;
+                right -= 1;
+            }
+            flips = black_box(flips + 1);
+        }
+        checksum = black_box(if index % 2 == 0 { checksum + flips } else { checksum - flips });
+        if flips > max_flips {
+            max_flips = flips;
+        }
+        loop {
+            if r == 7 {
+                return checksum * 100 + max_flips;
+            }
+            let first = perm[0];
+            for i in 0..r {
+                perm[i] = perm[i + 1];
+            }
+            perm[r] = first;
+            count[r] -= 1;
+            if count[r] > 0 {
+                break;
+            }
+            r += 1;
+        }
+        index += 1;
+    }
 }
 
 fn mat4_dot1(seed: i32) -> i32 {
@@ -946,13 +1265,252 @@ fn main() {
         bench("compact_filter_collect", std::cmp::max(1, iterations / 2), 2, compact_filter_collect),
         bench("alias_snapshot_update", iterations, 82, alias_snapshot_update),
         bench("fixed_collection_update", std::cmp::max(1, iterations / 4), 35, fixed_collection_update),
+        bench("fixed_collection_spread_update", std::cmp::max(1, iterations / 4), 35, fixed_collection_spread_update),
         bench("collision_aabb_64", std::cmp::max(1, iterations / 8), 9, collision_aabb_64),
         bench("path_grid_score_16", std::cmp::max(1, iterations / 8), 3060, path_grid_score_16),
         bench("range_fold_1k", std::cmp::max(1, iterations / 20), 499_500, range_fold_1k),
+        bench("fannkuch_redux_7", std::cmp::max(1, iterations / 1000), 22_816, fannkuch_redux_7),
         bench("mat4_dot1", iterations, 90, mat4_dot1),
         bench("mat4_full", iterations, 4944, mat4_full),
     ];
     println!("[{}]", rows.join(","));
+}
+`;
+}
+function rustWasmSource(entry: ScenarioName): string {
+  return String.raw`
+#![no_std]
+
+use core::hint::black_box;
+use core::panic::PanicInfo;
+
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! {
+    loop {}
+}
+
+#[derive(Clone, Copy)]
+struct Vec2 { x: i32, y: i32 }
+
+fn scalar_reuse_nway(seed: i32) -> i32 {
+    let x = black_box(seed + 10);
+    x + x + x + x
+}
+
+fn translate(point: Vec2, dx: i32, dy: i32) -> Vec2 {
+    Vec2 { x: point.x + dx, y: point.y + dy }
+}
+
+fn score(point: Vec2) -> i32 {
+    point.x + point.y
+}
+
+fn product_shadow_update(seed: i32) -> i32 {
+    let point = black_box(Vec2 { x: seed + 1, y: 2 });
+    let moved = translate(point, black_box(10), black_box(0));
+    let moved = translate(moved, black_box(0), black_box(20));
+    score(point) + score(moved)
+}
+
+fn tail_product_loop_1k(seed: i32) -> i32 {
+    let mut sum = 0;
+    let mut ticks = 0;
+    for i in (seed - seed)..black_box(1000) {
+        sum = black_box(sum + i);
+        ticks = black_box(ticks + 1);
+    }
+    sum + ticks
+}
+
+fn inline_array_builder_map(seed: i32) -> i32 {
+    let xs = core::array::from_fn::<_, 16, _>(|i| black_box(i as i32 + 1));
+    let ys = xs.map(|x| black_box(x + 1));
+    ys[0] + ys[15] + seed - seed
+}
+
+fn compact_filter_collect(seed: i32) -> i32 {
+    let input = black_box([1, 2, 3, 4]);
+    let mut len = 0;
+    for x in input {
+        if x > 2 {
+            let _ = black_box(x + 1);
+            len += 1;
+        }
+    }
+    len + seed - seed
+}
+
+#[derive(Clone, Copy)]
+struct State8 {
+    a: i32,
+    b: i32,
+    c: i32,
+    d: i32,
+    e: i32,
+    f: i32,
+    g: i32,
+    h: i32,
+}
+
+fn state8_sum(state: State8) -> i32 {
+    state.a + state.b + state.c + state.d + state.e + state.f + state.g + state.h
+}
+
+fn alias_snapshot_update(seed: i32) -> i32 {
+    let old = black_box(State8 { a: seed + 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 });
+    let newer = State8 {
+        a: old.a + 1,
+        b: old.b + 2,
+        c: old.c + 3,
+        d: old.d + 4,
+        e: old.e,
+        f: old.f,
+        g: old.g,
+        h: old.h,
+    };
+    state8_sum(old) + state8_sum(newer)
+}
+
+fn fixed_collection_update(seed: i32) -> i32 {
+    let xs = core::array::from_fn::<_, 16, _>(|i| black_box(i as i32 + 1));
+    let mut ys = xs;
+    let index = (seed - seed + 7) as usize;
+    ys[index] = black_box(ys[index] + 3);
+    xs[7] + ys[7] + ys[15]
+}
+
+fn fixed_collection_spread_update(seed: i32) -> i32 {
+    let xs = black_box([1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    let mut ys = xs;
+    ys[7] = black_box(xs[7] + 3);
+    xs[7] + ys[7] + ys[15]
+}
+
+#[derive(Clone, Copy)]
+struct Box2 { x: i32, y: i32, w: i32, h: i32 }
+
+fn intersects(a: Box2, b: Box2) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+fn collision_aabb_64(seed: i32) -> i32 {
+    let player = black_box(Box2 { x: seed - seed + 15, y: 15, w: 20, h: 20 });
+    let mut count = 0;
+    for i in 0..64 {
+        let candidate = Box2 { x: (i % 8) * 10, y: (i / 8) * 10, w: 8, h: 8 };
+        if intersects(player, candidate) {
+            count = black_box(count + 1);
+        }
+    }
+    count
+}
+
+fn path_grid_score_16(seed: i32) -> i32 {
+    let mut total = 0;
+    for i in (seed - seed)..256 {
+        let x = i % 16;
+        let y = i / 16;
+        if (x + y) % 5 != 0 {
+            total = black_box(total + x + y);
+        }
+    }
+    total
+}
+
+fn range_fold_1k(seed: i32) -> i32 {
+    ((seed - seed)..black_box(1000)).fold(0, |acc, x| black_box(acc + x))
+}
+
+fn fannkuch_redux_7(seed: i32) -> i32 {
+    let mut perm = black_box([seed - seed, 1, 2, 3, 4, 5, 6]);
+    let mut count = [0; 7];
+    let mut r = 7usize;
+    let mut index = 0i32;
+    let mut checksum = 0i32;
+    let mut max_flips = 0i32;
+    loop {
+        while r != 1 {
+            count[r - 1] = r as i32;
+            r -= 1;
+        }
+        let mut working = perm;
+        let mut flips = 0i32;
+        while working[0] != 0 {
+            let mut left = 0usize;
+            let mut right = working[0] as usize;
+            while left < right {
+                working.swap(left, right);
+                left += 1;
+                right -= 1;
+            }
+            flips = black_box(flips + 1);
+        }
+        checksum = black_box(if index % 2 == 0 { checksum + flips } else { checksum - flips });
+        if flips > max_flips {
+            max_flips = flips;
+        }
+        loop {
+            if r == 7 {
+                return checksum * 100 + max_flips;
+            }
+            let first = perm[0];
+            for i in 0..r {
+                perm[i] = perm[i + 1];
+            }
+            perm[r] = first;
+            count[r] -= 1;
+            if count[r] > 0 {
+                break;
+            }
+            r += 1;
+        }
+        index += 1;
+    }
+}
+
+fn mat4_dot1(seed: i32) -> i32 {
+    let rows = black_box([
+        [1 + seed - seed, 2, 3, 4],
+        [5, 6, 7, 8],
+        [9, 10, 11, 12],
+        [13, 14, 15, 16],
+    ]);
+    let cols = black_box([
+        [1, 5, 9, 13],
+        [2, 6, 10, 14],
+        [3, 7, 11, 15],
+        [4, 8, 12, 16],
+    ]);
+    black_box(rows[0][0] * cols[0][0] + rows[0][1] * cols[0][1] +
+        rows[0][2] * cols[0][2] + rows[0][3] * cols[0][3])
+}
+
+fn mat4_full(seed: i32) -> i32 {
+    let rows = black_box([
+        [1 + seed - seed, 2, 3, 4],
+        [5, 6, 7, 8],
+        [9, 10, 11, 12],
+        [13, 14, 15, 16],
+    ]);
+    let cols = black_box([
+        [1, 5, 9, 13],
+        [2, 6, 10, 14],
+        [3, 7, 11, 15],
+        [4, 8, 12, 16],
+    ]);
+    let mut total = 0;
+    for row in 0..4 {
+        for col in 0..4 {
+            total = black_box(total + rows[row][0] * cols[col][0] + rows[row][1] * cols[col][1] +
+                rows[row][2] * cols[col][2] + rows[row][3] * cols[col][3]);
+        }
+    }
+    total
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn main(seed: i32) -> i32 {
+    ${entry}(seed)
 }
 `;
 }

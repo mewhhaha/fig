@@ -11,7 +11,8 @@ import type {
   TypeDecl,
 } from "./core_ast.ts";
 import { CompileError } from "./diagnostics.ts";
-import { optimizeProgram, type OptLevel } from "./optimize.ts";
+import { optimizeProgram, type OptMode } from "./optimize.ts";
+import { isCatchAllPattern, patternBindingNames, patternDemandsMatchedValue } from "./patterns.ts";
 import {
   intrinsicCallId,
   intrinsicIdsByFunctionName,
@@ -67,6 +68,7 @@ type Instr =
   | { op: "local.tee"; name: string }
   | { op: "call"; name: string }
   | { op: "return_call"; name: string }
+  | { op: "select"; type: ValueType }
   | { op: "unary"; wasm: string }
   | { op: "binary"; wasm: string }
   | { op: "simd"; wasm: SimdOp; lane?: number; lanes?: number[] }
@@ -121,7 +123,7 @@ export type MemoryModel = "temporal" | "branch-debug" | "branch";
 export interface BackendOptions {
   tailCallMode?: TailCallMode;
   memoryModel?: MemoryModel;
-  optLevel?: OptLevel;
+  optMode?: OptMode;
 }
 
 const EXPLICIT_MEMORY: BackendMemory = {
@@ -149,7 +151,9 @@ export function emitWasm(
   program: Program,
   options: BackendOptions = {},
 ): Uint8Array<ArrayBuffer> {
-  return backendModuleToWasm(lowerBackendModule(program, options));
+  return backendModuleToWasm(lowerBackendModule(program, options), {
+    debugNames: (options.optMode ?? "debug") === "debug",
+  });
 }
 
 function lowerBackendModule(program: Program, options: BackendOptions = {}): BackendModule {
@@ -160,7 +164,8 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
       message: `unknown memory model ${memoryModel}`,
     }]);
   }
-  const optimized = optimizeProgram(program, { optLevel: options.optLevel });
+  const optMode = options.optMode ?? "debug";
+  const optimized = optimizeProgram(program, { optMode });
   const layouts = createLayoutEnv(optimized);
   const imports = optimized.imports.map((item) => importAsFn(item));
   const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
@@ -203,7 +208,7 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
       ),
       results: flattenType(fn.returnType, layouts).map((slot) => slot.wat),
     })),
-    functions: loweredFunctions,
+    functions: removeUnreachableBackendFunctions(loweredFunctions),
     memories: [
       ...(memoryModel === "temporal"
         ? needsTemporalMemory ? TEMPORAL_MEMORIES : []
@@ -867,8 +872,15 @@ function lowerTailOpcodeMatch(
 ): Instr[] {
   const [arm, ...rest] = expr.arms;
   if (!arm) return [{ op: "const", type: "i32", value: 0 }];
-  if (arm.pattern.kind === "wildcard" || rest.length === 0) {
-    return lowerTailOpcodeExpr(arm.value, fn, ctx, locals);
+  if (isCatchAllPattern(arm.pattern) || rest.length === 0) {
+    const ignored =
+      patternDemandsMatchedValue(arm.pattern) || hasRuntimeEffect(expr.value, ctx.functions)
+        ? lowerIgnoredExpr(expr.value, ctx, locals)
+        : [];
+    return [
+      ...ignored,
+      ...lowerTailOpcodeExpr(arm.value, fn, ctx, locals),
+    ];
   }
   return [
     ...lowerExpr(expr.value, ctx, locals),
@@ -952,8 +964,15 @@ function lowerTailLoopMatch(
   if (step) return step;
   const [arm, ...rest] = expr.arms;
   if (!arm) return [{ op: "br", depth: exitDepth }];
-  if (arm.pattern.kind === "wildcard" || rest.length === 0) {
-    return lowerTailLoopExpr(arm.value, fn, ctx, locals, continueDepth, exitDepth);
+  if (isCatchAllPattern(arm.pattern) || rest.length === 0) {
+    const ignored =
+      patternDemandsMatchedValue(arm.pattern) || hasRuntimeEffect(expr.value, ctx.functions)
+        ? lowerIgnoredExpr(expr.value, ctx, locals)
+        : [];
+    return [
+      ...ignored,
+      ...lowerTailLoopExpr(arm.value, fn, ctx, locals, continueDepth, exitDepth),
+    ];
   }
   return [
     ...lowerExpr(expr.value, ctx, locals),
@@ -999,16 +1018,27 @@ function lowerTailStepMatch(
     arm.pattern.name === "Done"
   );
   if (!yieldArm || !doneArm || yieldArm.pattern.kind !== "constructor") return undefined;
-  const itemName = yieldArm.pattern.args[0]?.kind === "binding"
+  const yieldUsesItem = yieldArm.pattern.args[0]?.kind === "binding" &&
+    exprMentionsName(yieldArm.value, yieldArm.pattern.args[0].name);
+  const yieldUsesNext = yieldArm.pattern.args[1]?.kind === "binding" &&
+    exprMentionsName(yieldArm.value, yieldArm.pattern.args[1].name);
+  const itemName = yieldArm.pattern.args[0]?.kind === "binding" &&
+      yieldUsesItem
     ? yieldArm.pattern.args[0].name
-    : "__iter_item";
-  const nextName = yieldArm.pattern.args[1]?.kind === "binding"
+    : undefined;
+  const nextName = yieldArm.pattern.args[1]?.kind === "binding" &&
+      yieldUsesNext
     ? yieldArm.pattern.args[1].name
-    : "__iter_next";
+    : undefined;
   const scoped = new Set(locals);
-  scoped.add(itemName);
-  scoped.add(nextName);
-  ctx.tempLocals.push({ name: itemName, type: "i32" }, { name: nextName, type: "i32" });
+  if (itemName) {
+    scoped.add(itemName);
+    ctx.tempLocals.push({ name: itemName, type: "i32" });
+  }
+  if (nextName) {
+    scoped.add(nextName);
+    ctx.tempLocals.push({ name: nextName, type: "i32" });
+  }
   return [
     ...lowerExpr(cursor, ctx, locals, "i32"),
     ...lowerExpr(n, ctx, locals, "i32"),
@@ -1017,12 +1047,20 @@ function lowerTailStepMatch(
       op: "if",
       results: [],
       thenBody: [
-        ...lowerExpr(cursor, ctx, locals, "i32"),
-        { op: "local.set", name: itemName },
-        ...lowerExpr(cursor, ctx, locals, "i32"),
-        { op: "const", type: "i32", value: 1 },
-        { op: "binary", wasm: "i32.add" },
-        { op: "local.set", name: nextName },
+        ...(itemName
+          ? [
+            ...lowerExpr(cursor, ctx, locals, "i32"),
+            { op: "local.set", name: itemName } as Instr,
+          ]
+          : []),
+        ...(nextName
+          ? [
+            ...lowerExpr(cursor, ctx, locals, "i32"),
+            { op: "const", type: "i32", value: 1 } as Instr,
+            { op: "binary", wasm: "i32.add" } as Instr,
+            { op: "local.set", name: nextName } as Instr,
+          ]
+          : []),
         ...lowerTailLoopExpr(yieldArm.value, fn, ctx, scoped, continueDepth + 1, exitDepth + 1),
       ],
       elseBody: lowerTailLoopExpr(doneArm.value, fn, ctx, locals, continueDepth + 1, exitDepth + 1),
@@ -1105,6 +1143,8 @@ function lowerExpr(
       {
         const step = lowerStepMatch(expr.value, expr.arms, ctx, locals, expectedType);
         if (step) return step;
+        const materialized = lowerMaterializedMatch(expr, ctx, locals, expectedType);
+        if (materialized) return materialized;
       }
       return lowerMatchArms(expr.value, expr.arms, ctx, locals, expectedType);
     case "shape":
@@ -1242,12 +1282,29 @@ function lowerRuntimeInlineArrayIndexFromLocalSlots(
   const fallbackSlots = itemSlots(Math.max(0, capacity - 1));
   if (!fallbackSlots.length) return undefined;
   const results = fallbackSlots.map(() => "i32" as const);
+  const cached = cacheRepeatedIndex(index, ctx, locals);
+  if (fallbackSlots.length === 1) {
+    let body: Instr[] = [{ op: "local.get", name: fallbackSlots[0] ?? "__missing_slot" }];
+    for (let item = capacity - 2; item >= 0; item--) {
+      const slots = itemSlots(item);
+      if (slots.length !== 1) return undefined;
+      body = [
+        { op: "local.get", name: slots[0] ?? "__missing_slot" },
+        ...body,
+        ...lowerExpr(cached.index, ctx, locals, "i32"),
+        { op: "const", type: "i32", value: item },
+        { op: "binary", wasm: "i32.eq" },
+        { op: "select", type: "i32" },
+      ];
+    }
+    return [...cached.prefix, ...body];
+  }
   let body: Instr[] = fallbackSlots.map((name) => ({ op: "local.get", name }));
   for (let item = capacity - 2; item >= 0; item--) {
     const slots = itemSlots(item);
     if (slots.length !== fallbackSlots.length) return undefined;
     body = [
-      ...lowerExpr(index, ctx, locals, "i32"),
+      ...lowerExpr(cached.index, ctx, locals, "i32"),
       { op: "const", type: "i32", value: item },
       { op: "binary", wasm: "i32.eq" },
       {
@@ -1258,7 +1315,7 @@ function lowerRuntimeInlineArrayIndexFromLocalSlots(
       },
     ];
   }
-  return body;
+  return [...cached.prefix, ...body];
 }
 
 function sparseWorldComponentStoreItemType(target: string, ctx: LowerContext): string | undefined {
@@ -1565,13 +1622,21 @@ function lowerRuntimeInlineArrayIndex(
 ): Instr[] {
   const fallback = lowerVar(`${target}[${Math.max(0, capacity - 1)}]`, ctx, locals, itemType);
   const flattened = flattenType(itemType, ctx.layouts).map((slot) => slot.wat);
+  if (flattened.length === 1 && isSelectableValueType(flattened[0])) {
+    const cached = cacheRepeatedIndex(index, ctx, locals);
+    return [
+      ...cached.prefix,
+      ...lowerScalarInlineArraySelectChain(target, cached.index, capacity, itemType, flattened[0], ctx, locals),
+    ];
+  }
   const results = fallback.length > flattened.length
     ? fallback.map(() => "i32" as const)
     : flattened;
+  const cached = cacheRepeatedIndex(index, ctx, locals);
   let body = fallback;
   for (let item = capacity - 2; item >= 0; item--) {
     body = [
-      ...lowerExpr(index, ctx, locals, "i32"),
+      ...lowerExpr(cached.index, ctx, locals, "i32"),
       { op: "const", type: "i32", value: item },
       { op: "binary", wasm: "i32.eq" },
       {
@@ -1582,7 +1647,52 @@ function lowerRuntimeInlineArrayIndex(
       },
     ];
   }
+  return [...cached.prefix, ...body];
+}
+
+function lowerScalarInlineArraySelectChain(
+  target: string,
+  index: Expr,
+  capacity: number,
+  itemType: string,
+  type: ValueType,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  let body = lowerVar(`${target}[${Math.max(0, capacity - 1)}]`, ctx, locals, itemType);
+  for (let item = capacity - 2; item >= 0; item--) {
+    body = [
+      ...lowerVar(`${target}[${item}]`, ctx, locals, itemType),
+      ...body,
+      ...lowerExpr(index, ctx, locals, "i32"),
+      { op: "const", type: "i32", value: item },
+      { op: "binary", wasm: "i32.eq" },
+      { op: "select", type },
+    ];
+  }
   return body;
+}
+
+function cacheRepeatedIndex(
+  index: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): { prefix: Instr[]; index: Expr } {
+  if (index.kind === "var" || index.kind === "literal") return { prefix: [], index };
+  const name = `__index_tmp${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name, type: "i32" });
+  locals.add(name);
+  return {
+    prefix: [
+      ...lowerExpr(index, ctx, locals, "i32"),
+      { op: "local.set", name },
+    ],
+    index: { kind: "var", name },
+  };
+}
+
+function isSelectableValueType(type: ValueType | undefined): type is ValueType {
+  return type === "i32" || type === "i64" || type === "f32" || type === "f64";
 }
 
 function varType(name: string, ctx: LowerContext): string | undefined {
@@ -1614,9 +1724,28 @@ function inlineArrayTypeArgs(
   layouts: LayoutEnv,
 ): [number, string] | undefined {
   const resolved = resolveAlias(type, layouts);
+  const tupleRepeat = resolved?.match(/^\[\s*(.+?)\s*;\s*([0-9]+)\s*\]$/);
+  if (tupleRepeat) {
+    return [Number.parseInt(tupleRepeat[2] ?? "0", 10), tupleRepeat[1]?.trim() ?? "i32"];
+  }
+  const repeat = resolved?.match(/^\{\s*([0-9]+)\s*\*\s*(.+?)\s*\}$/);
+  if (repeat) return [Number.parseInt(repeat[1] ?? "0", 10), repeat[2]?.trim() ?? "i32"];
   const unqualified = resolved?.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)+/, "");
   const args = unqualified ? typeCallArgs(unqualified, "InlineArray") : undefined;
-  if (!args) return undefined;
+  if (!args) {
+    const decl = resolved ? layouts.types.get(typeName(resolved)) : undefined;
+    if (decl?.normalized?.kind === "product") {
+      const slot = decl.normalized.shape.slots[0];
+      if (decl.normalized.shape.slots.length === 1 && !slot.label && slot.repeat) {
+        const callArgs = typeCallArgs(resolved ?? "", typeName(resolved ?? ""));
+        const argValues = callArgs ? splitTypeArgs(callArgs) : [];
+        const count = substituteAliasTypeParams(slot.repeat, decl, argValues);
+        const itemType = substituteAliasTypeParams(slot.type, decl, argValues);
+        return [Number.parseInt(count, 10), itemType];
+      }
+    }
+    return undefined;
+  }
   const [count, itemType] = splitTypeArgs(args);
   return [Number.parseInt(count ?? "0", 10), itemType?.trim() ?? "i32"];
 }
@@ -1677,11 +1806,13 @@ function lowerVar(
 }
 
 function lowerShapeStorage(
-  slots: { label?: string; value: Expr; spread?: boolean }[],
+  slots: { label?: string; value: Expr; spread?: boolean; index?: Expr }[],
   expectedType: string | undefined,
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  const fixedUpdate = lowerFixedCollectionUpdate(slots, expectedType, ctx, locals);
+  if (fixedUpdate) return fixedUpdate;
   const expanded = expandSpreadSlots(slots, expectedType, ctx, locals);
   if (expanded) slots = expanded;
   const layout = flattenType(expectedType, ctx.layouts);
@@ -1715,12 +1846,13 @@ function lowerShapeStorage(
 }
 
 function expandSpreadSlots(
-  slots: { label?: string; value: Expr; spread?: boolean }[],
+  slots: { label?: string; value: Expr; spread?: boolean; index?: Expr }[],
   expectedType: string | undefined,
   ctx: LowerContext,
   locals: Set<string>,
 ): { label?: string; value: Expr }[] | undefined {
   if (!slots.some((slot) => slot.spread)) return undefined;
+  if (slots.some((slot) => slot.index)) return undefined;
   const itemTypes = shapeSlotTypes(expectedType, ctx.layouts);
   const expanded: { label?: string; value: Expr }[] = [];
   for (const slot of slots) {
@@ -1753,6 +1885,147 @@ function expandSpreadSlots(
       ? { ...slot.value, inferredType: "i32" }
       : slot.value,
   }));
+}
+
+function lowerFixedCollectionUpdate(
+  slots: { label?: string; value: Expr; spread?: boolean; index?: Expr }[],
+  expectedType: string | undefined,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (!slots.some((slot) => slot.index)) return undefined;
+  const source = slots.find((slot) => slot.spread);
+  if (!source) return undefined;
+  const args = inlineArrayTypeArgs(expectedType, ctx.layouts);
+  if (!args) return undefined;
+  const [count, itemType] = args;
+  const itemSlots = flattenType(itemType, ctx.layouts);
+  const overrides = slots.filter((slot): slot is typeof slot & { index: Expr } =>
+    Boolean(slot.index)
+  );
+  const scalarDynamic = lowerScalarFixedCollectionUpdate(
+    source,
+    overrides,
+    count,
+    itemType,
+    itemSlots,
+    ctx,
+    locals,
+  );
+  if (scalarDynamic) return scalarDynamic;
+  return Array.from({ length: count }, (_, item) =>
+    itemSlots.map((_slot, slotIndex) => {
+      let body = lowerFlattenedValueSlot(
+        {
+          kind: "index",
+          target: source.value,
+          index: {
+            kind: "literal",
+            literalKind: "number",
+            value: String(item),
+            inferredType: "i32",
+          },
+        },
+        itemType,
+        slotIndex,
+        ctx,
+        locals,
+      );
+      for (const override of overrides) {
+        const literalIndex = staticIntegerLiteral(override.index);
+        if (literalIndex !== undefined) {
+          if (literalIndex === item) {
+            body = lowerFlattenedValueSlot(override.value, itemType, slotIndex, ctx, locals);
+          }
+          continue;
+        }
+        body = [
+          ...lowerExpr(override.index, ctx, locals, "i32"),
+          { op: "const", type: "i32", value: item },
+          { op: "binary", wasm: "i32.eq" },
+          {
+            op: "if",
+            results: [itemSlots[slotIndex]?.wat ?? "i32"],
+            thenBody: lowerFlattenedValueSlot(override.value, itemType, slotIndex, ctx, locals),
+            elseBody: body,
+          },
+        ];
+      }
+      return body;
+    }).flat()).flat();
+}
+
+function lowerScalarFixedCollectionUpdate(
+  source: { label?: string; value: Expr; spread?: boolean; index?: Expr },
+  overrides: ({ label?: string; value: Expr; spread?: boolean; index?: Expr } & { index: Expr })[],
+  count: number,
+  itemType: string,
+  itemSlots: LayoutSlot[],
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (itemSlots.length !== 1 || !isSelectableValueType(itemSlots[0]?.wat)) return undefined;
+  if (overrides.length !== 1) return undefined;
+  const override = overrides[0];
+  if (!override) return undefined;
+  if (staticIntegerLiteral(override.index) !== undefined) return undefined;
+  if (!isSpeculableNonTrappingExpr(override.value, ctx.functions)) return undefined;
+
+  const cached = cacheRepeatedIndex(override.index, ctx, locals);
+  return [
+    ...cached.prefix,
+    ...Array.from({ length: count }, (_, item): Instr[] => [
+      ...lowerFlattenedValueSlot(override.value, itemType, 0, ctx, locals),
+      ...lowerFlattenedValueSlot(
+        {
+          kind: "index",
+          target: source.value,
+          index: {
+            kind: "literal",
+            literalKind: "number",
+            value: String(item),
+            inferredType: "i32",
+          },
+        },
+        itemType,
+        0,
+        ctx,
+        locals,
+      ),
+      ...lowerExpr(cached.index, ctx, locals, "i32"),
+      { op: "const", type: "i32", value: item },
+      { op: "binary", wasm: "i32.eq" },
+      { op: "select", type: itemSlots[0]?.wat ?? "i32" },
+    ]).flat(),
+  ];
+}
+
+function isSpeculableNonTrappingExpr(expr: Expr, functions: Map<string, FnDecl>): boolean {
+  if (hasRuntimeEffect(expr, functions)) return false;
+  switch (expr.kind) {
+    case "literal":
+    case "var":
+    case "placeholder":
+      return true;
+    case "binary":
+      return expr.op !== "/" && expr.op !== "%" &&
+        isSpeculableNonTrappingExpr(expr.left, functions) &&
+        isSpeculableNonTrappingExpr(expr.right, functions);
+    case "field":
+      return isSpeculableNonTrappingExpr(expr.value, functions) &&
+        isSpeculableNonTrappingExpr(expr.key, functions);
+    case "pipe_bind":
+      return isSpeculableNonTrappingExpr(expr.value, functions) &&
+        isSpeculableNonTrappingExpr(expr.body, functions);
+    default:
+      return false;
+  }
+}
+
+function staticIntegerLiteral(expr: Expr): number | undefined {
+  if (expr.kind !== "literal" || expr.literalKind !== "number") return undefined;
+  if (!/^-?[0-9]+$/.test(expr.value)) return undefined;
+  return Number.parseInt(expr.value, 10);
 }
 
 function maskValue(value: Instr[], wat: ValueType, width: number): Instr[] {
@@ -1798,8 +2071,15 @@ function lowerMatchArms(
 ): Instr[] {
   const [arm, ...rest] = arms;
   if (!arm) return [{ op: "const", type: "i32", value: 0 }];
-  if (arm.pattern.kind === "wildcard" || rest.length === 0) {
-    return lowerExpr(arm.value, ctx, locals, expectedType);
+  if (isCatchAllPattern(arm.pattern) || rest.length === 0) {
+    const ignored =
+      patternDemandsMatchedValue(arm.pattern) || hasRuntimeEffect(value, ctx.functions)
+        ? lowerIgnoredExpr(value, ctx, locals)
+        : [];
+    return [
+      ...ignored,
+      ...lowerExpr(arm.value, ctx, locals, expectedType),
+    ];
   }
   return [
     ...lowerExpr(value, ctx, locals),
@@ -1811,6 +2091,41 @@ function lowerMatchArms(
       elseBody: lowerMatchArms(value, rest, ctx, locals, expectedType),
     },
   ];
+}
+
+function lowerIgnoredExpr(value: Expr, ctx: LowerContext, locals: Set<string>): Instr[] {
+  return [
+    ...lowerExpr(value, ctx, locals),
+    ...flattenType(exprTypeWithLocals(value, ctx), ctx.layouts).map((): Instr => ({ op: "drop" })),
+  ];
+}
+
+function lowerMaterializedMatch(
+  expr: Extract<Expr, { kind: "match" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] | undefined {
+  if (!shouldMaterializeMatchValue(expr, ctx)) return undefined;
+  const valueType = exprTypeWithLocals(expr.value, ctx);
+  const slots = flattenType(valueType, ctx.layouts);
+  if (slots.length !== 1) return undefined;
+  const name = `__match_value${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name, type: slots[0]?.wat ?? "i32" });
+  locals.add(name);
+  return [
+    ...lowerExpr(expr.value, ctx, locals, valueType),
+    { op: "local.set", name },
+    ...lowerMatchArms({ kind: "var", name }, expr.arms, ctx, locals, expectedType),
+  ];
+}
+
+function shouldMaterializeMatchValue(
+  expr: Extract<Expr, { kind: "match" }>,
+  ctx: LowerContext,
+): boolean {
+  const testedArms = expr.arms.filter((arm) => !isCatchAllPattern(arm.pattern));
+  return testedArms.length > 1 && hasRuntimeEffect(expr.value, ctx.functions);
 }
 
 function lowerStepMatch(
@@ -1838,12 +2153,19 @@ function lowerStepMatch(
   if (!yieldArm || !doneArm || yieldArm.pattern.kind !== "constructor") return undefined;
   const item = yieldArm.pattern.args[0];
   const next = yieldArm.pattern.args[1];
+  const yieldUsesItem = item?.kind === "binding" && exprMentionsName(yieldArm.value, item.name);
+  const yieldUsesNext = next?.kind === "binding" && exprMentionsName(yieldArm.value, next.name);
   const scoped = new Set(locals);
-  const itemName = item?.kind === "binding" ? item.name : "__iter_item";
-  const nextName = next?.kind === "binding" ? next.name : "__iter_next";
-  scoped.add(itemName);
-  scoped.add(nextName);
-  ctx.tempLocals.push({ name: itemName, type: "i32" }, { name: nextName, type: "i32" });
+  const itemName = item?.kind === "binding" && yieldUsesItem ? item.name : undefined;
+  const nextName = next?.kind === "binding" && yieldUsesNext ? next.name : undefined;
+  if (itemName) {
+    scoped.add(itemName);
+    ctx.tempLocals.push({ name: itemName, type: "i32" });
+  }
+  if (nextName) {
+    scoped.add(nextName);
+    ctx.tempLocals.push({ name: nextName, type: "i32" });
+  }
   return [
     ...lowerExpr(cursor, ctx, locals, "i32"),
     ...lowerExpr(n, ctx, locals, "i32"),
@@ -1852,12 +2174,20 @@ function lowerStepMatch(
       op: "if",
       results: flattenType(expectedType, ctx.layouts).map((slot) => slot.wat),
       thenBody: [
-        ...lowerExpr(cursor, ctx, locals, "i32"),
-        { op: "local.set", name: itemName },
-        ...lowerExpr(cursor, ctx, locals, "i32"),
-        { op: "const", type: "i32", value: 1 },
-        { op: "binary", wasm: "i32.add" },
-        { op: "local.set", name: nextName },
+        ...(itemName
+          ? [
+            ...lowerExpr(cursor, ctx, locals, "i32"),
+            { op: "local.set", name: itemName } as Instr,
+          ]
+          : []),
+        ...(nextName
+          ? [
+            ...lowerExpr(cursor, ctx, locals, "i32"),
+            { op: "const", type: "i32", value: 1 } as Instr,
+            { op: "binary", wasm: "i32.add" } as Instr,
+            { op: "local.set", name: nextName } as Instr,
+          ]
+          : []),
         ...lowerExpr(yieldArm.value, ctx, scoped, expectedType),
       ],
       elseBody: lowerExpr(doneArm.value, ctx, locals, expectedType),
@@ -1912,6 +2242,40 @@ function removeUnreachablePrivateFunctions(functions: FnDecl[]): FnDecl[] {
   };
   for (const fn of functions) if (fn.public) visit(fn.name);
   return functions.filter((fn) => fn.public || reachable.has(fn.name));
+}
+
+function removeUnreachableBackendFunctions(functions: BackendFunction[]): BackendFunction[] {
+  const byName = new Map(functions.map((fn) => [fn.name, fn]));
+  const reachable = new Set<string>();
+  const visit = (name: string) => {
+    if (reachable.has(name)) return;
+    const fn = byName.get(name);
+    if (!fn) return;
+    reachable.add(name);
+    for (const callee of calledBackendFunctions(fn.body)) visit(callee);
+  };
+  for (const fn of functions) {
+    if (fn.exportName) visit(fn.name);
+  }
+  return functions.filter((fn) => reachable.has(fn.name));
+}
+
+function calledBackendFunctions(instrs: Instr[]): string[] {
+  const names: string[] = [];
+  const visit = (instr: Instr) => {
+    if (instr.op === "call" || instr.op === "return_call") {
+      names.push(instr.name);
+      return;
+    }
+    if (instr.op === "if") {
+      instr.thenBody.forEach(visit);
+      instr.elseBody.forEach(visit);
+      return;
+    }
+    if (instr.op === "block" || instr.op === "loop") instr.body.forEach(visit);
+  };
+  instrs.forEach(visit);
+  return names;
 }
 
 interface TailCallAnalysis {
@@ -2112,6 +2476,8 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
       return [`${prefix}call $${watName(instr.name)}`];
     case "return_call":
       return [`${prefix}return_call $${watName(instr.name)}`];
+    case "select":
+      return [`${prefix}select`];
     case "binary":
       return [`${prefix}${instr.wasm}`];
     case "unary":
@@ -2175,7 +2541,10 @@ function watMemidx(memory: string | undefined): string {
   return memory && memory !== "memory" ? ` (memory $${watName(memory)})` : "";
 }
 
-function backendModuleToWasm(module: BackendModule): Uint8Array<ArrayBuffer> {
+function backendModuleToWasm(
+  module: BackendModule,
+  options: { debugNames?: boolean } = {},
+): Uint8Array<ArrayBuffer> {
   const allFns = [...module.imports, ...module.functions];
   const functionTypes = allFns.map((fn) => ({
     params: fn.params.map((param) =>
@@ -2261,7 +2630,43 @@ function backendModuleToWasm(module: BackendModule): Uint8Array<ArrayBuffer> {
       ])),
     );
   }
+  if (options.debugNames) {
+    section(bytes, 0, wasmNameSection(module, allFns));
+  }
   return new Uint8Array(bytes) as Uint8Array<ArrayBuffer>;
+}
+
+function wasmNameSection(
+  module: BackendModule,
+  allFns: (BackendImport | BackendFunction)[],
+): number[] {
+  const subsections: number[] = [];
+  const functionNames = allFns.map((fn, index) => [...uleb(index), ...nameBytes(fn.name)]);
+  nameSubsection(subsections, 1, vecItems(functionNames));
+
+  const localNameEntries = module.functions
+    .map((fn, functionIndex) => {
+      const locals = [...fn.params, ...fn.locals].map((local, localIndex) => [
+        ...uleb(localIndex),
+        ...nameBytes(local.name),
+      ]);
+      return locals.length
+        ? [
+          ...uleb(module.imports.length + functionIndex),
+          ...vecItems(locals),
+        ]
+        : undefined;
+    })
+    .filter((item): item is number[] => Boolean(item));
+  if (localNameEntries.length) nameSubsection(subsections, 2, vecItems(localNameEntries));
+
+  return [...nameBytes("name"), ...subsections];
+}
+
+function nameSubsection(bytes: number[], id: number, payload: number[]) {
+  bytes.push(id);
+  bytes.push(...uleb(payload.length));
+  for (const byte of payload) bytes.push(byte);
 }
 
 function collectBlockTypes(functions: BackendFunction[]): ValueType[][] {
@@ -2338,6 +2743,8 @@ function encodeInstr(
       if (index === undefined) throw new Error(`backend missing lowered callable: ${instr.name}`);
       return [0x12, ...uleb(index)];
     }
+    case "select":
+      return [0x1b];
     case "binary":
       return [wasmBinaryOp(instr.wasm)];
     case "unary":
@@ -3624,6 +4031,67 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
   return names;
 }
 
+function exprMentionsName(expr: Expr, name: string): boolean {
+  const target = baseName(name);
+  let found = false;
+  const visit = (item: Expr | undefined) => {
+    if (!item || found) return;
+    switch (item.kind) {
+      case "var":
+        found = baseName(item.name) === target;
+        return;
+      case "call":
+        visit(item.callee);
+        item.args.forEach(visit);
+        return;
+      case "index":
+        visit(item.target);
+        visit(item.index);
+        return;
+      case "binary":
+        visit(item.left);
+        visit(item.right);
+        return;
+      case "pipe_bind":
+        visit(item.value);
+        if (item.name !== target) visit(item.body);
+        return;
+      case "match":
+        visit(item.value);
+        for (const arm of item.arms) {
+          if (!patternBindingNames(arm.pattern).includes(target)) visit(arm.value);
+        }
+        return;
+      case "shape":
+      case "product_constructor":
+        item.slots.forEach((slot) => visit(slot.value));
+        return;
+      case "range":
+        visit(item.start);
+        visit(item.end);
+        return;
+      case "static_for_slots":
+        visit(item.value);
+        return;
+      case "field":
+        visit(item.value);
+        visit(item.key);
+        return;
+      case "block":
+        for (const stmt of item.statements) {
+          if (stmt.kind !== "proof_const") visit(stmt.value);
+        }
+        visit(item.expr);
+        return;
+      case "literal":
+      case "placeholder":
+        return;
+    }
+  };
+  visit(expr);
+  return found;
+}
+
 function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
   switch (expr.kind) {
     case "call":
@@ -3868,7 +4336,9 @@ function blockType(results: ValueType[] | undefined, typeKeys: Map<string, numbe
 }
 
 function section(bytes: number[], id: number, payload: number[]) {
-  bytes.push(id, ...uleb(payload.length), ...payload);
+  bytes.push(id);
+  bytes.push(...uleb(payload.length));
+  for (const byte of payload) bytes.push(byte);
 }
 
 function vecItems(items: number[][]): number[] {

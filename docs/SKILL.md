@@ -138,7 +138,7 @@ Use these literal forms:
 - Characters and strings: `'x'`, `"fig"`.
 - Fenced text: Triple backticks, useful for WGSL shader source.
 - Literal type tags: `#Tag`, `#field`, `#infixl`.
-- Tuple and repeat values: `[1, true]`, `[0; 4]`.
+- Tuple and repeat values: `[1, true]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
 - Target-typed collection literals: `<1, 2, 3>`, including spread such as `<0, ...rest>`.
 
 Unsuffixed integer literals default from context, commonly to `i32`. Current primitive scalar types
@@ -196,7 +196,7 @@ Supported expressions include:
   generated slots.
 - Shape values: `{x: 1, y: 2}`, `{x, y}`, `{...base, z: 3}`, and
   `{for Key, Spec in (fields): value}`.
-- Tuple and repeat values: `[1, 2]`, `[0; 4]`.
+- Tuple and repeat values: `[1, 2]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
 - Target-typed collection literals: `<1, 2, 3>`, `<0, ...rest>`.
 - `match value { pattern => expr, _ => fallback }`.
 - Binary operators listed in `grammar.ebnf`.

@@ -198,6 +198,70 @@ Deno.test("inline array list spread literals lower as flattened slots", async ()
   assert(!wat.includes("collect_finish"));
 });
 
+Deno.test("indexed spread update tuple literals check fixed inline arrays", async () => {
+  const checked = await checkSource(`
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    pub fn main() -> InlineArray(4, i32) {
+      let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+      let ys: InlineArray(4, i32) = [...xs, [1]: 32];
+      ys
+    }
+  `);
+  assertEquals(findFns(checked.program, "main").length, 1);
+
+  await checkSource(`
+    pub fn main() -> [i32; 3] {
+      let xs: [i32; 3] = [1, 2, 3];
+      [...xs, [1]: 32]
+    }
+  `);
+});
+
+Deno.test("indexed spread update rejects invalid fixed tuple overrides", async () => {
+  await assertThrowsCompile(
+    `
+      type fn InlineArray(n: count, a: type) -> type {
+        let InlineArray = {n*a};
+        struct(InlineArray)
+      }
+      pub fn Bad() -> InlineArray(4, i32) {
+        let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+        [...xs, [4]: 32]
+      }
+    `,
+    "collection.fixed_update_index_bounds",
+  );
+  await assertThrowsCompile(
+    `
+      type fn InlineArray(n: count, a: type) -> type {
+        let InlineArray = {n*a};
+        struct(InlineArray)
+      }
+      pub fn Bad() -> InlineArray(4, i32) {
+        let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+        [...xs, [1]: true]
+      }
+    `,
+    "collection.fixed_update_value_type",
+  );
+  await assertThrowsCompile(
+    `
+      type fn InlineArray(n: count, a: type) -> type {
+        let InlineArray = {n*a};
+        struct(InlineArray)
+      }
+      pub fn Bad() -> InlineArray(4, i32) {
+        let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+        <...xs, [1]: 32>
+      }
+    `,
+    "collection.fixed_update_square_syntax",
+  );
+});
+
 Deno.test("spread entries stay out of product and require inline array list tails", async () => {
   await assertThrowsCompile(
     `
@@ -1055,11 +1119,13 @@ Deno.test.ignore("ecs sparse world entity rows reject mismatched component value
   );
 });
 
-Deno.test.ignore("ecs sparse world entity add leaves fixed storage unchanged after capacity", async () => {
-  const instance = new WebAssembly.Instance(
-    new WebAssembly.Module(
-      await wasmFromSource(
-        `
+Deno.test.ignore(
+  "ecs sparse world entity add leaves fixed storage unchanged after capacity",
+  async () => {
+    const instance = new WebAssembly.Instance(
+      new WebAssembly.Module(
+        await wasmFromSource(
+          `
       const ecs = @import("engine.ecs");
       type fn Marker() -> type { let Marker = {tag: i32}; struct(Marker) }
       const components = {marker: Marker};
@@ -1072,12 +1138,13 @@ Deno.test.ignore("ecs sparse world entity add leaves fixed storage unchanged aft
         w.next_entity_id + w.marker.values[2].tag
       }
     `,
-        { resolveModule: resolveProjectModule },
+          { resolveModule: resolveProjectModule },
+        ),
       ),
-    ),
-  );
-  assertEquals((instance.exports.main as () => number)(), 7);
-});
+    );
+    assertEquals((instance.exports.main as () => number)(), 7);
+  },
+);
 
 Deno.test("shape and type reflection diagnostics are focused", async () => {
   await assertThrowsCompile(
@@ -1340,6 +1407,25 @@ Deno.test("accepts ordered value function literal clauses", async () => {
   `);
   assertEquals(findFns(checked.program, "something_n__clause_0").length, 1);
   assertEquals(findFns(checked.program, "something_n__clause_1").length, 1);
+});
+
+Deno.test("wildcard value patterns check without binding underscore", async () => {
+  await checkSource(`
+    type fn IterStep(state: type, item: type) -> type {
+      let Done = {};
+      let Yield = {item: item, next: state};
+      union(Done, Yield)
+    }
+    fn literal_clause(_: i32, 1: i32) -> i32 { 1 }
+    fn add(a: i32, b: i32) -> i32 { a + b }
+    fn match_tuple(pair: [i32, i32]) -> i32 {
+      match pair { [_, right] => right }
+    }
+    fn match_yield(step: IterStep(i32, i32)) -> i32 {
+      match step { Yield(_, next) => next, Done => 0 }
+    }
+    pub fn main() -> i32 { literal_clause(4, 1) + add(2, 3) }
+  `);
 });
 
 Deno.test("rejects incompatible value function clauses", async () => {
@@ -1758,7 +1844,10 @@ Deno.test("rejects removed ownership and explicit memory forms", async () => {
   await assertThrowsCompile("fn bad(x: #(i32)) -> i32 { 0 }", "parse.syntax");
   await assertThrowsCompile("pub fn main() -> i32 { let xs = #[1, 2, 3]; 0 }", "parse.syntax");
   await assertThrowsCompile("pub fn main(mem: memory) -> i32 { 0 }", "type.unknown_type");
-  await assertThrowsCompile("fn bad(x: i32) -> i32 { @memory_load_i32(x, x) }", "primitive.unknown");
+  await assertThrowsCompile(
+    "fn bad(x: i32) -> i32 { @memory_load_i32(x, x) }",
+    "primitive.unknown",
+  );
   await assertThrowsCompile("fn bad(x: i32) -> i32 { @ptr_add(x, 1) }", "primitive.unknown");
   await assertThrowsCompile("fn bad(x: i32) -> i32 { @freeze(x) }", "primitive.unknown");
 });
@@ -1880,25 +1969,35 @@ Deno.test("allows shadowing and temporal local reuse", async () => {
 });
 
 Deno.test("pipe bind syntax lowers through scoped bind bodies", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(a: i32, b: i32) -> i32 { a + b }
     fn mul(a: i32, b: i32) -> i32 { a * b }
     pub fn main() -> i32 {
       1 \\$ -> inc($) \\y -> add(1, y) \\z -> mul(z, 2)
     }
-  `);
+  `,
+    { optMode: "release" },
+  );
   assert(!wat.includes("call $inc"));
   assert(!wat.includes("call $add"));
   assert(!wat.includes("call $mul"));
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(`
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(a: i32, b: i32) -> i32 { a + b }
     fn mul(a: i32, b: i32) -> i32 { a * b }
     pub fn main() -> i32 {
       1 \\$ -> inc($) \\y -> add(1, y) \\z -> mul(z, 2)
     }
-  `)));
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
   assertEquals((instance.exports.main as CallableFunction)(), 6);
   await assertThrowsCompile(
     "pub fn main() -> i32 { \\x -> x + 1 }",
@@ -1940,22 +2039,32 @@ Deno.test("pipe bind evaluates left once and binds flattened products", async ()
 });
 
 Deno.test("$ const function helper sugar is unary and rejects runtime captures", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     type fn Lane4I32() { let Lane4I32 = {4*i32}; struct(Lane4I32) }
     fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
       [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
     }
     pub fn main() -> Lane4I32 { map4_i32($ + 1, [1, 2, 3, 4]) }
-  `);
+  `,
+    { optMode: "release" },
+  );
   assert(!wat.includes("(func $__dollar"));
   assert(!wat.includes("call $__dollar"));
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(`
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
     type fn Lane4I32() { let Lane4I32 = {4*i32}; struct(Lane4I32) }
     fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
       [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
     }
     pub fn main() -> Lane4I32 { map4_i32($ + 1, [1, 2, 3, 4]) }
-  `)));
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
   assertEquals((instance.exports.main as CallableFunction)(), [2, 3, 4, 5]);
   await assertThrowsCompile(
     "pub fn main() -> i32 { $ + 1 }",
@@ -1999,7 +2108,8 @@ Deno.test("$ const function helper sugar is unary and rejects runtime captures",
 });
 
 Deno.test("product result destructuring binds local result slots", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     type fn Pair() { let Pair = {first: i32, second: i32}; struct(Pair) }
     fn make_pair() -> Pair { [2, 3] }
     fn sink(x: i32) -> i32 { x }
@@ -2009,11 +2119,16 @@ Deno.test("product result destructuring binds local result slots", async () => {
       let first, second = make_pair();
       x + used + first + second
     }
-  `);
+  `,
+    { optMode: "release" },
+  );
   assert(!wat.includes("(func $make_pair (result i32) (result i32)"));
   assertStringIncludes(wat, "(local $first i32)");
   assertStringIncludes(wat, "(local $second i32)");
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(`
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
     type fn Pair() { let Pair = {first: i32, second: i32}; struct(Pair) }
     fn make_pair() -> Pair { [2, 3] }
     fn sink(x: i32) -> i32 { x }
@@ -2023,7 +2138,11 @@ Deno.test("product result destructuring binds local result slots", async () => {
       let first, second = make_pair();
       x + used + first + second
     }
-  `)));
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
   assertEquals((instance.exports.main as CallableFunction)(), 7);
   await assertThrowsCompile(
     `
@@ -2795,7 +2914,7 @@ Deno.test("optimizes const-parameter forwarding wrappers to direct calls", async
     { kind: "var", name: "mapped__box_functor" },
   );
 
-  const optimized = optimizeProgram(checked.program);
+  const optimized = optimizeProgram(checked.program, { optMode: "release" });
   const counts = countCalls(optimized, { includeGenerated: false });
   assertEquals(counts.get("mapped__box_functor") ?? 0, 0);
   assertEquals(counts.get("map_box") ?? 0, 0);
@@ -2816,7 +2935,9 @@ Deno.test("optimizes repeated forwarding wrapper call sites", async () => {
   `);
 
   assertEquals(findFns(checked.program, "mapped__box_functor").length, 1);
-  const counts = countCalls(optimizeProgram(checked.program), { includeGenerated: false });
+  const counts = countCalls(optimizeProgram(checked.program, { optMode: "release" }), {
+    includeGenerated: false,
+  });
   assertEquals(counts.get("mapped__box_functor") ?? 0, 0);
   assertEquals(counts.get("map_box") ?? 0, 2);
 });
@@ -2832,7 +2953,9 @@ Deno.test("optimizes nested forwarding specializations transitively", async () =
     pub fn main() -> Box { mapped_outer(box_functor, {value: 1}) }
   `);
 
-  const counts = countCalls(optimizeProgram(checked.program), { includeGenerated: false });
+  const counts = countCalls(optimizeProgram(checked.program, { optMode: "release" }), {
+    includeGenerated: false,
+  });
   assertEquals(counts.get("mapped_outer__box_functor") ?? 0, 0);
   assertEquals(counts.get("mapped__box_functor") ?? 0, 0);
   assertEquals(counts.get("map_box") ?? 0, 0);
@@ -2851,7 +2974,7 @@ Deno.test("inlines small product-return generated specializations at full-return
     pub fn main() -> Box { mapped(box_functor, {value: 1}) }
   `);
 
-  const counts = countCalls(optimizeProgram(checked.program));
+  const counts = countCalls(optimizeProgram(checked.program, { optMode: "release" }));
   assertEquals(counts.get("mapped__box_functor") ?? 0, 0);
 });
 
@@ -2868,7 +2991,9 @@ Deno.test("optimizes specialization calls by resolved generated name", async () 
 
   assertEquals(findFns(checked.program, "mapped__box_functor").length, 1);
   assertEquals(findFns(checked.program, "mapped__box_functor__2").length, 1);
-  const counts = countCalls(optimizeProgram(checked.program), { includeGenerated: false });
+  const counts = countCalls(optimizeProgram(checked.program, { optMode: "release" }), {
+    includeGenerated: false,
+  });
   assertEquals(counts.get("mapped__box_functor__2") ?? 0, 0);
   assertEquals(counts.get("map_box") ?? 0, 0);
 });
@@ -2878,27 +3003,10 @@ Deno.test("optimizes tiny private pure helpers by inlining", async () => {
     fn inc(x: i32) -> i32 { x + 1 }
     pub fn main() -> i32 { inc(41) }
   `);
-  const counts = countCalls(optimizeProgram(checked.program), { includeGenerated: false });
-  assertEquals(counts.get("inc") ?? 0, 0);
-});
-
-Deno.test("optimization levels control pure inlining budgets", async () => {
-  const checked = await checkSource(`
-    fn helper(x: i32) -> i32 {
-      let a = x + 1;
-      let b = a + 1;
-      b + 1
-    }
-    pub fn main() -> i32 { helper(1) }
-  `);
-
-  const debugCounts = countCalls(optimizeProgram(checked.program, { optLevel: "debug" }), {
+  const counts = countCalls(optimizeProgram(checked.program, { optMode: "release" }), {
     includeGenerated: false,
   });
-  const defaultCounts = countCalls(optimizeProgram(checked.program), { includeGenerated: false });
-
-  assertEquals(debugCounts.get("helper") ?? 0, 1);
-  assertEquals(defaultCounts.get("helper") ?? 0, 0);
+  assertEquals(counts.get("inc") ?? 0, 0);
 });
 
 Deno.test("function summaries classify purity calls returns and param effects", async () => {

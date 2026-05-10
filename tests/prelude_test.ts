@@ -123,7 +123,7 @@ Deno.test("InlineArray.fold_indices uses index cursor loop", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 6);
 });
 
-Deno.test("inline_array public helpers use builder cursor loops", async () => {
+Deno.test("inline_array public helpers compose without runtime helper calls", async () => {
   const source = `
     const layout = @import("prelude.layout");
 
@@ -147,7 +147,6 @@ Deno.test("inline_array public helpers use builder cursor loops", async () => {
   `;
 
   const wat = await watFromSource(source, { resolveModule });
-  assert(wat.includes("loop"));
   for (
     const forbidden of [
       "call $layout.core.IndexCursor.next",
@@ -771,7 +770,7 @@ Deno.test("Lane4I32 lowers to four scalar Wasm results", async () => {
     fn inc(x: i32) -> i32 { x + 1 }
     pub fn main() -> array.layout.Lane4I32 { array.map4_i32(inc, <1, 2, 3, 4>) }
   `,
-    { resolveModule },
+    { resolveModule, optMode: "release" },
   );
 
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
@@ -804,7 +803,7 @@ Deno.test("fold4 and reduce4 specialize reducers", async () => {
       array.fold4_i32(add, 0, <1, 2, 3, 4>) + array.reduce4_i32(add, <1, 2, 3, 4>)
     }
   `,
-    { resolveModule },
+    { resolveModule, optMode: "release" },
   );
 
   assertEquals(wat.match(/call \$add/g)?.length ?? 0, 0);

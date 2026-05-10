@@ -19,6 +19,7 @@ import type {
   TypeShape,
 } from "./core_ast.ts";
 import { CompileError, type Diagnostic, type Span } from "./diagnostics.ts";
+import { isCatchAllPattern } from "./patterns.ts";
 import { intrinsicWrapperId, isIntrinsicWrapper, isKnownIntrinsicId } from "./primitives.ts";
 import { type ShaderManifestEntry, shaderManifestEntry, wgslShaderId } from "./wgsl.ts";
 
@@ -395,12 +396,20 @@ function lowerResolvedOperators(
       case "shape":
         return {
           ...expr,
-          slots: expr.slots.map((slot) => ({ ...slot, value: lowerExpr(slot.value, env) })),
+          slots: expr.slots.map((slot) => ({
+            ...slot,
+            index: slot.index ? lowerExpr(slot.index, env) : undefined,
+            value: lowerExpr(slot.value, env),
+          })),
         };
       case "product_constructor":
         return {
           ...expr,
-          slots: expr.slots.map((slot) => ({ ...slot, value: lowerExpr(slot.value, env) })),
+          slots: expr.slots.map((slot) => ({
+            ...slot,
+            index: slot.index ? lowerExpr(slot.index, env) : undefined,
+            value: lowerExpr(slot.value, env),
+          })),
         };
       case "range":
         return { ...expr, start: lowerExpr(expr.start, env), end: lowerExpr(expr.end, env) };
@@ -467,10 +476,17 @@ function lowerCollectorLiterals(
             })),
           };
         }
-        if (expr.slots.some((slot) => slot.spread)) {
+        if (expr.slots.some((slot) => slot.spread || slot.index)) {
           return {
             ...expr,
-            slots: expr.slots.map((slot) => ({ ...slot, value: lowerExpr(slot.value, undefined) })),
+            slots: expr.slots.map((slot) => ({
+              ...slot,
+              index: slot.index ? lowerExpr(slot.index, undefined) : undefined,
+              value: lowerExpr(
+                slot.value,
+                slot.index ? inlineArrayLikeTypeArgs(expectedType, typeDecls)?.itemType : undefined,
+              ),
+            })),
           };
         }
         const inlineArray = inlineArrayLikeTypeArgs(expectedType, typeDecls);
@@ -2512,6 +2528,7 @@ function specializeInferredExpr(
         ...expr,
         slots: expr.slots.map((slot) => ({
           ...slot,
+          index: slot.index ? specializeInferredExpr(slot.index, context, env) : undefined,
           value: specializeInferredExpr(slot.value, context, env),
         })),
       };
@@ -2520,6 +2537,7 @@ function specializeInferredExpr(
         ...expr,
         slots: expr.slots.map((slot) => ({
           ...slot,
+          index: slot.index ? specializeInferredExpr(slot.index, context, env) : undefined,
           value: specializeInferredExpr(slot.value, context, env),
         })),
       };
@@ -8535,18 +8553,32 @@ function checkExpr(
       }
       return;
     case "shape":
-      if (expr.slots.some((slot) => slot.spread)) {
-        checkInlineArraySpreadLiteral(
-          expr,
-          env,
-          capabilities,
-          effects,
-          diagnostics,
-          expectedType,
-          types,
-          functions,
-          options,
-        );
+      if (expr.slots.some((slot) => slot.spread || slot.index)) {
+        if (expr.syntax === "record") {
+          checkFixedCollectionUpdateLiteral(
+            expr,
+            env,
+            capabilities,
+            effects,
+            diagnostics,
+            inlineArrayLikeTypeArgs(expectedType, types),
+            types,
+            functions,
+            options,
+          );
+        } else {
+          checkInlineArraySpreadLiteral(
+            expr,
+            env,
+            capabilities,
+            effects,
+            diagnostics,
+            expectedType,
+            types,
+            functions,
+            options,
+          );
+        }
         return;
       }
       for (const slot of expr.slots) {
@@ -8775,11 +8807,26 @@ function checkInlineArraySpreadLiteral(
   functions: FnDecl[],
   options: { recoverTypes: boolean },
 ) {
+  const hasOverrides = expr.slots.some((slot) => slot.index);
+  if (hasOverrides) {
+    diagnostics.push(diagnosticAt(
+      "collection.fixed_update_square_syntax",
+      "indexed fixed-array updates use square brackets, for example [...xs, [i]: value]",
+      expr,
+    ));
+  }
   for (const slot of expr.slots) {
     if (slot.label) {
       diagnostics.push(diagnosticAt(
         "collection.spread_labeled",
         "spread entries are only valid in unlabeled collection literals",
+        slot,
+      ));
+    }
+    if (slot.index && slot.spread) {
+      diagnostics.push(diagnosticAt(
+        "collection.indexed_spread",
+        "collection override entries cannot also be spread entries",
         slot,
       ));
     }
@@ -8791,6 +8838,9 @@ function checkInlineArraySpreadLiteral(
       "collection spread literal requires an expected inline_array or inline_array_list type",
       expr,
     ));
+  }
+  if (hasOverrides) {
+    return;
   }
   const itemType = expected?.itemType;
   let itemCount = expr.slots.filter((slot) => !slot.spread).length;
@@ -8850,12 +8900,169 @@ function checkInlineArraySpreadLiteral(
   }
 }
 
+function checkFixedCollectionUpdateLiteral(
+  expr: Extract<Expr, { kind: "shape" }>,
+  env: Map<string, OwnershipBinding>,
+  capabilities: Map<string, string[]>,
+  effects: string[],
+  diagnostics: Diagnostic[],
+  expected:
+    | { kind: "inline_array" | "inline_array_list"; count: number; itemType: string }
+    | undefined,
+  types: TypeDecl[],
+  functions: FnDecl[],
+  options: { recoverTypes: boolean },
+) {
+  if (!expected || expected.kind !== "inline_array") {
+    diagnostics.push(diagnosticAt(
+      "collection.fixed_update_target",
+      "indexed collection override requires an expected fixed inline_array target type",
+      expr,
+    ));
+  }
+  const spreads = expr.slots.filter((slot) => slot.spread);
+  const overrides = expr.slots.filter((slot) => slot.index);
+  if (spreads.length !== 1) {
+    diagnostics.push(diagnosticAt(
+      "collection.fixed_update_spread",
+      "indexed collection override requires exactly one spread source",
+      expr,
+    ));
+  }
+  if (overrides.length === 0) {
+    diagnostics.push(diagnosticAt(
+      "collection.fixed_update_override",
+      "indexed collection override requires at least one indexed override entry",
+      expr,
+    ));
+  }
+  for (const slot of expr.slots) {
+    if (!slot.spread && !slot.index) {
+      diagnostics.push(diagnosticAt(
+        "collection.fixed_update_item",
+        "indexed collection override literals only support a fixed spread source and override entries",
+        slot,
+      ));
+    }
+  }
+  const itemType = expected?.itemType;
+  for (const slot of expr.slots) {
+    if (slot.spread) {
+      checkExpr(
+        slot.value,
+        env,
+        capabilities,
+        effects,
+        diagnostics,
+        undefined,
+        types,
+        functions,
+        options,
+      );
+      const actual = inlineArrayLikeTypeArgs(
+        exprBindingType(slot.value, env, types, functions, options.recoverTypes),
+        types,
+      );
+      if (!actual || actual.kind !== "inline_array") {
+        diagnostics.push(diagnosticAt(
+          "collection.fixed_update_source",
+          "indexed collection override spread source must have fixed inline_array type",
+          slot,
+        ));
+      } else if (expected) {
+        if (
+          Number.isFinite(actual.count) && Number.isFinite(expected.count) &&
+          actual.count !== expected.count
+        ) {
+          diagnostics.push(diagnosticAt(
+            "collection.fixed_update_size",
+            `spread source has size ${actual.count} but expected ${expected.count}`,
+            slot,
+          ));
+        }
+        if (!typeMatches(expected.itemType, actual.itemType)) {
+          diagnostics.push(diagnosticAt(
+            "collection.fixed_update_item_type",
+            `spread source item type ${actual.itemType} does not match expected ${expected.itemType}`,
+            slot,
+          ));
+        }
+      }
+      continue;
+    }
+    if (!slot.index) continue;
+    checkExpr(
+      slot.index,
+      env,
+      capabilities,
+      effects,
+      diagnostics,
+      undefined,
+      types,
+      functions,
+      options,
+    );
+    checkExpr(
+      slot.value,
+      env,
+      capabilities,
+      effects,
+      diagnostics,
+      itemType,
+      types,
+      functions,
+      options,
+    );
+    const actualValueType =
+      exprBindingType(slot.value, env, types, functions, options.recoverTypes) ??
+        literalRuntimeType(slot.value);
+    if (itemType && actualValueType && !typeMatches(itemType, actualValueType)) {
+      diagnostics.push(diagnosticAt(
+        "collection.fixed_update_value_type",
+        `collection override value type ${actualValueType} does not match expected ${itemType}`,
+        slot.value,
+      ));
+    }
+    const literalIndex = staticIntegerLiteral(slot.index);
+    if (
+      expected && literalIndex !== undefined && (literalIndex < 0 || literalIndex >= expected.count)
+    ) {
+      diagnostics.push(diagnosticAt(
+        "collection.fixed_update_index_bounds",
+        `collection override index ${literalIndex} is out of bounds for size ${expected.count}`,
+        slot.index,
+      ));
+    }
+  }
+}
+
+function staticIntegerLiteral(expr: Expr): number | undefined {
+  if (expr.kind !== "literal" || expr.literalKind !== "number") return undefined;
+  if (!/^-?[0-9]+$/.test(expr.value)) return undefined;
+  return Number.parseInt(expr.value, 10);
+}
+
+function literalRuntimeType(expr: Expr): string | undefined {
+  if (expr.kind !== "literal") return undefined;
+  if (expr.literalKind === "number") return "i32";
+  if (expr.literalKind === "bool") return "bool";
+  return expr.inferredType;
+}
+
 function inlineArrayLikeTypeArgs(
   type: string | undefined,
   types: TypeDecl[],
 ): { kind: "inline_array" | "inline_array_list"; count: number; itemType: string } | undefined {
   const resolved = resolveAliasType(type, types)?.trim();
   if (!resolved) return undefined;
+  const tupleRepeat = resolved.match(/^\[\s*(.+?)\s*;\s*([0-9]+)\s*\]$/);
+  if (tupleRepeat) {
+    return {
+      kind: "inline_array",
+      count: Number.parseInt(tupleRepeat[2], 10),
+      itemType: tupleRepeat[1].trim(),
+    };
+  }
   const shapeRepeat = resolved.match(/^\{\s*([0-9]+)\s*\*\s*(.+?)\s*\}$/);
   if (shapeRepeat) {
     return {

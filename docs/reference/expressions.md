@@ -102,6 +102,13 @@ let pair = [1, true];
 let zeros = [0; 4];
 ```
 
+Fixed-array updates also use brackets. They copy one fixed source and apply indexed overrides:
+
+```fig
+let xs: [i32; 3] = [1, 2, 3];
+let ys: [i32; 3] = [...xs, [1]: 32];
+```
+
 Angle-bracket collection literals are target-typed and lower through collector members on the
 expected type. a spread can append a tail collection when the expected collector supports it:
 

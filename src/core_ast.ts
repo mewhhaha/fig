@@ -294,6 +294,7 @@ export type Expr =
           position?: number;
           value: Expr;
           spread?: boolean;
+          index?: Expr;
           repeat?: TypeCountExpr;
         }
         & AstNodeMeta
@@ -322,6 +323,7 @@ export type Expr =
         position?: number;
         value: Expr;
         spread?: boolean;
+        index?: Expr;
         repeat?: TypeCountExpr;
       }
       & AstNodeMeta

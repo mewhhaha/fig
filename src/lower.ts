@@ -27,6 +27,7 @@ import type {
 } from "./core_ast.ts";
 import { fail, type Span } from "./diagnostics.ts";
 import { hideAstMetadata, stripAstMetadata } from "./ast_meta.ts";
+import { patternBindingNames } from "./patterns.ts";
 import type { SyntaxNodeLike } from "../generated/baba-workbench/ast/types.ts";
 import { projectNode } from "../generated/baba-workbench/ast/visitor.ts";
 
@@ -761,8 +762,11 @@ function lowerParamPattern(node: Node): ParamPattern {
   if (node.type === "PatternIdent" || child.type === "PatternIdent") {
     const patternIdent = node.type === "PatternIdent" ? node : child;
     const ident = firstIdentifier(patternIdent).text;
-    const args = optional(patternIdent, "Args")
-      ? named(only(patternIdent, "Args")).filter(is("Expr")).map((expr) =>
+    const argsNode = optional(patternIdent, "PatternArgs") ?? optional(patternIdent, "Args");
+    const args = argsNode
+      ? named(argsNode).filter((node) => node.type === "Pattern" || node.type === "Expr").map((
+        expr,
+      ) =>
         expr.text.trim() === "_"
           ? { kind: "wildcard" as const, ...spanOnly(expr) }
           : /^[A-Za-z_][A-Za-z0-9_]*$/.test(expr.text.trim())
@@ -863,21 +867,6 @@ function lowerLet(node: Node): LetDecl | DestructureLetDecl {
     type: named(tail).find(is("Type"))?.text,
     value: lowerExpr(only(tail, "Expr")),
   };
-}
-
-function patternBindingNames(pattern: ParamPattern): string[] {
-  switch (pattern.kind) {
-    case "binding":
-      return [pattern.name];
-    case "tuple":
-      return pattern.items.flatMap(patternBindingNames);
-    case "constructor":
-      return pattern.args.flatMap(patternBindingNames);
-    case "wildcard":
-    case "literal":
-    case "type":
-      return [];
-  }
 }
 
 function lowerProofConst(node: Node): ProofConstDecl {
@@ -1399,6 +1388,14 @@ function lowerCollectionValueItems(node: Node): Extract<Expr, { kind: "shape" }>
       value: lowerExpr(optional(spread, "Expr") ?? first(spread, "CollectionExpr")),
     }, ...lowerCollectionValueTail(node)];
   }
+  const override = named(node).find(is("CollectionOverrideSlot"));
+  if (override) {
+    return [{
+      ...spanOnly(override),
+      index: lowerExpr(first(override, "Expr")),
+      value: lowerExpr(first(override, "CollectionExpr")),
+    }, ...lowerCollectionValueTail(node)];
+  }
   const expr =
     named(node).find((child) =>
       child.type === "Expr" || child.type === "CollectionExpr" ||
@@ -1430,6 +1427,16 @@ function lowerTupleValue(node: Node): Expr {
       slots: expandRepeatedValueSlot(value, count, spanOnly(repeat)),
     };
   }
+  const items = optional(node, "TupleValueItems") ?? node;
+  const slots = lowerTupleValueItems(items);
+  if (slots.some((slot) => slot.spread || slot.index)) {
+    return {
+      kind: "shape",
+      syntax: "record",
+      ...spanOnly(node),
+      slots,
+    };
+  }
   const exprs = listTupleItems(node, "Expr");
   return {
     kind: "shape",
@@ -1441,6 +1448,41 @@ function lowerTupleValue(node: Node): Expr {
       value: lowerExpr(expr),
     })),
   };
+}
+
+function lowerTupleValueItems(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
+  const spread = named(node).find(is("TupleSpreadSlot"));
+  if (spread) {
+    return [{
+      ...spanOnly(spread),
+      spread: true,
+      value: lowerExpr(first(spread, "Expr")),
+    }, ...lowerTupleValueTail(node)];
+  }
+  const override = named(node).find(is("TupleOverrideSlot"));
+  if (override) {
+    const exprs = named(override).filter(is("Expr"));
+    return [{
+      ...spanOnly(override),
+      index: lowerExpr(exprs[0] ?? first(override, "Expr")),
+      value: lowerExpr(exprs[1] ?? first(override, "Expr")),
+    }, ...lowerTupleValueTail(node)];
+  }
+  const expr = named(node).find(is("Expr"));
+  if (!expr) return [];
+  return [{
+    ...spanOnly(expr),
+    position: 0,
+    value: lowerExpr(expr),
+  }, ...lowerTupleValueTail(node)].map((slot, position) =>
+    slot.spread || slot.index ? slot : { ...slot, position }
+  );
+}
+
+function lowerTupleValueTail(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
+  const tail = named(node).find(is("TupleValueTail"));
+  const tailItems = tail ? named(tail).find(is("TupleValueItems")) : undefined;
+  return tailItems ? lowerTupleValueItems(tailItems) : [];
 }
 
 function expandRepeatedValueSlot(

@@ -77,7 +77,7 @@ export async function wasmFromSource(
 export { parse } from "./parser.ts";
 export { formatSource, isFormatted } from "./format.ts";
 export { tokenize } from "./tokenize.ts";
-export { optimizeProgram, type OptLevel, summarizeProgram } from "./optimize.ts";
+export { optimizeProgram, type OptMode, summarizeProgram } from "./optimize.ts";
 export { CompileError, formatDiagnostic } from "./diagnostics.ts";
 
 async function resolveSourceImports(

@@ -230,7 +230,7 @@ let state_next = state_then;
 }
 
 fn InlineArray.set(const n: count, const a: type, xs: InlineArray(n, a), index: core.Index(n), value: a) -> InlineArray(n, a) {
-  InlineArray.set_loop(n, a, core.IndexCursor.start(n), InlineArrayBuilder.start(n, a), xs, index, value)
+  [...xs, [index]: value]
 }
 
 fn InlineArray.set_loop(
@@ -278,7 +278,8 @@ fn InlineArray.update(
   index: core.Index(n),
   const f: fn(x: a) -> a
 ) -> InlineArray(n, a) {
-  InlineArray.update_loop(n, a, core.IndexCursor.start(n), InlineArrayBuilder.start(n, a), xs, index, f)
+  let old = xs[index];
+  [...xs, [index]: f(old)]
 }
 
 fn InlineArray.update_loop(

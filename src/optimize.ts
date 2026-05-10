@@ -8,22 +8,23 @@ import type {
   Statement,
   StaticForSource,
 } from "./core_ast.ts";
+import { patternBindingNames, patternBindsName } from "./patterns.ts";
 
 const INLINE_COST_BUDGET = 18;
 const PRODUCT_INLINE_COST_BUDGET = 12;
 const OPTIMIZE_PASSES = 4;
 
-export type OptLevel = "debug" | "default" | "speed" | "size";
+export type OptMode = "debug" | "release";
 
 export interface OptimizeOptions {
-  optLevel?: OptLevel;
+  optMode?: OptMode;
 }
 
 interface OptimizerConfig {
-  optLevel: OptLevel;
   scalarInlineBudget: number;
   productInlineBudget: number;
   passes: number;
+  rewriteUnusedPrivateParams: boolean;
 }
 
 export interface FunctionSummary {
@@ -56,7 +57,7 @@ export interface FunctionSummary {
 }
 
 export function optimizeProgram(program: Program, options: OptimizeOptions = {}): Program {
-  const config = optimizerConfig(options.optLevel ?? "default");
+  const config = optimizerConfig(options.optMode ?? "debug");
   const optimized = structuredClone(program) as Program;
   for (let pass = 0; pass < config.passes; pass++) {
     const functions = functionMap(optimized);
@@ -67,25 +68,25 @@ export function optimizeProgram(program: Program, options: OptimizeOptions = {})
       optimizeDecl(decl, forwarding, inlineable, functions)
     );
   }
+  if (config.rewriteUnusedPrivateParams) rewriteUnusedPrivateParams(optimized);
   return optimized;
 }
 
-function optimizerConfig(optLevel: OptLevel): OptimizerConfig {
-  switch (optLevel) {
-    case "debug":
-      return { optLevel, scalarInlineBudget: 6, productInlineBudget: 4, passes: 1 };
-    case "speed":
-      return { optLevel, scalarInlineBudget: 36, productInlineBudget: 28, passes: 8 };
-    case "size":
-      return { optLevel, scalarInlineBudget: 8, productInlineBudget: 0, passes: 2 };
-    case "default":
-      return {
-        optLevel,
-        scalarInlineBudget: INLINE_COST_BUDGET,
-        productInlineBudget: PRODUCT_INLINE_COST_BUDGET,
-        passes: OPTIMIZE_PASSES,
-      };
+function optimizerConfig(optMode: OptMode): OptimizerConfig {
+  if (optMode === "debug") {
+    return {
+      scalarInlineBudget: 0,
+      productInlineBudget: 0,
+      passes: 0,
+      rewriteUnusedPrivateParams: false,
+    };
   }
+  return {
+    scalarInlineBudget: INLINE_COST_BUDGET,
+    productInlineBudget: PRODUCT_INLINE_COST_BUDGET,
+    passes: OPTIMIZE_PASSES,
+    rewriteUnusedPrivateParams: true,
+  };
 }
 
 function functionMap(program: Program): Map<string, FnDecl> {
@@ -113,7 +114,7 @@ export function summarizeProgram(
   program: Program,
   options: OptimizeOptions = {},
 ): Map<string, FunctionSummary> {
-  const _config = optimizerConfig(options.optLevel ?? "default");
+  const _config = optimizerConfig(options.optMode ?? "debug");
   const functions = functionMap(program);
   return functionSummaries(program, functions);
 }
@@ -285,7 +286,99 @@ function optimizeBlock(
       ? inlineCallExpr(expr, inlineable, { allowMultiValue: true }) ?? expr
       : expr,
   };
-  return removeUnusedPureLets(optimized, functions);
+  const fixedUpdateFolded = foldFixedUpdateIndexLets(
+    optimized,
+    forwarding,
+    inlineable,
+    functions,
+  );
+  return removeUnusedPureLets(fixedUpdateFolded, functions);
+}
+
+function foldFixedUpdateIndexLets(
+  block: BlockExpr,
+  forwarding: Map<string, string>,
+  inlineable: Map<string, FnDecl>,
+  functions: Map<string, FnDecl>,
+): BlockExpr {
+  if (!block.expr || block.expr.kind !== "shape") return block;
+  if (
+    !block.expr.slots.some((slot) => slot.spread) || !block.expr.slots.some((slot) => slot.index)
+  ) {
+    return block;
+  }
+
+  const pureLets = pureLetValues(block, forwarding, inlineable, functions);
+  if (!pureLets.size) return block;
+
+  const replacements = new Map<string, Expr>();
+  for (const slot of block.expr.slots) {
+    if (!slot.index) continue;
+    let candidate = slot.index;
+    const contributors = new Set<string>();
+    for (const [name, value] of pureLets) {
+      if (!usedNames(candidate).has(name)) continue;
+      candidate = substituteVar(candidate, name, value);
+      contributors.add(name);
+    }
+    const optimized = optimizeExpr(candidate, forwarding, inlineable, functions);
+    if (!isIntegerLiteral(optimized)) continue;
+    for (const name of contributors) replacements.set(name, optimized);
+  }
+  if (!replacements.size) return block;
+  return substituteLocalLetUses(block, replacements);
+}
+
+function pureLetValues(
+  block: BlockExpr,
+  forwarding: Map<string, string>,
+  inlineable: Map<string, FnDecl>,
+  functions: Map<string, FnDecl>,
+): Map<string, Expr> {
+  const values = new Map<string, Expr>();
+  for (const stmt of block.statements) {
+    if (stmt.kind === "proof_const") continue;
+    let value = stmt.value;
+    for (const [name, replacement] of values) {
+      if (usedNames(value).has(name)) value = substituteVar(value, name, replacement);
+    }
+    value = optimizeExpr(value, forwarding, inlineable, functions);
+    if (stmt.kind === "let" && !hasRuntimeEffect(value, functions)) {
+      values.set(stmt.name, value);
+      continue;
+    }
+    const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
+    for (const name of bindings) values.delete(name);
+  }
+  return values;
+}
+
+function substituteLocalLetUses(block: BlockExpr, replacements: Map<string, Expr>): BlockExpr {
+  let active = new Map<string, Expr>();
+  const statements = block.statements.map((stmt) => {
+    if (stmt.kind === "proof_const") return stmt;
+    const value = substituteMany(stmt.value, active);
+    const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
+    active = new Map([...active].filter(([name]) => !bindings.includes(name)));
+    if (stmt.kind === "let") {
+      const replacement = replacements.get(stmt.name);
+      if (replacement) active.set(stmt.name, replacement);
+    }
+    return { ...stmt, value };
+  });
+  return {
+    ...block,
+    statements,
+    expr: block.expr ? substituteMany(block.expr, active) : undefined,
+  };
+}
+
+function substituteMany(expr: Expr, replacements: Map<string, Expr>): Expr {
+  let result = expr;
+  for (const [name, value] of replacements) {
+    if (usedNames(result).has(name)) result = substituteVar(result, name, value);
+  }
+  return result;
 }
 
 function optimizeStatement(
@@ -296,14 +389,24 @@ function optimizeStatement(
 ): Statement {
   if (stmt.kind === "let" || stmt.kind === "destructure_let") {
     const value = optimizeExpr(stmt.value, forwarding, inlineable, functions);
+    const inlined = stmt.kind === "destructure_let" || isFixedUpdateInlineCall(value, inlineable)
+      ? inlineCallExpr(value, inlineable, { allowMultiValue: true })
+      : undefined;
     return {
       ...stmt,
-      value: stmt.kind === "destructure_let"
-        ? inlineCallExpr(value, inlineable, { allowMultiValue: true }) ?? value
-        : value,
+      value: inlined ? optimizeExpr(inlined, forwarding, inlineable, functions) : value,
     };
   }
   return stmt;
+}
+
+function isFixedUpdateInlineCall(expr: Expr, inlineable: Map<string, FnDecl>): boolean {
+  if (expr.kind !== "call" || expr.callee.kind !== "var") return false;
+  const fn = inlineable.get(expr.callee.name);
+  if (!fn?.body.expr) return false;
+  return fn.body.expr.kind === "shape" &&
+    fn.body.expr.slots.some((slot) => slot.spread) &&
+    fn.body.expr.slots.some((slot) => slot.index);
 }
 
 function optimizeExpr(
@@ -376,6 +479,9 @@ function optimizeExpr(
         ...expr,
         slots: expr.slots.map((slot) => ({
           ...slot,
+          index: slot.index
+            ? optimizeExpr(slot.index, forwarding, inlineable, functions)
+            : undefined,
           value: optimizeExpr(slot.value, forwarding, inlineable, functions),
         })),
       };
@@ -412,6 +518,282 @@ function optimizeExpr(
     case "placeholder":
       return expr;
   }
+}
+
+function rewriteUnusedPrivateParams(program: Program) {
+  const functions = functionMap(program);
+  const valueUses = functionValueUses(program, functions);
+  const drops = new Map<string, Set<number>>();
+  for (const fn of functions.values()) {
+    if (
+      fn.public || fn.generated || fn.primitiveId || fn.params.some((param) => param.const) ||
+      valueUses.has(fn.name) || exprCallsFunction(fn.body, fn.name)
+    ) {
+      continue;
+    }
+    const calls = directCallsTo(program, fn.name);
+    if (!calls.length) continue;
+    const used = blockUsedNames(fn.body);
+    const indexes = new Set<number>();
+    fn.params.forEach((param, index) => {
+      if (used.has(param.name)) return;
+      const allCallsCanDrop = calls.every((call) =>
+        call.args.length === fn.params.length && call.args[index] &&
+        !hasRuntimeEffect(call.args[index], functions)
+      );
+      if (allCallsCanDrop) indexes.add(index);
+    });
+    if (indexes.size) drops.set(fn.name, indexes);
+  }
+  if (!drops.size) return;
+  program.declarations = program.declarations.map((decl) => {
+    if (decl.kind !== "fn") return decl;
+    const indexes = drops.get(decl.name);
+    const params = indexes
+      ? decl.params.filter((_param, index) => !indexes.has(index))
+      : decl.params;
+    return {
+      ...decl,
+      params,
+      body: rewriteDroppedCallArgs(decl.body, drops),
+    };
+  });
+}
+
+function directCallsTo(program: Program, target: string): Extract<Expr, { kind: "call" }>[] {
+  const calls: Extract<Expr, { kind: "call" }>[] = [];
+  const visit = (item: Expr | BlockExpr | Statement | undefined) => {
+    if (!item) return;
+    switch (item.kind) {
+      case "call":
+        if (item.callee.kind === "var" && item.callee.name === target) calls.push(item);
+        visit(item.callee);
+        item.args.forEach(visit);
+        return;
+      case "index":
+        visit(item.target);
+        visit(item.index);
+        return;
+      case "binary":
+        visit(item.left);
+        visit(item.right);
+        return;
+      case "pipe_bind":
+        visit(item.value);
+        visit(item.body);
+        return;
+      case "match":
+        visit(item.value);
+        item.arms.forEach((arm) => visit(arm.value));
+        return;
+      case "shape":
+      case "product_constructor":
+        item.slots.forEach((slot) => {
+          visit(slot.index);
+          visit(slot.value);
+        });
+        return;
+      case "static_for_slots":
+        visitStaticForSource(item.source);
+        visit(item.value);
+        return;
+      case "field":
+        visit(item.value);
+        visit(item.key);
+        return;
+      case "range":
+        visit(item.start);
+        visit(item.end);
+        return;
+      case "block":
+        item.statements.forEach(visit);
+        visit(item.expr);
+        return;
+      case "let":
+      case "destructure_let":
+        visit(item.value);
+        return;
+      case "proof_const":
+      case "literal":
+      case "var":
+      case "placeholder":
+        return;
+    }
+  };
+  const visitStaticForSource = (source: StaticForSource) => {
+    if (source.kind === "range") {
+      visit(source.start);
+      visit(source.end);
+    } else {
+      visit(source.shape);
+    }
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") visit(decl.body);
+    if (decl.kind === "let" || decl.kind === "const") visit(decl.value);
+  }
+  return calls;
+}
+
+function functionValueUses(program: Program, functions: Map<string, FnDecl>): Set<string> {
+  const used = new Set<string>();
+  const visit = (item: Expr | BlockExpr | Statement | undefined, calleePosition = false) => {
+    if (!item) return;
+    switch (item.kind) {
+      case "var":
+        if (!calleePosition && functions.has(item.name)) used.add(item.name);
+        return;
+      case "call":
+        visit(item.callee, true);
+        item.args.forEach((arg) => visit(arg));
+        return;
+      case "index":
+        visit(item.target);
+        visit(item.index);
+        return;
+      case "binary":
+        visit(item.left);
+        visit(item.right);
+        return;
+      case "pipe_bind":
+        visit(item.value);
+        visit(item.body);
+        return;
+      case "match":
+        visit(item.value);
+        item.arms.forEach((arm) => visit(arm.value));
+        return;
+      case "shape":
+      case "product_constructor":
+        item.slots.forEach((slot) => {
+          visit(slot.index);
+          visit(slot.value);
+        });
+        return;
+      case "static_for_slots":
+        visitStaticForSource(item.source);
+        visit(item.value);
+        return;
+      case "field":
+        visit(item.value);
+        visit(item.key);
+        return;
+      case "range":
+        visit(item.start);
+        visit(item.end);
+        return;
+      case "block":
+        item.statements.forEach((stmt) => visit(stmt));
+        visit(item.expr);
+        return;
+      case "let":
+      case "destructure_let":
+        visit(item.value);
+        return;
+      case "proof_const":
+      case "literal":
+      case "placeholder":
+        return;
+    }
+  };
+  const visitStaticForSource = (source: StaticForSource) => {
+    if (source.kind === "range") {
+      visit(source.start);
+      visit(source.end);
+    } else {
+      visit(source.shape);
+    }
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") visit(decl.body);
+    if (decl.kind === "let" || decl.kind === "const") visit(decl.value);
+  }
+  return used;
+}
+
+function rewriteDroppedCallArgs<T extends Expr | BlockExpr>(
+  expr: T,
+  drops: Map<string, Set<number>>,
+): T {
+  return rewriteExpr(expr, drops) as T;
+}
+
+function rewriteExpr(expr: Expr, drops: Map<string, Set<number>>): Expr {
+  switch (expr.kind) {
+    case "call": {
+      const callee = rewriteExpr(expr.callee, drops);
+      const indexes = callee.kind === "var" ? drops.get(callee.name) : undefined;
+      const args = expr.args
+        .map((arg) => rewriteExpr(arg, drops))
+        .filter((_arg, index) => !indexes?.has(index));
+      return { ...expr, callee, args };
+    }
+    case "index":
+      return {
+        ...expr,
+        target: rewriteExpr(expr.target, drops),
+        index: rewriteExpr(expr.index, drops),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: rewriteExpr(expr.left, drops),
+        right: rewriteExpr(expr.right, drops),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: rewriteExpr(expr.value, drops),
+        body: rewriteExpr(expr.body, drops),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: rewriteExpr(expr.value, drops),
+        arms: expr.arms.map((arm) => ({ ...arm, value: rewriteExpr(arm.value, drops) })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          index: slot.index ? rewriteExpr(slot.index, drops) : undefined,
+          value: rewriteExpr(slot.value, drops),
+        })),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: rewriteStaticForSource(expr.source, drops),
+        value: rewriteExpr(expr.value, drops),
+      };
+    case "range":
+      return { ...expr, start: rewriteExpr(expr.start, drops), end: rewriteExpr(expr.end, drops) };
+    case "field":
+      return { ...expr, value: rewriteExpr(expr.value, drops), key: rewriteExpr(expr.key, drops) };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "proof_const" ? stmt : { ...stmt, value: rewriteExpr(stmt.value, drops) }
+        ),
+        expr: expr.expr ? rewriteExpr(expr.expr, drops) : undefined,
+      };
+    case "literal":
+    case "var":
+    case "placeholder":
+      return expr;
+  }
+}
+
+function rewriteStaticForSource(
+  source: StaticForSource,
+  drops: Map<string, Set<number>>,
+): StaticForSource {
+  return source.kind === "range"
+    ? { ...source, start: rewriteExpr(source.start, drops), end: rewriteExpr(source.end, drops) }
+    : { ...source, shape: rewriteExpr(source.shape, drops) };
 }
 
 function optimizeStaticShapeCall(callee: Expr, args: Expr[]): Expr | undefined {
@@ -464,6 +846,10 @@ function isNumberLiteral(expr: Expr, value: number): boolean {
     Number.parseInt(expr.value, 10) === value;
 }
 
+function isIntegerLiteral(expr: Expr): boolean {
+  return expr.kind === "literal" && expr.literalKind === "number" && /^-?[0-9]+$/.test(expr.value);
+}
+
 function isBoolLiteral(expr: Expr, value: boolean): boolean {
   return expr.kind === "literal" && expr.literalKind === "bool" && expr.value === String(value);
 }
@@ -496,7 +882,11 @@ function stableExprKey(expr: Expr): string {
     case "shape":
     case "product_constructor":
       return `${expr.kind}:${
-        expr.slots.map((slot) => `${slot.label ?? ""}=${stableExprKey(slot.value)}`).join(",")
+        expr.slots.map((slot) =>
+          `${slot.label ?? ""}[${slot.index ? stableExprKey(slot.index) : ""}]=${
+            stableExprKey(slot.value)
+          }`
+        ).join(",")
       }`;
     case "match":
       return `match:${stableExprKey(expr.value)}:${
@@ -609,7 +999,11 @@ function exprCost(expr: Expr): number {
         expr.arms.reduce((sum, arm) => sum + exprCost(arm.value), 0);
     case "shape":
     case "product_constructor":
-      return 1 + expr.slots.reduce((sum, slot) => sum + exprCost(slot.value), 0);
+      return 1 +
+        expr.slots.reduce(
+          (sum, slot) => sum + (slot.index ? exprCost(slot.index) : 0) + exprCost(slot.value),
+          0,
+        );
     case "static_for_slots":
       return 4 + exprCost(expr.value) + staticForSourceCost(expr.source);
     case "range":
@@ -650,7 +1044,10 @@ function exprCallsFunction(expr: Expr | BlockExpr | undefined, name: string): bo
         expr.arms.some((arm) => exprCallsFunction(arm.value, name));
     case "shape":
     case "product_constructor":
-      return expr.slots.some((slot) => exprCallsFunction(slot.value, name));
+      return expr.slots.some((slot) =>
+        (slot.index ? exprCallsFunction(slot.index, name) : false) ||
+        exprCallsFunction(slot.value, name)
+      );
     case "static_for_slots":
       return exprCallsFunction(expr.value, name) ||
         (expr.source.kind === "range"
@@ -700,7 +1097,10 @@ function calledFunctionList(expr: Expr | BlockExpr | undefined): string[] {
         return;
       case "shape":
       case "product_constructor":
-        item.slots.forEach((slot) => visit(slot.value));
+        item.slots.forEach((slot) => {
+          visit(slot.index);
+          visit(slot.value);
+        });
         return;
       case "static_for_slots":
         visitStaticForSource(item.source);
@@ -826,7 +1226,7 @@ function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
       return [expr.value, ...expr.arms.map((arm) => arm.value)];
     case "shape":
     case "product_constructor":
-      return expr.slots.map((slot) => slot.value);
+      return expr.slots.flatMap((slot) => slot.index ? [slot.index, slot.value] : [slot.value]);
     case "static_for_slots":
       return [
         ...(expr.source.kind === "range"
@@ -979,6 +1379,7 @@ function renameExprBindings(expr: Expr, env: Map<string, string>, fnName: string
         ...expr,
         slots: expr.slots.map((slot) => ({
           ...slot,
+          index: slot.index ? renameExprBindings(slot.index, env, fnName) : undefined,
           value: renameExprBindings(slot.value, env, fnName),
         })),
       };
@@ -1118,11 +1519,18 @@ function usedNames(expr: Expr | undefined): Set<string> {
         return;
       case "match":
         visit(item.value);
-        for (const arm of item.arms) visit(arm.value);
+        for (const arm of item.arms) {
+          const scoped = usedNames(arm.value);
+          for (const binding of patternBindingNames(arm.pattern)) scoped.delete(binding);
+          for (const name of scoped) names.add(name);
+        }
         return;
       case "shape":
       case "product_constructor":
-        for (const slot of item.slots) visit(slot.value);
+        for (const slot of item.slots) {
+          visit(slot.index);
+          visit(slot.value);
+        }
         return;
       case "static_for_slots":
         visitStaticForSource(item.source);
@@ -1194,7 +1602,10 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
         expr.arms.some((arm) => hasRuntimeEffect(arm.value, functions));
     case "shape":
     case "product_constructor":
-      return expr.slots.some((slot) => hasRuntimeEffect(slot.value, functions));
+      return expr.slots.some((slot) =>
+        (slot.index ? hasRuntimeEffect(slot.index, functions) : false) ||
+        hasRuntimeEffect(slot.value, functions)
+      );
     case "range":
       return hasRuntimeEffect(expr.start, functions) || hasRuntimeEffect(expr.end, functions);
     case "static_for_slots":
@@ -1266,7 +1677,7 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
         value: substituteVar(expr.value, name, value),
         arms: expr.arms.map((arm) => ({
           ...arm,
-          value: patternBinds(arm.pattern, name)
+          value: patternBindsName(arm.pattern, name)
             ? arm.value
             : substituteVar(arm.value, name, value),
         })),
@@ -1277,6 +1688,7 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
         ...expr,
         slots: expr.slots.map((slot) => ({
           ...slot,
+          index: slot.index ? substituteVar(slot.index, name, value) : undefined,
           value: substituteVar(slot.value, name, value),
         })),
       };
@@ -1329,19 +1741,4 @@ function substituteBlock(block: BlockExpr, name: string, value: Expr): BlockExpr
     statements,
     expr: !shadowed && block.expr ? substituteVar(block.expr, name, value) : block.expr,
   };
-}
-
-function patternBinds(
-  pattern: { kind: string; name?: string; args?: unknown[] },
-  name: string,
-): boolean {
-  if ((pattern.kind === "binding" || pattern.kind === "constructor") && pattern.name === name) {
-    return true;
-  }
-  const args = pattern.args;
-  return Array.isArray(args) &&
-    args.some((arg) =>
-      typeof arg === "object" && arg !== null &&
-      patternBinds(arg as { kind: string; name?: string; args?: unknown[] }, name)
-    );
 }

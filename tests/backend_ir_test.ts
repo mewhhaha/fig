@@ -1,6 +1,49 @@
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert@1";
 import { wasmFromSource, watFromSource } from "../src/mod.ts";
 
+const resolveModule = async (moduleName: string) => {
+  try {
+    return await Deno.readTextFile(`${moduleName.replaceAll(".", "/")}.fig`);
+  } catch {
+    return undefined;
+  }
+};
+
+function hasCustomSection(bytes: Uint8Array, name: string): boolean {
+  let offset = 8;
+  while (offset < bytes.length) {
+    const id = bytes[offset++];
+    const size = readUleb(bytes, offset);
+    offset = size.offset;
+    const payloadEnd = offset + size.value;
+    if (id === 0) {
+      const sectionName = readName(bytes, offset);
+      if (sectionName.value === name) return true;
+    }
+    offset = payloadEnd;
+  }
+  return false;
+}
+
+function readName(bytes: Uint8Array, offset: number): { value: string; offset: number } {
+  const size = readUleb(bytes, offset);
+  const start = size.offset;
+  const end = start + size.value;
+  return { value: new TextDecoder().decode(bytes.slice(start, end)), offset: end };
+}
+
+function readUleb(bytes: Uint8Array, offset: number): { value: number; offset: number } {
+  let value = 0;
+  let shift = 0;
+  while (offset < bytes.length) {
+    const byte = bytes[offset++];
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+  }
+  return { value, offset };
+}
+
 Deno.test("WAT and wasm share lowered import signatures", async () => {
   const source = `
     const clock: fn() -> i32 !{time} = @capability("clock");
@@ -19,13 +62,33 @@ Deno.test("WAT and wasm share lowered import signatures", async () => {
   );
 });
 
+Deno.test("debug is the default opt mode and emits wasm name section", async () => {
+  const source = `
+    fn add1(x: i32) -> i32 { x + 1 }
+    pub fn main() -> i32 { add1(41) }
+  `;
+  const debugWat = await watFromSource(source);
+  assertStringIncludes(debugWat, "(func $add1");
+  assertStringIncludes(debugWat, "call $add1");
+
+  const debugWasm = await wasmFromSource(source);
+  assert(hasCustomSection(debugWasm, "name"));
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(debugWasm));
+  assertEquals((instance.exports.main as CallableFunction)(), 42);
+
+  const releaseWat = await watFromSource(source, { optMode: "release" });
+  assert(!releaseWat.includes("(func $add1"));
+  assert(!releaseWat.includes("call $add1"));
+  assert(!hasCustomSection(await wasmFromSource(source, { optMode: "release" }), "name"));
+});
+
 Deno.test("backend folds scalar literal arithmetic", async () => {
-  const wat = await watFromSource(`pub fn main() -> i32 { 40 + 2 }`);
+  const wat = await watFromSource(`pub fn main() -> i32 { 40 + 2 }`, { optMode: "release" });
   assertStringIncludes(wat, "i32.const 42");
   assert(!wat.includes("i32.add"));
 });
 
-Deno.test("backend lowers runtime inline-array indexing with branches", async () => {
+Deno.test("backend lowers runtime inline-array indexing with scalar select", async () => {
   const wat = await watFromSource(`
     type fn InlineArray(n: count, a: type) -> type {
       let InlineArray = {n*a};
@@ -38,63 +101,81 @@ Deno.test("backend lowers runtime inline-array indexing with branches", async ()
       get([4, 5, 6], 1)
     }
   `);
-  assertStringIncludes(wat, "if (result i32)");
+  assertStringIncludes(wat, "select");
   assertStringIncludes(wat, "i32.eq");
   assertStringIncludes(wat, "i32.const 1");
 });
 
 Deno.test("backend does not allocate unused pure locals", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     pub fn main() -> i32 {
       let unused: i32 = 1 + 2;
       9
     }
-  `);
+  `,
+    { optMode: "release" },
+  );
   assert(!wat.includes("(local $unused"));
   assert(!wat.includes("i32.const 3"));
 });
 
 Deno.test("backend uses local tee for immediate set get roundtrips", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     pub fn main() -> i32 {
       let x = 41;
       x + 1
     }
-  `);
+  `,
+    { optMode: "release" },
+  );
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(main, "local.tee $x");
   assert(!main.includes("local.set $x\n    local.get $x"));
 });
 
 Deno.test("backend removes unreachable instructions after branch terminators", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     fn loop_forever() -> i32 { loop_forever() }
     pub fn main() -> i32 { loop_forever() }
-  `);
+  `,
+    { optMode: "release" },
+  );
   const loop = wat.match(/\(func \$loop_forever[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(loop, "br 0");
   assert(!loop.includes("br 0\n        unreachable"));
 });
 
 Deno.test("optimizer simplifies numeric identities without dropping effects", async () => {
-  const pure = await watFromSource(`
+  const pure = await watFromSource(
+    `
     pub fn main(x: i32) -> i32 { (x * 1) + 0 }
-  `);
+  `,
+    { optMode: "release" },
+  );
   const pureMain = pure.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assert(!pureMain.includes("i32.mul"));
   assert(!pureMain.includes("i32.add"));
 
-  const samePure = await watFromSource(`
+  const samePure = await watFromSource(
+    `
     pub fn main(seed: i32) -> i32 { seed - seed }
-  `);
+  `,
+    { optMode: "release" },
+  );
   const samePureMain = samePure.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(samePureMain, "i32.const 0");
   assert(!samePureMain.includes("i32.sub"));
 
-  const effectful = await watFromSource(`
+  const effectful = await watFromSource(
+    `
     const clock: fn() -> i32 !{time} = @capability("clock");
     pub fn main() -> i32 !{time} { clock() * 0 }
-  `);
+  `,
+    { optMode: "release" },
+  );
   assertStringIncludes(effectful, "call $clock");
   assertStringIncludes(effectful, "i32.mul");
 });
@@ -118,7 +199,7 @@ Deno.test("benchmark-style internal loop calls private kernel directly", async (
       }
     }
   `;
-  const wat = await watFromSource(source, { optLevel: "speed", memoryModel: "branch" });
+  const wat = await watFromSource(source, { memoryModel: "branch", optMode: "release" });
   const benchLoop = wat.match(/\(func \$bench_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(benchLoop, "loop");
   assert(!benchLoop.includes("call $main"));
@@ -139,15 +220,66 @@ Deno.test("backend preserves and drops unused effectful capability calls", async
   assertStringIncludes(wat, "drop");
 });
 
+Deno.test("wildcard match skips pure scrutinee but preserves effectful scrutinee", async () => {
+  const pure = await watFromSource(`
+    fn ignored() -> i32 { 1 + 2 }
+    pub fn main() -> i32 {
+      match ignored() { _ => 7 }
+    }
+  `);
+  assert(!pure.includes("call $ignored"));
+  assert(!pure.includes("i32.const 3"));
+
+  const effectful = await watFromSource(`
+    const clock: fn() -> i32 !{time} = @capability("clock");
+    pub fn main() -> i32 !{time} {
+      match clock() { _ => 7 }
+    }
+  `);
+  assertStringIncludes(effectful, "call $clock");
+  assertStringIncludes(effectful, "drop");
+});
+
 Deno.test("backend removes private functions unreachable from exports", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     fn unused() -> i32 { 1 }
     fn used() -> i32 { 2 }
     pub fn main() -> i32 { used() }
-  `);
+  `,
+    { optMode: "release" },
+  );
   assert(!wat.includes("(func $unused"));
   assert(!wat.includes("(func $used"));
   assert(!wat.includes("call $used"));
+});
+
+Deno.test("optimizer drops pure unused private call arguments only when safe", async () => {
+  const pure = await watFromSource(
+    `
+    fn keep_second(_: i32, b: i32) -> i32 {
+      b + b + b + b + b + b + b + b + b + b + b + b
+    }
+    pub fn main() -> i32 { keep_second(40 + 2, 6) }
+  `,
+    { optMode: "release" },
+  );
+  assertStringIncludes(pure, `(func $keep_second (param $b i32) (result i32)`);
+  assert(!pure.includes("i32.const 42"));
+
+  const effectful = await watFromSource(
+    `
+    const clock: fn() -> i32 !{time} = @capability("clock");
+    fn keep_second(_: i32, b: i32) -> i32 {
+      b + b + b + b + b + b + b + b + b + b + b + b
+    }
+    pub fn main() -> i32 !{time} { keep_second(clock(), 6) }
+  `,
+    { optMode: "release" },
+  );
+  assertStringIncludes(effectful, `(func $keep_second (param $__pattern_`);
+  assertStringIncludes(effectful, "call $clock");
+  assertStringIncludes(effectful, "call $keep_second");
 });
 
 Deno.test("tail-recursive self calls lower to loops by default", async () => {
@@ -223,18 +355,46 @@ Deno.test("index cursor Yield item proves inline-array indexing and lowers inlin
       sum_loop([10, 20, 12], core.IndexCursor.start(3), 0)
     }
   `;
-  const wat = await watFromSource(source);
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
   const sum = wat.match(/\(func \$sum_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(sum, "loop");
   assert(!sum.includes("IndexCursor.next"));
   assert(!sum.includes("call $sum_loop"));
 
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
   assertEquals((instance.exports.main as CallableFunction)(), 42);
 });
 
+Deno.test("index cursor Yield wildcard payload skips unused item local", async () => {
+  const source = `
+    const core = @import("prelude.core");
+    fn skip_items(cursor: core.IndexCursor(3), acc: i32) -> i32 {
+      match core.IndexCursor.next(3, cursor) {
+        Yield(_, next) => skip_items(next, acc + 1),
+        Done => acc,
+      }
+    }
+    pub fn main() -> i32 {
+      skip_items(core.IndexCursor.start(3), 0)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const skip = wat.match(/\(func \$skip_items[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(!skip.includes("__iter_item"));
+  assert(!skip.includes("local.set $i"));
+  assertStringIncludes(skip, "$next");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 3);
+});
+
 Deno.test("inline array builder primitives lower without runtime calls", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     type fn Index(n: count) -> type { i32 }
     type fn InlineArray(n: count, a: type) -> type {
       let InlineArray = {n*a};
@@ -266,12 +426,155 @@ Deno.test("inline array builder primitives lower without runtime calls", async (
       let xs = InlineArrayBuilder.finish(2, i32, b2);
       xs[0] + xs[1]
     }
-  `);
+  `,
+    { optMode: "release" },
+  );
 
   assert(!wat.includes("InlineArrayBuilder.start"));
   assert(!wat.includes("InlineArrayBuilder.push"));
   assert(!wat.includes("InlineArrayBuilder.finish"));
   assert(!wat.includes("call $inline_array_builder"));
+});
+
+Deno.test("indexed spread fixed tuple update lowers without builder loop", async () => {
+  const source = `
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    fn source(seed: i32) -> InlineArray(4, i32) {
+      <seed + 1, 2, 3, 4>
+    }
+    pub fn main(seed: i32) -> i32 {
+      let xs = source(seed);
+      let ys: InlineArray(4, i32) = [...xs, [1]: 32];
+      xs[1] + ys[1] + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assert(!wat.includes("InlineArrayBuilder"));
+  assert(!wat.includes("InlineArray.set_loop"));
+  assert(!wat.includes("InlineArray.update_loop"));
+  assert(!wat.includes("if"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 38);
+});
+
+Deno.test("public inline array update folds statically known index", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn bump(x: i32) -> i32 { x + 3 }
+    pub fn main(seed: i32) -> i32 {
+      let xs: layout.InlineArray(4, i32) = <1, 2, 3, 4>;
+      let ys: layout.InlineArray(4, i32) = layout.InlineArray.update(4, i32, xs, seed - seed + 2, bump);
+      xs[2] + ys[2] + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(!main.includes("InlineArray.update_loop"));
+  assert(!main.includes("InlineArrayBuilder"));
+  assert(!main.includes("if"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 13);
+});
+
+Deno.test("backend prunes lowered helpers unused after fixed update lowering", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
+    fn bump(x: i32) -> i32 { x + 3 }
+    pub fn main(seed: i32) -> i32 {
+      let xs = layout.InlineArray.tabulate(16, i32, make);
+      let ys = layout.InlineArray.update(16, i32, xs, seed - seed + 7, bump);
+      xs[7] + ys[7] + ys[15]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+
+  assertEquals((wat.match(/\(func /g) ?? []).length, 1);
+  assert(!wat.includes("InlineArray.update_loop"));
+  assert(!wat.includes("InlineArrayBuilder"));
+  assert(!wat.includes("call $"));
+});
+
+Deno.test("dynamic scalar inline array indexing lowers through select", async () => {
+  const source = `
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    pub fn main(index: i32) -> i32 {
+      let xs: InlineArray(4, i32) = <10, 20, 30, 40>;
+      xs[index]
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(main, "select");
+  assert(!main.includes("if"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(0), 10);
+  assertEquals((instance.exports.main as CallableFunction)(2), 30);
+  assertEquals((instance.exports.main as CallableFunction)(9), 40);
+});
+
+Deno.test("safe dynamic scalar fixed tuple update lowers through select", async () => {
+  const source = `
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    pub fn main(index: i32) -> i32 {
+      let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+      let ys: InlineArray(4, i32) = [...xs, [index]: 40 + 2];
+      ys[1] + ys[2]
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(main, "select");
+  assert(!main.includes("if"));
+  assert(!wat.includes("InlineArrayBuilder"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1), 45);
+  assertEquals((instance.exports.main as CallableFunction)(2), 44);
+  assertEquals((instance.exports.main as CallableFunction)(9), 5);
+});
+
+Deno.test("dynamic indexed spread fixed tuple update is lazy and left-to-right", async () => {
+  const source = `
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    fn boom() -> i32 { 1 / 0 }
+    pub fn main(index: i32) -> i32 {
+      let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+      let ys: InlineArray(4, i32) = [...xs, [index]: boom(), [index]: 40];
+      ys[1] + ys[2]
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "if (result i32)");
+  assert(!wat.includes("InlineArrayBuilder"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1), 43);
 });
 
 Deno.test("direct self-tail body lowers to a loop by default", async () => {
@@ -369,14 +672,17 @@ async function assertTailCallRejected(label: string, source: string) {
 }
 
 Deno.test("backend keeps generated forwarding wrappers inlined at call sites", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     type fn Box() { let Box = {value: i32}; struct(Box) }
     type fn Functor(f: type) { let Functor = {map: fn(x: f) -> f}; struct(Functor) }
     fn map_box(x: Box) -> Box { {value: x.value + 1} }
     const box_functor: Functor(Box) = {map: map_box};
     fn mapped(const dict: Functor(Box), x: Box) -> Box { dict.map(x) }
     pub fn main() -> Box { mapped(box_functor, {value: 41}) }
-  `);
+  `,
+    { optMode: "release" },
+  );
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assert(!main.includes("call $map_box"));
   assert(!wat.includes("(func $mapped__box_functor"));

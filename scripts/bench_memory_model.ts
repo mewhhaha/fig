@@ -8,6 +8,9 @@ interface Scenario {
   callsDivisor?: number;
   notes: string;
   expectedShape?: ShapeExpectation;
+  forbiddenWat?: RegExp[];
+  maxWatBytes?: number;
+  maxWasmBytes?: number;
 }
 
 interface WatShape {
@@ -35,6 +38,7 @@ interface ShapeExpectation {
 type PartialShapeExpectation = Partial<Record<keyof WatShape, { min?: number; max?: number }>>;
 
 const iterations = Number(Deno.args.find((arg) => arg !== "--") ?? 100_000);
+const fannkuchReduxSource = await Deno.readTextFile("examples/perf_fannkuch_redux.fig");
 
 const resolveModule = async (moduleName: string) => {
   try {
@@ -47,7 +51,6 @@ const resolveModule = async (moduleName: string) => {
 const compileOptions = {
   resolveModule,
   memoryModel: "branch" as const,
-  optLevel: "speed" as const,
 };
 
 const simdDot1Source = `
@@ -259,10 +262,24 @@ const scenarios: Scenario[] = [
     callsDivisor: 4,
     expectedShape: {
       ...scalarFlatShape,
-      module: { ...scalarFlatShape.module, fig_buffers_refs: { max: 0 } },
+      module: {
+        ...scalarFlatShape.module,
+        branch_materialize_calls: { max: 0 },
+        fig_buffers_refs: { max: 0 },
+      },
     },
+    forbiddenWat: [
+      /InlineArrayBuilder/,
+      /InlineArray\.(?:set|update)_loop/,
+      /call \$.*inline_array_update/,
+      /branch_(?:ensure_editable|materialize)/,
+      /temporal_/,
+      /fig_(?:objects|logs|buffers)/,
+    ],
+    maxWatBytes: 12_000,
+    maxWasmBytes: 1_319,
     notes:
-      "InlineArray update keeps the source array live; stresses fixed collection copy/update lowering.",
+      "InlineArray update keeps the source array live while lowering through spread-copy slots.",
     source: `
       const layout = @import("prelude.layout");
       fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
@@ -270,6 +287,36 @@ const scenarios: Scenario[] = [
       pub fn main(seed: i32) -> i32 {
         let xs = layout.InlineArray.tabulate(16, i32, make);
         let ys = layout.InlineArray.update(16, i32, xs, seed - seed + 7, bump);
+        xs[7] + ys[7] + ys[15]
+      }
+    `,
+  },
+  {
+    name: "fixed_collection_spread_update",
+    expected: 35,
+    callsDivisor: 4,
+    expectedShape: {
+      ...scalarFlatShape,
+      module: {
+        ...scalarFlatShape.module,
+        branch_materialize_calls: { max: 0 },
+        fig_buffers_refs: { max: 0 },
+      },
+    },
+    forbiddenWat: [
+      /InlineArrayBuilder/,
+      /InlineArray\.(?:set|update)_loop/,
+      /branch_(?:ensure_editable|materialize)/,
+      /temporal_/,
+      /fig_(?:objects|logs|buffers)/,
+    ],
+    maxWatBytes: 16_000,
+    notes: "Indexed spread update copies a fixed inline array with direct slot replacement.",
+    source: `
+      const layout = @import("prelude.layout");
+      pub fn main(seed: i32) -> i32 {
+        let xs: layout.InlineArray(16, i32) = <1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>;
+        let ys: layout.InlineArray(16, i32) = [...xs, [7]: xs[7] + 3];
         xs[7] + ys[7] + ys[15]
       }
     `,
@@ -364,6 +411,20 @@ const scenarios: Scenario[] = [
     `,
   },
   {
+    name: "fannkuch_redux_7",
+    expected: 22_816,
+    callsDivisor: 1000,
+    expectedShape: {
+      ...scalarFlatShape,
+      module: { ...scalarFlatShape.module, loops: { min: 1 } },
+    },
+    maxWatBytes: 38_276,
+    maxWasmBytes: 6_435,
+    notes:
+      "CLBG fannkuch-redux n=7 adaptation using fixed arrays and dynamic InlineArray updates.",
+    source: fannkuchReduxSource,
+  },
+  {
     name: "mat4_dot1",
     expected: 90,
     expectedShape: {
@@ -423,6 +484,7 @@ for (const scenario of scenarios) {
   const timed = timeCalls(main, scenario.args, calls);
   const shape = scopedWatShape(wat);
   if (scenario.expectedShape) checkShape(scenario.name, shape, scenario.expectedShape);
+  checkWatGates(scenario.name, wat, wasm, scenario);
   rows.push({
     scenario: scenario.name,
     calls,
@@ -431,12 +493,32 @@ for (const scenario of scenarios) {
     calls_per_ms: (calls / timed.elapsedMs).toFixed(3),
     ns_per_call: ((timed.elapsedMs * 1_000_000) / calls).toFixed(1),
     wat_bytes: wat.length,
+    wasm_bytes: wasm.byteLength,
     main_locals: count(mainWat, /\(local \$/g),
     local_gets: count(mainWat, /\blocal\.get \$/g),
     local_sets: count(mainWat, /\blocal\.set \$/g),
     ...shape.module,
     notes: scenario.notes,
   });
+}
+
+function checkWatGates(
+  name: string,
+  wat: string,
+  wasm: Uint8Array<ArrayBuffer>,
+  scenario: Pick<Scenario, "forbiddenWat" | "maxWatBytes" | "maxWasmBytes">,
+) {
+  if (scenario.maxWatBytes !== undefined && wat.length > scenario.maxWatBytes) {
+    throw new Error(`${name} WAT size expected <= ${scenario.maxWatBytes}B but got ${wat.length}B`);
+  }
+  if (scenario.maxWasmBytes !== undefined && wasm.byteLength > scenario.maxWasmBytes) {
+    throw new Error(
+      `${name} Wasm size expected <= ${scenario.maxWasmBytes}B but got ${wasm.byteLength}B`,
+    );
+  }
+  for (const pattern of scenario.forbiddenWat ?? []) {
+    if (pattern.test(wat)) throw new Error(`${name} WAT matched forbidden ${pattern}`);
+  }
 }
 
 console.table(rows);

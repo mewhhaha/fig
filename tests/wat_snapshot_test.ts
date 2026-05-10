@@ -14,10 +14,13 @@ Deno.test("golden WAT for arithmetic main", async () => {
 
 Deno.test("golden WAT for direct function calls", async () => {
   assertEquals(
-    await watFromSource(`
+    await watFromSource(
+      `
       fn add1(x: i32) -> i32 { x + 1 }
       pub fn main() -> i32 { add1(41) }
-    `),
+    `,
+      { optMode: "release" },
+    ),
     `(module
   (func $main (export "main") (result i32)
     (local $__inl_add1_x i32)
@@ -32,7 +35,8 @@ Deno.test("golden WAT for direct function calls", async () => {
 
 Deno.test("golden WAT for multi-arm match", async () => {
   assertEquals(
-    await watFromSource(`
+    await watFromSource(
+      `
       fn classify(x: i32) -> i32 {
         match x {
           0 => 0,
@@ -41,7 +45,9 @@ Deno.test("golden WAT for multi-arm match", async () => {
         }
       }
       pub fn main() -> i32 { classify(1) }
-    `),
+    `,
+      { optMode: "release" },
+    ),
     `(module
   (func $main (export "main") (result i32)
     (local $__inl_classify_x i32)
@@ -68,11 +74,14 @@ Deno.test("golden WAT for multi-arm match", async () => {
 
 Deno.test("golden WAT for literal function clauses", async () => {
   assertEquals(
-    await watFromSource(`
+    await watFromSource(
+      `
       fn something_n(1: i32) -> i32 { 10 }
       fn something_n(a: i32) -> i32 { a }
       pub fn main() -> i32 { something_n(2) }
-    `),
+    `,
+      { optMode: "release" },
+    ),
     `(module
   (func $main (export "main") (result i32)
     (local $__inl_something_n___pattern_734601027 i32)
@@ -92,14 +101,17 @@ Deno.test("golden WAT for literal function clauses", async () => {
 
 Deno.test("golden WAT lowers optimized const-param calls directly", async () => {
   assertEquals(
-    await watFromSource(`
+    await watFromSource(
+      `
       type fn Box() { let Box = {value: i32}; struct(Box) }
       type fn Functor(f: type) { let Functor = {map: fn(x: f) -> f}; struct(Functor) }
       fn map_box(x: Box) -> Box { {value: x.value + 1} }
       const box_functor: Functor(Box) = {map: map_box};
       fn mapped(const dict: Functor(Box), x: Box) -> Box { dict.map(x) }
       pub fn main() -> Box { mapped(box_functor, {value: 41}) }
-    `),
+    `,
+      { optMode: "release" },
+    ),
     `(module
   (func $main (export "main") (result i32)
     (local $__inl_map_box_x$value i32)
@@ -113,7 +125,8 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
 });
 
 Deno.test("WAT specializes perf array const dictionary dispatch", async () => {
-  const wat = await watFromSource(`
+  const wat = await watFromSource(
+    `
     type fn ScalarBox() { let ScalarBox = {value: i32}; struct(ScalarBox) }
     type fn Map4(t: type) { let Map4 = {apply: fn(x: t) -> t}; struct(Map4) }
     fn add1_box(x: ScalarBox) -> ScalarBox { {value: x.value + 1} }
@@ -122,7 +135,9 @@ Deno.test("WAT specializes perf array const dictionary dispatch", async () => {
       ops.apply(ops.apply(ops.apply(ops.apply(x))))
     }
     pub fn main() -> ScalarBox { apply_tile(scalar_map4, {value: 1}) }
-  `);
+  `,
+    { optMode: "release" },
+  );
 
   assert(wat.includes("(func $apply_tile__scalar_map4 (param $x$value i32) (result i32)"));
   assertEquals(wat.match(/call \$add1_box/g)?.length, 3);

@@ -110,6 +110,49 @@ Deno.test("CLI usage names fig", async () => {
   assertStringIncludes(new TextDecoder().decode(output.stderr), "usage: fig ");
 });
 
+Deno.test("CLI defaults to debug mode and --release selects release mode", async () => {
+  const path = await Deno.makeTempFile({ suffix: ".fig" });
+  await Deno.writeTextFile(
+    path,
+    `
+      fn add1(x: i32) -> i32 { x + 1 }
+      pub fn main() -> i32 { add1(41) }
+    `,
+  );
+
+  const debug = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "--allow-read", "src/cli.ts", "wat", path],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(debug.success, true);
+  const debugWat = new TextDecoder().decode(debug.stdout);
+  assertStringIncludes(debugWat, "(func $add1");
+  assertStringIncludes(debugWat, "call $add1");
+
+  const release = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "--allow-read", "src/cli.ts", "wat", path, "--release"],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(release.success, true);
+  const releaseWat = new TextDecoder().decode(release.stdout);
+  assertEquals(releaseWat.includes("(func $add1"), false);
+  assertEquals(releaseWat.includes("call $add1"), false);
+
+  await Deno.remove(path);
+});
+
+Deno.test("CLI rejects legacy --opt modes", async () => {
+  const output = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "--allow-read", "src/cli.ts", "wat", "examples/hello.fig", "--opt", "debug"],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(output.success, false);
+  assertStringIncludes(new TextDecoder().decode(output.stderr), "usage: fig ");
+});
+
 Deno.test("arithmetic example runs through wasm backend", async () => {
   const source = await Deno.readTextFile("examples/arithmetic.fig");
   const instance = new WebAssembly.Instance(

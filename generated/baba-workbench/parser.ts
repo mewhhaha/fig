@@ -9,7 +9,7 @@ export interface LiteralParseNode { kind: "literal"; value: string; text: string
 export interface ParseDiagnostic { message: string; span?: { start: number; end: number }; token?: Token; }
 export interface ParseResult { ok: boolean; tree: RuleParseNode | null; ast: AstNode | null; diagnostics: ParseDiagnostic[]; tokens: Token[]; }
 
-export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ImportBindingListAstNode | ImportBindingItemsAstNode | ImportBindingTailAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | StaticForBindersAstNode | StaticForSourceAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | PipeBindAstNode | PipeBindAtomAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | StaticForSlotAstNode | PunnedShapeValueSlotAstNode | ShapeValueSlotKeyAstNode | SpreadSlotAstNode | SlotPositionAstNode | CollectionValueAstNode | CollectionValueItemsAstNode | CollectionValueTailAstNode | CollectionSpreadSlotAstNode | CollectionExprAstNode | CollectionPipeBindAstNode | CollectionPipeBindAtomAstNode | CollectionBinaryAstNode | TupleValueAstNode | TupleValueItemsAstNode | TupleValueTailAstNode | TupleValueRepeatAstNode | PatternAstNode | PatternIdentAstNode | TuplePatternAstNode | TuplePatternItemsAstNode | TuplePatternTailAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | TypeUnionAstNode | TypeAtomAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotKeyAstNode | ShapeSlotBodyAstNode | TupleTypeAstNode | TupleTypeBodyAstNode | TupleTypeTailAstNode | TupleTypeMoreAstNode | TupleTypeRepeatAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeTupleAstNode | TypeTupleBodyAstNode | TypeTupleTailAstNode | TypeTupleMoreAstNode | TypeTupleRepeatAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | TypeRepeatCountAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | OpNoCollectionCloseAstNode | TypeOpAstNode;
+export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ImportBindingListAstNode | ImportBindingItemsAstNode | ImportBindingTailAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | StaticForBindersAstNode | StaticForSourceAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | PipeBindAstNode | PipeBindAtomAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | StaticForSlotAstNode | PunnedShapeValueSlotAstNode | ShapeValueSlotKeyAstNode | SpreadSlotAstNode | SlotPositionAstNode | CollectionValueAstNode | CollectionValueItemsAstNode | CollectionValueTailAstNode | CollectionSpreadSlotAstNode | CollectionOverrideSlotAstNode | CollectionExprAstNode | CollectionPipeBindAstNode | CollectionPipeBindAtomAstNode | CollectionBinaryAstNode | TupleValueAstNode | TupleValueItemsAstNode | TupleValueTailAstNode | TupleSpreadSlotAstNode | TupleOverrideSlotAstNode | TupleValueRepeatAstNode | PatternAstNode | PatternIdentAstNode | PatternArgsAstNode | TuplePatternAstNode | TuplePatternItemsAstNode | TuplePatternTailAstNode | ParamsAstNode | ParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | TypeUnionAstNode | TypeAtomAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotKeyAstNode | ShapeSlotBodyAstNode | TupleTypeAstNode | TupleTypeBodyAstNode | TupleTypeTailAstNode | TupleTypeMoreAstNode | TupleTypeRepeatAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeTupleAstNode | TypeTupleBodyAstNode | TypeTupleTailAstNode | TypeTupleMoreAstNode | TypeTupleRepeatAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | TypeRepeatCountAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | OpNoCollectionCloseAstNode | TypeOpAstNode;
 
 export interface ProgramAstNode {
   kind: "Program";
@@ -473,6 +473,13 @@ export interface CollectionSpreadSlotAstNode {
   children: AstNode[];
 }
 
+export interface CollectionOverrideSlotAstNode {
+  kind: "CollectionOverrideSlot";
+  type: "CollectionOverrideSlot";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface CollectionExprAstNode {
   kind: "CollectionExpr";
   type: "CollectionExpr";
@@ -522,6 +529,20 @@ export interface TupleValueTailAstNode {
   children: AstNode[];
 }
 
+export interface TupleSpreadSlotAstNode {
+  kind: "TupleSpreadSlot";
+  type: "TupleSpreadSlot";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TupleOverrideSlotAstNode {
+  kind: "TupleOverrideSlot";
+  type: "TupleOverrideSlot";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface TupleValueRepeatAstNode {
   kind: "TupleValueRepeat";
   type: "TupleValueRepeat";
@@ -539,6 +560,13 @@ export interface PatternAstNode {
 export interface PatternIdentAstNode {
   kind: "PatternIdent";
   type: "PatternIdent";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface PatternArgsAstNode {
+  kind: "PatternArgs";
+  type: "PatternArgs";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -988,19 +1016,23 @@ const rules: Record<string, Expression> = {
   "SpreadSlot": { kind: "sequence", items: [{ kind: "literal", value: "..." }, { kind: "ref", name: "Expr" }] },
   "SlotPosition": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "Number" }, { kind: "literal", value: "]" }] },
   "CollectionValue": { kind: "sequence", items: [{ kind: "ref", name: "CollectionOpen" }, { kind: "ref", name: "CollectionValueItems" }] },
-  "CollectionValueItems": { kind: "choice", options: [{ kind: "ref", name: "CollectionClose" }, { kind: "sequence", items: [{ kind: "ref", name: "CollectionSpreadSlot" }, { kind: "ref", name: "CollectionValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "CollectionExpr" }, { kind: "ref", name: "CollectionValueTail" }] }] },
+  "CollectionValueItems": { kind: "choice", options: [{ kind: "ref", name: "CollectionClose" }, { kind: "sequence", items: [{ kind: "ref", name: "CollectionSpreadSlot" }, { kind: "ref", name: "CollectionValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "CollectionOverrideSlot" }, { kind: "ref", name: "CollectionValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "CollectionExpr" }, { kind: "ref", name: "CollectionValueTail" }] }] },
   "CollectionValueTail": { kind: "choice", options: [{ kind: "ref", name: "CollectionClose" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "CollectionValueItems" }] }] },
   "CollectionSpreadSlot": { kind: "sequence", items: [{ kind: "literal", value: "..." }, { kind: "ref", name: "CollectionExpr" }] },
+  "CollectionOverrideSlot": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: "]" }, { kind: "literal", value: ":" }, { kind: "ref", name: "CollectionExpr" }] },
   "CollectionExpr": { kind: "ref", name: "CollectionPipeBind" },
   "CollectionPipeBind": { kind: "sequence", items: [{ kind: "ref", name: "CollectionPipeBindAtom" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "\\" }, { kind: "ref", name: "PipeBindName" }, { kind: "literal", value: "->" }, { kind: "ref", name: "CollectionPipeBindAtom" }] } }] },
   "CollectionPipeBindAtom": { kind: "choice", options: [{ kind: "ref", name: "MatchExpr" }, { kind: "ref", name: "CollectionBinary" }] },
   "CollectionBinary": { kind: "sequence", items: [{ kind: "ref", name: "Call" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "ref", name: "OpNoCollectionClose" }, { kind: "ref", name: "Call" }] } }] },
   "TupleValue": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "TupleValueItems" }] },
-  "TupleValueItems": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "ref", name: "TupleValueRepeat" }, { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "ref", name: "TupleValueTail" }] }] },
+  "TupleValueItems": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "ref", name: "TupleSpreadSlot" }, { kind: "ref", name: "TupleValueTail" }] }, { kind: "sequence", items: [{ kind: "ref", name: "TupleOverrideSlot" }, { kind: "ref", name: "TupleValueTail" }] }, { kind: "ref", name: "TupleValueRepeat" }, { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "ref", name: "TupleValueTail" }] }] },
   "TupleValueTail": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TupleValueItems" }] }] },
+  "TupleSpreadSlot": { kind: "sequence", items: [{ kind: "literal", value: "..." }, { kind: "ref", name: "Expr" }] },
+  "TupleOverrideSlot": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: "]" }, { kind: "literal", value: ":" }, { kind: "ref", name: "Expr" }] },
   "TupleValueRepeat": { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }, { kind: "ref", name: "TypeRepeatCount" }, { kind: "literal", value: "]" }] },
   "Pattern": { kind: "choice", options: [{ kind: "literal", value: "_" }, { kind: "ref", name: "TuplePattern" }, { kind: "ref", name: "PatternIdent" }, { kind: "ref", name: "Literal" }] },
-  "PatternIdent": { kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "sequence", items: [{ kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "Args" } }, { kind: "literal", value: ")" }] } }] }] },
+  "PatternIdent": { kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "sequence", items: [{ kind: "ref", name: "PascalIdent" }, { kind: "optional", expression: { kind: "sequence", items: [{ kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "PatternArgs" } }, { kind: "literal", value: ")" }] } }] }] },
+  "PatternArgs": { kind: "sequence", items: [{ kind: "ref", name: "Pattern" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "Pattern" }] } }, { kind: "optional", expression: { kind: "literal", value: "," } }] },
   "TuplePattern": { kind: "sequence", items: [{ kind: "literal", value: "[" }, { kind: "ref", name: "TuplePatternItems" }] },
   "TuplePatternItems": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "ref", name: "Pattern" }, { kind: "ref", name: "TuplePatternTail" }] }] },
   "TuplePatternTail": { kind: "choice", options: [{ kind: "literal", value: "]" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TuplePatternItems" }] }] },
@@ -1543,6 +1575,13 @@ export function projectParseNode(node: ParseNode): AstNode | null {
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
+    case "CollectionOverrideSlot":
+      return {
+        kind: "CollectionOverrideSlot",
+        type: "CollectionOverrideSlot",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
     case "CollectionExpr":
       return {
         kind: "CollectionExpr",
@@ -1592,6 +1631,20 @@ export function projectParseNode(node: ParseNode): AstNode | null {
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
+    case "TupleSpreadSlot":
+      return {
+        kind: "TupleSpreadSlot",
+        type: "TupleSpreadSlot",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "TupleOverrideSlot":
+      return {
+        kind: "TupleOverrideSlot",
+        type: "TupleOverrideSlot",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
     case "TupleValueRepeat":
       return {
         kind: "TupleValueRepeat",
@@ -1610,6 +1663,13 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "PatternIdent",
         type: "PatternIdent",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "PatternArgs":
+      return {
+        kind: "PatternArgs",
+        type: "PatternArgs",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
