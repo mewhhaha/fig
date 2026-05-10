@@ -41,13 +41,25 @@ for (const size of sizes) {
 
 function sourceFor(mode: "direct" | "runtime-dict" | "const-param", calls: number): string {
   const mappedParam = mode === "const-param" ? "const dict: Functor(box)" : "dict: Functor(box)";
-  const call = mode === "direct" ? "map_box([value: 1])" : "mapped(box_functor, [value: 1])";
+  const call = mode === "direct"
+    ? "map_box(Box {value: 1}).value"
+    : "mapped(box_functor, Box {value: 1}).value";
   return `
-    type fn Box() { let Box = [value: i32]; struct(Box) }
-    type fn Functor(f: type) { let Functor = [map: fn(x: f) -> f]; struct(Functor) }
-    fn map_box(x: Box) -> Box { [value: x.value + 1] }
-    const box_functor: Functor(box) = [map: map_box];
-    fn mapped(${mappedParam}, x: Box) -> Box { dict.map(x) }
+    type fn Box() -> type {
+      let Box = {value: i32};
+      struct(Box)
+    }
+    type fn Functor(f: type) -> type {
+      let Functor = {map: fn(x: f) -> f};
+      struct(Functor)
+    }
+    fn map_box(x: Box) -> Box {
+      Box {value: x.value + 1}
+    }
+    const box_functor: Functor(box) = {map: map_box};
+    fn mapped(${mappedParam}, x: Box) -> Box {
+      dict.map(x)
+    }
     pub fn main() -> i32 {
       ${Array.from({ length: calls }, () => call).join(" +\n      ")}
     }

@@ -171,6 +171,34 @@ Deno.test("inline_array public helpers use builder cursor loops", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 186);
 });
 
+Deno.test("inline_array tabulate and map lower to compact direct slots", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+
+    fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
+    fn inc(x: i32) -> i32 { x + 1 }
+
+    pub fn main() -> i32 {
+      let xs = layout.InlineArray.tabulate(16, i32, make);
+      let ys = layout.InlineArray.map(16, i32, i32, xs, inc);
+      ys[0] + ys[15]
+    }
+  `;
+
+  const wat = await watFromSource(source, { resolveModule });
+  assert(wat.length < 20_000, `unexpected WAT size ${wat.length}`);
+  assertEquals(wat.match(/\bif\b/g)?.length ?? 0, 0);
+  assertEquals(wat.match(/i32\.eq/g)?.length ?? 0, 0);
+  assert(!wat.includes("InlineArrayBuilder.push"));
+  assert(!wat.includes("InlineArray.tabulate_loop"));
+  assert(!wat.includes("InlineArray.map_loop"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 19);
+});
+
 Deno.test("inline_array builder preserves flattened product elements", async () => {
   const source = `
     const layout = @import("prelude.layout");
@@ -194,6 +222,39 @@ Deno.test("inline_array builder preserves flattened product elements", async () 
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 62);
+});
+
+Deno.test("inline_array direct helper lowering preserves flattened product elements", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+
+    type fn PairI32() -> type {
+      let PairI32 = {x: i32, y: i32};
+      struct(PairI32)
+    }
+
+    fn make(i: layout.core.Index(4)) -> PairI32 {
+      {x: i + 10, y: i + 20}
+    }
+    fn move(pair: PairI32) -> PairI32 {
+      {x: pair.x + 1, y: pair.y + 2}
+    }
+
+    pub fn main() -> i32 {
+      let xs = layout.InlineArray.tabulate(4, PairI32, make);
+      let ys = layout.InlineArray.map(4, PairI32, PairI32, xs, move);
+      ys[0].x + ys[0].y + ys[3].x + ys[3].y
+    }
+  `;
+
+  const wat = await watFromSource(source, { resolveModule });
+  assert(wat.length < 20_000, `unexpected WAT size ${wat.length}`);
+  assert(!wat.includes("InlineArrayBuilder.push"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 72);
 });
 
 Deno.test("prelude std exposes common operators for custom types", async () => {

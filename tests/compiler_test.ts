@@ -3,6 +3,7 @@ import {
   checkSource,
   optimizeProgram,
   parse,
+  summarizeProgram,
   tokenize,
   wasmFromSource,
   watFromSource,
@@ -2881,6 +2882,39 @@ Deno.test("optimizes tiny private pure helpers by inlining", async () => {
   assertEquals(counts.get("inc") ?? 0, 0);
 });
 
+Deno.test("optimization levels control pure inlining budgets", async () => {
+  const checked = await checkSource(`
+    fn helper(x: i32) -> i32 {
+      let a = x + 1;
+      let b = a + 1;
+      b + 1
+    }
+    pub fn main() -> i32 { helper(1) }
+  `);
+
+  const debugCounts = countCalls(optimizeProgram(checked.program, { optLevel: "debug" }), {
+    includeGenerated: false,
+  });
+  const defaultCounts = countCalls(optimizeProgram(checked.program), { includeGenerated: false });
+
+  assertEquals(debugCounts.get("helper") ?? 0, 1);
+  assertEquals(defaultCounts.get("helper") ?? 0, 0);
+});
+
+Deno.test("function summaries classify purity calls returns and param effects", async () => {
+  const checked = await checkSource(`
+    fn score(x: i32) -> i32 { x + 1 }
+    fn id(x: i32) -> i32 { x }
+    pub fn main() -> i32 { score(id(1)) }
+  `);
+
+  const summaries = summarizeProgram(checked.program);
+  assertEquals(summaries.get("score")?.returnClass, "scalar");
+  assertEquals(summaries.get("score")?.callCount, 1);
+  assertEquals(summaries.get("score")?.paramEffects.get("x"), "consume");
+  assertEquals(summaries.get("id")?.paramEffects.get("x"), "alias_return");
+});
+
 Deno.test("does not inline large private helpers above the cost budget", async () => {
   const checked = await checkSource(`
     fn many(x: i32) -> i32 {
@@ -2925,6 +2959,24 @@ Deno.test("inlining preserves shadowed local bindings", async () => {
     ),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 2);
+});
+
+Deno.test("inlining alpha-renames helper locals away from caller locals", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+        fn helper(x: i32) -> i32 {
+          let tmp = x + 1;
+          tmp
+        }
+        pub fn main() -> i32 {
+          let tmp = 10;
+          helper(tmp) + tmp
+        }
+      `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 21);
 });
 
 Deno.test("product helpers do not inline into nested value arguments", async () => {

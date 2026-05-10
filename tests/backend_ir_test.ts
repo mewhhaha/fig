@@ -39,7 +39,8 @@ Deno.test("backend lowers runtime inline-array indexing with branches", async ()
     }
   `);
   assertStringIncludes(wat, "if (result i32)");
-  assertStringIncludes(wat, "local.get $xs$1");
+  assertStringIncludes(wat, "i32.eq");
+  assertStringIncludes(wat, "i32.const 1");
 });
 
 Deno.test("backend does not allocate unused pure locals", async () => {
@@ -591,6 +592,68 @@ Deno.test("branch memory mode exports branch memories and packs transitional han
     ) => item.name),
     ["fig_objects", "fig_buffers"],
   );
+});
+
+Deno.test("branch intrinsics lower to header flags and copy-before-write", async () => {
+  const source = `
+    fn branch.handle(ptr: i32) -> i64 {
+      @branch_handle(ptr)
+    }
+    fn branch.handle_ptr(handle: i64) -> i32 {
+      @branch_handle_ptr(handle)
+    }
+    fn branch.mark(handle: i64) -> i64 {
+      @branch_mark(handle)
+    }
+    fn branch.is_branched(handle: i64) -> bool {
+      @branch_is_branched(handle)
+    }
+    fn branch.ensure(handle: i64) -> i64 {
+      @branch_ensure_editable(handle)
+    }
+    pub fn mark_then_check(ptr: i32) -> bool {
+      branch.is_branched(branch.mark(branch.handle(ptr)))
+    }
+    pub fn ensure_ptr(ptr: i32) -> i32 {
+      branch.handle_ptr(branch.ensure(branch.handle(ptr)))
+    }
+  `;
+
+  const wat = await watFromSource(source, { memoryModel: "branch-debug" });
+  assertStringIncludes(wat, `(memory $fig_objects (export "fig_objects") 1)`);
+  assert(!wat.includes("fig_logs"));
+  assertStringIncludes(wat, "i32.load align=4 offset=8");
+  assertStringIncludes(wat, "i32.store align=4 offset=8");
+  assertStringIncludes(wat, "memory.copy");
+
+  const instance = await WebAssembly.instantiate(
+    await wasmFromSource(source, { memoryModel: "branch-debug" }),
+    {},
+  );
+  const exports = instance.instance.exports as {
+    fig_objects: WebAssembly.Memory;
+    mark_then_check: CallableFunction;
+    ensure_ptr: CallableFunction;
+  };
+  const words = new Uint32Array(exports.fig_objects.buffer);
+  const ptr = 64;
+  words[ptr / 4] = 11;
+  words[ptr / 4 + 1] = 8;
+  words[ptr / 4 + 2] = 0;
+  words[ptr / 4 + 4] = 123;
+  words[ptr / 4 + 5] = 456;
+
+  assertEquals(exports.ensure_ptr(ptr), ptr);
+  assertEquals(exports.mark_then_check(ptr), 1);
+
+  const copied = exports.ensure_ptr(ptr);
+  assertEquals(copied, ptr + 24);
+  assertEquals(words[ptr / 4 + 2], 1);
+  assertEquals(words[copied / 4], 11);
+  assertEquals(words[copied / 4 + 1], 8);
+  assertEquals(words[copied / 4 + 2], 0);
+  assertEquals(words[copied / 4 + 4], 123);
+  assertEquals(words[copied / 4 + 5], 456);
 });
 
 Deno.test("branch mode rejects temporal intrinsics", async () => {

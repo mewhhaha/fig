@@ -20,9 +20,9 @@ Deno.test("golden WAT for direct function calls", async () => {
     `),
     `(module
   (func $main (export "main") (result i32)
-    (local $x i32)
+    (local $__inl_add1_x i32)
     i32.const 41
-    local.tee $x
+    local.tee $__inl_add1_x
     i32.const 1
     i32.add
   )
@@ -44,15 +44,15 @@ Deno.test("golden WAT for multi-arm match", async () => {
     `),
     `(module
   (func $main (export "main") (result i32)
-    (local $x i32)
+    (local $__inl_classify_x i32)
     i32.const 1
-    local.tee $x
+    local.tee $__inl_classify_x
     i32.const 0
     i32.eq
     if (result i32)
       i32.const 0
     else
-      local.get $x
+      local.get $__inl_classify_x
       i32.const 1
       i32.eq
       if (result i32)
@@ -75,15 +75,15 @@ Deno.test("golden WAT for literal function clauses", async () => {
     `),
     `(module
   (func $main (export "main") (result i32)
-    (local $__pattern_734601027 i32)
+    (local $__inl_something_n___pattern_734601027 i32)
     i32.const 2
-    local.tee $__pattern_734601027
+    local.tee $__inl_something_n___pattern_734601027
     i32.const 1
     i32.eq
     if (result i32)
       i32.const 10
     else
-      local.get $__pattern_734601027
+      local.get $__inl_something_n___pattern_734601027
     end
   )
 )`,
@@ -102,9 +102,9 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
     `),
     `(module
   (func $main (export "main") (result i32)
-    (local $x$value i32)
+    (local $__inl_map_box_x$value i32)
     i32.const 41
-    local.tee $x$value
+    local.tee $__inl_map_box_x$value
     i32.const 1
     i32.add
   )

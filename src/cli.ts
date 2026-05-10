@@ -1,6 +1,7 @@
 import { checkSource, formatSource, wasmFromSource, watFromSource } from "./mod.ts";
 import { CompileError, formatDiagnostic } from "./diagnostics.ts";
 import type { MemoryModel } from "./backend.ts";
+import type { OptLevel } from "./optimize.ts";
 
 const [cmd, ...args] = Deno.args;
 
@@ -56,12 +57,20 @@ try {
   } else if (cmd === "wat") {
     const rest = commandRest;
     const source = await Deno.readTextFile(file);
-    const options = { resolveModule: moduleResolver(file), memoryModel: parseMemoryModel(rest) };
+    const options = {
+      resolveModule: moduleResolver(file),
+      memoryModel: parseMemoryModel(rest),
+      optLevel: parseOptLevel(rest),
+    };
     console.log(await watFromSource(source, options));
   } else if (cmd === "build") {
     const rest = commandRest;
     const source = await Deno.readTextFile(file);
-    const options = { resolveModule: moduleResolver(file), memoryModel: parseMemoryModel(rest) };
+    const options = {
+      resolveModule: moduleResolver(file),
+      memoryModel: parseMemoryModel(rest),
+      optLevel: parseOptLevel(rest),
+    };
     const outFlag = rest.indexOf("--out");
     const manifestFlag = rest.indexOf("--shader-manifest");
     const out = outFlag >= 0 ? rest[outFlag + 1] : file.replace(/\.fig$/, ".wasm");
@@ -78,7 +87,11 @@ try {
   } else if (cmd === "run") {
     const rest = commandRest;
     const source = await Deno.readTextFile(file);
-    const options = { resolveModule: moduleResolver(file), memoryModel: parseMemoryModel(rest) };
+    const options = {
+      resolveModule: moduleResolver(file),
+      memoryModel: parseMemoryModel(rest),
+      optLevel: parseOptLevel(rest),
+    };
     const wasm = await wasmFromSource(source, options);
     const module = new WebAssembly.Module(wasm);
     const imports = WebAssembly.Module.imports(module);
@@ -101,7 +114,7 @@ try {
 
 function usage(): never {
   console.error(
-    "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--out module.wasm] [--shader-manifest manifest.json]",
+    "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--opt debug|default|speed|size] [--out module.wasm] [--shader-manifest manifest.json]",
   );
   Deno.exit(2);
 }
@@ -111,6 +124,16 @@ function parseMemoryModel(args: string[]): MemoryModel | undefined {
   const value = eq ? eq.slice("--memory=".length) : args[args.indexOf("--memory") + 1];
   if (!value || args.indexOf("--memory") < 0 && !eq) return undefined;
   if (value === "temporal" || value === "branch-debug" || value === "branch") return value;
+  usage();
+}
+
+function parseOptLevel(args: string[]): OptLevel | undefined {
+  const eq = args.find((arg) => arg.startsWith("--opt="));
+  const value = eq ? eq.slice("--opt=".length) : args[args.indexOf("--opt") + 1];
+  if (!value || args.indexOf("--opt") < 0 && !eq) return undefined;
+  if (value === "debug" || value === "default" || value === "speed" || value === "size") {
+    return value;
+  }
   usage();
 }
 

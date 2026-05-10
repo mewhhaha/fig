@@ -11,7 +11,7 @@ import type {
   TypeDecl,
 } from "./core_ast.ts";
 import { CompileError } from "./diagnostics.ts";
-import { optimizeProgram } from "./optimize.ts";
+import { optimizeProgram, type OptLevel } from "./optimize.ts";
 import {
   intrinsicCallId,
   intrinsicIdsByFunctionName,
@@ -72,6 +72,7 @@ type Instr =
   | { op: "simd"; wasm: SimdOp; lane?: number; lanes?: number[] }
   | { op: "load"; type: ValueType; align: number; offset: number; memory?: string }
   | { op: "store"; type: ValueType; align: number; offset: number; memory?: string }
+  | { op: "memory.copy"; memory?: string }
   | { op: "drop" }
   | { op: "unreachable" }
   | { op: "if"; results: ValueType[]; thenBody: Instr[]; elseBody: Instr[] }
@@ -120,6 +121,7 @@ export type MemoryModel = "temporal" | "branch-debug" | "branch";
 export interface BackendOptions {
   tailCallMode?: TailCallMode;
   memoryModel?: MemoryModel;
+  optLevel?: OptLevel;
 }
 
 const EXPLICIT_MEMORY: BackendMemory = {
@@ -158,7 +160,7 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
       message: `unknown memory model ${memoryModel}`,
     }]);
   }
-  const optimized = optimizeProgram(program);
+  const optimized = optimizeProgram(program, { optLevel: options.optLevel });
   const layouts = createLayoutEnv(optimized);
   const imports = optimized.imports.map((item) => importAsFn(item));
   const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
@@ -248,11 +250,13 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
       message: `function ${fn.name} is not eligible for tail-call opcode lowering`,
     }]);
   }
-  const loweredBody = ctx.tailCallMode === "opcode" && tailCalls.hasOnlyTailDirectSelfCalls
-    ? lowerTailOpcodeBlock(fn.body, fn, fnCtx, localNames)
-    : tailCalls.hasOnlyTailDirectSelfCalls
-    ? lowerTailLoopBlock(fn.body, fn, fnCtx, localNames)
-    : lowerBlock(fn.body, fnCtx, localNames, fn.returnType);
+  const inlineArrayLoopBody = lowerInlineArrayLoopFunction(fn, fnCtx, localNames);
+  const loweredBody = inlineArrayLoopBody ??
+    (ctx.tailCallMode === "opcode" && tailCalls.hasOnlyTailDirectSelfCalls
+      ? lowerTailOpcodeBlock(fn.body, fn, fnCtx, localNames)
+      : tailCalls.hasOnlyTailDirectSelfCalls
+      ? lowerTailLoopBlock(fn.body, fn, fnCtx, localNames)
+      : lowerBlock(fn.body, fnCtx, localNames, fn.returnType));
   const prologue = laneParamVectors.flatMap((name): Instr[] => [
     ...packProjectedLane4I32FromScalars(name),
     { op: "local.set", name },
@@ -348,6 +352,245 @@ function dot4LaneUseCounts(block: BlockExpr): Map<string, number> {
   return counts;
 }
 
+interface InlineArrayLoopPlan {
+  capacity: number;
+  itemType: string;
+  indexName: string;
+  value: Expr;
+  aliases: Map<string, Expr>;
+}
+
+function lowerInlineArrayLoopFunction(
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  const plan = inlineArrayLoopPlan(fn, ctx);
+  if (!plan) return undefined;
+  const substitutions = new Map<string, Expr>();
+  for (const param of fn.params) {
+    substitutions.set(param.name, { kind: "var", name: param.name });
+  }
+  return lowerInlineArrayLoopPlan(plan, substitutions, ctx, locals);
+}
+
+function lowerInlineArrayHelperCall(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  _expectedType?: string,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var") return undefined;
+  const fn = ctx.functions.get(expr.callee.name);
+  if (!fn) return undefined;
+  const loopPlan = inlineArrayLoopPlan(fn, ctx);
+  if (loopPlan) {
+    return lowerInlineArrayLoopCall(fn, expr.args, loopPlan, ctx, locals);
+  }
+  const wrapperCall = inlineArrayLoopWrapperCall(fn);
+  if (!wrapperCall || wrapperCall.callee.kind !== "var") return undefined;
+  const wrapperSubstitutions = new Map<string, Expr>();
+  const argOffset = Math.max(0, expr.args.length - fn.params.length);
+  fn.params.forEach((param, index) => {
+    const arg = expr.args[index + argOffset];
+    if (arg) wrapperSubstitutions.set(param.name, arg);
+  });
+  const loweredCall = substituteExpr(wrapperCall, wrapperSubstitutions);
+  if (loweredCall.kind !== "call" || loweredCall.callee.kind !== "var") return undefined;
+  const loopFn = ctx.functions.get(loweredCall.callee.name);
+  const nestedPlan = loopFn ? inlineArrayLoopPlan(loopFn, ctx) : undefined;
+  return loopFn && nestedPlan
+    ? lowerInlineArrayLoopCall(loopFn, loweredCall.args, nestedPlan, ctx, locals)
+    : undefined;
+}
+
+function lowerInlineArrayLoopCall(
+  fn: FnDecl,
+  args: Expr[],
+  plan: InlineArrayLoopPlan,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  const substitutions = new Map<string, Expr>();
+  const argOffset = Math.max(0, args.length - fn.params.length);
+  fn.params.forEach((param, index) => {
+    const arg = args[index + argOffset];
+    if (arg) substitutions.set(param.name, arg);
+  });
+  return lowerInlineArrayLoopPlan(plan, substitutions, ctx, locals);
+}
+
+function lowerInlineArrayLoopPlan(
+  plan: InlineArrayLoopPlan,
+  baseSubstitutions: Map<string, Expr>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const substitutions = resolvedInlineArrayLoopSubstitutions(plan, baseSubstitutions);
+  const itemSlots = flattenType(plan.itemType, ctx.layouts);
+  return Array.from(
+    { length: plan.capacity },
+    (_, item) =>
+      itemSlots.flatMap((_slot, slotIndex) => {
+        const itemSubstitutions = new Map(substitutions);
+        itemSubstitutions.set(plan.indexName, staticIndexExpr(item));
+        const value = substituteExpr(plan.value, itemSubstitutions);
+        ensureLoweringLocals(value, ctx, locals);
+        return lowerFlattenedValueSlot(value, plan.itemType, slotIndex, ctx, locals);
+      }),
+  ).flat();
+}
+
+function resolvedInlineArrayLoopSubstitutions(
+  plan: InlineArrayLoopPlan,
+  baseSubstitutions: Map<string, Expr>,
+): Map<string, Expr> {
+  const substitutions = new Map(baseSubstitutions);
+  for (const [name, value] of plan.aliases) {
+    substitutions.set(name, substituteExpr(value, substitutions));
+  }
+  return substitutions;
+}
+
+function inlineArrayLoopWrapperCall(fn: FnDecl): Extract<Expr, { kind: "call" }> | undefined {
+  if (fn.body.statements.length !== 0) return undefined;
+  const expr = fn.body.expr;
+  if (!expr || expr.kind !== "call" || expr.callee.kind !== "var") return undefined;
+  return isInlineArrayLoopName(expr.callee.name) ? expr : undefined;
+}
+
+function inlineArrayLoopPlan(fn: FnDecl, ctx: LowerContext): InlineArrayLoopPlan | undefined {
+  if (!isInlineArrayLoopName(fn.name)) return undefined;
+  const [capacity, itemType] = inlineArrayLikeTypeArgs(fn.returnType, ctx.layouts) ?? [];
+  if (!capacity || !Number.isFinite(capacity) || !itemType) return undefined;
+  const expr = fn.body.expr;
+  if (!expr || expr.kind !== "match") return undefined;
+  const aliases = new Map<string, Expr>();
+  for (const stmt of fn.body.statements) {
+    if (stmt.kind !== "let") return undefined;
+    aliases.set(stmt.name, stmt.value);
+  }
+  const yieldArm = expr.arms.find((arm) =>
+    arm.pattern.kind === "constructor" && arm.pattern.name === "Yield"
+  );
+  if (!yieldArm || yieldArm.pattern.kind !== "constructor") return undefined;
+  const recursive = yieldArm.value;
+  if (
+    recursive.kind !== "call" || recursive.callee.kind !== "var" ||
+    recursive.callee.name !== fn.name
+  ) {
+    return undefined;
+  }
+  const push = recursive.args.find((arg): arg is Extract<Expr, { kind: "call" }> =>
+    arg.kind === "call" && arg.callee.kind === "var" &&
+    isInlineArrayBuilderPushName(arg.callee.name)
+  );
+  if (!push || push.args.length < 3) return undefined;
+  const index = push.args.at(-2);
+  const value = push.args.at(-1);
+  if (!index || index.kind !== "var" || !value) return undefined;
+  return { capacity, itemType, indexName: index.name, value, aliases };
+}
+
+function isInlineArrayLoopName(name: string): boolean {
+  return /(?:^|_)InlineArray_(?:tabulate|tabulate_with|fill|map|imap|imap_with_state|set|update)_loop(?:__|$)/
+    .test(name);
+}
+
+function isInlineArrayBuilderPushName(name: string): boolean {
+  return name.includes("InlineArrayBuilder_push") || name.includes("InlineArrayBuilder.push");
+}
+
+function staticIndexExpr(value: number): Expr {
+  return { kind: "literal", literalKind: "number", value: String(value), inferredType: "i32" };
+}
+
+function ensureLoweringLocals(expr: Expr, ctx: LowerContext, locals: Set<string>) {
+  const found: BackendLocal[] = [];
+  collectExprLocals(expr, found, ctx);
+  for (const local of found) {
+    if (locals.has(local.name) || ctx.tempLocals.some((item) => item.name === local.name)) continue;
+    locals.add(local.name);
+    ctx.tempLocals.push(local);
+  }
+}
+
+function substituteExpr(expr: Expr, substitutions: Map<string, Expr>): Expr {
+  switch (expr.kind) {
+    case "var":
+      return substitutions.get(expr.name) ?? expr;
+    case "call":
+      return {
+        ...expr,
+        callee: substituteExpr(expr.callee, substitutions),
+        args: expr.args.map((arg) => substituteExpr(arg, substitutions)),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: substituteExpr(expr.target, substitutions),
+        index: substituteExpr(expr.index, substitutions),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: substituteExpr(expr.left, substitutions),
+        right: substituteExpr(expr.right, substitutions),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: substituteExpr(expr.value, substitutions),
+        body: substituteExpr(expr.body, substitutions),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: substituteExpr(expr.value, substitutions),
+        arms: expr.arms.map((arm) => ({ ...arm, value: substituteExpr(arm.value, substitutions) })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          value: substituteExpr(slot.value, substitutions),
+        })),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: substituteExpr(expr.start, substitutions),
+        end: substituteExpr(expr.end, substitutions),
+      };
+    case "static_for_slots":
+      return { ...expr, value: substituteExpr(expr.value, substitutions) };
+    case "field":
+      return {
+        ...expr,
+        value: substituteExpr(expr.value, substitutions),
+        key: substituteExpr(expr.key, substitutions),
+      };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) => substituteStatement(stmt, substitutions)),
+        ...(expr.expr ? { expr: substituteExpr(expr.expr, substitutions) } : {}),
+      };
+    case "literal":
+    case "placeholder":
+      return expr;
+  }
+}
+
+function substituteStatement(stmt: Statement, substitutions: Map<string, Expr>): Statement {
+  if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+    return { ...stmt, value: substituteExpr(stmt.value, substitutions) } as Statement;
+  }
+  return stmt;
+}
+
 function cleanupInstrs(instrs: Instr[]): Instr[] {
   const cleaned: Instr[] = [];
   for (let index = 0; index < instrs.length; index++) {
@@ -360,6 +603,23 @@ function cleanupInstrs(instrs: Instr[]): Instr[] {
       continue;
     }
     cleaned.push(instr);
+    const current = cleaned[cleaned.length - 1];
+    const beforeCurrent = cleaned[cleaned.length - 2];
+    if (
+      beforeCurrent?.op === "local.get" && current?.op === "local.set" &&
+      beforeCurrent.name === current.name
+    ) {
+      cleaned.splice(cleaned.length - 2, 2);
+      continue;
+    }
+    if (beforeCurrent?.op === "local.tee" && current?.op === "drop") {
+      cleaned.splice(cleaned.length - 2, 2, { op: "local.set", name: beforeCurrent.name });
+      continue;
+    }
+    if (beforeCurrent?.op === "const" && current?.op === "drop") {
+      cleaned.splice(cleaned.length - 2, 2);
+      continue;
+    }
     if (isTerminator(instr)) break;
   }
   return cleaned;
@@ -788,6 +1048,8 @@ function lowerExpr(
       if (branch) return branch;
       const temporal = lowerTemporalIntrinsic(expr, ctx, locals);
       if (temporal) return temporal;
+      const inlineArrayHelper = lowerInlineArrayHelperCall(expr, ctx, locals, expectedType);
+      if (inlineArrayHelper) return inlineArrayHelper;
       const builder = lowerInlineArrayBuilderPrimitive(expr, ctx, locals, expectedType);
       if (builder) return builder;
       const componentSlotPut = lowerComponentSlotPut(expr, ctx, locals);
@@ -1860,6 +2122,8 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
           watMemidx(instr.memory)
         } align=${instr.align} offset=${instr.offset}`,
       ];
+    case "memory.copy":
+      return [`${prefix}memory.copy${watMemidx(instr.memory)}`];
     case "drop":
       return [`${prefix}drop`];
     case "unreachable":
@@ -2068,6 +2332,8 @@ function encodeInstr(
       return [...wasmLoadOp(instr.type), ...memarg(instr.align, instr.offset)];
     case "store":
       return [...wasmStoreOp(instr.type), ...memarg(instr.align, instr.offset)];
+    case "memory.copy":
+      return [0xfc, ...uleb(0x0a), 0x00, 0x00];
     case "drop":
       return [0x1a];
     case "unreachable":
@@ -2343,24 +2609,142 @@ function lowerBranchIntrinsic(
       { op: "unary", wasm: "i32.wrap_i64" },
     ];
   }
-  if (id === "branch_mark" || id === "branch_ensure_editable" || id === "branch_materialize") {
-    return lowerExpr(arg, ctx, locals, "i64");
+  if (id === "branch_mark") {
+    return lowerBranchMark(arg, ctx, locals);
+  }
+  if (id === "branch_ensure_editable" || id === "branch_materialize") {
+    return lowerBranchEnsureEditable(arg, ctx, locals);
   }
   if (id === "branch_is_branched") {
     const handle = expr.args.at(-1);
-    return [
-      ...lowerExpr(
-        handle ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-        "i64",
-      ),
-      { op: "unary", wasm: "i32.wrap_i64" },
-      { op: "const", type: "i32", value: 0 },
-      { op: "binary", wasm: "i32.ne" },
-    ];
+    return lowerBranchIsBranched(
+      handle ?? { kind: "literal", literalKind: "number", value: "0" },
+      ctx,
+      locals,
+    );
   }
   return undefined;
+}
+
+const BRANCH_HEADER_SIZE_OFFSET = 4;
+const BRANCH_HEADER_FLAGS_OFFSET = 8;
+const BRANCH_HEADER_SIZE = 16;
+const BRANCH_FLAG_BRANCHED = 1;
+const BRANCH_FLAG_PINNED = 2;
+const BRANCH_MUTATION_GUARD_FLAGS = BRANCH_FLAG_BRANCHED | BRANCH_FLAG_PINNED;
+const BRANCH_CLEAR_COPIED_FLAGS_MASK = -16;
+
+function lowerBranchMark(arg: Expr, ctx: LowerContext, locals: Set<string>): Instr[] {
+  const ptr = branchTemp(ctx, locals, "ptr");
+  return [
+    ...lowerExpr(arg, ctx, locals, "i64"),
+    { op: "unary", wasm: "i32.wrap_i64" },
+    { op: "local.tee", name: ptr },
+    { op: "const", type: "i32", value: 0 },
+    { op: "binary", wasm: "i32.ne" },
+    {
+      op: "if",
+      results: ["i64"],
+      thenBody: [
+        { op: "local.get", name: ptr },
+        { op: "local.get", name: ptr },
+        { op: "load", type: "i32", align: 4, offset: BRANCH_HEADER_FLAGS_OFFSET },
+        { op: "const", type: "i32", value: BRANCH_FLAG_BRANCHED },
+        { op: "binary", wasm: "i32.or" },
+        { op: "store", type: "i32", align: 4, offset: BRANCH_HEADER_FLAGS_OFFSET },
+        { op: "local.get", name: ptr },
+        { op: "unary", wasm: "i64.extend_i32_u" },
+      ],
+      elseBody: [{ op: "const", type: "i64", value: 0 }],
+    },
+  ];
+}
+
+function lowerBranchEnsureEditable(arg: Expr, ctx: LowerContext, locals: Set<string>): Instr[] {
+  const ptr = branchTemp(ctx, locals, "ptr");
+  const fresh = branchTemp(ctx, locals, "fresh");
+  const bytes = branchTemp(ctx, locals, "bytes");
+  return [
+    ...lowerExpr(arg, ctx, locals, "i64"),
+    { op: "unary", wasm: "i32.wrap_i64" },
+    { op: "local.tee", name: ptr },
+    { op: "const", type: "i32", value: 0 },
+    { op: "binary", wasm: "i32.eq" },
+    {
+      op: "if",
+      results: ["i64"],
+      thenBody: [{ op: "const", type: "i64", value: 0 }],
+      elseBody: [
+        { op: "local.get", name: ptr },
+        { op: "load", type: "i32", align: 4, offset: BRANCH_HEADER_FLAGS_OFFSET },
+        { op: "const", type: "i32", value: BRANCH_MUTATION_GUARD_FLAGS },
+        { op: "binary", wasm: "i32.and" },
+        { op: "const", type: "i32", value: 0 },
+        { op: "binary", wasm: "i32.eq" },
+        {
+          op: "if",
+          results: ["i64"],
+          thenBody: [
+            { op: "local.get", name: ptr },
+            { op: "unary", wasm: "i64.extend_i32_u" },
+          ],
+          elseBody: [
+            { op: "local.get", name: ptr },
+            { op: "load", type: "i32", align: 4, offset: BRANCH_HEADER_SIZE_OFFSET },
+            { op: "const", type: "i32", value: BRANCH_HEADER_SIZE },
+            { op: "binary", wasm: "i32.add" },
+            { op: "local.tee", name: bytes },
+            { op: "local.get", name: ptr },
+            { op: "binary", wasm: "i32.add" },
+            { op: "local.set", name: fresh },
+            { op: "local.get", name: fresh },
+            { op: "local.get", name: ptr },
+            { op: "local.get", name: bytes },
+            { op: "memory.copy" },
+            { op: "local.get", name: fresh },
+            { op: "local.get", name: fresh },
+            { op: "load", type: "i32", align: 4, offset: BRANCH_HEADER_FLAGS_OFFSET },
+            { op: "const", type: "i32", value: BRANCH_CLEAR_COPIED_FLAGS_MASK },
+            { op: "binary", wasm: "i32.and" },
+            { op: "store", type: "i32", align: 4, offset: BRANCH_HEADER_FLAGS_OFFSET },
+            { op: "local.get", name: fresh },
+            { op: "unary", wasm: "i64.extend_i32_u" },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+function lowerBranchIsBranched(arg: Expr, ctx: LowerContext, locals: Set<string>): Instr[] {
+  const ptr = branchTemp(ctx, locals, "ptr");
+  return [
+    ...lowerExpr(arg, ctx, locals, "i64"),
+    { op: "unary", wasm: "i32.wrap_i64" },
+    { op: "local.tee", name: ptr },
+    { op: "const", type: "i32", value: 0 },
+    { op: "binary", wasm: "i32.eq" },
+    {
+      op: "if",
+      results: ["i32"],
+      thenBody: [{ op: "const", type: "i32", value: 0 }],
+      elseBody: [
+        { op: "local.get", name: ptr },
+        { op: "load", type: "i32", align: 4, offset: BRANCH_HEADER_FLAGS_OFFSET },
+        { op: "const", type: "i32", value: BRANCH_FLAG_BRANCHED },
+        { op: "binary", wasm: "i32.and" },
+        { op: "const", type: "i32", value: 0 },
+        { op: "binary", wasm: "i32.ne" },
+      ],
+    },
+  ];
+}
+
+function branchTemp(ctx: LowerContext, locals: Set<string>, suffix: string): string {
+  const name = `__branch_${suffix}${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name, type: "i32" });
+  locals.add(name);
+  return name;
 }
 
 function packTemporalHandle(
