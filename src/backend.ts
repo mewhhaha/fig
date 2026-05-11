@@ -198,15 +198,14 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
     !decl.params.some((param) => param.const) &&
     Boolean(decl.returnType)
   );
-  const functions = removeUnreachablePrivateFunctions(runtimeFns);
-  const allFns = optimized.declarations.filter((decl): decl is FnDecl =>
+  const reachableFns = removeUnreachablePrivateFunctions(runtimeFns);
+  const sourceFns = optimized.declarations.filter((decl): decl is FnDecl =>
     decl.kind === "fn" && Boolean(decl.returnType)
   );
-  const signatures = new Map([...imports, ...functions].map((fn) => [fn.name, fn]));
-  const ctx: LowerContext = {
+  const baseCtx: LowerContext = {
     layouts,
-    functions: new Map([...imports, ...allFns].map((fn) => [fn.name, fn])),
-    signatures,
+    functions: new Map([...imports, ...sourceFns, ...reachableFns].map((fn) => [fn.name, fn])),
+    signatures: new Map([...imports, ...reachableFns].map((fn) => [fn.name, fn])),
     intrinsicIdsByName: intrinsicIdsByFunctionName(optimized.declarations),
     tempIndex: 0,
     tempLocals: [],
@@ -215,6 +214,16 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
     optMode,
     inlineStack: new Set(),
     nextDataOffset: 1024,
+  };
+  const functions = addOptimizedExportClones(
+    reachableFns,
+    (fn) => scratchWorthyFixedArrayTargets(fn.body, baseCtx).size > 0,
+  );
+  const signatures = new Map([...imports, ...functions].map((fn) => [fn.name, fn]));
+  const ctx: LowerContext = {
+    ...baseCtx,
+    functions: new Map([...imports, ...sourceFns, ...functions].map((fn) => [fn.name, fn])),
+    signatures,
   };
   const fixedArrayPlans = analyzeFixedArrayPlans(functions, ctx);
   ctx.scratchPlansByFunction = fixedArrayPlans.scratch;
@@ -349,6 +358,44 @@ function materializedLane4I32Params(fn: FnDecl, ctx: LowerContext): string[] {
     .map((param) => param.name);
 }
 
+function addOptimizedExportClones(
+  functions: FnDecl[],
+  shouldClone: (fn: FnDecl) => boolean,
+): FnDecl[] {
+  const used = new Set(functions.map((fn) => fn.name));
+  return functions.flatMap((fn) => {
+    if (!fn.public || !shouldClone(fn)) return [fn];
+    const cloneName = uniqueGeneratedFnName(`${fn.name}__optimized`, used);
+    const clone: FnDecl = {
+      ...fn,
+      public: false,
+      name: cloneName,
+      generated: true,
+    };
+    const wrapper: FnDecl = {
+      ...fn,
+      body: {
+        kind: "block",
+        statements: [],
+        expr: {
+          kind: "call",
+          callee: { kind: "var", name: cloneName },
+          args: fn.params.map((param) => ({ kind: "var", name: param.name } as Expr)),
+        },
+      },
+    };
+    return [wrapper, clone];
+  });
+}
+
+function uniqueGeneratedFnName(base: string, used: Set<string>): string {
+  let name = base;
+  let index = 0;
+  while (used.has(name)) name = `${base}_${++index}`;
+  used.add(name);
+  return name;
+}
+
 function analyzeFixedArrayPlans(
   functions: FnDecl[],
   ctx: LowerContext,
@@ -467,6 +514,10 @@ function scratchWorthyFixedArrayTargets(block: BlockExpr, ctx: LowerContext): Se
     if (update && staticIntegerLiteral(update.index) === undefined) targets.add(update.source.name);
     const swap = fixedArraySwapCall(expr, ctx);
     if (swap) targets.add(swap.source.name);
+    const spreadUpdate = fixedArraySpreadUpdateExpr(expr);
+    if (spreadUpdate && staticIntegerLiteral(spreadUpdate.index) === undefined) {
+      targets.add(spreadUpdate.source.name);
+    }
     switch (expr.kind) {
       case "block":
         for (const stmt of expr.statements) visitStatement(stmt);
@@ -522,6 +573,17 @@ function scratchWorthyFixedArrayTargets(block: BlockExpr, ctx: LowerContext): Se
   for (const stmt of block.statements) visitStatement(stmt);
   if (block.expr) visit(block.expr);
   return targets;
+}
+
+function fixedArraySpreadUpdateExpr(
+  expr: Expr,
+): { source: Extract<Expr, { kind: "var" }>; index: Expr } | undefined {
+  if (expr.kind !== "shape" && expr.kind !== "product_constructor") return undefined;
+  const source = expr.slots.find((slot) => slot.spread)?.value;
+  if (source?.kind !== "var") return undefined;
+  const override = expr.slots.find((slot) => slot.index);
+  if (!override?.index) return undefined;
+  return { source, index: override.index };
 }
 
 function dynamicFixedArrayReadTargets(block: BlockExpr): Set<string> {

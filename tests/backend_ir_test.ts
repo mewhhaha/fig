@@ -130,7 +130,8 @@ Deno.test("backend uses local tee for immediate set get roundtrips", async () =>
   `,
     { optMode: "release" },
   );
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  const main = wat.match(/\(func \$main__optimized[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(main, "local.tee $x");
   assert(!main.includes("local.set $x\n    local.get $x"));
 });
@@ -528,6 +529,38 @@ Deno.test("packed fixed-array dynamic set updates with shifts and masks", async 
   assertEquals((instance.exports.main as CallableFunction)(2), 1274);
 });
 
+Deno.test("public fixed-array kernel uses optimized private representation clone", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn A() -> type {
+      layout.InlineArray(7, u3)
+    }
+    pub fn public_kernel(xs: A, i: i32, v: u3) -> u3 {
+      let ys = layout.InlineArray.set(7, u3, xs, i, v);
+      ys[i]
+    }
+    fn private_kernel(xs: A, i: i32, v: u3) -> u3 {
+      let ys = layout.InlineArray.set(7, u3, xs, i, v);
+      ys[i]
+    }
+    pub fn main(i: i32) -> i32 {
+      private_kernel(<0, 1, 2, 3, 4, 5, 6>, i, 7)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const publicWrapper = wat.match(/\(func \$public_kernel[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(publicWrapper, `call $public_kernel__optimized`);
+  assertStringIncludes(wat, `(func $public_kernel__optimized`);
+  assertStringIncludes(wat, "$__fixed_array_packed_xs");
+  assert(!wat.includes("fig_buffers"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.public_kernel as CallableFunction)(0, 1, 2, 3, 4, 5, 6, 2, 7), 7);
+  assertEquals((instance.exports.main as CallableFunction)(3), 7);
+});
+
 Deno.test("packed fixed-array swap stays loop-lowered without helpers", async () => {
   const source = `
     const layout = @import("prelude.layout");
@@ -907,7 +940,8 @@ Deno.test("dynamic scalar inline array indexing lowers through select", async ()
     }
   `;
   const wat = await watFromSource(source, { optMode: "release" });
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  const main = wat.match(/\(func \$main__optimized[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(main, "select");
   assert(!main.includes("if"));
   assert(!wat.includes("fig_buffers"));
@@ -933,7 +967,8 @@ Deno.test("safe dynamic scalar fixed tuple update lowers through select", async 
     }
   `;
   const wat = await watFromSource(source, { optMode: "release" });
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  const main = wat.match(/\(func \$main__optimized[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(main, "select");
   assert(!main.includes("if"));
   assert(!wat.includes("InlineArrayBuilder"));
