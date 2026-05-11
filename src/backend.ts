@@ -104,7 +104,9 @@ interface LowerContext {
   signatures: Map<string, FnDecl>;
   intrinsicIdsByName: Map<string, string>;
   scratchPlansByFunction?: Map<string, Map<string, ScratchArrayPlan>>;
+  packedPlansByFunction?: Map<string, Map<string, PackedArrayPlan>>;
   scratchArrays?: Map<string, ScratchArrayPlan>;
+  packedArrays?: Map<string, PackedArrayPlan>;
   tempIndex: number;
   tempLocals: BackendLocal[];
   currentFn?: FnDecl;
@@ -124,6 +126,15 @@ interface ScratchArrayPlan {
   byteSize: number;
   align: number;
   offset: number;
+}
+
+interface PackedArrayPlan {
+  name: string;
+  capacity: number;
+  itemType: string;
+  valueType: ValueType;
+  packedType: ValueType;
+  bitWidth: number;
 }
 
 interface LayoutEnv {
@@ -205,7 +216,9 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
     inlineStack: new Set(),
     nextDataOffset: 1024,
   };
-  ctx.scratchPlansByFunction = analyzeScratchArrayPlans(functions, ctx);
+  const fixedArrayPlans = analyzeFixedArrayPlans(functions, ctx);
+  ctx.scratchPlansByFunction = fixedArrayPlans.scratch;
+  ctx.packedPlansByFunction = fixedArrayPlans.packed;
 
   const loweredFunctions = functions.map((fn) => lowerFunction(fn, ctx));
   const needsScratchMemory = [...ctx.scratchPlansByFunction.values()].some((plans) =>
@@ -273,7 +286,12 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
     currentFn: fn,
     localTypes: new Map(fn.params.map((param) => [param.name, param.type])),
     scratchArrays: ctx.scratchPlansByFunction?.get(fn.name),
+    packedArrays: ctx.packedPlansByFunction?.get(fn.name),
   };
+  for (const plan of fnCtx.packedArrays?.values() ?? []) {
+    fnCtx.tempLocals.push({ name: packedArrayLocalName(plan.name), type: plan.packedType });
+    localNames.add(packedArrayLocalName(plan.name));
+  }
   const laneParamVectors = materializedLane4I32Params(fn, fnCtx);
   for (const name of laneParamVectors) {
     fnCtx.tempLocals.push({ name, type: "v128" });
@@ -303,7 +321,10 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
   const scratchPrologue = [...(fnCtx.scratchArrays?.values() ?? [])].flatMap((plan) =>
     lowerScratchArrayInit(plan)
   );
-  const body = cleanupInstrs([...prologue, ...scratchPrologue, ...loweredBody]);
+  const packedPrologue = [...(fnCtx.packedArrays?.values() ?? [])].flatMap((plan) =>
+    lowerPackedArrayInit(plan)
+  );
+  const body = cleanupInstrs([...prologue, ...scratchPrologue, ...packedPrologue, ...loweredBody]);
   const bodyLocals = instrLocalNames(body);
   const locals = [...collectIrLocals(fn.body, fnCtx), ...fnCtx.tempLocals].filter((local) =>
     (!paramNames.has(local.name) && bodyLocals.has(local.name)) ||
@@ -328,22 +349,33 @@ function materializedLane4I32Params(fn: FnDecl, ctx: LowerContext): string[] {
     .map((param) => param.name);
 }
 
-function analyzeScratchArrayPlans(
+function analyzeFixedArrayPlans(
   functions: FnDecl[],
   ctx: LowerContext,
-): Map<string, Map<string, ScratchArrayPlan>> {
-  const byFunction = new Map<string, Map<string, ScratchArrayPlan>>();
+): {
+  scratch: Map<string, Map<string, ScratchArrayPlan>>;
+  packed: Map<string, Map<string, PackedArrayPlan>>;
+} {
+  const scratchByFunction = new Map<string, Map<string, ScratchArrayPlan>>();
+  const packedByFunction = new Map<string, Map<string, PackedArrayPlan>>();
   let nextOffset = 4096;
   const addPlan = (
     fn: FnDecl,
-    plans: Map<string, ScratchArrayPlan>,
+    scratchPlans: Map<string, ScratchArrayPlan>,
+    packedPlans: Map<string, PackedArrayPlan>,
     target: string,
     type: string | undefined,
   ): boolean => {
-    if (plans.has(target)) return false;
+    if (scratchPlans.has(target) || packedPlans.has(target)) return false;
     const args = inlineArrayLikeTypeArgs(type, ctx.layouts);
     if (!args) return false;
     const [capacity, itemType] = args;
+    const packed = packedArrayPlan(target, capacity, itemType, ctx.layouts);
+    if (packed) {
+      packedPlans.set(target, packed);
+      packedByFunction.set(fn.name, packedPlans);
+      return true;
+    }
     const itemSlots = flattenType(itemType, ctx.layouts);
     const valueType = itemSlots[0]?.wat;
     if (
@@ -361,19 +393,23 @@ function analyzeScratchArrayPlans(
       offset: nextOffset,
     };
     nextOffset += capacity * byteSize;
-    plans.set(target, plan);
-    byFunction.set(fn.name, plans);
+    scratchPlans.set(target, plan);
+    scratchByFunction.set(fn.name, scratchPlans);
     return true;
   };
   for (const fn of functions) {
-    const plans = new Map<string, ScratchArrayPlan>();
+    const scratchPlans = new Map<string, ScratchArrayPlan>();
+    const packedPlans = new Map<string, PackedArrayPlan>();
     if (fn.public) {
-      byFunction.set(fn.name, plans);
+      scratchByFunction.set(fn.name, scratchPlans);
+      packedByFunction.set(fn.name, packedPlans);
       continue;
     }
     const scratchTargets = scratchWorthyFixedArrayTargets(fn.body, ctx);
     for (const param of fn.params) {
-      if (scratchTargets.has(param.name)) addPlan(fn, plans, param.name, param.type);
+      if (scratchTargets.has(param.name)) {
+        addPlan(fn, scratchPlans, packedPlans, param.name, param.type);
+      }
     }
     for (const target of scratchTargets) {
       if (
@@ -381,34 +417,47 @@ function analyzeScratchArrayPlans(
       ) {
         continue;
       }
-      addPlan(fn, plans, target, varTypeWithParamTypes(target, fn, ctx));
+      addPlan(fn, scratchPlans, packedPlans, target, varTypeWithParamTypes(target, fn, ctx));
     }
-    byFunction.set(fn.name, plans);
+    scratchByFunction.set(fn.name, scratchPlans);
+    packedByFunction.set(fn.name, packedPlans);
   }
   let changed = true;
   while (changed) {
     changed = false;
     for (const caller of functions) {
-      const callerPlans = byFunction.get(caller.name);
-      if (!callerPlans?.size) continue;
+      const callerScratchPlans = scratchByFunction.get(caller.name);
+      const callerPackedPlans = packedByFunction.get(caller.name);
+      if (!callerScratchPlans?.size && !callerPackedPlans?.size) continue;
       for (const call of privateCallsInBlock(caller.body, ctx)) {
         if (call.callee.kind !== "var") continue;
         const callee = ctx.functions.get(call.callee.name);
         if (!callee || callee.public) continue;
         const dynamicReads = dynamicFixedArrayReadTargets(callee.body);
         if (!dynamicReads.size) continue;
-        const calleePlans = byFunction.get(callee.name) ?? new Map<string, ScratchArrayPlan>();
+        const calleeScratchPlans = scratchByFunction.get(callee.name) ??
+          new Map<string, ScratchArrayPlan>();
+        const calleePackedPlans = packedByFunction.get(callee.name) ??
+          new Map<string, PackedArrayPlan>();
         const argOffset = Math.max(0, call.args.length - callee.params.length);
         for (const [index, param] of callee.params.entries()) {
-          if (!dynamicReads.has(param.name) || calleePlans.has(param.name)) continue;
+          if (
+            !dynamicReads.has(param.name) || calleeScratchPlans.has(param.name) ||
+            calleePackedPlans.has(param.name)
+          ) continue;
           const arg = call.args[index + argOffset];
-          if (!arg || !scratchBackedFixedArrayExpr(arg, callerPlans, ctx)) continue;
-          if (addPlan(callee, calleePlans, param.name, param.type)) changed = true;
+          if (
+            !arg ||
+            !backedFixedArrayExpr(arg, callerScratchPlans, callerPackedPlans, ctx)
+          ) continue;
+          if (
+            addPlan(callee, calleeScratchPlans, calleePackedPlans, param.name, param.type)
+          ) changed = true;
         }
       }
     }
   }
-  return byFunction;
+  return { scratch: scratchByFunction, packed: packedByFunction };
 }
 
 function scratchWorthyFixedArrayTargets(block: BlockExpr, ctx: LowerContext): Set<string> {
@@ -608,14 +657,24 @@ function privateCallsInBlock(
   return calls;
 }
 
-function scratchBackedFixedArrayExpr(
+function backedFixedArrayExpr(
   expr: Expr,
-  plans: Map<string, ScratchArrayPlan>,
+  scratchPlans: Map<string, ScratchArrayPlan> | undefined,
+  packedPlans: Map<string, PackedArrayPlan> | undefined,
   ctx: LowerContext,
 ): boolean {
-  if (expr.kind === "var") return Boolean(scratchPlanForName(expr.name, plans));
+  if (expr.kind === "var") {
+    return Boolean(
+      scratchPlanForName(expr.name, scratchPlans) ?? packedPlanForName(expr.name, packedPlans),
+    );
+  }
   const update = fixedArrayUpdateCall(expr, ctx);
-  if (update) return Boolean(scratchPlanForName(update.source.name, plans));
+  if (update) {
+    return Boolean(
+      scratchPlanForName(update.source.name, scratchPlans) ??
+        packedPlanForName(update.source.name, packedPlans),
+    );
+  }
   return false;
 }
 
@@ -725,6 +784,15 @@ function lowerInlineArrayHelperCall(
   const fn = ctx.functions.get(expr.callee.name);
   if (!fn) return undefined;
   const fixedUpdate = fixedArrayUpdateCall(expr, ctx);
+  const packedUpdate = fixedUpdate
+    ? packedPlanForName(fixedUpdate.source.name, ctx.packedArrays)
+    : undefined;
+  if (fixedUpdate && packedUpdate) {
+    return [
+      ...lowerPackedArrayStore(packedUpdate, fixedUpdate.index, fixedUpdate.value, ctx, locals),
+      ...lowerPackedArrayMaterialize(packedUpdate, ctx, locals),
+    ];
+  }
   const scratchUpdate = fixedUpdate
     ? scratchPlanForName(fixedUpdate.source.name, ctx.scratchArrays)
     : undefined;
@@ -1937,12 +2005,17 @@ function lowerPrivateProductCallInline(
     ctx.scratchPlansByFunction?.get(callee.name),
     renames,
   );
+  const packedArrays = renamedPackedPlans(
+    ctx.packedPlansByFunction?.get(callee.name),
+    renames,
+  );
   const inlineCtx: LowerContext = {
     ...ctx,
     currentFn: renamed,
     localTypes: new Map(renamed.params.map((param) => [param.name, param.type])),
     inlineStack: new Set([...(ctx.inlineStack ?? []), callee.name]),
     scratchArrays,
+    packedArrays,
   };
   const paramBindings = renamed.params.flatMap((param) =>
     flattenBinding(param.name, param.type, ctx.layouts)
@@ -1950,6 +2023,13 @@ function lowerPrivateProductCallInline(
   for (const binding of paramBindings) {
     locals.add(binding.name);
     ctx.tempLocals.push({ name: binding.name, type: binding.wat });
+  }
+  for (const plan of packedArrays?.values() ?? []) {
+    const name = packedArrayLocalName(plan.name);
+    if (!locals.has(name) && !ctx.tempLocals.some((item) => item.name === name)) {
+      locals.add(name);
+      ctx.tempLocals.push({ name, type: plan.packedType });
+    }
   }
   for (const local of collectIrLocals(renamed.body, inlineCtx)) {
     if (locals.has(local.name) || ctx.tempLocals.some((item) => item.name === local.name)) continue;
@@ -1964,6 +2044,9 @@ function lowerPrivateProductCallInline(
   const scratchPrologue = [...(scratchArrays?.values() ?? [])].flatMap((plan) =>
     lowerScratchArrayInit(plan)
   );
+  const packedPrologue = [...(packedArrays?.values() ?? [])].flatMap((plan) =>
+    lowerPackedArrayInit(plan)
+  );
   return [
     ...runtimeArgs.flatMap((arg, index) => lowerExpr(arg, ctx, locals, callee.params[index]?.type)),
     ...paramBindings.toReversed().map((binding): Instr => ({
@@ -1971,6 +2054,7 @@ function lowerPrivateProductCallInline(
       name: binding.name,
     })),
     ...scratchPrologue,
+    ...packedPrologue,
     ...body,
   ];
 }
@@ -1979,6 +2063,19 @@ function renamedScratchPlans(
   plans: Map<string, ScratchArrayPlan> | undefined,
   renames: Map<string, string>,
 ): Map<string, ScratchArrayPlan> | undefined {
+  if (!plans?.size) return plans;
+  return new Map(
+    [...plans].map(([name, plan]) => {
+      const renamed = renameDottedName(name, renames);
+      return [renamed, { ...plan, name: renamed }];
+    }),
+  );
+}
+
+function renamedPackedPlans(
+  plans: Map<string, PackedArrayPlan> | undefined,
+  renames: Map<string, string>,
+): Map<string, PackedArrayPlan> | undefined {
   if (!plans?.size) return plans;
   return new Map(
     [...plans].map(([name, plan]) => {
@@ -2302,6 +2399,8 @@ function lowerRuntimeInlineArrayIndex(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  const packed = packedPlanForName(target, ctx.packedArrays);
+  if (packed) return lowerPackedArrayLoad(packed, index, ctx, locals);
   const scratch = ctx.scratchArrays?.get(target);
   if (scratch) return lowerScratchArrayLoad(scratch, index, ctx, locals);
   const fallback = lowerVar(`${target}[${Math.max(0, capacity - 1)}]`, ctx, locals, itemType);
@@ -2385,6 +2484,34 @@ function cacheRepeatedIndex(
 
 function isSelectableValueType(type: ValueType | undefined): type is ValueType {
   return type === "i32" || type === "i64" || type === "f32" || type === "f64";
+}
+
+function packedArrayPlan(
+  name: string,
+  capacity: number,
+  itemType: string,
+  layouts: LayoutEnv,
+): PackedArrayPlan | undefined {
+  const bitWidth = packedArrayItemBitWidth(itemType);
+  if (!Number.isFinite(capacity) || capacity <= 0 || !bitWidth) return undefined;
+  const totalBits = capacity * bitWidth;
+  if (totalBits > 64) return undefined;
+  const itemSlots = flattenType(itemType, layouts);
+  const valueType = itemSlots[0]?.wat;
+  if (itemSlots.length !== 1 || (valueType !== "i32" && valueType !== "i64")) return undefined;
+  return {
+    name,
+    capacity,
+    itemType,
+    valueType,
+    packedType: totalBits <= 32 ? "i32" : "i64",
+    bitWidth,
+  };
+}
+
+function packedArrayItemBitWidth(type: string): number | undefined {
+  if (type === "bool") return 1;
+  return unsignedBitWidth(type);
 }
 
 function valueTypeByteSize(type: ValueType): number {
@@ -2478,6 +2605,132 @@ function lowerScratchArrayAddress(
     { op: "binary", wasm: "i32.mul" },
     { op: "binary", wasm: "i32.add" },
   ];
+}
+
+function lowerPackedArrayInit(plan: PackedArrayPlan): Instr[] {
+  const packed = Array.from({ length: plan.capacity }, (_, index) =>
+    lowerPackedArraySlotValue(
+      plan,
+      [{ op: "local.get", name: scratchArrayLocalSlotName(plan.name, index) }],
+      index * plan.bitWidth,
+    ));
+  const value = packed.reduce(
+    (body, slot) =>
+      body.length
+        ? [...body, ...slot, { op: "binary", wasm: `${plan.packedType}.or` } as Instr]
+        : slot,
+    [] as Instr[],
+  );
+  return [
+    ...(value.length ? value : [{ op: "const", type: plan.packedType, value: 0 } as Instr]),
+    { op: "local.set", name: packedArrayLocalName(plan.name) },
+  ];
+}
+
+function lowerPackedArrayMaterialize(
+  plan: PackedArrayPlan,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  return Array.from(
+    { length: plan.capacity },
+    (_, index) => lowerPackedArrayLoad(plan, staticIndexExpr(index), ctx, locals),
+  ).flat();
+}
+
+function lowerPackedArrayLoad(
+  plan: PackedArrayPlan,
+  index: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const literal = staticIntegerLiteral(index);
+  const shifted: Instr[] = literal !== undefined
+    ? [
+      { op: "local.get", name: packedArrayLocalName(plan.name) },
+      ...(literal * plan.bitWidth === 0 ? [] : [
+        { op: "const", type: "i32", value: literal * plan.bitWidth } as Instr,
+        { op: "binary", wasm: `${plan.packedType}.shr_u` } as Instr,
+      ]),
+    ]
+    : [
+      { op: "local.get", name: packedArrayLocalName(plan.name) },
+      ...lowerExpr(index, ctx, locals, "i32"),
+      { op: "const", type: "i32", value: plan.bitWidth },
+      { op: "binary", wasm: "i32.mul" },
+      { op: "binary", wasm: `${plan.packedType}.shr_u` },
+    ];
+  return lowerPackedArrayValueToItem(plan, maskValue(shifted, plan.packedType, plan.bitWidth));
+}
+
+function lowerPackedArrayStore(
+  plan: PackedArrayPlan,
+  index: Expr,
+  value: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  ensureLoweringLocals(value, ctx, locals);
+  const cachedIndex = cacheRepeatedIndex(index, ctx, locals);
+  const shiftName = `__fixed_array_packed_shift${ctx.tempIndex++}`;
+  const valueName = `__fixed_array_packed_value${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: shiftName, type: "i32" });
+  ctx.tempLocals.push({ name: valueName, type: plan.packedType });
+  locals.add(shiftName);
+  locals.add(valueName);
+  const mask = packedMaskInstr(plan.packedType, plan.bitWidth);
+  return [
+    ...cachedIndex.prefix,
+    ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: plan.bitWidth },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "local.set", name: shiftName },
+    ...lowerPackedArrayValueToPacked(plan, lowerExpr(value, ctx, locals, plan.itemType)),
+    { op: "local.set", name: valueName },
+    { op: "local.get", name: packedArrayLocalName(plan.name) },
+    { op: "const", type: plan.packedType, value: -1 },
+    mask,
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.xor` },
+    { op: "binary", wasm: `${plan.packedType}.and` },
+    { op: "local.get", name: valueName },
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.or` },
+    { op: "local.set", name: packedArrayLocalName(plan.name) },
+  ];
+}
+
+function lowerPackedArraySlotValue(
+  plan: PackedArrayPlan,
+  value: Instr[],
+  offset: number,
+): Instr[] {
+  const packed = lowerPackedArrayValueToPacked(plan, value);
+  if (offset === 0) return packed;
+  return [
+    ...packed,
+    { op: "const", type: "i32", value: offset },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+  ];
+}
+
+function lowerPackedArrayValueToPacked(plan: PackedArrayPlan, value: Instr[]): Instr[] {
+  const widened = plan.packedType === "i64" && plan.valueType === "i32"
+    ? [...value, { op: "unary", wasm: "i64.extend_i32_u" } as Instr]
+    : value;
+  return maskValue(widened, plan.packedType, plan.bitWidth);
+}
+
+function lowerPackedArrayValueToItem(plan: PackedArrayPlan, value: Instr[]): Instr[] {
+  return plan.valueType === "i32" && plan.packedType === "i64"
+    ? [...value, { op: "unary", wasm: "i32.wrap_i64" }]
+    : value;
+}
+
+function packedMaskInstr(type: ValueType, width: number): Instr {
+  return { op: "const", type, value: width >= 64 ? -1 : 2 ** width - 1 };
 }
 
 interface FixedArrayUpdateCall {
@@ -2596,6 +2849,8 @@ function lowerTransientFixedArraySet(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  const packed = ctx.packedArrays?.get(param.name);
+  if (packed) return lowerPackedArrayStore(packed, update.index, update.value, ctx, locals);
   const scratch = ctx.scratchArrays?.get(param.name);
   if (scratch) return lowerScratchArrayStore(scratch, update.index, update.value, ctx, locals);
   ensureLoweringLocals(update.value, ctx, locals);
@@ -2628,6 +2883,35 @@ function lowerTransientFixedArraySwap(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  const packed = ctx.packedArrays?.get(param.name);
+  if (packed) {
+    const leftValue = `__fixed_swap_left${ctx.tempIndex++}`;
+    const rightValue = `__fixed_swap_right${ctx.tempIndex++}`;
+    ctx.tempLocals.push({ name: leftValue, type: packed.valueType });
+    ctx.tempLocals.push({ name: rightValue, type: packed.valueType });
+    locals.add(leftValue);
+    locals.add(rightValue);
+    return [
+      ...lowerPackedArrayLoad(packed, swap.left, ctx, locals),
+      { op: "local.set", name: leftValue },
+      ...lowerPackedArrayLoad(packed, swap.right, ctx, locals),
+      { op: "local.set", name: rightValue },
+      ...lowerPackedArrayStore(
+        packed,
+        swap.left,
+        { kind: "var", name: rightValue },
+        ctx,
+        locals,
+      ),
+      ...lowerPackedArrayStore(
+        packed,
+        swap.right,
+        { kind: "var", name: leftValue },
+        ctx,
+        locals,
+      ),
+    ];
+  }
   const scratch = ctx.scratchArrays?.get(param.name);
   if (scratch) {
     const leftValue = `__fixed_swap_left${ctx.tempIndex++}`;
@@ -2794,10 +3078,24 @@ function lowerVar(
   expectedType?: string,
 ): Instr[] {
   const layouts = ctx.layouts;
+  const exactPacked = ctx.packedArrays?.get(name);
+  if (exactPacked) return lowerPackedArrayMaterialize(exactPacked, ctx, locals);
   const exactScratch = ctx.scratchArrays?.get(name);
   if (exactScratch) return lowerScratchArrayMaterialize(exactScratch, ctx, locals);
   const base = baseName(name);
   const projection = projectionSuffix(name);
+  const packed = packedPlanForName(name, ctx.packedArrays);
+  if (packed) {
+    const packedPath = packed.name === base
+      ? projection
+      : name.slice(packed.name.length).replace(/^\./, "").replace(/^\[/, "").replace(/\]$/, "");
+    const item = packedPath && /^[0-9]+$/.test(packedPath)
+      ? Number.parseInt(packedPath, 10)
+      : undefined;
+    return item === undefined
+      ? lowerPackedArrayMaterialize(packed, ctx, locals)
+      : lowerPackedArrayLoad(packed, staticIndexExpr(item), ctx, locals);
+  }
   const scratch = scratchPlanForName(name, ctx.scratchArrays);
   if (scratch) {
     const scratchPath = scratch.name === base
@@ -2848,8 +3146,25 @@ function scratchPlanForName(
     (projection ? plans.get(`${base}.${projection.replaceAll("$", ".")}`) : undefined);
 }
 
+function packedPlanForName(
+  name: string,
+  plans: Map<string, PackedArrayPlan> | undefined,
+): PackedArrayPlan | undefined {
+  if (!plans) return undefined;
+  const exact = plans.get(name);
+  if (exact) return exact;
+  const base = baseName(name);
+  const projection = projectionSuffix(name);
+  return plans.get(base) ??
+    (projection ? plans.get(`${base}.${projection.replaceAll("$", ".")}`) : undefined);
+}
+
 function scratchArrayLocalSlotName(name: string, index: number): string {
   return `${name.replaceAll(".", "$")}$${index}`;
+}
+
+function packedArrayLocalName(name: string): string {
+  return `__fixed_array_packed_${name.replaceAll(".", "$")}`;
 }
 
 function lowerShapeStorage(
@@ -5308,10 +5623,12 @@ function wasmBinaryOp(op: string): number {
     "i32.rem_s": 0x6f,
     "i32.and": 0x71,
     "i32.or": 0x72,
+    "i32.xor": 0x73,
     "i32.shl": 0x74,
     "i32.shr_u": 0x76,
     "i64.and": 0x83,
     "i64.or": 0x84,
+    "i64.xor": 0x85,
     "i64.shl": 0x86,
     "i64.shr_u": 0x88,
     "i32.eq": 0x46,

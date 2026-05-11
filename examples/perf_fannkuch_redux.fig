@@ -3,7 +3,7 @@
 const layout = @import("prelude.layout");
 
 type fn Perm7() -> type {
-  layout.InlineArray(7, i32)
+  layout.InlineArray(7, u3)
 }
 
 type fn State() -> type {
@@ -11,7 +11,7 @@ type fn State() -> type {
   struct(State)
 }
 
-fn dec(x: i32) -> i32 {
+fn dec(x: u3) -> u3 {
   x - 1
 }
 
@@ -25,8 +25,8 @@ fn max_i32(a: i32, b: i32) -> i32 {
 fn swap(xs: Perm7, left: i32, right: i32) -> Perm7 {
   let a = xs[left];
   let b = xs[right];
-  layout.InlineArray.set(7, i32, xs, left, b)
-    \ys -> layout.InlineArray.set(7, i32, ys, right, a)
+  layout.InlineArray.set(7, u3, xs, left, b)
+    \ys -> layout.InlineArray.set(7, u3, ys, right, a)
 }
 
 fn reverse_prefix_loop(
@@ -45,7 +45,7 @@ fn reverse_prefix_loop(
 }
 
 fn flip_count_loop(xs: Perm7, flips: i32) -> i32 {
-  let first: i32 = xs[0];
+  let first: u3 = xs[0];
   match first != 0 {
     true => flip_count_loop(
       reverse_prefix_loop(xs, 0, first),
@@ -78,7 +78,7 @@ fn prepare(state: State) -> State {
       perm: state.perm,
       count: layout.InlineArray.set(
         7,
-        i32,
+        u3,
         state.count,
         state.r - 1,
         state.r
@@ -96,18 +96,18 @@ fn rotate_left_loop(
   xs: Perm7,
   i: i32,
   r: i32,
-  first: i32
+  first: u3
 ) -> Perm7 {
   match i < r {
     true => rotate_left_loop(
-      layout.InlineArray.set(7, i32, xs, i, xs[i + 1]),
+      layout.InlineArray.set(7, u3, xs, i, xs[i + 1]),
       i + 1,
       r,
       first
     ),
     false => layout.InlineArray.set(
       7,
-      i32,
+      u3,
       xs,
       r,
       first
@@ -126,7 +126,7 @@ fn advance(state: State, r: i32) -> State {
       \old_count ->(rotate_left(state.perm, r)
       \rotated ->(layout.InlineArray.update(
       7,
-      i32,
+      u3,
       state.count,
       r,
       dec

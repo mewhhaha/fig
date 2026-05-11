@@ -427,12 +427,13 @@ const scenarios: Scenario[] = [
       ...scalarFlatShape,
       module: {
         ...scalarFlatShape.module,
-        fig_buffers_refs: { min: 2 },
-        fixed_array_representation_scratch: { min: 1 },
+        fig_buffers_refs: { max: 0 },
+        fixed_array_representation_scratch: { max: 0 },
+        fixed_array_representation_packed: { min: 1 },
         loops: { min: 1 },
       },
     },
-    maxWatBytes: 44_000,
+    maxWatBytes: 52_000,
     maxWasmBytes: 2_480,
     notes: "CLBG fannkuch-redux n=7 adaptation using fixed arrays and dynamic InlineArray updates.",
     source: fannkuchReduxSource,
@@ -608,7 +609,7 @@ function fixedArrayShape(wat: string) {
     wat,
     /\bfixed_array_scratch\b|\bfig_fixed_scratch\b|\b(?:i32|i64|f32|f64)\.(?:load|store) \(memory \$fig_buffers\)/g,
   );
-  const packedRefs = count(wat, /\bfixed_array_packed\b|\bpacked_fixed_array\b/g);
+  const packedRefs = count(wat, /fixed_array_packed|packed_fixed_array/g);
   return {
     fixed_dynamic_gets: fixedDynamicGets,
     fixed_dynamic_sets: fixedDynamicSets,

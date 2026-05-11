@@ -3822,6 +3822,12 @@ function typeProofMatchesExpected(proof: string, expectedType: string): boolean 
 }
 
 function constValueFromKeyName(name: string): ConstValue | undefined {
+  if (
+    ["i32", "u32", "i64", "u64", "f32", "f64", "bool", "string"].includes(name) ||
+    isUnsignedIntegerType(name)
+  ) {
+    return { kind: "type", name };
+  }
   const shape = constShapeValueFromTypeArg(name);
   if (shape) return shape;
   if (!name.startsWith("{")) return undefined;

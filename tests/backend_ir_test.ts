@@ -466,11 +466,101 @@ Deno.test("fannkuch search release lowering fuses product-state step", async () 
   assert(!wat.includes("(func $layout_InlineArray_set__"));
   assert(!wat.includes("(func $layout_InlineArray_update__"));
   assert(!wat.includes("select"));
+  assertStringIncludes(wat, "fixed_array_packed");
+  assert(!wat.includes("fig_buffers"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(0), 22816);
+});
+
+Deno.test("packed fixed-array dynamic read lowers through shift and mask", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
+      xs[index]
+    }
+    fn bump_read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
+      read(layout.InlineArray.set(4, u3, xs, index, 7), index)
+    }
+    pub fn main(index: i32) -> i32 {
+      bump_read(<1, 2, 3, 4>, index)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule });
+  const read = wat.match(/\(func \$read[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(read, "fixed_array_packed");
+  assertStringIncludes(read, "i32.shr_u");
+  assertStringIncludes(read, "i32.and");
+  assert(!read.includes("select"));
+  assert(!wat.includes("fig_buffers"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(2), 7);
+});
+
+Deno.test("packed fixed-array dynamic set updates with shifts and masks", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn set_at(xs: layout.InlineArray(4, u3), index: i32, value: u3) -> layout.InlineArray(4, u3) {
+      layout.InlineArray.set(4, u3, xs, index, value)
+    }
+    pub fn main(index: i32) -> i32 {
+      let ys = set_at(<1, 2, 3, 4>, index, 7);
+      ys[0] * 1000 + ys[1] * 100 + ys[2] * 10 + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule });
+  const setAt = wat.match(/\(func \$set_at[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(setAt, "fixed_array_packed");
+  assertStringIncludes(setAt, "i32.shl");
+  assertStringIncludes(setAt, "i32.and");
+  assertStringIncludes(setAt, "i32.xor");
+  assert(!setAt.includes("select"));
+  assert(!wat.includes("fig_buffers"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(2), 1274);
+});
+
+Deno.test("packed fixed-array swap stays loop-lowered without helpers", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn swap(xs: layout.InlineArray(4, u3), left: i32, right: i32) -> layout.InlineArray(4, u3) {
+      let a = xs[left];
+      let b = xs[right];
+      layout.InlineArray.set(4, u3, xs, left, b) \\ys ->
+      layout.InlineArray.set(4, u3, ys, right, a)
+    }
+    fn reverse_loop(xs: layout.InlineArray(4, u3), left: i32, right: i32) -> layout.InlineArray(4, u3) {
+      match left < right {
+        true => reverse_loop(swap(xs, left, right), left + 1, right - 1),
+        false => xs,
+      }
+    }
+    pub fn main() -> i32 {
+      let ys = reverse_loop(<1, 2, 3, 4>, 0, 3);
+      ys[0] * 1000 + ys[1] * 100 + ys[2] * 10 + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const reverse = wat.match(/\(func \$reverse_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(reverse, "loop");
+  assertStringIncludes(reverse, "fixed_array_packed");
+  assert(!reverse.includes("select"));
+  assert(!reverse.includes("call $swap"));
+  assert(!reverse.includes("call $layout_InlineArray_set__4__u3"));
+  assert(!wat.includes("fig_buffers"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 4321);
 });
 
 Deno.test("tail-recursive scalar inline-array set mutates dead slots in loop", async () => {
