@@ -338,6 +338,307 @@ Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 6);
 });
 
+Deno.test("private pipe-bind product search chain fuses into tail loop", async () => {
+  const source = `
+    type fn State() -> type {
+      let State = {x: i32, r: i32, sum: i32};
+      struct(State)
+    }
+    fn prepare(state: State) -> State {
+      State { x: state.x + 1, r: state.r, sum: state.sum }
+    }
+    fn score(state: State) -> State {
+      State { x: state.x, r: state.r, sum: state.sum + state.x }
+    }
+    fn advance(state: State) -> State {
+      State { x: state.x, r: state.r + 1, sum: state.sum }
+    }
+    fn search(state: State) -> State {
+      prepare(state) \\prepared ->
+        score(prepared) \\scored ->
+          advance(scored) \\next ->
+            match next.r == 3 {
+              true => next,
+              false => search(next),
+            }
+    }
+    pub fn main() -> i32 {
+      search(State { x: 0, r: 0, sum: 0 }) \\result ->
+        result.x * 100 + result.sum
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const search = wat.match(/\(func \$search[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(search, "loop");
+  assert(!search.includes("call $prepare"));
+  assert(!search.includes("call $score"));
+  assert(!search.includes("call $advance"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 306);
+});
+
+Deno.test("private let-chain product search chain fuses into same tail loop shape", async () => {
+  const source = `
+    type fn State() -> type {
+      let State = {x: i32, r: i32, sum: i32};
+      struct(State)
+    }
+    fn prepare(state: State) -> State {
+      State { x: state.x + 1, r: state.r, sum: state.sum }
+    }
+    fn score(state: State) -> State {
+      State { x: state.x, r: state.r, sum: state.sum + state.x }
+    }
+    fn advance(state: State) -> State {
+      State { x: state.x, r: state.r + 1, sum: state.sum }
+    }
+    fn search(state: State) -> State {
+      let prepared = prepare(state);
+      let scored = score(prepared);
+      let next = advance(scored);
+      match next.r == 3 {
+        true => next,
+        false => search(next),
+      }
+    }
+    pub fn main() -> i32 {
+      search(State { x: 0, r: 0, sum: 0 }) \\result ->
+        result.x * 100 + result.sum
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const search = wat.match(/\(func \$search[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertEquals((search.match(/\bloop\b/g) ?? []).length, 1);
+  assert(!search.includes("call $prepare"));
+  assert(!search.includes("call $score"));
+  assert(!search.includes("call $advance"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 306);
+});
+
+Deno.test("effectful product transformer is not fused into private search loop", async () => {
+  const source = `
+    const tick: fn() -> i32 !{time} = @capability("tick");
+    type fn State() -> type {
+      let State = {x: i32, r: i32};
+      struct(State)
+    }
+    fn prepare(state: State) -> State !{time} {
+      State { x: state.x + tick(), r: state.r }
+    }
+    fn advance(state: State) -> State {
+      State { x: state.x, r: state.r + 1 }
+    }
+    fn search(state: State) -> State !{time} {
+      prepare(state) \\prepared ->
+        advance(prepared) \\next ->
+          match next.r == 1 {
+            true => next,
+            false => search(next),
+          }
+    }
+    pub fn main() -> i32 !{time} {
+      search(State { x: 0, r: 0 }) \\result -> result.x
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const search = wat.match(/\(func \$search[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(search, "call $prepare");
+  assert(!search.includes("call $advance"));
+});
+
+Deno.test("fannkuch search release lowering fuses product-state step", async () => {
+  const source = await Deno.readTextFile("examples/perf_fannkuch_redux.fig");
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const search = wat.match(/\(func \$search[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(search, "loop");
+  assert(!search.includes("call $prepare"));
+  assert(!search.includes("call $score"));
+  assert(!search.includes("call $advance"));
+  assert(!wat.includes("call $layout_InlineArray_set__"));
+  assert(!wat.includes("call $layout_InlineArray_update__"));
+  assert(!wat.includes("(func $layout_InlineArray_set__"));
+  assert(!wat.includes("(func $layout_InlineArray_update__"));
+  assert(!wat.includes("select"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(0), 22816);
+});
+
+Deno.test("tail-recursive scalar inline-array set mutates dead slots in loop", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn rotate_left_loop(
+      xs: layout.InlineArray(4, i32),
+      i: i32,
+      r: i32,
+      first: i32
+    ) -> layout.InlineArray(4, i32) {
+      match i < r {
+        true => rotate_left_loop(layout.InlineArray.set(4, i32, xs, i, xs[i + 1]), i + 1, r, first),
+        false => layout.InlineArray.set(4, i32, xs, r, first),
+      }
+    }
+    pub fn main() -> i32 {
+      let xs: layout.InlineArray(4, i32) = <1, 2, 3, 4>;
+      let ys = rotate_left_loop(xs, 0, 2, xs[0]);
+      ys[0] * 1000 + ys[1] * 100 + ys[2] * 10 + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const rotate = wat.match(/\(func \$rotate_left_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(rotate, "loop");
+  assertStringIncludes(rotate, `i32.load (memory $fig_buffers)`);
+  assertStringIncludes(rotate, `i32.store (memory $fig_buffers)`);
+  assert(!rotate.includes("select"));
+  assert(!rotate.includes("call $rotate_left_loop"));
+  assert(!rotate.includes("call $layout_InlineArray_set__4__i32"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 2314);
+});
+
+Deno.test("tail-recursive scalar inline-array swap mutates dead slots in loop", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn swap(xs: layout.InlineArray(4, i32), left: i32, right: i32) -> layout.InlineArray(4, i32) {
+      let a = xs[left];
+      let b = xs[right];
+      layout.InlineArray.set(4, i32, xs, left, b) \\ys ->
+      layout.InlineArray.set(4, i32, ys, right, a)
+    }
+    fn reverse_loop(xs: layout.InlineArray(4, i32), left: i32, right: i32) -> layout.InlineArray(4, i32) {
+      match left < right {
+        true => reverse_loop(swap(xs, left, right), left + 1, right - 1),
+        false => xs,
+      }
+    }
+    pub fn main() -> i32 {
+      let ys = reverse_loop(<1, 2, 3, 4>, 0, 3);
+      ys[0] * 1000 + ys[1] * 100 + ys[2] * 10 + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const reverse = wat.match(/\(func \$reverse_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(reverse, "loop");
+  assertStringIncludes(reverse, `i32.load (memory $fig_buffers)`);
+  assertStringIncludes(reverse, `i32.store (memory $fig_buffers)`);
+  assert(!reverse.includes("select"));
+  assert(!reverse.includes("call $swap"));
+  assert(!reverse.includes("call $layout_InlineArray_set__4__i32"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 4321);
+});
+
+Deno.test("private product fixed-array field dynamic set uses scratch storage", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Box() -> type {
+      let Box = {values: layout.InlineArray(4, i32), tag: i32};
+      struct(Box)
+    }
+    fn bump(box: Box, index: i32) -> Box {
+      Box {
+        values: layout.InlineArray.set(4, i32, box.values, index, box.tag + 1),
+        tag: box.tag,
+      }
+    }
+    pub fn main(index: i32) -> i32 {
+      let box = Box { values: <1, 2, 3, 4>, tag: 9 };
+      let next = bump(box, index);
+      next.values[1] * 10 + next.values[2] + next.tag
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const bump = wat.match(/\(func \$bump[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(bump, `i32.load (memory $fig_buffers)`);
+  assertStringIncludes(bump, `i32.store (memory $fig_buffers)`);
+  assert(!bump.includes("select"));
+  assert(!bump.includes("call $layout_InlineArray_set__4__i32"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1), 112);
+  assertEquals((instance.exports.main as CallableFunction)(2), 39);
+});
+
+Deno.test("scratch fixed-array update evaluates old value without helper call", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Box() -> type {
+      let Box = {values: layout.InlineArray(4, i32), tag: i32};
+      struct(Box)
+    }
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn bump(box: Box, index: i32) -> Box {
+      Box {
+        values: layout.InlineArray.update(4, i32, box.values, index, inc),
+        tag: box.tag,
+      }
+    }
+    pub fn main(index: i32) -> i32 {
+      let box = Box { values: <1, 2, 3, 4>, tag: 9 };
+      let next = bump(box, index);
+      next.values[1] * 10 + next.values[2] + next.tag
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const bump = wat.match(/\(func \$bump[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(bump, `i32.load (memory $fig_buffers)`);
+  assertStringIncludes(bump, `i32.store (memory $fig_buffers)`);
+  assert(!bump.includes("select"));
+  assert(!bump.includes("call $layout_InlineArray_update__4__i32__inc"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1), 42);
+  assertEquals((instance.exports.main as CallableFunction)(2), 33);
+});
+
+Deno.test("scratch fixed-array argument forwards to private dynamic read callee", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn read(xs: layout.InlineArray(4, i32), index: i32) -> i32 {
+      xs[index]
+    }
+    fn bump_read(xs: layout.InlineArray(4, i32), index: i32) -> i32 {
+      read(layout.InlineArray.update(4, i32, xs, index, inc), index)
+    }
+    pub fn main(index: i32) -> i32 {
+      bump_read(<1, 2, 3, 4>, index)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule });
+  const read = wat.match(/\(func \$read[\s\S]*?\n  \)/)?.[0] ?? "";
+  const bumpRead = wat.match(/\(func \$bump_read[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(read, `i32.load (memory $fig_buffers)`);
+  assertStringIncludes(read, `i32.store (memory $fig_buffers)`);
+  assert(!read.includes("select"));
+  assert(!bumpRead.includes("call $layout_InlineArray_update__4__i32__inc"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1), 3);
+  assertEquals((instance.exports.main as CallableFunction)(2), 4);
+});
+
 Deno.test("index cursor Yield item proves inline-array indexing and lowers inline", async () => {
   const source = `
     const core = @import("prelude.core");
@@ -519,6 +820,7 @@ Deno.test("dynamic scalar inline array indexing lowers through select", async ()
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(main, "select");
   assert(!main.includes("if"));
+  assert(!wat.includes("fig_buffers"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
@@ -545,6 +847,7 @@ Deno.test("safe dynamic scalar fixed tuple update lowers through select", async 
   assertStringIncludes(main, "select");
   assert(!main.includes("if"));
   assert(!wat.includes("InlineArrayBuilder"));
+  assert(!wat.includes("fig_buffers"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),

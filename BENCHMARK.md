@@ -4,9 +4,8 @@ These numbers compare Fig compiled to Wasm against equivalent JavaScript and Rus
 machine-local measurements from the current working tree and should be used mainly for regression
 tracking.
 
-Fig is compiled with the compiler's single best-effort optimization mode and
-`memoryModel: "branch"`. The tables report both the old exported-call shape and the new
-internal-loop shape:
+Fig is compiled with `optMode: "release"` and `memoryModel: "branch"`. The tables report both the
+old exported-call shape and the new internal-loop shape:
 
 - `Fig/Wasm external`: JavaScript calls the exported Wasm `main(seed)` once per measured iteration.
 - `Fig/Wasm internal`: JavaScript calls exported Wasm `bench(iterations)` once, and the measured
@@ -41,29 +40,35 @@ compiled as a single exported kernel, which is the fair size comparison to `Rust
 
 | Scenario                         | Fig compare Wasm | Fig kernel Wasm | Rust/Wasm |
 | -------------------------------- | ---------------: | --------------: | --------: |
-| `scalar_reuse_nway`              |              248 |              84 |       140 |
-| `product_shadow_update`          |              430 |             264 |       225 |
-| `tail_product_loop_1k`           |              419 |             253 |       348 |
-| `inline_array_builder_map`       |              675 |             511 |       530 |
-| `compact_filter_collect`         |             1927 |            1762 |       317 |
-| `alias_snapshot_update`          |              713 |             549 |       224 |
-| `fixed_collection_update`        |             1263 |            1099 |       278 |
-| `fixed_collection_spread_update` |              580 |             416 |       261 |
-| `collision_aabb_64`              |              661 |             497 |       275 |
-| `path_grid_score_16`             |              365 |             200 |       189 |
-| `range_fold_1k`                  |              535 |             376 |       333 |
-| `fannkuch_redux_7`               |             5526 |            5362 |      1190 |
-| `mat4_dot1`                      |              484 |             318 |       416 |
-| `mat4_full`                      |             2585 |            2421 |       648 |
+| `scalar_reuse_nway`              |              147 |              54 |       140 |
+| `product_shadow_update`          |              200 |             107 |       225 |
+| `tail_product_loop_1k`           |              303 |             137 |       348 |
+| `inline_array_builder_map`       |              548 |             255 |       530 |
+| `compact_filter_collect`         |              790 |             714 |       317 |
+| `alias_snapshot_update`          |              281 |             204 |       224 |
+| `fixed_collection_update`        |              270 |             183 |       278 |
+| `fixed_collection_spread_update` |              270 |             183 |       261 |
+| `collision_aabb_64`              |              411 |             304 |       275 |
+| `path_grid_score_16`             |              228 |             146 |       189 |
+| `range_fold_1k`                  |              241 |             143 |       333 |
+| `fannkuch_redux_7`               |             2202 |            2047 |      1190 |
+| `mat4_dot1`                      |              296 |             209 |       416 |
+| `mat4_full`                      |             2123 |            1658 |       648 |
 
 Representative timed rows from the same run:
 
 | Scenario                  | Fig external ns/call | Fig internal ns/call | JavaScript ns/call | Rust ns/call |
 | ------------------------- | -------------------: | -------------------: | -----------------: | -----------: |
-| `fixed_collection_update` |                103.7 |                  2.9 |              652.5 |          2.6 |
-| `compact_filter_collect`  |                 80.8 |                 25.7 |               67.0 |         15.3 |
-| `fannkuch_redux_7`        |             583233.5 |             570156.9 |           227133.9 |      90699.0 |
-| `mat4_full`               |                 44.0 |                 24.2 |               70.9 |         27.8 |
+| `fixed_collection_update` |                 18.9 |                 12.1 |              582.5 |          2.5 |
+| `compact_filter_collect`  |                 20.9 |                  3.3 |               77.3 |         12.8 |
+| `fannkuch_redux_7`        |             187664.5 |             212238.7 |           232388.3 |      94746.2 |
+| `mat4_full`               |                 31.0 |                 18.3 |               76.9 |         24.7 |
+
+Dynamic fixed-array diagnostics from the same run:
+
+| Scenario           | Dynamic selectors | Set/update calls | Spread helpers | Slot-copy/select sites | Transient sets | Flat | Scratch | Packed |
+| ------------------ | ----------------: | ---------------: | -------------: | ---------------------: | -------------: | ---: | ------: | -----: |
+| `fannkuch_redux_7` |                 0 |                0 |              0 |                      0 |              0 |    0 |       1 |      0 |
 
 ## Notes
 
@@ -89,6 +94,7 @@ Representative timed rows from the same run:
 - `collision_aabb_64` and `path_grid_score_16` are common systems-style kernels that stress flat
   products, nested conditionals, integer division/modulo, and scalar loop lowering.
 - `fannkuch_redux_7` is adapted from the Computer Language Benchmarks Game benchmark description and
-  uses fixed arrays, dynamic indexing, and repeated public `InlineArray.update`/`set` paths. Its
-  binary-size growth is bounded but the runtime gap is suspicious enough to make dynamic fixed-array
-  update lowering the next likely investigation target.
+  uses fixed arrays, dynamic indexing, and repeated public `InlineArray.update`/`set` paths. The
+  current lowering uses `fig_buffers` scratch storage for the dynamic reverse/rotate/count paths,
+  and fuses the private product-state search step in release mode. Packed bounded arrays remain a
+  likely follow-up for code-size pressure.

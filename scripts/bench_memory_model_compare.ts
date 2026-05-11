@@ -43,6 +43,14 @@ interface WatShape {
   simd_ops: number;
   loops: number;
   recursive_calls: number;
+  fixed_dynamic_gets: number;
+  fixed_dynamic_sets: number;
+  fixed_spread_updates: number;
+  fixed_update_slot_copies: number;
+  fixed_transient_sets: number;
+  fixed_array_representation_flat: number;
+  fixed_array_representation_scratch: number;
+  fixed_array_representation_packed: number;
 }
 
 interface ShapeExpectation {
@@ -70,6 +78,14 @@ interface Row {
   ns_per_call?: string;
   wat_bytes?: number;
   wasm_bytes?: number;
+  fixed_dynamic_gets?: number;
+  fixed_dynamic_sets?: number;
+  fixed_spread_updates?: number;
+  fixed_update_slot_copies?: number;
+  fixed_transient_sets?: number;
+  fixed_array_representation_flat?: number;
+  fixed_array_representation_scratch?: number;
+  fixed_array_representation_packed?: number;
 }
 
 const iterations = Number(Deno.args.find((arg) => arg !== "--") ?? 100_000);
@@ -103,6 +119,7 @@ const resolveModule = async (moduleName: string) => {
 const compileOptions = {
   resolveModule,
   memoryModel: "branch" as const,
+  optMode: "release" as const,
 };
 
 const scalarFlatShape: ShapeExpectation = {
@@ -442,12 +459,14 @@ const figScenarios: FigScenario[] = [
       ...scalarFlatShape,
       module: {
         ...scalarFlatShape.module,
+        fig_buffers_refs: { min: 2 },
+        fixed_array_representation_scratch: { min: 1 },
         loops: { min: 1 },
       },
     },
-    maxWatBytes: 39_384,
-    maxWasmBytes: 6_632,
-    maxKernelWasmBytes: 6_435,
+    maxWatBytes: 50_000,
+    maxWasmBytes: 2_600,
+    maxKernelWasmBytes: 2_480,
     source: fannkuchReduxSource,
   },
   {
@@ -702,6 +721,14 @@ function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
     "ns_per_call",
     "wat_bytes",
     "wasm_bytes",
+    "fixed_dynamic_gets",
+    "fixed_dynamic_sets",
+    "fixed_spread_updates",
+    "fixed_update_slot_copies",
+    "fixed_transient_sets",
+    "fixed_array_representation_flat",
+    "fixed_array_representation_scratch",
+    "fixed_array_representation_packed",
   ];
   for (const scenario of scenarioOrder) {
     const byRuntime = new Map(
@@ -737,9 +764,26 @@ async function benchFig(scenario: FigScenario, calls: number): Promise<Row[]> {
   const start = performance.now();
   const checksum = bench(calls) as number;
   const internal = { elapsedMs: performance.now() - start, checksum };
+  const kernelShape = watShape(kernelWat);
   return [
-    row("fig_wasm_external_call", scenario.name, calls, external, wat.length, wasm.byteLength),
-    row("fig_wasm_internal_loop", scenario.name, calls, internal, wat.length, wasm.byteLength),
+    row(
+      "fig_wasm_external_call",
+      scenario.name,
+      calls,
+      external,
+      wat.length,
+      wasm.byteLength,
+      shape.module,
+    ),
+    row(
+      "fig_wasm_internal_loop",
+      scenario.name,
+      calls,
+      internal,
+      wat.length,
+      wasm.byteLength,
+      shape.module,
+    ),
     row(
       "fig_wasm_kernel",
       scenario.name,
@@ -747,6 +791,7 @@ async function benchFig(scenario: FigScenario, calls: number): Promise<Row[]> {
       undefined,
       kernelWat.length,
       kernelWasm.byteLength,
+      kernelShape,
     ),
   ];
 }
@@ -879,6 +924,7 @@ function row(
   timed?: { elapsedMs: number; checksum: number },
   watBytes?: number,
   wasmBytes?: number,
+  shape?: WatShape,
 ): Row {
   return {
     runtime,
@@ -896,6 +942,18 @@ function row(
       : {}),
     ...(watBytes !== undefined ? { wat_bytes: watBytes } : {}),
     ...(wasmBytes !== undefined ? { wasm_bytes: wasmBytes } : {}),
+    ...(shape
+      ? {
+        fixed_dynamic_gets: shape.fixed_dynamic_gets,
+        fixed_dynamic_sets: shape.fixed_dynamic_sets,
+        fixed_spread_updates: shape.fixed_spread_updates,
+        fixed_update_slot_copies: shape.fixed_update_slot_copies,
+        fixed_transient_sets: shape.fixed_transient_sets,
+        fixed_array_representation_flat: shape.fixed_array_representation_flat,
+        fixed_array_representation_scratch: shape.fixed_array_representation_scratch,
+        fixed_array_representation_packed: shape.fixed_array_representation_packed,
+      }
+      : {}),
   };
 }
 
@@ -941,6 +999,7 @@ function scopedWatShape(wat: string) {
 }
 
 function watShape(wat: string): WatShape {
+  const fixed = fixedArrayShape(wat);
   return {
     function_calls: count(wat, /\bcall \$/g),
     return_calls: count(wat, /\breturn_call \$/g),
@@ -956,7 +1015,43 @@ function watShape(wat: string): WatShape {
     simd_ops: count(wat, /\bi(?:8|16|32|64|f32|f64)x[0-9]+\./g),
     loops: count(wat, /\bloop\b/g),
     recursive_calls: recursiveCallCount(wat),
+    ...fixed,
   };
+}
+
+function fixedArrayShape(wat: string) {
+  const helperWat = inlineArrayUpdateHelperWat(wat);
+  const fixedDynamicGets = count(wat, /\bselect\b/g);
+  const fixedDynamicSets = count(wat, /\bcall \$layout_InlineArray_(?:set|update)__/g);
+  const fixedSpreadUpdates = count(wat, /\(func \$layout_InlineArray_(?:set|update)__/g);
+  const fixedUpdateSlotCopies = count(helperWat, /\b(?:select|if)\b/g);
+  const fixedTransientSets = count(
+    wat,
+    /\bselect\n\s+local\.set \$[A-Za-z_][A-Za-z0-9_]*\$[0-9]+/g,
+  );
+  const scratchRefs = count(
+    wat,
+    /\bfixed_array_scratch\b|\bfig_fixed_scratch\b|\b(?:i32|i64|f32|f64)\.(?:load|store) \(memory \$fig_buffers\)/g,
+  );
+  const packedRefs = count(wat, /\bfixed_array_packed\b|\bpacked_fixed_array\b/g);
+  return {
+    fixed_dynamic_gets: fixedDynamicGets,
+    fixed_dynamic_sets: fixedDynamicSets,
+    fixed_spread_updates: fixedSpreadUpdates,
+    fixed_update_slot_copies: fixedUpdateSlotCopies,
+    fixed_transient_sets: fixedTransientSets,
+    fixed_array_representation_flat: fixedDynamicGets || fixedDynamicSets || fixedSpreadUpdates
+      ? 1
+      : 0,
+    fixed_array_representation_scratch: scratchRefs ? 1 : 0,
+    fixed_array_representation_packed: packedRefs ? 1 : 0,
+  };
+}
+
+function inlineArrayUpdateHelperWat(wat: string): string {
+  return [...wat.matchAll(/\(func \$(layout_InlineArray_(?:set|update)__[^\s)]+)[\s\S]*?\n  \)/g)]
+    .map((match) => match[0])
+    .join("\n");
 }
 
 function checkShape(

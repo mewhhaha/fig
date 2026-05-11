@@ -28,6 +28,14 @@ interface WatShape {
   simd_ops: number;
   loops: number;
   recursive_calls: number;
+  fixed_dynamic_gets: number;
+  fixed_dynamic_sets: number;
+  fixed_spread_updates: number;
+  fixed_update_slot_copies: number;
+  fixed_transient_sets: number;
+  fixed_array_representation_flat: number;
+  fixed_array_representation_scratch: number;
+  fixed_array_representation_packed: number;
 }
 
 interface ShapeExpectation {
@@ -51,6 +59,7 @@ const resolveModule = async (moduleName: string) => {
 const compileOptions = {
   resolveModule,
   memoryModel: "branch" as const,
+  optMode: "release" as const,
 };
 
 const simdDot1Source = `
@@ -416,12 +425,16 @@ const scenarios: Scenario[] = [
     callsDivisor: 1000,
     expectedShape: {
       ...scalarFlatShape,
-      module: { ...scalarFlatShape.module, loops: { min: 1 } },
+      module: {
+        ...scalarFlatShape.module,
+        fig_buffers_refs: { min: 2 },
+        fixed_array_representation_scratch: { min: 1 },
+        loops: { min: 1 },
+      },
     },
-    maxWatBytes: 38_276,
-    maxWasmBytes: 6_435,
-    notes:
-      "CLBG fannkuch-redux n=7 adaptation using fixed arrays and dynamic InlineArray updates.",
+    maxWatBytes: 44_000,
+    maxWasmBytes: 2_480,
+    notes: "CLBG fannkuch-redux n=7 adaptation using fixed arrays and dynamic InlineArray updates.",
     source: fannkuchReduxSource,
   },
   {
@@ -561,6 +574,7 @@ function scopedWatShape(wat: string) {
 }
 
 function watShape(wat: string): WatShape {
+  const fixed = fixedArrayShape(wat);
   return {
     function_calls: count(wat, /\bcall \$/g),
     return_calls: count(wat, /\breturn_call \$/g),
@@ -576,7 +590,43 @@ function watShape(wat: string): WatShape {
     simd_ops: count(wat, /\bi(?:8|16|32|64|f32|f64)x[0-9]+\./g),
     loops: count(wat, /\bloop\b/g),
     recursive_calls: recursiveCallCount(wat),
+    ...fixed,
   };
+}
+
+function fixedArrayShape(wat: string) {
+  const helperWat = inlineArrayUpdateHelperWat(wat);
+  const fixedDynamicGets = count(wat, /\bselect\b/g);
+  const fixedDynamicSets = count(wat, /\bcall \$layout_InlineArray_(?:set|update)__/g);
+  const fixedSpreadUpdates = count(wat, /\(func \$layout_InlineArray_(?:set|update)__/g);
+  const fixedUpdateSlotCopies = count(helperWat, /\b(?:select|if)\b/g);
+  const fixedTransientSets = count(
+    wat,
+    /\bselect\n\s+local\.set \$[A-Za-z_][A-Za-z0-9_]*\$[0-9]+/g,
+  );
+  const scratchRefs = count(
+    wat,
+    /\bfixed_array_scratch\b|\bfig_fixed_scratch\b|\b(?:i32|i64|f32|f64)\.(?:load|store) \(memory \$fig_buffers\)/g,
+  );
+  const packedRefs = count(wat, /\bfixed_array_packed\b|\bpacked_fixed_array\b/g);
+  return {
+    fixed_dynamic_gets: fixedDynamicGets,
+    fixed_dynamic_sets: fixedDynamicSets,
+    fixed_spread_updates: fixedSpreadUpdates,
+    fixed_update_slot_copies: fixedUpdateSlotCopies,
+    fixed_transient_sets: fixedTransientSets,
+    fixed_array_representation_flat: fixedDynamicGets || fixedDynamicSets || fixedSpreadUpdates
+      ? 1
+      : 0,
+    fixed_array_representation_scratch: scratchRefs ? 1 : 0,
+    fixed_array_representation_packed: packedRefs ? 1 : 0,
+  };
+}
+
+function inlineArrayUpdateHelperWat(wat: string): string {
+  return [...wat.matchAll(/\(func \$(layout_InlineArray_(?:set|update)__[^\s)]+)[\s\S]*?\n  \)/g)]
+    .map((match) => match[0])
+    .join("\n");
 }
 
 function checkShape(

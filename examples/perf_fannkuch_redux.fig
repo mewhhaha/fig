@@ -1,6 +1,5 @@
 // Adapted from the Computer Language Benchmarks Game fannkuch-redux benchmark
 // materials, which are distributed under the BSD 3-Clause license.
-
 const layout = @import("prelude.layout");
 
 type fn Perm7() -> type {
@@ -26,13 +25,21 @@ fn max_i32(a: i32, b: i32) -> i32 {
 fn swap(xs: Perm7, left: i32, right: i32) -> Perm7 {
   let a = xs[left];
   let b = xs[right];
-  layout.InlineArray.set(7, i32, xs, left, b) \ys ->
-    layout.InlineArray.set(7, i32, ys, right, a)
+  layout.InlineArray.set(7, i32, xs, left, b)
+    \ys -> layout.InlineArray.set(7, i32, ys, right, a)
 }
 
-fn reverse_prefix_loop(xs: Perm7, left: i32, right: i32) -> Perm7 {
+fn reverse_prefix_loop(
+  xs: Perm7,
+  left: i32,
+  right: i32
+) -> Perm7 {
   match left < right {
-    true => reverse_prefix_loop(swap(xs, left, right), left + 1, right - 1),
+    true => reverse_prefix_loop(
+      swap(xs, left, right),
+      left + 1,
+      right - 1
+    ),
     false => xs,
   }
 }
@@ -40,7 +47,10 @@ fn reverse_prefix_loop(xs: Perm7, left: i32, right: i32) -> Perm7 {
 fn flip_count_loop(xs: Perm7, flips: i32) -> i32 {
   let first: i32 = xs[0];
   match first != 0 {
-    true => flip_count_loop(reverse_prefix_loop(xs, 0, first), flips + 1),
+    true => flip_count_loop(
+      reverse_prefix_loop(xs, 0, first),
+      flips + 1
+    ),
     false => flips,
   }
 }
@@ -52,7 +62,9 @@ fn score(state: State) -> State {
     count: state.count,
     r: state.r,
     index: state.index,
-    checksum: match state.index % 2 == 0 {
+    checksum: match state.index
+      % 2
+      == 0 {
       true => state.checksum + flips,
       false => state.checksum - flips,
     },
@@ -64,7 +76,13 @@ fn prepare(state: State) -> State {
   match state.r != 1 {
     true => prepare(State {
       perm: state.perm,
-      count: layout.InlineArray.set(7, i32, state.count, state.r - 1, state.r),
+      count: layout.InlineArray.set(
+        7,
+        i32,
+        state.count,
+        state.r - 1,
+        state.r
+      ),
       r: state.r - 1,
       index: state.index,
       checksum: state.checksum,
@@ -74,59 +92,77 @@ fn prepare(state: State) -> State {
   }
 }
 
-fn rotate_left_loop(xs: Perm7, i: i32, r: i32, first: i32) -> Perm7 {
+fn rotate_left_loop(
+  xs: Perm7,
+  i: i32,
+  r: i32,
+  first: i32
+) -> Perm7 {
   match i < r {
-    true => rotate_left_loop(layout.InlineArray.set(7, i32, xs, i, xs[i + 1]), i + 1, r, first),
-    false => layout.InlineArray.set(7, i32, xs, r, first),
+    true => rotate_left_loop(
+      layout.InlineArray.set(7, i32, xs, i, xs[i + 1]),
+      i + 1,
+      r,
+      first
+    ),
+    false => layout.InlineArray.set(
+      7,
+      i32,
+      xs,
+      r,
+      first
+    ),
   }
 }
 
 fn rotate_left(xs: Perm7, r: i32) -> Perm7 {
-  xs[0] \first ->
-    rotate_left_loop(xs, 0, r, first)
-}
-
-fn advance_after_rotate(state: State, r: i32, rotated: Perm7, count: Perm7) -> State {
-  match count[r] > 0 {
-    true => State {
-      perm: rotated,
-      count: count,
-      r: r,
-      index: state.index + 1,
-      checksum: state.checksum,
-      max_flips: state.max_flips,
-    },
-    false => advance(State {
-      perm: rotated,
-      count: count,
-      r: r + 1,
-      index: state.index,
-      checksum: state.checksum,
-      max_flips: state.max_flips,
-    }, r + 1),
-  }
+  xs[0] \first -> rotate_left_loop(xs, 0, r, first)
 }
 
 fn advance(state: State, r: i32) -> State {
   match r == 7 {
     true => state,
-    false => advance_after_rotate(
-      state,
+    false => state.count[r]
+      \old_count ->(rotate_left(state.perm, r)
+      \rotated ->(layout.InlineArray.update(
+      7,
+      i32,
+      state.count,
       r,
-      rotate_left(state.perm, r),
-      layout.InlineArray.update(7, i32, state.count, r, dec)
-    ),
+      dec
+    )
+      \count -> match old_count > 1 {
+      true => State {
+        perm: rotated,
+        count: count,
+        r: r,
+        index: state.index + 1,
+        checksum: state.checksum,
+        max_flips: state.max_flips,
+      },
+      false => advance(
+        State {
+          perm: rotated,
+          count: count,
+          r: r + 1,
+          index: state.index,
+          checksum: state.checksum,
+          max_flips: state.max_flips,
+        },
+        r + 1
+      ),
+    })),
   }
 }
 
 fn search(state: State) -> State {
-  let prepared = prepare(state);
-  let scored = score(prepared);
-  let next = advance(scored, scored.r);
-  match next.r == 7 {
+  prepare(state)
+    \prepared ->(score(prepared)
+    \scored ->(advance(scored, scored.r)
+    \next -> match next.r == 7 {
     true => next,
     false => search(next),
-  }
+  }))
 }
 
 pub fn main(seed: i32) -> i32 {
@@ -137,7 +173,7 @@ pub fn main(seed: i32) -> i32 {
     index: 0,
     checksum: 0,
     max_flips: 0,
-  } \initial ->
-    search(initial) \result ->
-      result.checksum * 100 + result.max_flips
+  }
+    \initial -> search(initial)
+    \result -> result.checksum * 100 + result.max_flips
 }
