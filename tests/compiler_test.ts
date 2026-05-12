@@ -2156,11 +2156,25 @@ Deno.test("const function literals specialize const fn parameters", async () => 
   );
   await assertFirstDiagnosticSpanIncludes(
     `
+    type fn Lane4I32() { let Lane4I32 = {4*i32}; struct(Lane4I32) }
+    fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
+      [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
+    }
+    pub fn main() -> Lane4I32 {
+      let x = 1;
+      map4_i32(\\y -> x + y, [1, 2, 3, 4])
+    }
+  `,
+    "const.const_fn_capture",
+    "x + y",
+  );
+  await assertFirstDiagnosticSpanIncludes(
+    `
     fn needs_type(const value: type) -> i32 { 0 }
     pub fn main() -> i32 { needs_type(\\x -> x + 1) }
   `,
     "const.const_fn_expected_fn",
-    "\\x -> x + 1",
+    "x + 1",
   );
   await assertFirstDiagnosticSpanIncludes(
     `
@@ -2171,7 +2185,7 @@ Deno.test("const function literals specialize const fn parameters", async () => 
     pub fn main() -> Lane4I32 { map4_i32(\\(x, y) -> x + y, [1, 2, 3, 4]) }
   `,
     "const.const_fn_arity",
-    "\\(x, y) -> x + y",
+    "x + y",
   );
   await assertFirstDiagnosticSpanIncludes(
     `
@@ -2183,6 +2197,53 @@ Deno.test("const function literals specialize const fn parameters", async () => 
   `,
     "const.placeholder_deprecated",
     "$ + 1",
+  );
+});
+
+Deno.test("do monad lowers through generated capturing const functions", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Id(a: type) -> type { a }
+    fn Id.pure(value: a) -> Id(a) { value }
+    fn Id.bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }
+    fn a() -> Id(i32) { 1 }
+    fn b(x: i32) -> Id(i32) { x + 2 }
+    pub fn main() -> Id(i32) {
+      do @monad(Id) {
+        x <- a();
+        let k = x + 1;
+        y <- b(k);
+        x + y
+      }
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 5);
+  await assertThrowsCompile(
+    `
+    type fn Id(a: type) -> type { a }
+    fn Id.pure(value: a) -> Id(a) { value }
+    pub fn main() -> Id(i32) {
+      do @parser(Id) { 1 }
+    }
+  `,
+    "do.unknown_strategy",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Id(a: type) -> type { a }
+    pub fn main() -> Id(i32) {
+      do @monad(Id) {
+        x <- 1;
+      }
+    }
+  `,
+    "do.missing_final_expr",
   );
 });
 

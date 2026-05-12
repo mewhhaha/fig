@@ -384,6 +384,16 @@ function qualifyTypeBlock(block: TypeBlock, alias: string, names: Set<string>): 
 
 function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
   switch (expr.kind) {
+    case "do":
+      return withMeta(expr, {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? { ...stmt, value: qualifyExpr(stmt.value, alias, names) }
+            : stmt
+        ),
+        expr: expr.expr ? qualifyExpr(expr.expr, alias, names) : undefined,
+      });
     case "var":
       return withMeta(expr, { ...expr, name: qualifyReference(expr.name, alias, names) });
     case "call":

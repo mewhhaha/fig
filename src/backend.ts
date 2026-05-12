@@ -1021,6 +1021,8 @@ function ensureLoweringLocals(expr: Expr, ctx: LowerContext, locals: Set<string>
 
 function substituteExpr(expr: Expr, substitutions: Map<string, Expr>): Expr {
   switch (expr.kind) {
+    case "do":
+      return expr.expr ? substituteExpr(expr.expr, substitutions) : expr;
     case "const_fn":
       return { ...expr, body: substituteExpr(expr.body, substitutions) };
     case "var":
@@ -1682,6 +1684,8 @@ function lowerExpr(
   const folded = constFold(expr);
   if (folded !== expr) return lowerExpr(folded, ctx, locals, expectedType);
   switch (expr.kind) {
+    case "do":
+      throw new Error("backend cannot lower do expression before desugaring");
     case "literal":
       return lowerLiteral(expr, expectedType);
     case "var":
@@ -2212,6 +2216,8 @@ function renameStatement(stmt: Statement, renames: Map<string, string>): Stateme
 
 function renameExpr(expr: Expr, renames: Map<string, string>): Expr {
   switch (expr.kind) {
+    case "do":
+      return { ...expr, expr: expr.expr ? renameExpr(expr.expr, renames) : undefined };
     case "const_fn":
       return { ...expr, body: renameExpr(expr.body, renames) };
     case "var":
@@ -3895,6 +3901,8 @@ function statementHasSelfCall(stmt: Statement, name: string): boolean {
 
 function exprHasSelfCall(expr: Expr, name: string): boolean {
   switch (expr.kind) {
+    case "do":
+      return expr.expr ? exprHasSelfCall(expr.expr, name) : false;
     case "const_fn":
       return exprHasSelfCall(expr.body, name);
     case "call":
@@ -3933,6 +3941,8 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
   const visit = (item: Expr | Statement | undefined) => {
     if (!item) return;
     switch (item.kind) {
+      case "do":
+        return visit(item.expr);
       case "let":
         visit(item.value);
         return;
@@ -5665,6 +5675,8 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
   const visit = (item: Expr | Statement | undefined) => {
     if (!item) return;
     switch (item.kind) {
+      case "do":
+        return visit(item.expr);
       case "let":
         visit(item.value);
         return;
@@ -5828,6 +5840,8 @@ function usesTemporalIntrinsic(expr: Expr | BlockExpr, functions: Map<string, Fn
   const visit = (item: Expr | Statement | undefined): boolean => {
     if (!item) return false;
     switch (item.kind) {
+      case "do":
+        return visit(item.expr);
       case "let":
         return visit(item.value);
       case "destructure_let":
@@ -5871,6 +5885,8 @@ function usesBranchIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
   const visit = (item: Expr | Statement | undefined): boolean => {
     if (!item) return false;
     switch (item.kind) {
+      case "do":
+        return visit(item.expr);
       case "let":
         return visit(item.value);
       case "destructure_let":

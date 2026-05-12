@@ -416,6 +416,8 @@ function optimizeExpr(
   functions: Map<string, FnDecl>,
 ): Expr {
   switch (expr.kind) {
+    case "do":
+      return expr;
     case "const_fn":
       return { ...expr, body: optimizeExpr(expr.body, forwarding, inlineable, functions) };
     case "call": {
@@ -722,6 +724,8 @@ function rewriteDroppedCallArgs<T extends Expr | BlockExpr>(
 
 function rewriteExpr(expr: Expr, drops: Map<string, Set<number>>): Expr {
   switch (expr.kind) {
+    case "do":
+      return expr;
     case "const_fn":
       return { ...expr, body: rewriteExpr(expr.body, drops) };
     case "call": {
@@ -865,6 +869,8 @@ function samePureExpr(left: Expr, right: Expr, functions: Map<string, FnDecl>): 
 
 function stableExprKey(expr: Expr): string {
   switch (expr.kind) {
+    case "do":
+      return `do:${expr.strategy.name}`;
     case "const_fn":
       return `const_fn:${expr.params.join(",")}=>${stableExprKey(expr.body)}`;
     case "literal":
@@ -992,6 +998,8 @@ function statementCost(stmt: Statement): number {
 
 function exprCost(expr: Expr): number {
   switch (expr.kind) {
+    case "do":
+      return 100;
     case "const_fn":
       return 1 + exprCost(expr.body);
     case "call":
@@ -1037,6 +1045,8 @@ function staticForSourceCost(source: StaticForSource): number {
 function exprCallsFunction(expr: Expr | BlockExpr | undefined, name: string): boolean {
   if (!expr) return false;
   switch (expr.kind) {
+    case "do":
+      return expr.expr ? exprCallsFunction(expr.expr, name) : false;
     case "const_fn":
       return exprCallsFunction(expr.body, name);
     case "call":
@@ -1224,6 +1234,8 @@ function exprMentionsName(expr: Expr, name: string): boolean {
 
 function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
   switch (expr.kind) {
+    case "do":
+      return expr.expr ? [expr.expr] : [];
     case "const_fn":
       return [expr.body];
     case "call":
@@ -1341,6 +1353,8 @@ function renameBlockBindings(
 
 function renameExprBindings(expr: Expr, env: Map<string, string>, fnName: string): Expr {
   switch (expr.kind) {
+    case "do":
+      return expr;
     case "const_fn":
       return { ...expr, body: renameExprBindings(expr.body, env, fnName) };
     case "var": {
@@ -1600,6 +1614,8 @@ function baseName(name: string): string {
 
 function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
   switch (expr.kind) {
+    case "do":
+      return true;
     case "const_fn":
       return hasRuntimeEffect(expr.body, functions);
     case "call":
@@ -1660,6 +1676,8 @@ function substituteStaticForSource(
 
 function substituteVar(expr: Expr, name: string, value: Expr): Expr {
   switch (expr.kind) {
+    case "do":
+      return expr;
     case "const_fn":
       return expr.params.includes(name)
         ? expr

@@ -39,6 +39,7 @@
 (Comment) @comment
 (Placeholder) @operator
 "_" @keyword
+"do" @keyword
 "else" @keyword
 "for" @keyword
 "if" @keyword
@@ -84,3 +85,4 @@
 (CollectionClose) @constant
 (Char) @constant
 (LiteralType) @constant
+(DoBindName) @constant

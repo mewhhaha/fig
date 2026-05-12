@@ -5,6 +5,7 @@ import type {
   ConstDecl,
   Declaration,
   DestructureLetDecl,
+  DoStatement,
   Expr,
   FnDecl,
   LetDecl,
@@ -892,7 +893,7 @@ function lowerProofConst(node: Node): ProofConstDecl {
 }
 
 function lowerBlock(node: Node): Extract<Expr, { kind: "block" }> {
-  const statements: Statement[] = [];
+  const statements: (Statement | DoStatement)[] = [];
   let expr: Expr | undefined;
   for (const child of named(node)) {
     if (child.type === "BlockLetDecl") {
@@ -907,7 +908,16 @@ function lowerBlock(node: Node): Extract<Expr, { kind: "block" }> {
       expr = lowerExpr(child);
     }
   }
-  return { kind: "block", ...spanOnly(node), statements, expr };
+  return { kind: "block", ...spanOnly(node), statements: statements as Statement[], expr };
+}
+
+function lowerDoBind(node: Node): DoStatement {
+  return {
+    kind: "do_bind",
+    ...spanOnly(node),
+    name: first(node, "DoBindName").text.replace(/<-\s*$/, "").trim(),
+    value: lowerExpr(first(node, "Expr")),
+  };
 }
 
 function lowerIfArmBlock(node: Node): Expr {
@@ -918,6 +928,8 @@ function lowerIfArmBlock(node: Node): Expr {
 function lowerExpr(node: Node): Expr {
   const expr = unwrap(node);
   switch (expr.type) {
+    case "DoExpr":
+      return lowerDoExpr(expr);
     case "IfExpr": {
       const condition = first(expr, "Expr");
       const blocks = named(expr).filter(is("Block"));
@@ -994,6 +1006,35 @@ function lowerExpr(node: Node): Expr {
     default:
       return unreachable(expr, "expression");
   }
+}
+
+function lowerDoExpr(node: Node): Expr {
+  const strategy = first(node, "DoStrategy");
+  const block = first(node, "DoBlock");
+  const statements: DoStatement[] = [];
+  let expr: Expr | undefined;
+  for (const child of named(block)) {
+    if (child.type === "DoBlockItem") {
+      const item = named(child)[0];
+      if (!item) continue;
+      if (item.type === "DoBindStmt") statements.push(lowerDoBind(item));
+      else if (item.type === "BlockLetDecl") statements.push(lowerLet(item));
+      else if (item.type === "BlockProofConstDecl") statements.push(lowerProofConst(item));
+    } else if (child.type === "Expr") {
+      expr = lowerExpr(child);
+    }
+  }
+  return {
+    kind: "do",
+    ...spanOnly(node),
+    strategy: {
+      ...spanOnly(strategy),
+      name: first(strategy, "StaticBuiltin").text.replace(/^@/, ""),
+      effect: lowerTypeExpr(first(strategy, "TypeExpr")),
+    },
+    statements,
+    expr,
+  };
 }
 
 function lowerBinary(node: Node): Expr {
@@ -1102,6 +1143,16 @@ function lowerPipeBindBody(node: Node, bindName: string): Expr {
 function bindDollarPlaceholders(expr: Expr): Expr {
   if (expr.kind === "placeholder") return { kind: "var", name: "$", span: expr.span };
   switch (expr.kind) {
+    case "do":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? { ...stmt, value: bindDollarPlaceholders(stmt.value) }
+            : stmt
+        ),
+        expr: expr.expr ? bindDollarPlaceholders(expr.expr) : undefined,
+      };
     case "const_fn":
       return { ...expr, body: bindDollarPlaceholders(expr.body) };
     case "call":
@@ -1305,6 +1356,8 @@ function lowerPrimary(node: Node): Expr {
     return unreachable(node, "primary");
   }
   switch (child.type) {
+    case "DoExpr":
+      return lowerDoExpr(child);
     case "Literal":
       return lowerLiteral(child);
     case "Placeholder":

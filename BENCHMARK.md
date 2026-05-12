@@ -15,8 +15,8 @@ old exported-call shape and the new internal-loop shape:
 
 ## Environment
 
-- Date: 2026-05-10
-- OS: Linux cachyos-x8664 7.0.5-1-cachyos x86_64
+- Date: 2026-05-12
+- OS: Linux 7.0.5-1-cachyos x86_64
 - Deno: 2.7.14, V8 14.7.173.20-rusty, TypeScript 5.9.2
 - Rust: rustc 1.96.0-nightly (3645249d7 2026-03-16)
 
@@ -25,6 +25,17 @@ old exported-call shape and the new internal-loop shape:
 ```bash
 deno run --allow-read --allow-write --allow-run scripts/bench_memory_model_compare.ts 50000
 ```
+
+Current status: the release-gated command above does not complete because `fannkuch_redux_7` exceeds
+its kernel Wasm size gate:
+
+```text
+fannkuch_redux_7 kernel Wasm size expected <= 2480B but got 4665B
+```
+
+The measurements below were captured from the same harness with the size gates temporarily disabled,
+using `20000` iterations. Treat them as current-tree diagnostic numbers rather than a clean
+benchmark pass.
 
 The Rust comparison is compiled by the benchmark harness with:
 
@@ -51,24 +62,34 @@ compiled as a single exported kernel, which is the fair size comparison to `Rust
 | `collision_aabb_64`              |              411 |             304 |       275 |
 | `path_grid_score_16`             |              228 |             146 |       189 |
 | `range_fold_1k`                  |              241 |             143 |       333 |
-| `fannkuch_redux_7`               |             2202 |            2047 |      1190 |
+| `fannkuch_redux_7`               |             4802 |            4665 |      1190 |
 | `mat4_dot1`                      |              296 |             209 |       416 |
 | `mat4_full`                      |             2123 |            1658 |       648 |
 
-Representative timed rows from the same run:
+Timed rows from the same run:
 
-| Scenario                  | Fig external ns/call | Fig internal ns/call | JavaScript ns/call | Rust ns/call |
-| ------------------------- | -------------------: | -------------------: | -----------------: | -----------: |
-| `fixed_collection_update` |                 18.9 |                 12.1 |              582.5 |          2.5 |
-| `compact_filter_collect`  |                 20.9 |                  3.3 |               77.3 |         12.8 |
-| `fannkuch_redux_7`        |             187664.5 |             212238.7 |           232388.3 |      94746.2 |
-| `mat4_full`               |                 31.0 |                 18.3 |               76.9 |         24.7 |
+| Scenario                         | Fig external ns/call | Fig internal ns/call | JavaScript ns/call | Rust ns/call |
+| -------------------------------- | -------------------: | -------------------: | -----------------: | -----------: |
+| `scalar_reuse_nway`              |                 19.6 |                  1.1 |               11.4 |          0.8 |
+| `product_shadow_update`          |                 18.6 |                  7.2 |               36.4 |          2.8 |
+| `tail_product_loop_1k`           |                568.8 |               1167.7 |              815.3 |        584.8 |
+| `inline_array_builder_map`       |                 42.0 |                  5.8 |              645.6 |         24.3 |
+| `compact_filter_collect`         |                 37.6 |                  3.4 |               71.4 |         15.5 |
+| `alias_snapshot_update`          |                 21.5 |                  8.4 |               85.4 |          9.2 |
+| `fixed_collection_update`        |                 19.6 |                 16.5 |              727.2 |          3.5 |
+| `fixed_collection_spread_update` |                 43.4 |                 13.7 |               43.3 |          1.9 |
+| `collision_aabb_64`              |                236.1 |                 77.7 |              459.4 |         50.5 |
+| `path_grid_score_16`             |                418.8 |                309.8 |              697.6 |        128.3 |
+| `range_fold_1k`                  |                532.4 |                215.5 |              664.5 |        253.2 |
+| `fannkuch_redux_7`               |             197477.7 |             179623.3 |           306556.6 |      88958.2 |
+| `mat4_dot1`                      |                 19.3 |                  9.9 |               41.5 |          2.1 |
+| `mat4_full`                      |                109.8 |                 36.8 |              222.1 |         24.8 |
 
 Dynamic fixed-array diagnostics from the same run:
 
 | Scenario           | Dynamic selectors | Set/update calls | Spread helpers | Slot-copy/select sites | Transient sets | Flat | Scratch | Packed |
 | ------------------ | ----------------: | ---------------: | -------------: | ---------------------: | -------------: | ---: | ------: | -----: |
-| `fannkuch_redux_7` |                 0 |                0 |              0 |                      0 |              0 |    0 |       1 |      0 |
+| `fannkuch_redux_7` |                 0 |                0 |              0 |                      0 |              0 |    0 |       0 |      1 |
 
 ## Notes
 
@@ -95,6 +116,6 @@ Dynamic fixed-array diagnostics from the same run:
   products, nested conditionals, integer division/modulo, and scalar loop lowering.
 - `fannkuch_redux_7` is adapted from the Computer Language Benchmarks Game benchmark description and
   uses fixed arrays, dynamic indexing, and repeated public `InlineArray.update`/`set` paths. The
-  current lowering uses `fig_buffers` scratch storage for the dynamic reverse/rotate/count paths,
-  and fuses the private product-state search step in release mode. Packed bounded arrays remain a
-  likely follow-up for code-size pressure.
+  current lowering uses packed bounded arrays for the dynamic reverse/rotate/count paths and fuses
+  the private product-state search step in release mode. Its current kernel size regresses past the
+  release gate, so it is the main code-size follow-up before treating this run as healthy.

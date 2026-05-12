@@ -1,6 +1,7 @@
 import type {
   BlockExpr,
   ConstDecl,
+  DoStatement,
   Expr,
   FnDecl,
   OperatorDescriptor,
@@ -83,6 +84,7 @@ function checkProgramInternal(
     return entry;
   };
   const capabilities = new Map(program.imports.map((item) => [item.name, item.effects]));
+  lowerDoExpressions(program, diagnostics);
   checkBorrowTypeRestrictions(program, diagnostics);
   groupFunctionClauses(program, diagnostics);
   checkBranchHints(program, diagnostics);
@@ -259,8 +261,170 @@ function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]
   }
 }
 
+function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
+  const lowerExpr = (expr: Expr): Expr => {
+    switch (expr.kind) {
+      case "do":
+        return lowerDoExpression(expr, diagnostics, lowerExpr);
+      case "const_fn":
+        return { ...expr, body: lowerExpr(expr.body) };
+      case "call":
+        return { ...expr, callee: lowerExpr(expr.callee), args: expr.args.map(lowerExpr) };
+      case "index":
+        return { ...expr, target: lowerExpr(expr.target), index: lowerExpr(expr.index) };
+      case "binary":
+        return { ...expr, left: lowerExpr(expr.left), right: lowerExpr(expr.right) };
+      case "pipe_bind":
+        return { ...expr, value: lowerExpr(expr.value), body: lowerExpr(expr.body) };
+      case "match":
+        return {
+          ...expr,
+          value: lowerExpr(expr.value),
+          arms: expr.arms.map((arm) => ({ ...arm, value: lowerExpr(arm.value) })),
+        };
+      case "shape":
+      case "product_constructor":
+        return {
+          ...expr,
+          slots: expr.slots.map((slot) => ({
+            ...slot,
+            index: slot.index ? lowerExpr(slot.index) : undefined,
+            value: lowerExpr(slot.value),
+          })),
+        };
+      case "static_for_slots":
+        return {
+          ...expr,
+          source: expr.source.kind === "range"
+            ? {
+              kind: "range",
+              start: lowerExpr(expr.source.start),
+              end: lowerExpr(expr.source.end),
+            }
+            : { kind: "shape", shape: lowerExpr(expr.source.shape) },
+          value: lowerExpr(expr.value),
+        };
+      case "field":
+        return { ...expr, value: lowerExpr(expr.value), key: lowerExpr(expr.key) };
+      case "range":
+        return { ...expr, start: lowerExpr(expr.start), end: lowerExpr(expr.end) };
+      case "block":
+        return {
+          ...expr,
+          statements: expr.statements.map((stmt) =>
+            stmt.kind === "let" || stmt.kind === "destructure_let"
+              ? { ...stmt, value: lowerExpr(stmt.value) } as Statement
+              : stmt
+          ),
+          expr: expr.expr ? lowerExpr(expr.expr) : undefined,
+        };
+      case "literal":
+      case "placeholder":
+      case "var":
+        return expr;
+    }
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") decl.body = lowerExpr(decl.body) as BlockExpr;
+    else if (decl.kind === "let" || decl.kind === "const") decl.value = lowerExpr(decl.value);
+  }
+}
+
+function lowerDoExpression(
+  expr: Extract<Expr, { kind: "do" }>,
+  diagnostics: Diagnostic[],
+  lowerExpr: (expr: Expr) => Expr,
+): Expr {
+  if (!expr.expr) {
+    diagnostics.push({
+      code: "do.missing_final_expr",
+      message: "do block requires a final expression",
+      span: expr.span,
+    });
+    return { kind: "literal", literalKind: "number", value: "0", span: expr.span };
+  }
+  const effect = renderTypeExpr(expr.strategy.effect);
+  const strategy = expr.strategy.name;
+  if (strategy !== "monad" && strategy !== "applicative") {
+    diagnostics.push({
+      code: "do.unknown_strategy",
+      message: `unknown do strategy @${strategy}`,
+      span: expr.strategy.span,
+    });
+    return lowerExpr(expr.expr);
+  }
+  const loweredStatements = expr.statements.map((stmt) =>
+    stmt.kind === "do_bind"
+      ? { ...stmt, value: lowerExpr(stmt.value) }
+      : stmt.kind === "let" || stmt.kind === "destructure_let"
+      ? { ...stmt, value: lowerExpr(stmt.value) }
+      : stmt
+  );
+  const finalExpr = lowerExpr(expr.expr);
+  if (strategy === "applicative") {
+    const binds = loweredStatements.filter((stmt) => stmt.kind === "do_bind");
+    if (binds.length > 1) {
+      diagnostics.push({
+        code: "do.applicative_unsupported",
+        message: "@applicative do with multiple <- bindings requires function-valued effects",
+        span: expr.span,
+      });
+      return monadicDo(effect, loweredStatements, finalExpr);
+    }
+    return applicativeDo(effect, loweredStatements, finalExpr);
+  }
+  return monadicDo(effect, loweredStatements, finalExpr);
+}
+
+function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
+  const [head, ...tail] = statements;
+  if (!head) return callExpr(`${effect}.pure`, [finalExpr]);
+  if (head.kind === "do_bind") {
+    return callExpr(`${effect}.bind`, [
+      head.value,
+      {
+        kind: "const_fn",
+        params: [head.name],
+        body: monadicDo(effect, tail, finalExpr),
+        allowCaptures: true,
+      },
+    ]);
+  }
+  return { kind: "block", statements: [head], expr: monadicDo(effect, tail, finalExpr) };
+}
+
+function applicativeDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
+  const [head, ...tail] = statements;
+  if (!head) return callExpr(`${effect}.pure`, [finalExpr]);
+  if (head.kind === "do_bind") {
+    return callExpr(`${effect}.map`, [
+      {
+        kind: "const_fn",
+        params: [head.name],
+        body: monadicDo(effect, tail, finalExpr),
+        allowCaptures: true,
+      },
+      head.value,
+    ]);
+  }
+  return { kind: "block", statements: [head], expr: applicativeDo(effect, tail, finalExpr) };
+}
+
+function callExpr(name: string, args: Expr[]): Expr {
+  return { kind: "call", callee: { kind: "var", name }, args };
+}
+
 function exprChildValues(expr: Expr): Expr[] {
   switch (expr.kind) {
+    case "do":
+      return [
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? [stmt.value]
+            : []
+        ),
+        ...(expr.expr ? [expr.expr] : []),
+      ];
     case "const_fn":
       return [expr.body];
     case "call":
@@ -464,6 +628,8 @@ function lowerCollectorLiterals(
   const functions = new Map(fnDecls.map((fn) => [fn.name, fn]));
   const lowerExpr = (expr: Expr, expectedType: string | undefined): Expr => {
     switch (expr.kind) {
+      case "do":
+        return lowerDoExpression(expr, diagnostics, (child) => lowerExpr(child, undefined));
       case "const_fn":
         return { ...expr, span: expr.span, body: lowerExpr(expr.body, undefined) };
       case "shape": {
@@ -1552,6 +1718,8 @@ function rewriteAttachedMembersInBlock(
 
 function rewriteAttachedMembersInExpr(expr: Expr, members: Map<string, string>): Expr {
   switch (expr.kind) {
+    case "do":
+      return lowerDoExpression(expr, [], (child) => rewriteAttachedMembersInExpr(child, members));
     case "const_fn":
       return { ...expr, span: expr.span, body: rewriteAttachedMembersInExpr(expr.body, members) };
     case "var":
@@ -2619,6 +2787,12 @@ function specializeInferredExpr(
   env = new Map<string, string>(),
 ): Expr {
   switch (expr.kind) {
+    case "do":
+      return lowerDoExpression(
+        expr,
+        context.diagnostics,
+        (child) => specializeInferredExpr(child, context, env),
+      );
     case "const_fn":
       return { ...expr, span: expr.span, body: specializeInferredExpr(expr.body, context, env) };
     case "call": {
@@ -3526,13 +3700,20 @@ function specializeConstParamCalls(
     emitDiagnostics,
     addShader,
     cache: new Map(),
+    constFnCaptures: new Map(),
     usedNames: new Set(program.declarations.map((decl) => "name" in decl ? decl.name : "")),
   };
   for (const decl of program.declarations) {
     if (decl.kind === "fn" && !decl.params.some((param) => param.const)) {
-      specializeBlock(decl.body, context);
+      specializeBlock(
+        decl.body,
+        context,
+        new Map(
+          decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
+        ),
+      );
     } else if (decl.kind === "let" || decl.kind === "const") {
-      decl.value = specializeExpr(decl.value, context);
+      decl.value = specializeExpr(decl.value, context, new Map());
     }
   }
   let processedGenerated = 0;
@@ -3540,7 +3721,13 @@ function specializeConstParamCalls(
     const generated = [...context.cache.values()].slice(processedGenerated);
     processedGenerated = context.cache.size;
     for (const decl of generated) {
-      if (!decl.params.some((param) => param.const)) specializeBlock(decl.body, context);
+      if (!decl.params.some((param) => param.const)) {
+        specializeBlock(
+          decl.body,
+          context,
+          new Map(decl.params.map((param) => [param.name, param.type])),
+        );
+      }
     }
   }
   if (context.cache.size > 0) program.declarations.push(...context.cache.values());
@@ -3549,109 +3736,131 @@ function specializeConstParamCalls(
 function specializeBlock(
   block: Extract<Expr, { kind: "block" }>,
   context: ConstSpecializationContext,
+  env: Map<string, string>,
 ) {
   block.statements = block.statements.flatMap((stmt): Statement[] => {
     if (stmt.kind === "let") {
-      stmt.value = specializeExpr(stmt.value, context);
+      stmt.value = specializeExpr(stmt.value, context, env);
+      if (stmt.type) env.set(stmt.name, stmt.type);
     } else if (stmt.kind === "destructure_let") {
-      stmt.value = specializeExpr(stmt.value, context);
+      stmt.value = specializeExpr(stmt.value, context, env);
     }
     return [stmt];
   });
-  if (block.expr) block.expr = specializeExpr(block.expr, context);
+  if (block.expr) block.expr = specializeExpr(block.expr, context, env);
 }
 
 function specializeExpr(
   expr: Expr,
   context: ConstSpecializationContext,
+  env: Map<string, string>,
 ): Expr {
-  switch (expr.kind) {
-    case "const_fn":
-      return { ...expr, span: expr.span, body: specializeExpr(expr.body, context) };
-    case "call": {
-      const callee = specializeExpr(expr.callee, context);
-      const args = expr.args.map((arg) => specializeExpr(arg, context));
-      const direct = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
-      if (!direct?.params.some((param) => param.const)) return { ...expr, callee, args };
-      return specializeConstParamCall(direct, args, context, callSiteSpan(expr)) ??
-        { ...expr, callee, args };
+  const previousRuntimeEnv = context.runtimeEnv;
+  context.runtimeEnv = env;
+  try {
+    switch (expr.kind) {
+      case "do":
+        return lowerDoExpression(
+          expr,
+          context.diagnostics,
+          (child) => specializeExpr(child, context, env),
+        );
+      case "const_fn":
+        return expr;
+      case "call": {
+        const callee = specializeExpr(expr.callee, context, env);
+        const args = expr.args.map((arg) => specializeExpr(arg, context, env));
+        const direct = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
+        if (!direct?.params.some((param) => param.const)) return { ...expr, callee, args };
+        return specializeConstParamCall(direct, args, context, callSiteSpan(expr)) ??
+          { ...expr, callee, args };
+      }
+      case "index":
+        return {
+          ...expr,
+          target: specializeExpr(expr.target, context, env),
+          index: specializeExpr(expr.index, context, env),
+        };
+      case "binary":
+        return {
+          ...expr,
+          left: specializeExpr(expr.left, context, env),
+          right: specializeExpr(expr.right, context, env),
+        };
+      case "pipe_bind":
+        const pipeValue = specializeExpr(expr.value, context, env);
+        return {
+          ...expr,
+          value: pipeValue,
+          body: specializeExpr(expr.body, context, new Map(env).set(expr.name, "")),
+        };
+      case "match":
+        return {
+          ...expr,
+          value: specializeExpr(expr.value, context, env),
+          arms: expr.arms.map((arm) => ({
+            ...arm,
+            value: specializeExpr(arm.value, context, env),
+          })),
+        };
+      case "shape":
+        return {
+          ...expr,
+          slots: expr.slots.flatMap((slot) =>
+            expandSpecializedShapeSlot(
+              slot,
+              new Map(),
+              context.consts,
+              new Map(),
+              context,
+            ).map((expanded) => ({
+              ...expanded,
+              value: specializeExpr(expanded.value, context, env),
+            }))
+          ),
+        };
+      case "product_constructor":
+        return {
+          ...expr,
+          slots: expr.slots.flatMap((slot) =>
+            expandSpecializedShapeSlot(
+              slot,
+              new Map(),
+              context.consts,
+              new Map(),
+              context,
+            ).map((expanded) => ({
+              ...expanded,
+              value: specializeExpr(expanded.value, context, env),
+            }))
+          ),
+        };
+      case "range":
+        return {
+          ...expr,
+          start: specializeExpr(expr.start, context, env),
+          end: specializeExpr(expr.end, context, env),
+        };
+      case "static_for_slots":
+        return expr;
+      case "field":
+        return {
+          ...expr,
+          value: specializeExpr(expr.value, context, env),
+          key: specializeExpr(expr.key, context, env),
+        };
+      case "block": {
+        const block = cloneExpr(expr) as Extract<Expr, { kind: "block" }>;
+        specializeBlock(block, context, new Map(env));
+        return block;
+      }
+      case "literal":
+      case "var":
+      case "placeholder":
+        return expr;
     }
-    case "index":
-      return {
-        ...expr,
-        target: specializeExpr(expr.target, context),
-        index: specializeExpr(expr.index, context),
-      };
-    case "binary":
-      return {
-        ...expr,
-        left: specializeExpr(expr.left, context),
-        right: specializeExpr(expr.right, context),
-      };
-    case "pipe_bind":
-      return {
-        ...expr,
-        value: specializeExpr(expr.value, context),
-        body: specializeExpr(expr.body, context),
-      };
-    case "match":
-      return {
-        ...expr,
-        value: specializeExpr(expr.value, context),
-        arms: expr.arms.map((arm) => ({
-          ...arm,
-          value: specializeExpr(arm.value, context),
-        })),
-      };
-    case "shape":
-      return {
-        ...expr,
-        slots: expr.slots.flatMap((slot) =>
-          expandSpecializedShapeSlot(
-            slot,
-            new Map(),
-            context.consts,
-            new Map(),
-            context,
-          ).map((expanded) => ({ ...expanded, value: specializeExpr(expanded.value, context) }))
-        ),
-      };
-    case "product_constructor":
-      return {
-        ...expr,
-        slots: expr.slots.flatMap((slot) =>
-          expandSpecializedShapeSlot(
-            slot,
-            new Map(),
-            context.consts,
-            new Map(),
-            context,
-          ).map((expanded) => ({ ...expanded, value: specializeExpr(expanded.value, context) }))
-        ),
-      };
-    case "range":
-      return {
-        ...expr,
-        start: specializeExpr(expr.start, context),
-        end: specializeExpr(expr.end, context),
-      };
-    case "static_for_slots":
-      return expr;
-    case "field":
-      return {
-        ...expr,
-        value: specializeExpr(expr.value, context),
-        key: specializeExpr(expr.key, context),
-      };
-    case "block": {
-      const block = cloneExpr(expr) as Extract<Expr, { kind: "block" }>;
-      specializeBlock(block, context);
-      return block;
-    }
-    case "literal":
-    case "var":
-    case "placeholder":
-      return expr;
+  } finally {
+    context.runtimeEnv = previousRuntimeEnv;
   }
 }
 
@@ -3663,8 +3872,10 @@ interface ConstSpecializationContext {
   emitDiagnostics: boolean;
   addShader: (source: string) => ShaderManifestEntry;
   cache: Map<string, FnDecl>;
+  constFnCaptures: Map<string, Param[]>;
   usedNames: Set<string>;
   diagnosticSpan?: Span;
+  runtimeEnv?: Map<string, string>;
 }
 
 function specializeConstParamCall(
@@ -3682,6 +3893,7 @@ function specializeConstParamCall(
     const inferredTypes = new Map<string, string>();
     const constArgNames: string[] = [];
     const runtimeArgs: Expr[] = [];
+    const captureParams: Param[] = [];
     for (let index = 0; index < fn.params.length; index++) {
       const param = fn.params[index];
       const arg = args[index] ?? { kind: "var" as const, name: "<missing>" };
@@ -3727,6 +3939,13 @@ function specializeConstParamCall(
         }
         staticArgNames.set(param.name, staticArg.name);
         constArgNames.push(staticArg.name);
+        if (staticArg.value.kind === "fn") {
+          for (const capture of context.constFnCaptures.get(staticArg.value.name) ?? []) {
+            if (!captureParams.some((item) => item.name === capture.name)) {
+              captureParams.push(capture);
+            }
+          }
+        }
       } else {
         runtimeArgs.push(arg);
       }
@@ -3747,7 +3966,7 @@ function specializeConstParamCall(
             substituteConstParamType(param.type, staticValues, staticArgNames),
             inferredTypes,
           ),
-        })),
+        })).concat(captureParams),
         returnType: fn.returnType
           ? substituteTypeVars(
             substituteConstParamType(fn.returnType, staticValues, staticArgNames),
@@ -3767,17 +3986,27 @@ function specializeConstParamCall(
       };
       context.cache.set(key, specialized);
       context.functions.set(specialized.name, specialized);
-      specialized.body = substituteSpecializedExpr(
-        specialized.body,
-        new Map(),
-        staticValues,
-        staticArgNames,
-        context,
-      ) as Extract<Expr, { kind: "block" }>;
+      const previousRuntimeEnv = context.runtimeEnv;
+      context.runtimeEnv = new Map(specialized.params.map((param) => [param.name, param.type]));
+      try {
+        specialized.body = substituteSpecializedExpr(
+          specialized.body,
+          new Map(),
+          staticValues,
+          staticArgNames,
+          context,
+        ) as Extract<Expr, { kind: "block" }>;
+      } finally {
+        context.runtimeEnv = previousRuntimeEnv;
+      }
       specialized.generatedInlineable = isInlineableGeneratedSpecializationSource(fn) &&
         !exprCallsFunction(specialized.body, specialized.name);
     }
-    return { kind: "call", callee: { kind: "var", name: specialized.name }, args: runtimeArgs };
+    return {
+      kind: "call",
+      callee: { kind: "var", name: specialized.name },
+      args: runtimeArgs.concat(captureParams.map((param) => ({ kind: "var", name: param.name }))),
+    };
   } finally {
     context.diagnosticSpan = previousDiagnosticSpan;
   }
@@ -3792,6 +4021,11 @@ function isInlineableGeneratedSpecializationSource(fn: FnDecl): boolean {
 function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
   if (!expr) return false;
   switch (expr.kind) {
+    case "do":
+      return expr.statements.some((stmt) =>
+        (stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let") &&
+        exprCallsFunction(stmt.value, name)
+      ) || exprCallsFunction(expr.expr, name);
     case "const_fn":
       return exprCallsFunction(expr.body, name);
     case "call":
@@ -4075,26 +4309,33 @@ function synthesizeConstFnHelper(
     return undefined;
   }
   const paramNames = new Set(arg.params);
-  const expectedParams = new Set(signature.params.map((param) => param.name));
-  const captures = [...exprRuntimeCaptures(arg.body)].filter((name) =>
-    !paramNames.has(name) && !expectedParams.has(name) && !context.functions.has(name) &&
-    !context.consts.has(name)
+  const captureNames = [...exprRuntimeCaptures(arg.body)].filter((name) =>
+    !paramNames.has(name) && !context.functions.has(name) && !context.consts.has(name)
   );
-  if (captures.length) {
+  const captures = captureNames.map((name) => {
+    const type = context.runtimeEnv?.get(name);
+    return type ? { name, type } : undefined;
+  });
+  if (captures.length && !arg.allowCaptures) {
     context.diagnostics.push({
       code: "const.const_fn_capture",
-      message: `const fn literal cannot capture runtime local ${captures[0]}`,
+      message: `const fn literal cannot capture runtime local ${captureNames[0]}`,
       span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
     });
     return undefined;
   }
-  let body = arg.body;
-  signature.params.forEach((param, index) => {
-    const sourceName = arg.params[index]!;
-    if (sourceName !== param.name) {
-      body = replaceNamedVar(body, sourceName, { kind: "var", name: param.name });
-    }
-  });
+  const missing = captures.find((capture) => !capture);
+  if (missing) {
+    context.diagnostics.push({
+      code: "const.const_fn_capture",
+      message: `const fn literal cannot capture runtime local ${
+        captureNames[captures.indexOf(missing)]
+      }`,
+      span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
+    });
+    return undefined;
+  }
+  const body = arg.body;
   const key = `__const_fn\0${expectedType}\0${JSON.stringify(body)}`;
   let fn = context.cache.get(key);
   if (!fn) {
@@ -4107,7 +4348,10 @@ function synthesizeConstFnHelper(
       kind: "fn",
       public: false,
       name,
-      params: signature.params.map((param) => ({ name: param.name, type: param.type })),
+      params: signature.params.map((param, index) => ({
+        name: arg.params[index] ?? param.name,
+        type: param.type,
+      })).concat(captures.filter((capture): capture is Param => !!capture)),
       returnType: signature.returnType,
       effects: [],
       body: { kind: "block", statements: [], expr: body },
@@ -4115,6 +4359,7 @@ function synthesizeConstFnHelper(
     };
     context.cache.set(key, fn);
     context.functions.set(name, fn);
+    context.constFnCaptures.set(name, captures.filter((capture): capture is Param => !!capture));
   }
   return { name: fn.name, value: { kind: "fn", name: fn.name } };
 }
@@ -4171,6 +4416,12 @@ function exprRuntimeCaptures(expr: Expr): Set<string> {
       if (!bound.has(item.name)) captures.add(item.name);
       return;
     }
+    if (item.kind === "const_fn") {
+      const scoped = new Set(bound);
+      for (const param of item.params) scoped.add(param);
+      visit(item.body, scoped);
+      return;
+    }
     if (item.kind === "pipe_bind") {
       visit(item.value, bound);
       visit(item.body, new Set(bound).add(item.name));
@@ -4220,6 +4471,16 @@ function exprRuntimeCaptures(expr: Expr): Set<string> {
 function replacePlaceholder(expr: Expr, replacement: Expr): Expr {
   if (expr.kind === "placeholder") return cloneExpr(replacement);
   switch (expr.kind) {
+    case "do":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? { ...stmt, value: replacePlaceholder(stmt.value, replacement) }
+            : stmt
+        ),
+        expr: expr.expr ? replacePlaceholder(expr.expr, replacement) : undefined,
+      };
     case "const_fn":
       return { ...expr, body: replacePlaceholder(expr.body, replacement) };
     case "call":
@@ -4303,6 +4564,16 @@ function replacePlaceholder(expr: Expr, replacement: Expr): Expr {
 function replaceNamedVar(expr: Expr, name: string, replacement: Expr): Expr {
   if (expr.kind === "var" && expr.name === name) return cloneExpr(replacement);
   switch (expr.kind) {
+    case "do":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? { ...stmt, value: replaceNamedVar(stmt.value, name, replacement) }
+            : stmt
+        ),
+        expr: expr.expr ? replaceNamedVar(expr.expr, name, replacement) : undefined,
+      };
     case "const_fn":
       return expr.params.includes(name)
         ? expr
@@ -4420,6 +4691,15 @@ function replaceStaticForSourceNamedVar(
 
 function exprChildren(expr: Expr): Expr[] {
   switch (expr.kind) {
+    case "do":
+      return [
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? [stmt.value]
+            : []
+        ),
+        ...(expr.expr ? [expr.expr] : []),
+      ];
     case "const_fn":
       return [expr.body];
     case "call":
@@ -4628,6 +4908,12 @@ function substituteSpecializedExpr(
   context: ConstSpecializationContext,
 ): Expr {
   switch (expr.kind) {
+    case "do":
+      return lowerDoExpression(
+        expr,
+        context.diagnostics,
+        (child) => substituteSpecializedExpr(child, values, staticValues, staticArgNames, context),
+      );
     case "const_fn":
       return {
         ...expr,
@@ -4691,23 +4977,37 @@ function substituteSpecializedExpr(
       const args = expr.args.map((arg) =>
         substituteSpecializedExpr(arg, values, staticValues, staticArgNames, context)
       );
+      const captured = callee.kind === "var"
+        ? context.constFnCaptures.get(callee.name)?.map((param) => ({
+          kind: "var" as const,
+          name: param.name,
+        })) ??
+          []
+        : [];
+      const callArgs = captured.length ? args.concat(captured) : args;
       if (callee.kind === "var" && callee.name === "@empty") {
-        const emptyType = renderTypeProofArg(args[0]);
+        const emptyType = renderTypeProofArg(callArgs[0]);
         const emptyExpr = emptyType ? emptyExprForType(emptyType, context) : undefined;
         if (emptyExpr) return emptyExpr;
         if (context.emitDiagnostics) {
           context.diagnostics.push({
             code: "type.unknown_type_member",
             message: `type ${emptyType ?? "<unknown>"} does not have an empty value`,
-            span: args[0]?.span ?? context.diagnosticSpan,
+            span: callArgs[0]?.span ?? context.diagnosticSpan,
           });
         }
-        return { ...expr, callee, args };
+        return { ...expr, callee, args: callArgs };
       }
       const direct = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
       if (direct?.params.some((param) => param.const)) {
-        return specializeConstParamCall(direct, args, context, callSiteSpan(expr), staticValues) ??
-          { ...expr, callee, args };
+        return specializeConstParamCall(
+          direct,
+          callArgs,
+          context,
+          callSiteSpan(expr),
+          staticValues,
+        ) ??
+          { ...expr, callee, args: callArgs };
       }
       if (!direct && callee.kind === "var" && args.length === 0) {
         const emptyType = emptyMemberOwner(callee.name);
@@ -4724,7 +5024,7 @@ function substituteSpecializedExpr(
         }
       }
       if (callee.kind === "var" && callee.name === "@wgsl_shader_id") {
-        const source = stringLiteralValue(args[0]);
+        const source = stringLiteralValue(callArgs[0]);
         if (source !== undefined) {
           context.addShader(source);
           return { kind: "literal", literalKind: "number", value: String(wgslShaderId(source)) };
@@ -4740,10 +5040,10 @@ function substituteSpecializedExpr(
         if (staticExpr) return staticExpr;
       }
       if (callee.kind === "var" && isInlineArrayExprBuiltin(callee.name)) {
-        return expandInlineArrayExprBuiltin(callee.name, args, staticValues, context) ??
-          { ...expr, callee, args };
+        return expandInlineArrayExprBuiltin(callee.name, callArgs, staticValues, context) ??
+          { ...expr, callee, args: callArgs };
       }
-      return { ...expr, callee, args };
+      return { ...expr, callee, args: callArgs };
     }
     case "index":
       return {
@@ -6323,6 +6623,8 @@ function lowerProductConstructors(
   }
   const lowerExpr = (expr: Expr): Expr => {
     switch (expr.kind) {
+      case "do":
+        return lowerDoExpression(expr, diagnostics, lowerExpr);
       case "const_fn":
         return { ...expr, span: expr.span, body: lowerExpr(expr.body) };
       case "product_constructor": {
@@ -8513,6 +8815,11 @@ function checkFn(
 function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
   if (!expr) return false;
   switch (expr.kind) {
+    case "do":
+      return expr.statements.some((stmt) =>
+        (stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let") &&
+        exprContainsStaticExpansion(stmt.value)
+      ) || exprContainsStaticExpansion(expr.expr);
     case "const_fn":
       return exprContainsStaticExpansion(expr.body);
     case "static_for_slots":

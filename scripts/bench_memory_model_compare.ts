@@ -24,6 +24,8 @@ type ScenarioName =
   | "collision_aabb_64"
   | "path_grid_score_16"
   | "range_fold_1k"
+  | "monadic_do_id_chain"
+  | "applicative_do_id_map"
   | "fannkuch_redux_7"
   | "mat4_dot1"
   | "mat4_full";
@@ -452,6 +454,67 @@ const figScenarios: FigScenario[] = [
     `,
   },
   {
+    name: "monadic_do_id_chain",
+    expected: 7,
+    expectedShape: scalarFlatShape,
+    source: `
+      type fn Id(a: type) -> type { a }
+
+      fn Id.pure(value: a) -> Id(a) {
+        value
+      }
+
+      fn Id.bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) {
+        f(value)
+      }
+
+      fn get(seed: i32) -> Id(i32) {
+        seed + 1
+      }
+
+      fn add_id(x: i32) -> Id(i32) {
+        x + 2
+      }
+
+      pub fn main(seed: i32) -> i32 {
+        do @monad(Id) {
+          x <- get(seed);
+          let y = x + 3;
+          z <- add_id(y);
+          x + z
+        }
+      }
+    `,
+  },
+  {
+    name: "applicative_do_id_map",
+    expected: 8,
+    expectedShape: scalarFlatShape,
+    source: `
+      type fn Id(a: type) -> type { a }
+
+      fn Id.pure(value: a) -> Id(a) {
+        value
+      }
+
+      fn Id.map(const f: fn(x: a) -> b, value: Id(a)) -> Id(b) {
+        f(value)
+      }
+
+      fn get(seed: i32) -> Id(i32) {
+        seed + 1
+      }
+
+      pub fn main(seed: i32) -> i32 {
+        do @applicative(Id) {
+          x <- get(seed);
+          let y = x + 3;
+          y * 2
+        }
+      }
+    `,
+  },
+  {
     name: "fannkuch_redux_7",
     expected: 22_816,
     callsDivisor: 1000,
@@ -612,6 +675,17 @@ const jsScenarios: Record<ScenarioName, (seed: number) => number> = {
     let acc = 0;
     for (let i = seed - seed; i < 1000; i++) acc += i;
     return acc;
+  },
+  monadic_do_id_chain(seed: number) {
+    const x = seed + 1;
+    const y = x + 3;
+    const z = y + 2;
+    return x + z;
+  },
+  applicative_do_id_map(seed: number) {
+    const x = seed + 1;
+    const y = x + 3;
+    return y * 2;
   },
   fannkuch_redux_7(seed: number) {
     const n = 7;
@@ -1244,6 +1318,19 @@ fn range_fold_1k(seed: i32) -> i32 {
     ((seed - seed)..black_box(1000)).fold(0, |acc, x| black_box(acc + x))
 }
 
+fn monadic_do_id_chain(seed: i32) -> i32 {
+    let x = black_box(seed + 1);
+    let y = black_box(x + 3);
+    let z = black_box(y + 2);
+    x + z
+}
+
+fn applicative_do_id_map(seed: i32) -> i32 {
+    let x = black_box(seed + 1);
+    let y = black_box(x + 3);
+    y * 2
+}
+
 fn fannkuch_redux_7(seed: i32) -> i32 {
     let mut perm = black_box([seed - seed, 1, 2, 3, 4, 5, 6]);
     let mut count = [0; 7];
@@ -1365,6 +1452,8 @@ fn main() {
         bench("collision_aabb_64", std::cmp::max(1, iterations / 8), 9, collision_aabb_64),
         bench("path_grid_score_16", std::cmp::max(1, iterations / 8), 3060, path_grid_score_16),
         bench("range_fold_1k", std::cmp::max(1, iterations / 20), 499_500, range_fold_1k),
+        bench("monadic_do_id_chain", iterations, 7, monadic_do_id_chain),
+        bench("applicative_do_id_map", iterations, 8, applicative_do_id_map),
         bench("fannkuch_redux_7", std::cmp::max(1, iterations / 1000), 22_816, fannkuch_redux_7),
         bench("mat4_dot1", iterations, 90, mat4_dot1),
         bench("mat4_full", iterations, 4944, mat4_full),
@@ -1515,6 +1604,19 @@ fn path_grid_score_16(seed: i32) -> i32 {
 
 fn range_fold_1k(seed: i32) -> i32 {
     ((seed - seed)..black_box(1000)).fold(0, |acc, x| black_box(acc + x))
+}
+
+fn monadic_do_id_chain(seed: i32) -> i32 {
+    let x = black_box(seed + 1);
+    let y = black_box(x + 3);
+    let z = black_box(y + 2);
+    x + z
+}
+
+fn applicative_do_id_map(seed: i32) -> i32 {
+    let x = black_box(seed + 1);
+    let y = black_box(x + 3);
+    y * 2
 }
 
 fn fannkuch_redux_7(seed: i32) -> i32 {
