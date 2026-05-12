@@ -198,19 +198,19 @@ Supported expressions include:
   `{for Key, Spec in (fields): value}`.
 - Tuple and repeat values: `[1, 2]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
 - Target-typed collection literals: `<1, 2, 3>`, `<0, ...rest>`.
-- `match value { pattern => expr, _ => fallback }`.
+- `match value { pattern => expr, _ => fallback }` and boolean `if cond { a } else { b }`.
 - Binary operators listed in `grammar.ebnf`.
 - Ranges: `start .. end`.
 - Pipe-bind: `expr \name -> next` and placeholder form `expr \$ -> use($)`.
 
-There is no `if`; use `match` on `bool`. There is no assignment statement; bind new locals with
-`let`. Let statements require semicolons.
+Boolean `if` is expression sugar for `match` on `bool`. There is no assignment statement; bind new
+locals with `let`. Let statements require semicolons.
 
 ## Pattern Matching and Ordered Clauses
 
-Use `match` instead of `if`. a `match` expression has one scrutinee expression and ordered arms.
-Patterns support `_`, literals, lowercase bindings, PascalCase variant names, and variant payload
-deconstruction:
+Use `match` for variants, literals, and ordered pattern dispatch. a `match` expression has one
+scrutinee expression and ordered arms. Patterns support `_`, literals, lowercase bindings,
+PascalCase variant names, and variant payload deconstruction:
 
 ```fig
 fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
@@ -317,7 +317,7 @@ When choosing a type-function pattern:
 
 Use static builtins only with the `@` prefix. Current reflection helpers include:
 
-- Type predicates: `@type_is_product(t)`, `@type_has_slot(t, #field)`,
+- Type predicates: `@type_is_product(t)`, `@type_is_number(t)`, `@type_has_slot(t, #field)`,
   `@type_has_variant(t, #Some)`, `@type_variant_has_slot(t, #Some, #value)`,
   `@type_has_member(t, #map)`.
 - Type lookup: `@type_slot_type(t, #field)`, `@type_member_type(t, #member)`, `@type_slots(t)`,
@@ -434,17 +434,17 @@ pub fn main() -> i32 {
 }
 ```
 
-Use `option` and `result` helpers for branchless success/failure pipelines:
+Use attached `Option` and `Result` methods for branchless success/failure pipelines:
 
 ```fig
-const option = @import("prelude.Option");
+const option = @import("prelude.option");
 
 fn inc(x: i32) -> i32 { x + 1 }
-fn next(x: i32) -> Option.core.Option(i32) { Option.some(x + 1) }
+fn next(x: i32) -> option.core.Option(i32) { option.some(x + 1) }
 
 pub fn main() -> i32 {
-  let maybe = Option.option_and_then(Option.option_map(Option.some(1), inc), next);
-  Option.option_unwrap_or(maybe, 0)
+  let maybe = option.core.Option.bind(option.core.Option.map(inc, option.some(1)), next);
+  option.core.Option.unwrap_or(maybe, 0)
 }
 ```
 
@@ -548,22 +548,23 @@ Compiler-recognized branch intrinsics such as `@branch_handle`, `@branch_mark`, 
 being built. Temporal intrinsics remain compatibility-only in temporal memory mode. Ordinary Fig
 modules should prefer prelude APIs and host capabilities.
 
-## Placeholder and Pipe Sugar
+## Const Function and Pipe Sugar
 
-Use `$` only in const function helper contexts, such as a const function argument:
+Use const-function literals for inline compile-time function arguments:
 
 ```fig
-map4_i32($ + 1, [1, 2, 3, 4])
+map4_i32(\x -> x + 1, [1, 2, 3, 4])
+fold4_i32(\(acc, x) -> acc + x, 0, xs)
 ```
 
-The placeholder creates a unary helper and cannot capture runtime locals. Use pipe-bind for scoped
-value flow:
+Const-function literals are templates for expected `const fn` parameters. They are not runtime
+closure values and cannot capture runtime locals. Use pipe-bind for scoped value flow:
 
 ```fig
 1 \$ -> inc($) \y -> add(1, y)
 ```
 
-Fig does not support `|>` pipeline syntax or lambda literals like `\x -> x + 1` as ordinary
+Fig does not support `|>` pipeline syntax or lambda literals like `\x -> x + 1` as ordinary runtime
 expressions.
 
 ## Prelude Modules
@@ -576,8 +577,7 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
   iterators, compact arrays, and iterator map/filter/fold/collect.
 - `prelude.function`: `functor`, `applicative`, `monad`, `fmap`, `bind`, `pipe`, `flip`.
 - `prelude.operators`: common operator descriptors.
-- `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.bool`, `prelude.num`,
-  `prelude.order`, and `prelude.schedule`.
+- `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, and `prelude.schedule`.
 - `prelude.geometry2d`: Fixed 2D vector, color, vertex, quad, and geometry helpers.
 
 Prelude modules are pure and do not declare host capabilities. Heap-backed lists, growable vectors,

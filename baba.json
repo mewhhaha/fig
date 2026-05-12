@@ -9,6 +9,9 @@
   "conflicts": [
     ["Primary"],
     ["Call"],
+    ["Primary", "PunnedShapeValueSlot"],
+    ["Primary", "ShapeValueSlotKey"],
+    ["SlotPosition", "Literal"],
     ["FieldName", "TypeAnn"],
     ["FieldName", "PatternIdent"],
     ["FieldName", "TypeParamDecl"],
@@ -54,6 +57,7 @@
         "(Param (PatternIdent (LowerIdent) @variable.parameter))",
         "(Param (PatternIdent (PascalIdent) @constructor))",
         "(Param (FieldName) @variable.parameter)",
+        "(ConstFnParams (LowerIdent) @variable.parameter)",
         "(BlockLetDecl (LowerIdent) @variable)",
         "(BlockLetDecl (FieldName) @variable)",
         "(BlockProofConstDecl (PascalIdent) @type)",

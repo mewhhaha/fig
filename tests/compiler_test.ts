@@ -75,6 +75,75 @@ Deno.test("AST span metadata is hidden and semantic-neutral", async () => {
   assert(!wat.includes("span"));
 });
 
+Deno.test("branch hints parse on match arms and function clauses", async () => {
+  const parsed = await parse(`
+    @unlikely fn score(false: bool) -> i32 { 0 }
+    pub @likely fn score(true: bool) -> i32 { 1 }
+    pub fn main(x: i32) -> i32 {
+      match x {
+        @likely 0 => score(true),
+        @unlikely _ => score(false),
+      }
+    }
+  `);
+  const scoreClauses = findFns(parsed, "score");
+  assertEquals(scoreClauses.map((fn) => fn.branchHint), ["unlikely", "likely"]);
+  const main = findFn(parsed, "main");
+  assert(main?.body.expr?.kind === "match");
+  assertEquals(main.body.expr.arms.map((arm) => arm.branchHint), ["likely", "unlikely"]);
+
+  const checked = await checkSource(`
+    @likely fn score(true: bool) -> i32 { 1 }
+    fn score(false: bool) -> i32 { 0 }
+    pub fn main() -> i32 { score(true) }
+  `);
+  const dispatcher = findFn(checked.program, "score");
+  assert(dispatcher?.body.expr?.kind === "match");
+  assertEquals(dispatcher.body.expr.arms[0]?.branchHint, "likely");
+});
+
+Deno.test("branch hints reject unmapped source locations", async () => {
+  await assertThrowsCompile(
+    `@likely fn main() -> i32 { 1 }`,
+    "branch_hint.unused",
+  );
+  await assertThrowsCompile(
+    `pub fn main(x: i32) -> i32 { match x { @likely _ => 1 } }`,
+    "branch_hint.unmapped",
+  );
+  await assertThrowsCompile(
+    `pub fn main(x: i32) -> i32 { match x { @likely 0 => 1, @unlikely _ => 2 } }`,
+    "branch_hint.unmapped",
+  );
+});
+
+Deno.test("if expression desugars to boolean match", async () => {
+  const source = `
+    pub fn main(x: i32) -> i32 {
+      if x < 3 {
+        let y = x + 1;
+        y
+      } else {
+        x - 1
+      }
+    }
+  `;
+  const parsed = await parse(source);
+  const main = findFn(parsed, "main");
+  assert(main?.body.expr?.kind === "match");
+  assertEquals(
+    main.body.expr.arms.map((arm) => {
+      assert(arm.pattern.kind === "literal");
+      return arm.pattern.value;
+    }),
+    ["true", "false"],
+  );
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(2), 3);
+  assertEquals((instance.exports.main as CallableFunction)(4), 3);
+});
+
 Deno.test("index cursor itself is not an inline-array index proof", async () => {
   await assertThrowsCompile(
     `
@@ -2001,11 +2070,7 @@ Deno.test("pipe bind syntax lowers through scoped bind bodies", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 6);
   await assertThrowsCompile(
     "pub fn main() -> i32 { \\x -> x + 1 }",
-    "parse.syntax",
-  );
-  await assertThrowsCompile(
-    "fn map4_i32(const f: fn(x: i32) -> i32, xs: i32) -> i32 { xs } pub fn main() -> i32 { map4_i32(\\x -> x + 1, 1) }",
-    "parse.syntax",
+    "const.const_fn_context",
   );
   await assertThrowsCompile(
     `
@@ -2038,19 +2103,19 @@ Deno.test("pipe bind evaluates left once and binds flattened products", async ()
   assertEquals((instance.exports.main as CallableFunction)(), 9);
 });
 
-Deno.test("$ const function helper sugar is unary and rejects runtime captures", async () => {
+Deno.test("const function literals specialize const fn parameters", async () => {
   const wat = await watFromSource(
     `
     type fn Lane4I32() { let Lane4I32 = {4*i32}; struct(Lane4I32) }
     fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
       [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
     }
-    pub fn main() -> Lane4I32 { map4_i32($ + 1, [1, 2, 3, 4]) }
+    pub fn main() -> Lane4I32 { map4_i32(\\x -> x + 1, [1, 2, 3, 4]) }
   `,
     { optMode: "release" },
   );
-  assert(!wat.includes("(func $__dollar"));
-  assert(!wat.includes("call $__dollar"));
+  assert(!wat.includes("(func $__const_fn"));
+  assert(!wat.includes("call $__const_fn"));
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
       await wasmFromSource(
@@ -2059,16 +2124,22 @@ Deno.test("$ const function helper sugar is unary and rejects runtime captures",
     fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
       [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
     }
-    pub fn main() -> Lane4I32 { map4_i32($ + 1, [1, 2, 3, 4]) }
+    fn fold4_i32(const f: fn(acc: i32, x: i32) -> i32, init: i32, xs: Lane4I32) -> i32 {
+      f(f(f(f(init, xs[0]), xs[1]), xs[2]), xs[3])
+    }
+    pub fn main() -> i32 {
+      let mapped = map4_i32(\\x -> { let y = x + 1; y }, [1, 2, 3, 4]);
+      fold4_i32(\\(acc, x) -> acc + x, 0, mapped)
+    }
   `,
         { optMode: "release" },
       ),
     ),
   );
-  assertEquals((instance.exports.main as CallableFunction)(), [2, 3, 4, 5]);
+  assertEquals((instance.exports.main as CallableFunction)(), 14);
   await assertThrowsCompile(
-    "pub fn main() -> i32 { $ + 1 }",
-    "const.placeholder_context",
+    "pub fn main() -> i32 { \\x -> x + 1 }",
+    "const.const_fn_context",
   );
   await assertThrowsCompile(
     `
@@ -2078,18 +2149,18 @@ Deno.test("$ const function helper sugar is unary and rejects runtime captures",
     }
     pub fn main() -> Lane4I32 {
       let bump = 1;
-      map4_i32($ + bump, [1, 2, 3, 4])
+      map4_i32(\\x -> x + bump, [1, 2, 3, 4])
     }
   `,
-    "const.placeholder_capture",
+    "const.const_fn_capture",
   );
   await assertFirstDiagnosticSpanIncludes(
     `
     fn needs_type(const value: type) -> i32 { 0 }
-    pub fn main() -> i32 { needs_type($ + 1) }
+    pub fn main() -> i32 { needs_type(\\x -> x + 1) }
   `,
-    "const.placeholder_expected_fn",
-    "$ + 1",
+    "const.const_fn_expected_fn",
+    "\\x -> x + 1",
   );
   await assertFirstDiagnosticSpanIncludes(
     `
@@ -2097,13 +2168,21 @@ Deno.test("$ const function helper sugar is unary and rejects runtime captures",
     fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
       [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
     }
-    pub fn main() -> Lane4I32 {
-      let bump = 1;
-      map4_i32($ + bump, [1, 2, 3, 4])
-    }
+    pub fn main() -> Lane4I32 { map4_i32(\\(x, y) -> x + y, [1, 2, 3, 4]) }
   `,
-    "const.placeholder_capture",
-    "$ + bump",
+    "const.const_fn_arity",
+    "\\(x, y) -> x + y",
+  );
+  await assertFirstDiagnosticSpanIncludes(
+    `
+    type fn Lane4I32() { let Lane4I32 = {4*i32}; struct(Lane4I32) }
+    fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
+      [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
+    }
+    pub fn main() -> Lane4I32 { map4_i32($ + 1, [1, 2, 3, 4]) }
+  `,
+    "const.placeholder_deprecated",
+    "$ + 1",
   );
 });
 

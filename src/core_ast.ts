@@ -13,6 +13,7 @@ export interface Program {
 }
 
 export type Declaration = FnDecl | LetDecl | ConstDecl | TypeDecl;
+export type BranchHint = "likely" | "unlikely";
 
 export interface CapabilityImport extends AstNodeMeta {
   kind: "import";
@@ -51,6 +52,7 @@ export interface FnDecl extends AstNodeMeta {
   generated?: boolean;
   generatedInlineable?: boolean;
   primitiveId?: string;
+  branchHint?: BranchHint;
 }
 
 export interface LetDecl extends AstNodeMeta {
@@ -275,12 +277,17 @@ export type Expr =
   } & AstNodeMeta)
   | ({ kind: "var"; name: string } & AstNodeMeta)
   | ({ kind: "placeholder" } & AstNodeMeta)
+  | ({ kind: "const_fn"; params: string[]; body: Expr } & AstNodeMeta)
   | ({ kind: "pipe_bind"; value: Expr; name: string; doc?: string; body: Expr } & AstNodeMeta)
   | ({ kind: "call"; callee: Expr; args: Expr[] } & AstNodeMeta)
   | ({ kind: "index"; target: Expr; index: Expr } & AstNodeMeta)
   | ({ kind: "binary"; op: string; left: Expr; right: Expr } & AstNodeMeta)
   | (
-    & { kind: "match"; value: Expr; arms: ({ pattern: ParamPattern; value: Expr } & AstNodeMeta)[] }
+    & {
+      kind: "match";
+      value: Expr;
+      arms: ({ pattern: ParamPattern; value: Expr; branchHint?: BranchHint } & AstNodeMeta)[];
+    }
     & AstNodeMeta
   )
   | (

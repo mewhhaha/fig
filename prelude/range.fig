@@ -1,0 +1,49 @@
+type fn RangeI32() {
+  let RangeI32 = {start: i32, end: i32};
+  struct(RangeI32)
+}
+
+type fn RangeIter() {
+  let RangeIter = {source: RangeI32};
+  struct(RangeIter)
+}
+
+fn RangeI32.Iter(r: RangeI32) -> RangeIter {
+  RangeIter {source: r}
+}
+
+fn RangeIter.fold_loop(i: i32, end: i32, acc: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
+  let acc_then = acc;
+  let acc_else = acc;
+  match i < end {
+    true => RangeIter.fold_loop(i + 1, end, f(acc_then, i), f),
+    false => acc_else,
+  }
+}
+
+fn RangeIter.fold(xs: RangeIter, init: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
+  RangeIter.fold_loop(xs.source.start, xs.source.end, init, f)
+}
+
+fn RangeIter.count(xs: RangeIter) -> i32 {
+  match xs.source.start < xs.source.end {
+    true => xs.source.end - xs.source.start,
+    false => 0,
+  }
+}
+
+fn range_sum_step(acc: i32, x: i32) -> i32 {
+  acc + x
+}
+
+fn range_product_step(acc: i32, x: i32) -> i32 {
+  acc * x
+}
+
+fn RangeIter.sum(xs: RangeIter) -> i32 {
+  RangeIter.fold(xs, 0, range_sum_step)
+}
+
+fn RangeIter.product(xs: RangeIter) -> i32 {
+  RangeIter.fold(xs, 1, range_product_step)
+}

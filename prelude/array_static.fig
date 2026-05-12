@@ -697,18 +697,18 @@ fn RangeIter.count(xs: RangeIter) -> i32 {
 }
 
 fn RangeIter.sum(xs: RangeIter) -> i32 {
-  RangeIter.fold(xs, 0, i32_add)
+  RangeIter.fold(xs, 0, range_sum_step)
 }
 
 fn RangeIter.product(xs: RangeIter) -> i32 {
-  RangeIter.fold(xs, 1, i32_mul)
+  RangeIter.fold(xs, 1, range_product_step)
 }
 
-fn i32_add(acc: i32, x: i32) -> i32 {
+fn range_sum_step(acc: i32, x: i32) -> i32 {
   acc + x
 }
 
-fn i32_mul(acc: i32, x: i32) -> i32 {
+fn range_product_step(acc: i32, x: i32) -> i32 {
   acc * x
 }
 

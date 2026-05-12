@@ -64,10 +64,10 @@ compatibility testing and additionally exports `fig_logs` for revision/undo meta
 For normal performance-oriented code, prefer `const std = @import("prelude.std");`. The prelude is
 pure: it exposes common fragments as nested namespaces for core value data, static contracts such as
 `eq`, `semigroup`, `monoid`, `functor`, `applicative`, and `monad`, fixed inline layouts,
-fixed-array/lane helpers, functional helpers, pure option/result helpers, tuple helpers, boolean and
-`i32` utilities, and schedule metadata. Existing fragment imports such as `prelude.core`,
-`prelude.layout`, `prelude.array_static`, `prelude.function`, `prelude.option`, `prelude.result`,
-`prelude.tuple`, and `prelude.schedule` remain available for smaller surfaces.
+fixed-array/lane helpers, functional helpers, pure option/result methods, tuple methods, and
+schedule metadata. Existing fragment imports such as `prelude.core`, `prelude.layout`,
+`prelude.array_static`, `prelude.function`, `prelude.option`, `prelude.result`, `prelude.tuple`,
+`prelude.scalar`, and `prelude.schedule` remain available for smaller surfaces.
 
 ```fig
 const std = @import("prelude.std");
@@ -75,10 +75,11 @@ const std = @import("prelude.std");
 fn inc(x: i32) -> i32 { x + 1 }
 
 pub fn main() -> i32 {
-  let maybe = std.option_map(std.some(1), inc);
-  let value = std.option_unwrap_or(maybe, 0);
-  let bounded = std.clamp_i32(value + 10, 0, 8);
-  let swapped = std.pair_swap(Pair {first: bounded, second: std.result_unwrap_or(std.ok(2), 0)});
+  let maybe = Option.map(inc, some(1));
+  let value = Option.unwrap_or(maybe, 0);
+  let bounded = value + 8;
+  let pair: Pair(i32, i32) = {first: bounded, second: Result.unwrap_or(ok(2), 0)};
+  let swapped = Pair.swap(pair);
   swapped.first + swapped.second
 }
 ```

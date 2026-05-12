@@ -1,4 +1,5 @@
 import type {
+  BlockExpr,
   ConstDecl,
   Expr,
   FnDecl,
@@ -19,7 +20,7 @@ import type {
   TypeShape,
 } from "./core_ast.ts";
 import { CompileError, type Diagnostic, type Span } from "./diagnostics.ts";
-import { isCatchAllPattern } from "./patterns.ts";
+import { isCatchAllPattern, patternBindingNames } from "./patterns.ts";
 import { intrinsicWrapperId, isIntrinsicWrapper, isKnownIntrinsicId } from "./primitives.ts";
 import { type ShaderManifestEntry, shaderManifestEntry, wgslShaderId } from "./wgsl.ts";
 
@@ -84,6 +85,7 @@ function checkProgramInternal(
   const capabilities = new Map(program.imports.map((item) => [item.name, item.effects]));
   checkBorrowTypeRestrictions(program, diagnostics);
   groupFunctionClauses(program, diagnostics);
+  checkBranchHints(program, diagnostics);
   const typeDecls = mergeTypeFragments(program, diagnostics);
   checkTypeFunctionCasing(typeDecls, program, diagnostics);
   let fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
@@ -259,6 +261,8 @@ function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]
 
 function exprChildValues(expr: Expr): Expr[] {
   switch (expr.kind) {
+    case "const_fn":
+      return [expr.body];
     case "call":
       return [expr.callee, ...expr.args];
     case "index":
@@ -460,6 +464,8 @@ function lowerCollectorLiterals(
   const functions = new Map(fnDecls.map((fn) => [fn.name, fn]));
   const lowerExpr = (expr: Expr, expectedType: string | undefined): Expr => {
     switch (expr.kind) {
+      case "const_fn":
+        return { ...expr, span: expr.span, body: lowerExpr(expr.body, undefined) };
       case "shape": {
         if (expr.syntax !== "collection") {
           const productSlots = productSlotTypes(expectedType, typeDecls, expr.slots.length);
@@ -1106,6 +1112,21 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
       });
     }
     if (!compatible) continue;
+    for (let index = 0; index < group.length; index++) {
+      const clause = group[index]!;
+      if (!clause.branchHint) continue;
+      if (clausePatternTests(first, clause).length > 0) continue;
+      const previous = group[index - 1];
+      if (
+        index === group.length - 1 && previous &&
+        clausePatternTests(first, previous).length > 0 && !previous.branchHint
+      ) continue;
+      diagnostics.push({
+        code: "branch_hint.unmapped",
+        message: "branch hint cannot be attached to a generated runtime conditional",
+        span: clause.nameSpan ?? clause.span,
+      });
+    }
     const generated = group.map((clause, index): FnDecl => ({
       ...clause,
       memberOf: undefined,
@@ -1116,6 +1137,7 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
         pattern: { kind: "binding", name: param.name },
       })),
       generated: true,
+      branchHint: undefined,
     }));
     const dispatcher: FnDecl = {
       ...first,
@@ -1125,6 +1147,7 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
       })),
       body: clauseDispatcherBody(first, group),
       generated: true,
+      branchHint: undefined,
     };
     replacements.set(first, [dispatcher, ...generated]);
     for (const clause of group.slice(1)) replacements.set(clause, []);
@@ -1133,6 +1156,98 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
   program.declarations = program.declarations.flatMap((decl): Program["declarations"] =>
     decl.kind === "fn" ? (replacements.get(decl) ?? [decl]) : [decl]
   );
+}
+
+function checkBranchHints(program: Program, diagnostics: Diagnostic[]) {
+  for (const decl of program.declarations) {
+    if (decl.kind !== "fn") continue;
+    if (decl.branchHint && !decl.generated) {
+      diagnostics.push({
+        code: "branch_hint.unused",
+        message: `branch hint on function ${decl.name} is only valid on function clauses`,
+        span: decl.nameSpan ?? decl.span,
+      });
+    }
+    checkBranchHintsInBlock(decl.body, diagnostics);
+  }
+}
+
+function checkBranchHintsInBlock(block: BlockExpr, diagnostics: Diagnostic[]) {
+  for (const stmt of block.statements) {
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+      checkBranchHintsInExpr(stmt.value, diagnostics);
+    }
+  }
+  if (block.expr) checkBranchHintsInExpr(block.expr, diagnostics);
+}
+
+function checkBranchHintsInExpr(expr: Expr, diagnostics: Diagnostic[]) {
+  switch (expr.kind) {
+    case "block":
+      checkBranchHintsInBlock(expr, diagnostics);
+      return;
+    case "call":
+      checkBranchHintsInExpr(expr.callee, diagnostics);
+      expr.args.forEach((arg) => checkBranchHintsInExpr(arg, diagnostics));
+      return;
+    case "index":
+      checkBranchHintsInExpr(expr.target, diagnostics);
+      checkBranchHintsInExpr(expr.index, diagnostics);
+      return;
+    case "binary":
+      checkBranchHintsInExpr(expr.left, diagnostics);
+      checkBranchHintsInExpr(expr.right, diagnostics);
+      return;
+    case "pipe_bind":
+      checkBranchHintsInExpr(expr.value, diagnostics);
+      checkBranchHintsInExpr(expr.body, diagnostics);
+      return;
+    case "match":
+      checkBranchHintsInExpr(expr.value, diagnostics);
+      validateMatchBranchHints(expr, diagnostics);
+      expr.arms.forEach((arm) => checkBranchHintsInExpr(arm.value, diagnostics));
+      return;
+    case "shape":
+    case "product_constructor":
+      expr.slots.forEach((slot) => {
+        if (slot.index) checkBranchHintsInExpr(slot.index, diagnostics);
+        checkBranchHintsInExpr(slot.value, diagnostics);
+      });
+      return;
+    case "range":
+      checkBranchHintsInExpr(expr.start, diagnostics);
+      checkBranchHintsInExpr(expr.end, diagnostics);
+      return;
+    case "static_for_slots":
+      checkBranchHintsInExpr(expr.value, diagnostics);
+      return;
+    case "field":
+      checkBranchHintsInExpr(expr.value, diagnostics);
+      checkBranchHintsInExpr(expr.key, diagnostics);
+      return;
+    case "literal":
+    case "var":
+    case "placeholder":
+      return;
+  }
+}
+
+function validateMatchBranchHints(
+  expr: Extract<Expr, { kind: "match" }>,
+  diagnostics: Diagnostic[],
+) {
+  expr.arms.forEach((arm, index) => {
+    if (!arm.branchHint) return;
+    const isLast = index === expr.arms.length - 1;
+    const previous = expr.arms[index - 1];
+    if (!isLast && !isCatchAllPattern(arm.pattern)) return;
+    if (isLast && previous && !previous.branchHint) return;
+    diagnostics.push({
+      code: "branch_hint.unmapped",
+      message: "branch hint cannot be attached to a generated runtime conditional",
+      span: arm.span,
+    });
+  });
 }
 
 function clauseDispatcherBody(
@@ -1146,15 +1261,19 @@ function clauseDispatcherBody(
   });
   let expr: Expr = { kind: "literal", literalKind: "number", value: "0" };
   for (let index = clauses.length - 1; index >= 0; index--) {
-    expr = buildClauseBranch(signature, clauses[index], index, expr);
+    expr = buildClauseBranch(signature, clauses[index], index, expr, clauses[index + 1]);
   }
   return { kind: "block", statements: [], expr };
 }
 
-function buildClauseBranch(signature: FnDecl, clause: FnDecl, index: number, fallback: Expr): Expr {
-  const tests = clause.params.map((param, paramIndex) =>
-    patternTestExpr(param.pattern, { kind: "var", name: signature.params[paramIndex].name })
-  ).filter((expr): expr is Expr => Boolean(expr));
+function buildClauseBranch(
+  signature: FnDecl,
+  clause: FnDecl,
+  index: number,
+  fallback: Expr,
+  nextClause?: FnDecl,
+): Expr {
+  const tests = clausePatternTests(signature, clause);
   if (!tests.length) {
     return {
       kind: "call",
@@ -1163,12 +1282,17 @@ function buildClauseBranch(signature: FnDecl, clause: FnDecl, index: number, fal
     };
   }
   const test = tests.reduce((left, right) => ({ kind: "binary", op: "==", left, right }));
+  const nextHint = nextClause?.branchHint && clausePatternTests(signature, nextClause).length === 0
+    ? invertBranchHint(nextClause.branchHint)
+    : undefined;
+  const branchHint = clause.branchHint ?? nextHint;
   return {
     kind: "match",
     value: test,
     arms: [
       {
         pattern: literalPattern("true", "bool"),
+        ...(branchHint ? { branchHint } : {}),
         value: {
           kind: "call",
           callee: { kind: "var", name: `${signature.name}__clause_${index}` },
@@ -1178,6 +1302,16 @@ function buildClauseBranch(signature: FnDecl, clause: FnDecl, index: number, fal
       { pattern: wildcardPattern(), value: fallback },
     ],
   };
+}
+
+function invertBranchHint(hint: "likely" | "unlikely"): "likely" | "unlikely" {
+  return hint === "likely" ? "unlikely" : "likely";
+}
+
+function clausePatternTests(signature: FnDecl, clause: FnDecl): Expr[] {
+  return clause.params.map((param, paramIndex) =>
+    patternTestExpr(param.pattern, { kind: "var", name: signature.params[paramIndex].name })
+  ).filter((expr): expr is Expr => Boolean(expr));
 }
 
 function wildcardPattern(): ParamPattern {
@@ -1418,6 +1552,8 @@ function rewriteAttachedMembersInBlock(
 
 function rewriteAttachedMembersInExpr(expr: Expr, members: Map<string, string>): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, span: expr.span, body: rewriteAttachedMembersInExpr(expr.body, members) };
     case "var":
       return members.has(expr.name) ? { kind: "var", name: members.get(expr.name)! } : expr;
     case "call":
@@ -2034,6 +2170,7 @@ class ConstEvaluator {
     }
     if (name === "type_is_sum") return { kind: "bool", value: type.normalized?.kind === "sum" };
     if (name === "type_is_alias") return { kind: "bool", value: type.normalized?.kind === "alias" };
+    if (name === "type_is_number") return { kind: "bool", value: isNumericType(type.name) };
     if (name === "type_has_slot") {
       return { kind: "bool", value: hasProductSlot(type, args[1]) };
     }
@@ -2482,6 +2619,8 @@ function specializeInferredExpr(
   env = new Map<string, string>(),
 ): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, span: expr.span, body: specializeInferredExpr(expr.body, context, env) };
     case "call": {
       const callee = specializeInferredExpr(expr.callee, context, env);
       const args = expr.args.map((arg) => specializeInferredExpr(arg, context, env));
@@ -3427,6 +3566,8 @@ function specializeExpr(
   context: ConstSpecializationContext,
 ): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, span: expr.span, body: specializeExpr(expr.body, context) };
     case "call": {
       const callee = specializeExpr(expr.callee, context);
       const args = expr.args.map((arg) => specializeExpr(arg, context));
@@ -3651,6 +3792,8 @@ function isInlineableGeneratedSpecializationSource(fn: FnDecl): boolean {
 function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
   if (!expr) return false;
   switch (expr.kind) {
+    case "const_fn":
+      return exprCallsFunction(expr.body, name);
     case "call":
       return (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprCallsFunction(expr.callee, name) ||
@@ -3696,7 +3839,7 @@ function staticConstArgValue(
   context: ConstSpecializationContext,
   staticValues = new Map<string, ConstValue>(),
 ): { name: string; value: ConstValue } | undefined {
-  const helper = expectedType ? synthesizePlaceholderHelper(arg, expectedType, context) : undefined;
+  const helper = expectedType ? synthesizeConstFnHelper(arg, expectedType, context) : undefined;
   if (helper) return helper;
   if (arg.kind === "var") {
     const staticValue = staticValues.get(arg.name) ?? constValueFromKeyName(arg.name);
@@ -3899,41 +4042,64 @@ function isKnownTypeProof(proof: string, types: TypeDecl[]): boolean {
   ].includes(name) || types.some((type) => type.name === name || type.name === terminalName(name));
 }
 
-function synthesizePlaceholderHelper(
+function synthesizeConstFnHelper(
   arg: Expr,
   expectedType: string,
   context: ConstSpecializationContext,
 ): { name: string; value: ConstValue } | undefined {
-  if (!exprContainsPlaceholder(arg)) return undefined;
-  const match = expectedType.trim().match(
-    /^fn\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)\)\s*->\s*(.+)$/,
-  );
-  if (!match) {
+  if (exprContainsPlaceholder(arg)) {
     context.diagnostics.push({
-      code: "const.placeholder_expected_fn",
-      message: "$ helper requires an expected unary const fn parameter",
+      code: "const.placeholder_deprecated",
+      message: "$ const fn helper is deprecated; use \\x -> ... instead",
       span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
     });
     return undefined;
   }
-  const [, paramName, paramType, returnType] = match;
-  const captures = [...exprRuntimeCaptures(arg)].filter((name) =>
-    name !== "$" && name !== paramName && !context.functions.has(name) && !context.consts.has(name)
+  if (arg.kind !== "const_fn") return undefined;
+  const signature = parseExpectedFnType(expectedType);
+  if (!signature) {
+    context.diagnostics.push({
+      code: "const.const_fn_expected_fn",
+      message: "const fn literal requires an expected const fn parameter",
+      span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
+    });
+    return undefined;
+  }
+  if (arg.params.length !== signature.params.length) {
+    context.diagnostics.push({
+      code: "const.const_fn_arity",
+      message:
+        `const fn literal has ${arg.params.length} parameter(s), expected ${signature.params.length}`,
+      span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
+    });
+    return undefined;
+  }
+  const paramNames = new Set(arg.params);
+  const expectedParams = new Set(signature.params.map((param) => param.name));
+  const captures = [...exprRuntimeCaptures(arg.body)].filter((name) =>
+    !paramNames.has(name) && !expectedParams.has(name) && !context.functions.has(name) &&
+    !context.consts.has(name)
   );
   if (captures.length) {
     context.diagnostics.push({
-      code: "const.placeholder_capture",
-      message: `$ helper cannot capture runtime local ${captures[0]}`,
+      code: "const.const_fn_capture",
+      message: `const fn literal cannot capture runtime local ${captures[0]}`,
       span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
     });
     return undefined;
   }
-  const body = replacePlaceholder(arg, { kind: "var", name: paramName });
-  const key = `__placeholder\0${expectedType}\0${JSON.stringify(body)}`;
+  let body = arg.body;
+  signature.params.forEach((param, index) => {
+    const sourceName = arg.params[index]!;
+    if (sourceName !== param.name) {
+      body = replaceNamedVar(body, sourceName, { kind: "var", name: param.name });
+    }
+  });
+  const key = `__const_fn\0${expectedType}\0${JSON.stringify(body)}`;
   let fn = context.cache.get(key);
   if (!fn) {
     const name = allocateSpecializationName(
-      "__dollar",
+      "__const_fn",
       [expectedType, JSON.stringify(body)],
       context.usedNames,
     );
@@ -3941,8 +4107,8 @@ function synthesizePlaceholderHelper(
       kind: "fn",
       public: false,
       name,
-      params: [{ name: paramName, type: paramType.trim() }],
-      returnType: returnType.trim(),
+      params: signature.params.map((param) => ({ name: param.name, type: param.type })),
+      returnType: signature.returnType,
       effects: [],
       body: { kind: "block", statements: [], expr: body },
       generated: true,
@@ -3953,6 +4119,46 @@ function synthesizePlaceholderHelper(
   return { name: fn.name, value: { kind: "fn", name: fn.name } };
 }
 
+function parseExpectedFnType(
+  source: string,
+): { params: { name: string; type: string }[]; returnType: string } | undefined {
+  const trimmed = source.trim();
+  if (!trimmed.startsWith("fn(")) return undefined;
+  const close = findMatchingParen(trimmed, 2);
+  if (close < 0) return undefined;
+  const rest = trimmed.slice(close + 1).trim();
+  if (!rest.startsWith("->")) return undefined;
+  const paramsSource = trimmed.slice(3, close).trim();
+  const params = paramsSource
+    ? splitTypeArgs(paramsSource).map((param, index) => {
+      const colon = topLevelTypeColon(param);
+      if (colon < 0) return undefined;
+      const name = param.slice(0, colon).trim();
+      const type = param.slice(colon + 1).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || !type) return undefined;
+      return { name, type, index };
+    })
+    : [];
+  if (params.some((param) => !param)) return undefined;
+  return {
+    params: params.map((param) => ({ name: param!.name, type: param!.type })),
+    returnType: rest.slice(2).trim(),
+  };
+}
+
+function findMatchingParen(source: string, openIndex: number): number {
+  let depth = 0;
+  for (let index = openIndex; index < source.length; index++) {
+    const char = source[index];
+    if (char === "(") depth++;
+    else if (char === ")") {
+      depth--;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
 function exprContainsPlaceholder(expr: Expr): boolean {
   if (expr.kind === "placeholder") return true;
   return exprChildren(expr).some(exprContainsPlaceholder);
@@ -3960,9 +4166,52 @@ function exprContainsPlaceholder(expr: Expr): boolean {
 
 function exprRuntimeCaptures(expr: Expr): Set<string> {
   const captures = new Set<string>();
-  const visit = (item: Expr) => {
-    if (item.kind === "var") captures.add(item.name);
-    for (const child of exprChildren(item)) visit(child);
+  const visit = (item: Expr, bound = new Set<string>()) => {
+    if (item.kind === "var") {
+      if (!bound.has(item.name)) captures.add(item.name);
+      return;
+    }
+    if (item.kind === "pipe_bind") {
+      visit(item.value, bound);
+      visit(item.body, new Set(bound).add(item.name));
+      return;
+    }
+    if (item.kind === "match") {
+      visit(item.value, bound);
+      for (const arm of item.arms) {
+        const scoped = new Set(bound);
+        for (const name of patternBindingNames(arm.pattern)) scoped.add(name);
+        visit(arm.value, scoped);
+      }
+      return;
+    }
+    if (item.kind === "static_for_slots") {
+      if (item.source.kind === "range") {
+        visit(item.source.start, bound);
+        visit(item.source.end, bound);
+      } else {
+        visit(item.source.shape, bound);
+      }
+      const scoped = new Set(bound).add(item.iterator);
+      if (item.valueIterator) scoped.add(item.valueIterator);
+      visit(item.value, scoped);
+      return;
+    }
+    if (item.kind === "block") {
+      const scoped = new Set(bound);
+      for (const stmt of item.statements) {
+        if (stmt.kind === "let") {
+          visit(stmt.value, scoped);
+          scoped.add(stmt.name);
+        } else if (stmt.kind === "destructure_let") {
+          visit(stmt.value, scoped);
+          for (const name of stmt.names) scoped.add(name);
+        }
+      }
+      if (item.expr) visit(item.expr, scoped);
+      return;
+    }
+    for (const child of exprChildren(item)) visit(child, bound);
   };
   visit(expr);
   return captures;
@@ -3971,6 +4220,8 @@ function exprRuntimeCaptures(expr: Expr): Set<string> {
 function replacePlaceholder(expr: Expr, replacement: Expr): Expr {
   if (expr.kind === "placeholder") return cloneExpr(replacement);
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: replacePlaceholder(expr.body, replacement) };
     case "call":
       return {
         ...expr,
@@ -4049,6 +4300,97 @@ function replacePlaceholder(expr: Expr, replacement: Expr): Expr {
   }
 }
 
+function replaceNamedVar(expr: Expr, name: string, replacement: Expr): Expr {
+  if (expr.kind === "var" && expr.name === name) return cloneExpr(replacement);
+  switch (expr.kind) {
+    case "const_fn":
+      return expr.params.includes(name)
+        ? expr
+        : { ...expr, body: replaceNamedVar(expr.body, name, replacement) };
+    case "call":
+      return {
+        ...expr,
+        callee: replaceNamedVar(expr.callee, name, replacement),
+        args: expr.args.map((arg) => replaceNamedVar(arg, name, replacement)),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: replaceNamedVar(expr.target, name, replacement),
+        index: replaceNamedVar(expr.index, name, replacement),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: replaceNamedVar(expr.left, name, replacement),
+        right: replaceNamedVar(expr.right, name, replacement),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: replaceNamedVar(expr.value, name, replacement),
+        body: expr.name === name ? expr.body : replaceNamedVar(expr.body, name, replacement),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: replaceNamedVar(expr.value, name, replacement),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: replaceNamedVar(arm.value, name, replacement),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          value: replaceNamedVar(slot.value, name, replacement),
+        })),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: replaceStaticForSourceNamedVar(expr.source, name, replacement),
+        value: replaceNamedVar(expr.value, name, replacement),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: replaceNamedVar(expr.value, name, replacement),
+        key: replaceNamedVar(expr.key, name, replacement),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: replaceNamedVar(expr.start, name, replacement),
+        end: replaceNamedVar(expr.end, name, replacement),
+      };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) => {
+          if (stmt.kind === "let") {
+            return {
+              ...stmt,
+              value: replaceNamedVar(stmt.value, name, replacement),
+            };
+          }
+          if (stmt.kind === "destructure_let") {
+            return { ...stmt, value: replaceNamedVar(stmt.value, name, replacement) };
+          }
+          return stmt;
+        }),
+        expr: expr.expr ? replaceNamedVar(expr.expr, name, replacement) : undefined,
+      };
+    case "literal":
+    case "placeholder":
+    case "var":
+      return expr;
+  }
+}
+
 function replaceStaticForSourcePlaceholder(
   source: Extract<Expr, { kind: "static_for_slots" }>["source"],
   replacement: Expr,
@@ -4062,8 +4404,24 @@ function replaceStaticForSourcePlaceholder(
     : { kind: "shape", shape: replacePlaceholder(source.shape, replacement) };
 }
 
+function replaceStaticForSourceNamedVar(
+  source: Extract<Expr, { kind: "static_for_slots" }>["source"],
+  name: string,
+  replacement: Expr,
+): Extract<Expr, { kind: "static_for_slots" }>["source"] {
+  return source.kind === "range"
+    ? {
+      kind: "range",
+      start: replaceNamedVar(source.start, name, replacement),
+      end: replaceNamedVar(source.end, name, replacement),
+    }
+    : { kind: "shape", shape: replaceNamedVar(source.shape, name, replacement) };
+}
+
 function exprChildren(expr: Expr): Expr[] {
   switch (expr.kind) {
+    case "const_fn":
+      return [expr.body];
     case "call":
       return [expr.callee, ...expr.args];
     case "index":
@@ -4270,6 +4628,11 @@ function substituteSpecializedExpr(
   context: ConstSpecializationContext,
 ): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return {
+        ...expr,
+        body: substituteSpecializedExpr(expr.body, values, staticValues, staticArgNames, context),
+      };
     case "var": {
       const value = values.get(expr.name);
       if (value) return cloneExpr(value);
@@ -5960,6 +6323,8 @@ function lowerProductConstructors(
   }
   const lowerExpr = (expr: Expr): Expr => {
     switch (expr.kind) {
+      case "const_fn":
+        return { ...expr, span: expr.span, body: lowerExpr(expr.body) };
       case "product_constructor": {
         const product = resolveProductConstructor(expr.constructor, products, productsByTerminal);
         if (!product) {
@@ -6520,6 +6885,7 @@ class TypeEvaluator {
     }
     if (name === "type_is_sum") return { kind: "bool", value: type.normalized?.kind === "sum" };
     if (name === "type_is_alias") return { kind: "bool", value: type.normalized?.kind === "alias" };
+    if (name === "type_is_number") return { kind: "bool", value: isNumericType(type.name) };
     if (name === "type_has_slot") {
       return { kind: "bool", value: !!this.typeProductSlot(type, args[1]) };
     }
@@ -7584,6 +7950,10 @@ function isEmptyPrimitiveType(type: string): boolean {
 }
 
 function isEmptyNumericType(type: string): boolean {
+  return isNumericType(type);
+}
+
+function isNumericType(type: string): boolean {
   return ["i32", "u32", "i64", "u64", "f32", "f64"].includes(type) ||
     unsignedBitWidth(type) !== undefined;
 }
@@ -7608,6 +7978,7 @@ function isStaticBuiltinName(name: string): boolean {
     "type_is_product",
     "type_is_sum",
     "type_is_alias",
+    "type_is_number",
     "type_has_slot",
     "type_slot_type",
     "type_has_member",
@@ -8142,6 +8513,8 @@ function checkFn(
 function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
   if (!expr) return false;
   switch (expr.kind) {
+    case "const_fn":
+      return exprContainsStaticExpansion(expr.body);
     case "static_for_slots":
       return true;
     case "block":
@@ -8336,6 +8709,13 @@ function checkExpr(
   options: { recoverTypes: boolean } = { recoverTypes: false },
 ) {
   switch (expr.kind) {
+    case "const_fn":
+      diagnostics.push({
+        code: "const.const_fn_context",
+        message: "const fn literal is only valid as an expected const fn argument",
+        span: expr.span,
+      });
+      return;
     case "var": {
       checkProjection(expr.name, env, types, diagnostics);
       const binding = env.get(expr.name);

@@ -29,6 +29,7 @@ work during const evaluation when their arguments are compile-time Values.
 | `@type_is_product`       | `t: type`                                                      | `bool`                                      |
 | `@type_is_sum`           | `t: type`                                                      | `bool`                                      |
 | `@type_is_alias`         | `t: type`                                                      | `bool`                                      |
+| `@type_is_number`        | `t: type`                                                      | `bool`                                      |
 | `@type_has_slot`         | `t: type`, `slot: #literal/string`                             | `bool`                                      |
 | `@type_slot_type`        | `t: type`, `slot: #literal/string`                             | slot `type`, or diagnostic                  |
 | `@type_has_member`       | `t: type`, `member: #literal/string`                           | `bool`                                      |

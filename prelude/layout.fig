@@ -233,44 +233,6 @@ fn InlineArray.set(const n: count, const a: type, xs: InlineArray(n, a), index: 
   [...xs, [index]: value]
 }
 
-fn InlineArray.set_loop(
-  const n: count,
-  const a: type,
-  cursor: core.IndexCursor(n),
-  builder: InlineArrayBuilder(n, a),
-  xs: InlineArray(n, a),
-  index: core.Index(n),
-  value: a
-) -> InlineArray(n, a) {
-  let builder_then = builder;
-let builder_else = builder;
-  let xs_then = xs;
-let xs_else = xs;
-  let value_then = value;
-let value_else = value;
-  let builder_true = builder_then;
-let builder_false = builder_then;
-  let xs_current = xs_then;
-let xs_next = xs_then;
-  let xs_true_next = xs_next;
-let xs_false_next = xs_next;
-  let value_current = value_then;
-let value_next = value_then;
-  let value_true_next = value_next;
-let value_false_next = value_next;
-  let index_test = index;
-let index_next = index;
-  let index_true_next = index_next;
-let index_false_next = index_next;
-  match core.IndexCursor.next(n, cursor) {
-    Yield(i, next) => match i == index_test {
-      true => InlineArray.set_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_true, i, value_current), xs_true_next, index_true_next, value_true_next),
-      false => InlineArray.set_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_false, i, xs_current[i]), xs_false_next, index_false_next, value_false_next),
-    },
-    Done => InlineArrayBuilder.finish(n, a, builder_else),
-  }
-}
-
 fn InlineArray.update(
   const n: count,
   const a: type,
@@ -280,38 +242,6 @@ fn InlineArray.update(
 ) -> InlineArray(n, a) {
   let old = xs[index];
   [...xs, [index]: f(old)]
-}
-
-fn InlineArray.update_loop(
-  const n: count,
-  const a: type,
-  cursor: core.IndexCursor(n),
-  builder: InlineArrayBuilder(n, a),
-  xs: InlineArray(n, a),
-  index: core.Index(n),
-  const f: fn(x: a) -> a
-) -> InlineArray(n, a) {
-  let builder_then = builder;
-let builder_else = builder;
-  let xs_then = xs;
-let xs_else = xs;
-  let builder_true = builder_then;
-let builder_false = builder_then;
-  let xs_current = xs_then;
-let xs_next = xs_then;
-  let xs_update = xs_next;
-let xs_false_next = xs_next;
-  let index_test = index;
-let index_next = index;
-  let index_true_next = index_next;
-let index_false_next = index_next;
-  match core.IndexCursor.next(n, cursor) {
-    Yield(i, next) => match i == index_test {
-      true => InlineArray.update_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_true, i, f(xs_current[i])), xs_update, index_true_next, f),
-      false => InlineArray.update_loop(n, a, next, InlineArrayBuilder.push(n, a, builder_false, i, xs_current[i]), xs_false_next, index_false_next, f),
-    },
-    Done => InlineArrayBuilder.finish(n, a, builder_else),
-  }
 }
 
 fn InlineArray.fold_indices(

@@ -42,47 +42,47 @@ type fn OpGte(t: type) -> operator {
   operator(#infix, 50, ">=", t.gte)
 }
 
-fn bool_and(a: bool, b: bool) -> bool {
+fn op_and_impl(a: bool, b: bool) -> bool {
   match a { true => b, false => false }
 }
 
-fn bool_or(a: bool, b: bool) -> bool {
+fn op_or_impl(a: bool, b: bool) -> bool {
   match a { true => true, false => b }
 }
 
-fn bool_xor(a: bool, b: bool) -> bool {
+fn op_xor_impl(a: bool, b: bool) -> bool {
   match a {
     true => match b { true => false, false => true },
     false => b,
   }
 }
 
-fn bool_eq(a: bool, b: bool) -> bool {
+fn op_bool_eq_impl(a: bool, b: bool) -> bool {
   match a { true => b, false => match b { true => false, false => true } }
 }
 
-fn bool_neq(a: bool, b: bool) -> bool {
-  bool_xor(a, b)
+fn op_bool_neq_impl(a: bool, b: bool) -> bool {
+  op_xor_impl(a, b)
 }
 
 type fn OpBoolAnd() -> operator {
-  operator(#infixr, 30, "&&", bool_and)
+  operator(#infixr, 30, "&&", op_and_impl)
 }
 
 type fn OpBoolOr() -> operator {
-  operator(#infixr, 20, "||", bool_or)
+  operator(#infixr, 20, "||", op_or_impl)
 }
 
 type fn OpBoolXor() -> operator {
-  operator(#infixr, 25, "^^", bool_xor)
+  operator(#infixr, 25, "^^", op_xor_impl)
 }
 
 type fn OpBoolEq() -> operator {
-  operator(#infix, 40, "==", bool_eq)
+  operator(#infix, 40, "==", op_bool_eq_impl)
 }
 
 type fn OpBoolNeq() -> operator {
-  operator(#infix, 40, "!=", bool_neq)
+  operator(#infix, 40, "!=", op_bool_neq_impl)
 }
 
 type fn OpAppend(t: type) -> operator {

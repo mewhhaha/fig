@@ -1,0 +1,56 @@
+fn bool_not(value: bool) -> bool {
+  if value { false } else { true }
+}
+
+fn bool_and(a: bool, b: bool) -> bool {
+  if a { b } else { false }
+}
+
+fn bool_or(a: bool, b: bool) -> bool {
+  if a { true } else { b }
+}
+
+fn bool_xor(a: bool, b: bool) -> bool {
+  if a { bool_not(b) } else { b }
+}
+
+fn select(cond: bool, when_true: a, when_false: a) -> a {
+  if cond { when_true } else { when_false }
+}
+
+type fn Number(t: type) -> type {
+  @require(@type_is_number(t), "expected a numeric scalar type");
+  t
+}
+
+fn min(const t: type, const _number: Number(t), a: t, b: t) -> t {
+  if a < b { a } else { b }
+}
+
+fn max(const t: type, const _number: Number(t), a: t, b: t) -> t {
+  if a < b { b } else { a }
+}
+
+fn clamp(const t: type, const _number: Number(t), value: t, low: t, high: t) -> t {
+  max(t, Number(t), low, min(t, Number(t), value, high))
+}
+
+fn between(const t: type, const _number: Number(t), value: t, low: t, high: t) -> bool {
+  if low <= value { value <= high } else { false }
+}
+
+fn abs(const t: type, const _number: Number(t), value: t) -> t {
+  if value < 0 { 0 - value } else { value }
+}
+
+fn signum(const t: type, const _number: Number(t), value: t) -> t {
+  if value == 0 {
+    0
+  } else {
+    if value < 0 { 0 - 1 } else { 1 }
+  }
+}
+
+fn square(const t: type, const _number: Number(t), value: t) -> t {
+  value * value
+}

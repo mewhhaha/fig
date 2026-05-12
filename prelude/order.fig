@@ -1,15 +1,1 @@
-fn min_i32(a: i32, b: i32) -> i32 {
-  match a < b { true => a, false => b }
-}
-
-fn max_i32(a: i32, b: i32) -> i32 {
-  match a < b { true => b, false => a }
-}
-
-fn clamp_i32(value: i32, low: i32, high: i32) -> i32 {
-  max_i32(low, min_i32(value, high))
-}
-
-fn between_i32(value: i32, low: i32, high: i32) -> bool {
-  match low <= value { true => value <= high, false => false }
-}
+const scalar = @import("prelude.scalar");

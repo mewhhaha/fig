@@ -10,6 +10,7 @@
 (Param (PatternIdent (LowerIdent) @variable.parameter))
 (Param (PatternIdent (PascalIdent) @constructor))
 (Param (FieldName) @variable.parameter)
+(ConstFnParams (LowerIdent) @variable.parameter)
 (BlockLetDecl (LowerIdent) @variable)
 (BlockLetDecl (FieldName) @variable)
 (BlockLetTail (LowerIdent) @variable)
@@ -38,8 +39,12 @@
 (Comment) @comment
 (Placeholder) @operator
 "_" @keyword
+"else" @keyword
 "for" @keyword
+"if" @keyword
 "in" @keyword
+"likely" @keyword
+"unlikely" @keyword
 "zip" @keyword
 "!" @operator
 "%" @operator

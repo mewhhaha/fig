@@ -10,9 +10,8 @@ capabilities, imports, primitive type names, and type functions. PascalCase iden
 `[a-Z][a-Za-z0-9]*` and are used for product constructors, union variants, and type-level local
 shape bindings.
 
-Qualified names use dots, for example `std.option_map`, `Point.eql`, or
-`Geometry.Layout.vertex2d_i32`. Literal tags begin with `#`, for example `#field`, `#Some`, and
-`#infixl`.
+Qualified names use dots, for example `Option.map`, `Point.eql`, or `Geometry.Layout.vertex2d_i32`.
+Literal tags begin with `#`, for example `#field`, `#Some`, and `#infixl`.
 
 ## Doc Comments
 
@@ -140,6 +139,19 @@ fn tuple([left, right]: Pair) -> i32 { left + right }
 `const` parameters are compile-time parameters. They specialize at call sites and are erased from
 runtime parameters where possible.
 
+Inline const-function literals can be passed where a `const fn` parameter is expected:
+
+```fig
+fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
+  [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
+}
+
+map4_i32(\x -> x + 1, xs)
+fold4_i32(\(acc, x) -> acc + x, 0, xs)
+```
+
+They are compile-time templates, not runtime closure values.
+
 ## Blocks and Patterns
 
 Blocks contain `let` statements, local proof consts, and an optional final expression:
@@ -170,7 +182,7 @@ match maybe {
 }
 ```
 
-There is no assignment statement and no `if` expression; use `let` and `match`.
+There is no assignment statement; bind updated values with `let` shadowing.
 
 ## Literals
 

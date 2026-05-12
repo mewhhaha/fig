@@ -1,5 +1,6 @@
 import type {
   AstNodeMeta,
+  BranchHint,
   CapabilityImport,
   ConstDecl,
   Declaration,
@@ -190,7 +191,16 @@ function lowerFn(node: Node): FnDecl {
       ? named(only(fn, "EffectRow")).filter(isIdentifier).map((id) => id.text)
       : [],
     body: lowerBlock(only(fn, "Block")),
+    ...(lowerBranchHint(optional(fn, "BranchHint")) ?? {}),
   };
+}
+
+function lowerBranchHint(node: Node | undefined): { branchHint: BranchHint } | undefined {
+  if (!node) return undefined;
+  const hint = node.text.replace(/\s+/g, "");
+  if (hint === "@likely") return { branchHint: "likely" };
+  if (hint === "@unlikely") return { branchHint: "unlikely" };
+  fail("parse.lower", `unknown branch hint ${node.text}`, spanFor(node));
 }
 
 function lowerFnName(
@@ -900,20 +910,69 @@ function lowerBlock(node: Node): Extract<Expr, { kind: "block" }> {
   return { kind: "block", ...spanOnly(node), statements, expr };
 }
 
+function lowerIfArmBlock(node: Node): Expr {
+  const block = lowerBlock(node);
+  return block.statements.length === 0 && block.expr ? block.expr : block;
+}
+
 function lowerExpr(node: Node): Expr {
   const expr = unwrap(node);
   switch (expr.type) {
+    case "IfExpr": {
+      const condition = first(expr, "Expr");
+      const blocks = named(expr).filter(is("Block"));
+      const trueBlock = blocks[0];
+      const falseBlock = blocks[1];
+      return {
+        kind: "match",
+        ...spanOnly(expr),
+        value: lowerExpr(condition),
+        arms: [
+          {
+            ...spanOnly(trueBlock),
+            pattern: {
+              kind: "literal",
+              value: "true",
+              literalKind: "bool",
+              ...spanOnly(trueBlock),
+            },
+            value: lowerIfArmBlock(trueBlock),
+          },
+          {
+            ...spanOnly(falseBlock),
+            pattern: {
+              kind: "literal",
+              value: "false",
+              literalKind: "bool",
+              ...spanOnly(falseBlock),
+            },
+            value: lowerIfArmBlock(falseBlock),
+          },
+        ],
+      };
+    }
     case "MatchExpr": {
       const value = first(expr, "Expr");
       const arms = named(expr).filter(is("Arm")).map((arm) => {
         const armExpr = first(arm, "Expr");
         return {
           ...spanOnly(arm),
+          ...(lowerBranchHint(optional(arm, "BranchHint")) ?? {}),
           pattern: lowerParamPattern(first(arm, "Pattern")),
           value: lowerExpr(armExpr),
         };
       });
       return { kind: "match", ...spanOnly(expr), value: lowerExpr(value), arms };
+    }
+    case "ConstFn": {
+      const paramsNode = first(expr, "ConstFnParams");
+      const params = descendantLowerIdents(paramsNode).map((child) => child.text);
+      return {
+        kind: "const_fn",
+        ...spanOnly(expr),
+        params,
+        body: lowerExpr(optional(expr, "Block") ?? first(expr, "Expr")),
+      };
     }
     case "PipeBind":
     case "CollectionPipeBind":
@@ -1043,6 +1102,8 @@ function lowerPipeBindBody(node: Node, bindName: string): Expr {
 function bindDollarPlaceholders(expr: Expr): Expr {
   if (expr.kind === "placeholder") return { kind: "var", name: "$", span: expr.span };
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: bindDollarPlaceholders(expr.body) };
     case "call":
       return {
         ...expr,
@@ -1567,6 +1628,16 @@ function named(node: Node): readonly Node[] {
   return ((node.namedChildren ?? []) as readonly Node[]).filter((child) =>
     child.type !== "Whitespace" && child.type !== "Comment"
   );
+}
+
+function descendantLowerIdents(node: Node): Node[] {
+  const result: Node[] = [];
+  const visit = (item: Node) => {
+    if (item.type === "LowerIdent") result.push(item);
+    for (const child of named(item)) visit(child);
+  };
+  visit(node);
+  return result;
 }
 
 function docText(node: Node | undefined): string | undefined {

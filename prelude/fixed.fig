@@ -1,0 +1,59 @@
+const core = @import("prelude.core");
+const layout = @import("prelude.layout");
+
+// Canonical fixed-size value layouts. These mirror layout.InlineArray but keep
+// update/edit helpers written as structurally recognizable source patterns.
+
+type fn Array(n: count, a: type) -> type {
+  layout.InlineArray(n, a)
+}
+
+fn Array.set(
+  const n: count,
+  const a: type,
+  xs: Array(n, a),
+  index: core.Index(n),
+  value: a
+) -> Array(n, a) {
+  [...xs, [index]: value]
+}
+
+fn Array.update(
+  const n: count,
+  const a: type,
+  xs: Array(n, a),
+  index: core.Index(n),
+  const f: fn(x: a) -> a
+) -> Array(n, a) {
+  let old = xs[index];
+  [...xs, [index]: f(old)]
+}
+
+fn Array.swap(
+  const n: count,
+  const a: type,
+  xs: Array(n, a),
+  left: core.Index(n),
+  right: core.Index(n)
+) -> Array(n, a) {
+  let a_left = xs[left];
+  let a_right = xs[right];
+  let xs: Array(n, a) = [...xs, [left]: a_right];
+  let xs: Array(n, a) = [...xs, [right]: a_left];
+  xs
+}
+
+fn Array.fold_indices(
+  const n: count,
+  const acc_type: type,
+  cursor: core.IndexCursor(n),
+  acc: acc_type,
+  const f: fn(acc: acc_type, i: core.Index(n)) -> acc_type
+) -> acc_type {
+  let acc_then = acc;
+  let acc_else = acc;
+  match core.IndexCursor.next(n, cursor) {
+    Yield(i, next) => Array.fold_indices(n, acc_type, next, f(acc_then, i), f),
+    Done => acc_else,
+  }
+}

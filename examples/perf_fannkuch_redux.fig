@@ -16,9 +16,10 @@ fn dec(x: u3) -> u3 {
 }
 
 fn max_i32(a: i32, b: i32) -> i32 {
-  match a < b {
-    true => b,
-    false => a,
+  if a < b {
+    b
+  } else {
+    a
   }
 }
 
@@ -34,24 +35,26 @@ fn reverse_prefix_loop(
   left: i32,
   right: i32
 ) -> Perm7 {
-  match left < right {
-    true => reverse_prefix_loop(
+  if left < right {
+    reverse_prefix_loop(
       swap(xs, left, right),
       left + 1,
       right - 1
-    ),
-    false => xs,
+    )
+  } else {
+    xs
   }
 }
 
 fn flip_count_loop(xs: Perm7, flips: i32) -> i32 {
   let first: u3 = xs[0];
-  match first != 0 {
-    true => flip_count_loop(
+  if first != 0 {
+    flip_count_loop(
       reverse_prefix_loop(xs, 0, first),
       flips + 1
-    ),
-    false => flips,
+    )
+  } else {
+    flips
   }
 }
 
@@ -62,19 +65,20 @@ fn score(state: State) -> State {
     count: state.count,
     r: state.r,
     index: state.index,
-    checksum: match state.index
+    checksum: if state.index
       % 2
       == 0 {
-      true => state.checksum + flips,
-      false => state.checksum - flips,
+      state.checksum + flips
+    } else {
+      state.checksum - flips
     },
     max_flips: max_i32(state.max_flips, flips),
   }
 }
 
 fn prepare(state: State) -> State {
-  match state.r != 1 {
-    true => prepare(State {
+  if state.r != 1 {
+    prepare(State {
       perm: state.perm,
       count: layout.InlineArray.set(
         7,
@@ -87,8 +91,9 @@ fn prepare(state: State) -> State {
       index: state.index,
       checksum: state.checksum,
       max_flips: state.max_flips,
-    }),
-    false => state,
+    })
+  } else {
+    state
   }
 }
 
@@ -98,82 +103,89 @@ fn rotate_left_loop(
   r: i32,
   first: u3
 ) -> Perm7 {
-  match i < r {
-    true => rotate_left_loop(
+  if i < r {
+    rotate_left_loop(
       layout.InlineArray.set(7, u3, xs, i, xs[i + 1]),
       i + 1,
       r,
       first
-    ),
-    false => layout.InlineArray.set(
-      7,
-      u3,
-      xs,
-      r,
-      first
-    ),
+    )
+  } else {
+    layout.InlineArray.set(7, u3, xs, r, first)
   }
 }
 
 fn rotate_left(xs: Perm7, r: i32) -> Perm7 {
-  xs[0] \first -> rotate_left_loop(xs, 0, r, first)
+  let first: u3 = xs[0];
+  rotate_left_loop(xs, 0, r, first)
 }
 
-fn advance(state: State, r: i32) -> State {
-  match r == 7 {
-    true => state,
-    false => state.count[r]
-      \old_count ->(rotate_left(state.perm, r)
-      \rotated ->(layout.InlineArray.update(
-      7,
-      u3,
-      state.count,
-      r,
-      dec
-    )
-      \count -> match old_count > 1 {
-      true => State {
+fn step_continue(state: State, r: i32) -> State {
+  let old_count = state.count[r];
+  let rotated = rotate_left(state.perm, r);
+  let count = layout.InlineArray.update(
+    7,
+    u3,
+    state.count,
+    r,
+    dec
+  );
+  if old_count > 1 {
+    State {
+      perm: rotated,
+      count: count,
+      r: r,
+      index: state.index + 1,
+      checksum: state.checksum,
+      max_flips: state.max_flips,
+    }
+  } else {
+    step_active(
+      State {
         perm: rotated,
         count: count,
-        r: r,
-        index: state.index + 1,
+        r: r + 1,
+        index: state.index,
         checksum: state.checksum,
         max_flips: state.max_flips,
       },
-      false => advance(
-        State {
-          perm: rotated,
-          count: count,
-          r: r + 1,
-          index: state.index,
-          checksum: state.checksum,
-          max_flips: state.max_flips,
-        },
-        r + 1
-      ),
-    })),
+      r + 1
+    )
   }
 }
 
+fn step_active(state: State, r: i32) -> State {
+  if r == 7 {
+    state
+  } else {
+    step_continue(state, r)
+  }
+}
+
+fn advance(state: State, r: i32) -> State {
+  step_active(state, r)
+}
+
 fn search(state: State) -> State {
-  prepare(state)
-    \prepared ->(score(prepared)
-    \scored ->(advance(scored, scored.r)
-    \next -> match next.r == 7 {
-    true => next,
-    false => search(next),
-  }))
+  let prepared = prepare(state);
+  let scored = score(prepared);
+  let next = advance(scored, scored.r);
+  if next.r == 7 {
+    next
+  } else {
+    search(next)
+  }
 }
 
 pub fn main(seed: i32) -> i32 {
-  State {
+  let initial = State {
     perm: <seed - seed, 1, 2, 3, 4, 5, 6>,
     count: <0, 0, 0, 0, 0, 0, 0>,
     r: 7,
     index: 0,
     checksum: 0,
     max_flips: 0,
-  }
-    \initial -> search(initial)
-    \result -> result.checksum * 100 + result.max_flips
+  };
+  let result = search(initial);
+  result.checksum * 100 + result.max_flips
 }

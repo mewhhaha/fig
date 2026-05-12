@@ -61,6 +61,7 @@ try {
       resolveModule: moduleResolver(file),
       memoryModel: parseMemoryModel(rest),
       optMode: parseOptMode(rest),
+      branchHints: parseBranchHints(rest),
     };
     console.log(await watFromSource(source, options));
   } else if (cmd === "build") {
@@ -70,6 +71,7 @@ try {
       resolveModule: moduleResolver(file),
       memoryModel: parseMemoryModel(rest),
       optMode: parseOptMode(rest),
+      branchHints: parseBranchHints(rest),
     };
     const outFlag = rest.indexOf("--out");
     const manifestFlag = rest.indexOf("--shader-manifest");
@@ -91,6 +93,7 @@ try {
       resolveModule: moduleResolver(file),
       memoryModel: parseMemoryModel(rest),
       optMode: parseOptMode(rest),
+      branchHints: parseBranchHints(rest),
     };
     const wasm = await wasmFromSource(source, options);
     const module = new WebAssembly.Module(wasm);
@@ -114,7 +117,7 @@ try {
 
 function usage(): never {
   console.error(
-    "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--release] [--out module.wasm] [--shader-manifest manifest.json]",
+    "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--release] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]",
   );
   Deno.exit(2);
 }
@@ -133,6 +136,13 @@ function parseOptMode(args: string[]): OptMode {
   }
   if (args.some((arg) => arg.startsWith("--release="))) usage();
   return args.includes("--release") ? "release" : "debug";
+}
+
+function parseBranchHints(args: string[]): boolean | undefined {
+  if (args.includes("--branch-hints") && args.includes("--no-branch-hints")) usage();
+  if (args.includes("--branch-hints")) return true;
+  if (args.includes("--no-branch-hints")) return false;
+  return undefined;
 }
 
 function moduleResolver(entryFile: string) {

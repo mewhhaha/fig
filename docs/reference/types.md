@@ -18,6 +18,9 @@ type
 Primitive scalar types currently include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`,
 and unsigned widths `u1` through `u64`.
 
+Use `@type_is_number(t)` in compile-time contracts to test whether `t` is one of the numeric scalar
+types, including arbitrary unsigned widths such as `u3` or `u17`.
+
 Function types are `fn(params) -> Type`. Effect rows are part of function declarations and typed
 capabilities, written as `!{effect, other}` or `!{}`.
 

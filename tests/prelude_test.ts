@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import { checkSource, CompileError, wasmFromSource, watFromSource } from "../src/mod.ts";
 
 const prelude = (name: string) => Deno.readTextFile(`prelude/${name}.fig`);
@@ -256,6 +256,81 @@ Deno.test("inline_array direct helper lowering preserves flattened product eleme
   assertEquals((instance.exports.main as CallableFunction)(), 72);
 });
 
+Deno.test("fixed prelude exposes canonical spread update and builder fallback", async () => {
+  const source = `
+    const fixed = @import("prelude.fixed");
+    const build = @import("prelude.fixed_build");
+
+    fn inc(x: u3) -> u3 { x + 1 }
+    fn helper_set(xs: fixed.Array(4, u3), index: i32, value: u3) -> fixed.Array(4, u3) {
+      fixed.Array.set(4, u3, xs, index, value)
+    }
+    fn user_set(xs: fixed.Array(4, u3), index: i32, value: u3) -> fixed.Array(4, u3) {
+      [...xs, [index]: value]
+    }
+    fn helper_update(xs: fixed.Array(4, u3), index: i32) -> fixed.Array(4, u3) {
+      fixed.Array.update(4, u3, xs, index, inc)
+    }
+
+    pub fn main(index: i32) -> i32 {
+      let b0 = build.ArrayBuilder.start(4, u3);
+      let b1 = build.ArrayBuilder.push(4, u3, b0, 0, 1);
+      let b2 = build.ArrayBuilder.push(4, u3, b1, 1, 2);
+      let b3 = build.ArrayBuilder.push(4, u3, b2, 2, 3);
+      let b4 = build.ArrayBuilder.push(4, u3, b3, 3, 4);
+      let xs: fixed.Array(4, u3) = build.ArrayBuilder.finish(4, u3, b4);
+      let helper = helper_set(xs, index, 7);
+      let user = user_set(xs, index, 7);
+      let updated = helper_update(xs, index);
+      helper[index] + user[index] + updated[index]
+    }
+  `;
+
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  assert(!wat.includes("fig_buffers"));
+  assert(!wat.includes("call $fixed_Array_set"));
+  assert(!wat.includes("call $fixed_Array_update"));
+  assert(!wat.includes("call $inline_array_builder"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(2), 18);
+});
+
+Deno.test("range prelude fold matches user self-tail-recursive loop shape", async () => {
+  const source = `
+    const range = @import("prelude.range");
+
+    fn add(acc: i32, x: i32) -> i32 { acc + x }
+    fn user_fold_loop(i: i32, end: i32, acc: i32) -> i32 {
+      match i < end {
+        true => user_fold_loop(i + 1, end, acc + i),
+        false => acc,
+      }
+    }
+
+    pub fn main() -> i32 {
+      let prelude_sum = range.RangeIter.fold(range.RangeI32.Iter(0 .. 10), 0, add);
+      let user_sum = user_fold_loop(0, 10, 0);
+      prelude_sum * 100 + user_sum
+    }
+  `;
+
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const preludeFold = wat.match(/\(func \$range_RangeIter_fold_loop__add[\s\S]*?\n  \)/)?.[0] ?? "";
+  const userFold = wat.match(/\(func \$user_fold_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(wat, "loop");
+  assertStringIncludes(preludeFold, "loop");
+  assert(!userFold.includes("call $user_fold_loop"));
+  assert(!preludeFold.includes("call $range_RangeIter_fold_loop__add"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 4545);
+});
+
 Deno.test("prelude std exposes common operators for custom types", async () => {
   const checked = await checkSource(
     `
@@ -428,26 +503,25 @@ Deno.test("prelude std keeps heap collection APIs out of the pure surface", asyn
   }
 });
 
-Deno.test("prelude option helpers construct map bind and unwrap", async () => {
+Deno.test("prelude option concept methods construct map bind append and unwrap", async () => {
   await checkSource(
     `
     const option = @import("prelude.option");
 
-    fn inc(x: i32) -> i32 { x + 1 }
-    fn next(x: i32) -> Option.core.Option(i32) { Option.some(x + 1) }
-    fn fallback() -> Option.core.Option(i32) { Option.some(9) }
+    fn fallback() -> option.core.Option(i32) { option.some(9) }
 
     pub fn main() -> i32 {
-      let mapped = Option.option_map(Option.some(1), inc);
-      let bound = Option.option_and_then(mapped, next);
-      Option.option_unwrap_or(bound, 0) + Option.option_unwrap_or(Option.option_or_else(Option.none(), fallback), 0)
+      let mapped = option.core.Option.map(\\x -> x + 1, option.some(1));
+      let bound = option.core.Option.bind(mapped, \\x -> option.some(x + 1));
+      let picked = option.core.Option.append(option.none(), bound);
+      option.core.Option.unwrap_or(picked, 0) + option.core.Option.unwrap_or(option.core.Option.or_else(option.none(), fallback), 0)
     }
     `,
     { resolveModule },
   );
 });
 
-Deno.test("prelude result helpers construct map bind and unwrap", async () => {
+Deno.test("prelude result methods construct map bind and unwrap", async () => {
   await checkSource(
     `
     const result = @import("prelude.result");
@@ -457,16 +531,16 @@ Deno.test("prelude result helpers construct map bind and unwrap", async () => {
     fn next(x: i32) -> result.core.Result(i32, i32) { result.ok(x + 1) }
 
     pub fn main() -> i32 {
-      let mapped = result.result_map(result.ok(1), inc);
-      let mapped_err = result.result_map_err(mapped, err_inc);
-      result.result_unwrap_or(result.result_and_then(mapped_err, next), 0)
+      let mapped = result.core.Result.map(inc, result.ok(1));
+      let mapped_err = result.core.Result.map_err(err_inc, mapped);
+      result.core.Result.unwrap_or(result.core.Result.bind(mapped_err, next), 0)
     }
     `,
     { resolveModule },
   );
 });
 
-Deno.test("prelude tuple helpers extract swap and map", async () => {
+Deno.test("prelude tuple methods extract swap and map", async () => {
   await checkSource(
     `
     const tuple = @import("prelude.tuple");
@@ -474,32 +548,84 @@ Deno.test("prelude tuple helpers extract swap and map", async () => {
     fn inc(x: i32) -> i32 { x + 1 }
 
     pub fn main() -> i32 {
-      let swapped = tuple.pair_swap(Pair {first: 1, second: 2});
-      let mapped = tuple.pair_map(Pair {first: 3, second: 4}, inc, inc);
+      let swapped = tuple.core.Pair.swap(Pair {first: 1, second: 2});
+      let mapped = tuple.core.Pair.bimap(inc, inc, Pair {first: 3, second: 4});
       let triple: tuple.core.Tuple3(i32, i32, i32) = Tuple3 {first: 5, second: 6, third: 7};
-      swapped.first + tuple.pair_first(mapped) + tuple.tuple3_third(triple)
+      swapped.first + tuple.core.Pair.first(mapped) + tuple.core.Tuple3.third(triple)
     }
     `,
     { resolveModule },
   );
 });
 
-Deno.test("prelude bool order num and function helpers check", async () => {
+Deno.test("prelude scalar and function helpers check", async () => {
   await checkSource(
     `
-    const bools = @import("prelude.bool");
     const fun = @import("prelude.function");
-    const num = @import("prelude.num");
-    const order = @import("prelude.order");
+    const scalar = @import("prelude.scalar");
 
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(a: i32, b: i32) -> i32 { a + b }
 
     pub fn main() -> i32 {
-      let clamped = order.clamp_i32(num.abs_i32(0 - 3), 0, 2);
-      bools.select(order.between_i32(clamped, 1, 3), fun.pipe(clamped, inc), 0) + fun.flip(add, 4, 5)
+      let clamped = scalar.clamp(i32, scalar.Number(i32), scalar.abs(i32, scalar.Number(i32), 0 - 3), 0, 2);
+      scalar.select(scalar.between(i32, scalar.Number(i32), clamped, 1, 3), fun.pipe(clamped, inc), 0) + fun.flip(add, 4, 5)
     }
     `,
+    { resolveModule },
+  );
+});
+
+Deno.test("prelude scalar exposes generic numeric helpers", async () => {
+  const source = `
+    const scalar = @import("prelude.scalar");
+
+    fn require_number(const t: type, const _proof: scalar.Number(t)) -> i32 { 0 }
+
+    pub fn main(x: i32, y: u3) -> i32 {
+      let signed = scalar.signum(i32, scalar.Number(i32), x) +
+        scalar.abs(i32, scalar.Number(i32), x);
+      let bounded = scalar.clamp(i32, scalar.Number(i32), signed, 0, 9);
+      let unsigned = scalar.signum(u3, scalar.Number(u3), y) +
+        scalar.square(u3, scalar.Number(u3), y);
+      let proof = require_number(u17, scalar.Number(u17));
+      let in_range = scalar.between(i32, scalar.Number(i32), bounded, 0, 9);
+      scalar.select(in_range, bounded + unsigned + proof, 0)
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(0 - 3, 2), 7);
+  assertEquals((instance.exports.main as CallableFunction)(4, 0), 5);
+});
+
+Deno.test("type_is_number covers primitive and arbitrary-width numeric types", async () => {
+  await checkSource(
+    `
+    const scalar = @import("prelude.scalar");
+
+    type fn ExpectNumber(t: type) -> type {
+      @require(@type_is_number(t), "number");
+      t
+    }
+
+    type fn ExpectNotNumber(t: type) -> type {
+      @require(@type_is_number(t) == false, "not number");
+      t
+    }
+
+    fn ok_i32(const _proof: ExpectNumber(i32)) -> i32 { 0 }
+    fn ok_u3(const _proof: ExpectNumber(u3)) -> i32 { 0 }
+    fn ok_f64(const _proof: ExpectNumber(f64)) -> i32 { 0 }
+    fn ok_bool(const _proof: ExpectNotNumber(bool)) -> i32 { 0 }
+
+    pub fn main() -> i32 {
+      ok_i32(ExpectNumber(i32)) + ok_u3(ExpectNumber(u3)) +
+        ok_f64(ExpectNumber(f64)) + ok_bool(ExpectNotNumber(bool))
+    }
+  `,
     { resolveModule },
   );
 });
@@ -683,6 +809,37 @@ Deno.test("prelude std helpers support user functor applicative and monad types"
 
     pub fn main() -> i32 {
       bind(fmap(Box {value: 1}, inc, Functor(Box)), wrap, Monad(Box)).value
+    }
+    `,
+    { resolveModule },
+  );
+});
+
+Deno.test("prelude std exposes option as functor applicative monad and semigroup", async () => {
+  await checkSource(
+    `
+    const merge = @import("prelude.std");
+
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn inc_to_option(x: i32) -> Option(i32) { some(x + 10) }
+
+    fn proof(
+      const _functor: Functor(Option),
+      const _applicative: Applicative(Option),
+      const _monad: Monad(Option),
+      const _semigroup: Semigroup(Option(i32)),
+      const _monoid: Monoid(Option(i32))
+    ) -> i32 {
+      0
+    }
+
+    pub fn main() -> i32 {
+      let mapped = fmap(some(1), inc, Functor(Option));
+      let applied = apply(some(inc), mapped, Applicative(Option));
+      let bound = bind(applied, inc_to_option, Monad(Option));
+      let picked = append(Option(i32), Semigroup(Option(i32)), none(), bound);
+      proof(Functor(Option), Applicative(Option), Monad(Option), Semigroup(Option(i32)), Monoid(Option(i32))) +
+        Option.unwrap_or(picked, 0)
     }
     `,
     { resolveModule },

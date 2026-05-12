@@ -1,7 +1,8 @@
 # Fig Expressions
 
 Expressions include literals, variables, calls, field access, indexing, constructors, shape values,
-tuple values, collection literals, matches, binary operators, ranges, blocks, pipe-bind, and `$`.
+tuple values, collection literals, matches, `if` sugar, binary operators, ranges, blocks, pipe-bind,
+and `$`.
 
 ```fig
 add(1, 2)
@@ -12,13 +13,14 @@ Point {x: 1, y: 2}
 [1, [0; 3]]
 <1, 2, 3>
 match value { Some(x) => x, None => 0 }
+if ready { 1 } else { 0 }
 1 .. 4
 ```
 
 ## Match
 
-Use `match` instead of `if`. Arms are ordered. Function clauses are also ordered and can be used for
-literal and wildcard dispatch.
+Use `match` for variants, literals, and other ordered pattern dispatch. Function clauses are also
+ordered and can be used for literal and wildcard dispatch.
 
 ```fig
 fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
@@ -26,7 +28,52 @@ fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
 }
 ```
 
-## Pipe-Bind and Placeholder
+Boolean `if` is pure expression sugar:
+
+```fig
+if cond {
+  a
+} else {
+  b
+}
+```
+
+It desugars to:
+
+```fig
+match cond {
+  true => a,
+  false => b,
+}
+```
+
+For boolean algorithm branches, keep each arm expression-oriented and prefer block `let` bindings
+over deeply nested pipe-bind chains when several intermediate values feed the branch result:
+
+```fig
+let old_count = state.count[r];
+let rotated = rotate_left(state.perm, r);
+let count = fixed.Array.update(7, u3, state.count, r, dec);
+
+match old_count > 1 {
+  true => State {...state, perm: rotated, count, r},
+  false => advance(State {...state, perm: rotated, count, r: r + 1}, r + 1),
+}
+```
+
+## Const Functions and Pipe-Bind
+
+Const-function literals provide inline templates where an expected `const fn` parameter supplies the
+parameter and return types:
+
+```fig
+Option.map(\x -> x + 1, some(1))
+RangeIter.fold(xs, 0, \(acc, x) -> acc + x)
+Option.map(\x -> { let y = x + 1; y }, some(1))
+```
+
+They are compile-time templates, not runtime closure values. They are valid only in expected
+`const fn` argument positions and cannot capture runtime locals.
 
 Pipe-bind evaluates the left side, binds it, and evaluates the next atom:
 
@@ -35,13 +82,9 @@ Pipe-bind evaluates the left side, binds it, and evaluates the next atom:
 1 \$ -> add($, 2)
 ```
 
-`$` is also accepted as placeholder syntax in const function helper contexts:
-
-```fig
-map4_i32($ + 1, xs)
-```
-
-The placeholder creates a unary helper where the checker can infer an expected unary const function.
+The placeholder pipe-bind form is retained for compatibility, but named pipe-bind variables are the
+preferred form. Pipe-bind is intended for short one-step value flow. For state machines or
+update-heavy code, block `let` shadowing usually makes the same lowering shape easier to inspect.
 
 ## Shadowing and Destructuring
 
@@ -82,6 +125,15 @@ Slots may be labeled, positioned, punned from a visible local name, or spread fr
 Point {x, y, ...base}
 ```
 
+Spread is the canonical update form for product values:
+
+```fig
+Player {
+  ...player,
+  hp: player.hp - 1,
+}
+```
+
 Static slots generate fields from a compile-time shape:
 
 ```fig
@@ -107,6 +159,16 @@ Fixed-array updates also use brackets. They copy one fixed source and apply inde
 ```fig
 let xs: [i32; 3] = [1, 2, 3];
 let ys: [i32; 3] = [...xs, [1]: 32];
+```
+
+Repeated `let` shadowing plus fixed-array spread is the canonical source form for edit chains:
+
+```fig
+let a = xs[left];
+let b = xs[right];
+let xs = [...xs, [left]: b];
+let xs = [...xs, [right]: a];
+xs
 ```
 
 Angle-bracket collection literals are target-typed and lower through collector members on the

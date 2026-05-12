@@ -31,19 +31,19 @@ const std=@import("prelude.std");
 const clock:fn()->i32!{time}=@capability("clock");
 pub fn main()->i32!{time}{clock()}`,
     expected:
-      "/// import docs\nconst std = @import(\"prelude.std\");\n/// capability docs\nconst clock: fn() -> i32 !{time} = @capability(\"clock\");\n\npub fn main() -> i32 !{time} {\n  clock()\n}\n",
+      '/// import docs\nconst std = @import("prelude.std");\n/// capability docs\nconst clock: fn() -> i32 !{time} = @capability("clock");\n\npub fn main() -> i32 !{time} {\n  clock()\n}\n',
   },
   {
     name: "destructured source imports",
     input: `const{map4_i32,lane4_add_i32}=@import("prelude.array_static");`,
-    expected: "const { map4_i32, lane4_add_i32 } = @import(\"prelude.array_static\");\n",
+    expected: 'const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");\n',
   },
   {
     name: "const group before type function",
     input:
       `const std=@import("prelude.std");const limit=4;type fn Sized(a:type)->struct{let Row={value:a};struct(Row)}`,
     expected:
-      "const std = @import(\"prelude.std\");\nconst limit = 4;\n\ntype fn Sized(a: type) -> struct {\n  let Row = {value: a};\n  struct(Row)\n}\n",
+      'const std = @import("prelude.std");\nconst limit = 4;\n\ntype fn Sized(a: type) -> struct {\n  let Row = {value: a};\n  struct(Row)\n}\n',
   },
   {
     name: "empty and multi item effect rows",
@@ -61,6 +61,18 @@ pub fn main()->i32!{time}{clock()}`,
     input: "fn main()->i32{let point={x:1,y:2};match Point.x{1=>2,// arm\n_=>3}\\value->value}",
     expected:
       "fn main() -> i32 {\n  let point = {x: 1, y: 2};\n  match Point.x {\n    1 => 2, // arm\n    _ => 3\n  } \\value -> value\n}\n",
+  },
+  {
+    name: "branch hints on functions and match arms",
+    input: "pub @unlikely fn score(x:i32)->i32{match x{@likely 0=>1,@unlikely _=>2}}",
+    expected:
+      "pub @unlikely fn score(x: i32) -> i32 {\n  match x {\n    @likely 0 => 1,\n    @unlikely _ => 2\n  }\n}\n",
+  },
+  {
+    name: "formatter boolean if expression",
+    input: "fn main(x:i32)->i32{if x<3{let y=x+1;y}else{x-1}}",
+    expected:
+      "fn main(x: i32) -> i32 {\n  if x < 3 {\n    let y = x + 1;\n    y\n  } else {\n    x - 1\n  }\n}\n",
   },
   {
     name: "operators fields indexing and literal tags",
@@ -106,7 +118,7 @@ pub fn main()->i32!{time}{clock()}`,
     input:
       'type fn Shaped()->type{let Base={x:i32,y:bool,z:i32};let Picked=@shape_pick(Base,{x:true,y:true});let Out=@shape_concat(Picked,{count:@shape_count(Picked)});@require(@shape_has_slot(Out,#count),"count");struct(Out)}',
     expected:
-      "type fn Shaped() -> type {\n  let Base = {x: i32, y: bool, z: i32};\n  let Picked = @shape_pick(Base, {x: true, y: true});\n  let Out = @shape_concat(\n    Picked,\n    {count: @shape_count(Picked)}\n  );\n  @require(@shape_has_slot(Out, #count), \"count\");\n  struct(Out)\n}\n",
+      'type fn Shaped() -> type {\n  let Base = {x: i32, y: bool, z: i32};\n  let Picked = @shape_pick(Base, {x: true, y: true});\n  let Out = @shape_concat(\n    Picked,\n    {count: @shape_count(Picked)}\n  );\n  @require(@shape_has_slot(Out, #count), "count");\n  struct(Out)\n}\n',
   },
   {
     name: "shape index call and constructor ambiguity",
@@ -153,7 +165,7 @@ fn classify(x:i32)->i32{match x{
 _=>2 // fallback
 }}`,
     expected:
-      "/// import docs\nconst std = @import(\"prelude.std\"); // import tail\n/// type docs\ntype fn Row(a: type) -> struct {\n  // slot docs\n  let Row = {\n    x: a, // x tail\n  };\n  struct(Row) // final expr tail\n}\n\nfn make() -> World {\n  World {\n    defaults: @field(default_components, #key) // tail\n  }\n}\n\nfn classify(x: i32) -> i32 {\n  match x {\n    0 => 1, // zero\n    _ => 2 // fallback\n  }\n}\n",
+      '/// import docs\nconst std = @import("prelude.std"); // import tail\n/// type docs\ntype fn Row(a: type) -> struct {\n  // slot docs\n  let Row = {\n    x: a, // x tail\n  };\n  struct(Row) // final expr tail\n}\n\nfn make() -> World {\n  World {\n    defaults: @field(default_components, #key) // tail\n  }\n}\n\nfn classify(x: i32) -> i32 {\n  match x {\n    0 => 1, // zero\n    _ => 2 // fallback\n  }\n}\n',
   },
   {
     name: "function clauses and custom operators",
@@ -185,7 +197,7 @@ _=>2 // fallback
     input:
       'const canvas=@import("web.canvas");const shader:string=```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;pub fn main()->i32!{gpu}{canvas.gpu_create_shader(canvas.shader_id(shader))}',
     expected:
-      "const canvas = @import(\"web.canvas\");\nconst shader: string = ```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;\n\npub fn main() -> i32 !{gpu} {\n  canvas.gpu_create_shader(canvas.shader_id(shader))\n}\n",
+      'const canvas = @import("web.canvas");\nconst shader: string = ```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;\n\npub fn main() -> i32 !{gpu} {\n  canvas.gpu_create_shader(canvas.shader_id(shader))\n}\n',
   },
   {
     name: "destructuring and local proof consts",
@@ -196,10 +208,16 @@ _=>2 // fallback
   },
   {
     name: "pipe placeholder and fluent chains",
-    input:
-      "fn main()->i32{InlineArray.Iter([1,2,3,4])\\$->$.map(double).filter(keep).fold(0,add)}",
+    input: "fn main()->i32{InlineArray.Iter([1,2,3,4])\\$->$.map(double).filter(keep).fold(0,add)}",
     expected:
       "fn main() -> i32 {\n  InlineArray.Iter([1, 2, 3, 4])\n    \\$ -> $.map(double)\n    .filter(keep)\n    .fold(0, add)\n}\n",
+  },
+  {
+    name: "const function literals",
+    input:
+      "fn main()->i32{let mapped=Option.map(\\x->x+1,some(1));RangeIter.fold(mapped,0,\\(acc,x)->{let next=acc+x;next})}",
+    expected:
+      "fn main() -> i32 {\n  let mapped = Option.map(\\x -> x + 1, some(1));\n  RangeIter.fold(\n    mapped,\n    0,\n    \\(acc, x) -> {\n      let next = acc + x;\n      next\n    }\n  )\n}\n",
   },
   {
     name: "wrapped fluent call chains verticalize every call",
@@ -234,7 +252,7 @@ _=>2 // fallback
     input:
       'type fn OpAdd(t:type)->operator{operator(#infixl,60,"+",t.add)} type fn OpBind(t:type)->operator{operator(#infixl,10,">>=",t.bind)}',
     expected:
-      "type fn OpAdd(t: type) -> operator {\n  operator(#infixl, 60, \"+\", t.add)\n}\n\ntype fn OpBind(t: type) -> operator {\n  operator(#infixl, 10, \">>=\", t.bind)\n}\n",
+      'type fn OpAdd(t: type) -> operator {\n  operator(#infixl, 60, "+", t.add)\n}\n\ntype fn OpBind(t: type) -> operator {\n  operator(#infixl, 10, ">>=", t.bind)\n}\n',
   },
   {
     name: "type reflection helper surface",
@@ -346,7 +364,9 @@ Deno.test("formatter preserves vertically written records", () => {
 
 Deno.test("formatter breaks records when nested groups wrap", () => {
   assertEquals(
-    formatSource("fn make()->World{World { component_next:{next:0},defaults:@field(defaults,#key)}}"),
+    formatSource(
+      "fn make()->World{World { component_next:{next:0},defaults:@field(defaults,#key)}}",
+    ),
     "fn make() -> World {\n  World {\n    component_next: {next: 0},\n    defaults: @field(defaults, #key)\n  }\n}\n",
   );
 });

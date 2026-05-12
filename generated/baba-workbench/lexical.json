@@ -3,12 +3,15 @@
     "_",
     "capability",
     "const",
+    "else",
     "false",
     "fn",
     "for",
+    "if",
     "import",
     "in",
     "let",
+    "likely",
     "match",
     "operator",
     "pub",
@@ -16,6 +19,7 @@
     "true",
     "type",
     "union",
+    "unlikely",
     "zip"
   ],
   "symbols": [

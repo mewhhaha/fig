@@ -25,6 +25,40 @@ function hasCustomSection(bytes: Uint8Array, name: string): boolean {
   return false;
 }
 
+function customSection(bytes: Uint8Array<ArrayBuffer>, name: string): Uint8Array | undefined {
+  const module = new WebAssembly.Module(bytes);
+  const section = WebAssembly.Module.customSections(module, name)[0];
+  return section ? new Uint8Array(section) : undefined;
+}
+
+function decodeBranchHints(
+  bytes: Uint8Array<ArrayBuffer>,
+): { functionIndex: number; hints: { offset: number; hint: number }[] }[] {
+  const section = customSection(bytes, "metadata.code.branch_hint");
+  if (!section) return [];
+  let offset = 0;
+  const functions = readUleb(section, offset);
+  offset = functions.offset;
+  const result = [];
+  for (let fn = 0; fn < functions.value; fn++) {
+    const functionIndex = readUleb(section, offset);
+    offset = functionIndex.offset;
+    const hints = readUleb(section, offset);
+    offset = hints.offset;
+    const entries = [];
+    for (let index = 0; index < hints.value; index++) {
+      const hintOffset = readUleb(section, offset);
+      const reserved = readUleb(section, hintOffset.offset);
+      const hint = readUleb(section, reserved.offset);
+      assertEquals(reserved.value, 1);
+      offset = hint.offset;
+      entries.push({ offset: hintOffset.value, hint: hint.value });
+    }
+    result.push({ functionIndex: functionIndex.value, hints: entries });
+  }
+  return result;
+}
+
 function readName(bytes: Uint8Array, offset: number): { value: string; offset: number } {
   const size = readUleb(bytes, offset);
   const start = size.offset;
@@ -80,6 +114,64 @@ Deno.test("debug is the default opt mode and emits wasm name section", async () 
   assert(!releaseWat.includes("(func $add1"));
   assert(!releaseWat.includes("call $add1"));
   assert(!hasCustomSection(await wasmFromSource(source, { optMode: "release" }), "name"));
+});
+
+Deno.test("branch hints emit release custom section and WAT annotations", async () => {
+  const source = `
+    pub fn main(x: i32) -> i32 {
+      match x {
+        @likely 0 => 1,
+        _ => 2,
+      }
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, `if (@metadata.code.branch_hint "\\01")`);
+
+  const release = await wasmFromSource(source, { optMode: "release" });
+  const hints = decodeBranchHints(release);
+  assertEquals(hints.length, 1);
+  assertEquals(hints[0]?.functionIndex, 0);
+  assertEquals(hints[0]?.hints.map((hint) => hint.hint), [1]);
+  assertEquals(
+    hints[0]?.hints.map((hint) => hint.offset),
+    hints[0]?.hints.map((hint) => hint.offset).toSorted((left, right) => left - right),
+  );
+
+  assert(!hasCustomSection(await wasmFromSource(source), "metadata.code.branch_hint"));
+  assert(
+    hasCustomSection(
+      await wasmFromSource(source, { branchHints: true }),
+      "metadata.code.branch_hint",
+    ),
+  );
+  assert(
+    !hasCustomSection(
+      await wasmFromSource(source, { optMode: "release", branchHints: false }),
+      "metadata.code.branch_hint",
+    ),
+  );
+});
+
+Deno.test("function clause branch hints lower to dispatcher branch metadata", async () => {
+  const clauses = `
+    @likely fn score(true: bool) -> i32 { 1 }
+    fn score(false: bool) -> i32 { 0 }
+    pub fn main(x: bool) -> i32 { score(x) }
+  `;
+  const handwritten = `
+    fn score(x: bool) -> i32 {
+      match x {
+        @likely true => 1,
+        _ => 0,
+      }
+    }
+    pub fn main(x: bool) -> i32 { score(x) }
+  `;
+  const clauseHints = decodeBranchHints(await wasmFromSource(clauses, { optMode: "release" }));
+  const matchHints = decodeBranchHints(await wasmFromSource(handwritten, { optMode: "release" }));
+  assertEquals(clauseHints.flatMap((fn) => fn.hints.map((hint) => hint.hint)), [1]);
+  assertEquals(matchHints.flatMap((fn) => fn.hints.map((hint) => hint.hint)), [1]);
 });
 
 Deno.test("backend folds scalar literal arithmetic", async () => {
@@ -596,6 +688,42 @@ Deno.test("packed fixed-array swap stays loop-lowered without helpers", async ()
   assertEquals((instance.exports.main as CallableFunction)(), 4321);
 });
 
+Deno.test("user let-shadowed fixed-array edit chain lowers like helper swap", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Perm4() -> type { layout.InlineArray(4, u3) }
+    fn user_swap(xs: Perm4, left: i32, right: i32) -> Perm4 {
+      let a = xs[left];
+      let b = xs[right];
+      let xs: Perm4 = [...xs, [left]: b];
+      let xs: Perm4 = [...xs, [right]: a];
+      xs
+    }
+    fn reverse_loop(xs: Perm4, left: i32, right: i32) -> Perm4 {
+      match left < right {
+        true => reverse_loop(user_swap(xs, left, right), left + 1, right - 1),
+        false => xs,
+      }
+    }
+    pub fn main() -> i32 {
+      let ys = reverse_loop(<1, 2, 3, 4>, 0, 3);
+      ys[0] * 1000 + ys[1] * 100 + ys[2] * 10 + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const reverse = wat.match(/\(func \$reverse_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(reverse, "loop");
+  assertStringIncludes(reverse, "fixed_array_packed");
+  assert(!reverse.includes("select"));
+  assert(!reverse.includes("call $user_swap"));
+  assert(!wat.includes("fig_buffers"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 4321);
+});
+
 Deno.test("tail-recursive scalar inline-array set mutates dead slots in loop", async () => {
   const source = `
     const layout = @import("prelude.layout");
@@ -1015,6 +1143,26 @@ Deno.test("direct self-tail body lowers to a loop by default", async () => {
   assertStringIncludes(again, "loop");
   assert(!again.includes("call $again"));
   assert(!again.includes("return_call $again"));
+});
+
+Deno.test("if sugar preserves self-tail loop lowering", async () => {
+  const source = `
+    fn sum(n: i32, acc: i32) -> i32 {
+      if n == 0 {
+        acc
+      } else {
+        sum(n - 1, acc + n)
+      }
+    }
+    pub fn main() -> i32 { sum(5, 0) }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const sum = wat.match(/\(func \$sum[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(sum, "loop");
+  assert(!sum.includes("call $sum"));
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 15);
 });
 
 Deno.test("tail-recursive match arms can emit return_call when requested", async () => {

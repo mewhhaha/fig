@@ -1,5 +1,6 @@
 import type {
   BlockExpr,
+  BranchHint,
   ConstDecl,
   Expr,
   FnDecl,
@@ -26,6 +27,7 @@ interface BackendModule {
   functions: BackendFunction[];
   memories: BackendMemory[];
   data: BackendData[];
+  branchHints: boolean;
 }
 
 interface BackendMemory {
@@ -77,11 +79,19 @@ type Instr =
   | { op: "memory.copy"; memory?: string }
   | { op: "drop" }
   | { op: "unreachable" }
-  | { op: "if"; results: ValueType[]; thenBody: Instr[]; elseBody: Instr[] }
+  | {
+    op: "if";
+    results: ValueType[];
+    thenBody: Instr[];
+    elseBody: Instr[];
+    branchHint?: BranchHint;
+  }
   | { op: "block"; body: Instr[]; results?: ValueType[] }
   | { op: "loop"; body: Instr[]; results?: ValueType[] }
   | { op: "br"; depth: number }
-  | { op: "br_if"; depth: number };
+  | { op: "br_if"; depth: number; branchHint?: BranchHint };
+
+type MatchArm = Extract<Expr, { kind: "match" }>["arms"][number];
 
 type SimdOp =
   | "i8x16.shuffle"
@@ -149,6 +159,7 @@ export interface BackendOptions {
   tailCallMode?: TailCallMode;
   memoryModel?: MemoryModel;
   optMode?: OptMode;
+  branchHints?: boolean;
 }
 
 const EXPLICIT_MEMORY: BackendMemory = {
@@ -258,6 +269,7 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
       needsScratchMemory,
     ),
     data: [],
+    branchHints: options.branchHints ?? optMode === "release",
   };
 }
 
@@ -1009,6 +1021,8 @@ function ensureLoweringLocals(expr: Expr, ctx: LowerContext, locals: Set<string>
 
 function substituteExpr(expr: Expr, substitutions: Map<string, Expr>): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: substituteExpr(expr.body, substitutions) };
     case "var":
       return substitutions.get(expr.name) ?? expr;
     case "call":
@@ -1392,6 +1406,7 @@ function lowerTailOpcodeMatch(
       results: flattenType(fn.returnType, ctx.layouts).map((slot) => slot.wat),
       thenBody: lowerTailOpcodeExpr(arm.value, fn, ctx, locals),
       elseBody: lowerTailOpcodeMatch({ ...expr, arms: rest }, fn, ctx, locals),
+      branchHint: branchHintForTestedArm(arm, rest),
     },
   ];
 }
@@ -1485,7 +1500,8 @@ function lowerTransientFixedArrayTailCall(
   const firstArg = runtimeArgs[0];
   if (!firstParam || !firstArg) return undefined;
   if (runtimeArgs.slice(1).some((arg) => exprMentionsName(arg, firstParam.name))) return undefined;
-  const update = fixedArrayUpdateCall(firstArg, ctx);
+  const update = fixedArrayUpdateCall(firstArg, ctx) ??
+    fixedArrayUpdateExpr(firstArg, firstParam.type, ctx);
   if (update && update.source.name === firstParam.name) {
     if (inlineArrayLikeTypeArgs(firstParam.type, ctx.layouts)?.[0] !== update.capacity) {
       return undefined;
@@ -1566,6 +1582,7 @@ function lowerTailLoopMatch(
         continueDepth + 1,
         exitDepth + 1,
       ),
+      branchHint: branchHintForTestedArm(arm, rest),
     },
   ];
 }
@@ -1641,6 +1658,7 @@ function lowerTailStepMatch(
         ...lowerTailLoopExpr(yieldArm.value, fn, ctx, scoped, continueDepth + 1, exitDepth + 1),
       ],
       elseBody: lowerTailLoopExpr(doneArm.value, fn, ctx, locals, continueDepth + 1, exitDepth + 1),
+      branchHint: branchHintForStepArms(yieldArm, doneArm),
     },
   ];
 }
@@ -1668,6 +1686,8 @@ function lowerExpr(
       return lowerLiteral(expr, expectedType);
     case "var":
       return lowerVar(expr.name, ctx, locals, expectedType);
+    case "const_fn":
+      throw new Error("backend cannot lower const fn literal");
     case "placeholder":
       throw new Error("backend cannot lower unresolved $ placeholder");
     case "call": {
@@ -2192,6 +2212,8 @@ function renameStatement(stmt: Statement, renames: Map<string, string>): Stateme
 
 function renameExpr(expr: Expr, renames: Map<string, string>): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: renameExpr(expr.body, renames) };
     case "var":
       return renameVarExpr(expr, renames);
     case "call":
@@ -2813,6 +2835,12 @@ interface FixedArraySwapCall {
   valueType: ValueType;
 }
 
+interface FixedArraySpreadUpdateShape {
+  source: Extract<Expr, { kind: "var" }>;
+  index: Expr;
+  value: Expr;
+}
+
 function fixedArrayUpdateCall(expr: Expr, ctx: LowerContext): FixedArrayUpdateCall | undefined {
   if (expr.kind !== "call" || expr.callee.kind !== "var") return undefined;
   const fn = ctx.functions.get(expr.callee.name);
@@ -2856,10 +2884,32 @@ function fixedArrayUpdateCall(expr: Expr, ctx: LowerContext): FixedArrayUpdateCa
   };
 }
 
+function fixedArrayUpdateExpr(
+  expr: Expr,
+  expectedType: string | undefined,
+  ctx: LowerContext,
+): FixedArrayUpdateCall | undefined {
+  const update = fixedArraySpreadUpdateShape(expr);
+  if (!update) return undefined;
+  const args = inlineArrayTypeArgs(expectedType, ctx.layouts);
+  if (!args) return undefined;
+  const [capacity, itemType] = args;
+  const itemSlots = flattenType(itemType, ctx.layouts);
+  if (itemSlots.length !== 1 || !isSelectableValueType(itemSlots[0]?.wat)) return undefined;
+  return {
+    source: update.source,
+    index: update.index,
+    value: update.value,
+    capacity,
+    itemType,
+    valueType: itemSlots[0].wat,
+  };
+}
+
 function fixedArraySwapCall(expr: Expr, ctx: LowerContext): FixedArraySwapCall | undefined {
   if (expr.kind !== "call" || expr.callee.kind !== "var") return undefined;
   const fn = ctx.functions.get(expr.callee.name);
-  if (!fn?.body.expr || fn.body.expr.kind !== "pipe_bind") return undefined;
+  if (!fn?.body.expr) return undefined;
   const args = inlineArrayTypeArgs(fn.returnType, ctx.layouts);
   if (!args) return undefined;
   const [capacity, itemType] = args;
@@ -2873,6 +2923,16 @@ function fixedArraySwapCall(expr: Expr, ctx: LowerContext): FixedArraySwapCall |
     if (arg) substitutions.set(param.name, arg);
   });
 
+  const letChain = fixedArrayLetChainSwapCall(
+    fn,
+    substitutions,
+    capacity,
+    itemType,
+    itemSlots[0].wat,
+  );
+  if (letChain) return letChain;
+
+  if (fn.body.expr.kind !== "pipe_bind") return undefined;
   const [firstLet, secondLet] = fn.body.statements;
   if (firstLet?.kind !== "let" || secondLet?.kind !== "let") return undefined;
   if (firstLet.value.kind !== "index" || secondLet.value.kind !== "index") return undefined;
@@ -2903,6 +2963,63 @@ function fixedArraySwapCall(expr: Expr, ctx: LowerContext): FixedArraySwapCall |
     itemType,
     valueType: itemSlots[0].wat,
   };
+}
+
+function fixedArraySpreadUpdateShape(expr: Expr): FixedArraySpreadUpdateShape | undefined {
+  if (expr.kind !== "shape" && expr.kind !== "product_constructor") return undefined;
+  if (expr.slots.length !== 2) return undefined;
+  const spreads = expr.slots.filter((slot) => slot.spread);
+  const overrides = expr.slots.filter((slot) => slot.index);
+  if (spreads.length !== 1 || overrides.length !== 1) return undefined;
+  const [spread] = spreads;
+  const [override] = overrides;
+  if (!spread || spread.value.kind !== "var" || !override?.index) return undefined;
+  return { source: spread.value, index: override.index, value: override.value };
+}
+
+function fixedArrayLetChainSwapCall(
+  fn: FnDecl,
+  substitutions: Map<string, Expr>,
+  capacity: number,
+  itemType: string,
+  valueType: ValueType,
+): FixedArraySwapCall | undefined {
+  const [firstLet, secondLet, firstSet, secondSet] = fn.body.statements;
+  if (
+    firstLet?.kind !== "let" || secondLet?.kind !== "let" ||
+    firstSet?.kind !== "let" || secondSet?.kind !== "let"
+  ) return undefined;
+  if (firstLet.value.kind !== "index" || secondLet.value.kind !== "index") return undefined;
+  if (fn.body.expr?.kind !== "var" || fn.body.expr.name !== secondSet.name) return undefined;
+  if (firstSet.name !== secondSet.name) return undefined;
+
+  const source = substituteExpr(firstLet.value.target, substitutions);
+  if (source.kind !== "var") return undefined;
+  const secondSource = substituteExpr(secondLet.value.target, substitutions);
+  if (secondSource.kind !== "var" || secondSource.name !== source.name) return undefined;
+
+  const firstUpdate = fixedArraySpreadUpdateShape(firstSet.value);
+  const secondUpdate = fixedArraySpreadUpdateShape(secondSet.value);
+  if (!firstUpdate || !secondUpdate) return undefined;
+  if (firstUpdate.source.name !== source.name || secondUpdate.source.name !== firstSet.name) {
+    return undefined;
+  }
+  if (firstUpdate.value.kind !== "var" || firstUpdate.value.name !== secondLet.name) {
+    return undefined;
+  }
+  if (secondUpdate.value.kind !== "var" || secondUpdate.value.name !== firstLet.name) {
+    return undefined;
+  }
+
+  const left = substituteExpr(firstLet.value.index, substitutions);
+  const right = substituteExpr(secondLet.value.index, substitutions);
+  if (JSON.stringify(left) !== JSON.stringify(substituteExpr(firstUpdate.index, substitutions))) {
+    return undefined;
+  }
+  if (JSON.stringify(right) !== JSON.stringify(substituteExpr(secondUpdate.index, substitutions))) {
+    return undefined;
+  }
+  return { source, left, right, capacity, itemType, valueType };
 }
 
 function lowerTransientFixedArraySet(
@@ -3513,8 +3630,28 @@ function lowerMatchArms(
       results: flattenType(expectedType, ctx.layouts).map((slot) => slot.wat),
       thenBody: lowerExpr(arm.value, ctx, locals, expectedType),
       elseBody: lowerMatchArms(value, rest, ctx, locals, expectedType),
+      branchHint: branchHintForTestedArm(arm, rest),
     },
   ];
+}
+
+function branchHintForTestedArm(arm: MatchArm, rest: MatchArm[]): BranchHint | undefined {
+  if (arm.branchHint) return arm.branchHint;
+  const fallback = rest.length === 1 ? rest[0] : undefined;
+  if (fallback?.branchHint) return invertBranchHint(fallback.branchHint);
+  return undefined;
+}
+
+function branchHintForStepArms(
+  thenArm: MatchArm | undefined,
+  elseArm: MatchArm | undefined,
+): BranchHint | undefined {
+  if (thenArm?.branchHint) return thenArm.branchHint;
+  return elseArm?.branchHint ? invertBranchHint(elseArm.branchHint) : undefined;
+}
+
+function invertBranchHint(hint: BranchHint): BranchHint {
+  return hint === "likely" ? "unlikely" : "likely";
 }
 
 function lowerIgnoredExpr(value: Expr, ctx: LowerContext, locals: Set<string>): Instr[] {
@@ -3615,6 +3752,7 @@ function lowerStepMatch(
         ...lowerExpr(yieldArm.value, ctx, scoped, expectedType),
       ],
       elseBody: lowerExpr(doneArm.value, ctx, locals, expectedType),
+      branchHint: branchHintForStepArms(yieldArm, doneArm),
     },
   ];
 }
@@ -3757,6 +3895,8 @@ function statementHasSelfCall(stmt: Statement, name: string): boolean {
 
 function exprHasSelfCall(expr: Expr, name: string): boolean {
   switch (expr.kind) {
+    case "const_fn":
+      return exprHasSelfCall(expr.body, name);
     case "call":
       return (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprHasSelfCall(expr.callee, name) ||
@@ -3942,7 +4082,9 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
       return [`${prefix}unreachable`];
     case "if":
       return [
-        `${prefix}if${instr.results.map((result) => ` (result ${result})`).join("")}`,
+        `${prefix}if${branchHintWat(instr.branchHint)}${
+          instr.results.map((result) => ` (result ${result})`).join("")
+        }`,
         ...emitInstrsWat(instr.thenBody, indent + 2),
         `${prefix}else`,
         ...emitInstrsWat(instr.elseBody, indent + 2),
@@ -3963,8 +4105,13 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
     case "br":
       return [`${prefix}br ${instr.depth}`];
     case "br_if":
-      return [`${prefix}br_if ${instr.depth}`];
+      return [`${prefix}br_if${branchHintWat(instr.branchHint)} ${instr.depth}`];
   }
+}
+
+function branchHintWat(hint: BranchHint | undefined): string {
+  if (!hint) return "";
+  return ` (@metadata.code.branch_hint "${hint === "likely" ? "\\01" : "\\00"}")`;
 }
 
 function watMemidx(memory: string | undefined): string {
@@ -4041,10 +4188,17 @@ function backendModuleToWasm(
   }
   if (exports.length) section(bytes, 7, vecItems(exports));
   if (module.functions.length) {
+    const encodedFunctions = module.functions.map((fn, index) =>
+      encodeFunction(fn, module.imports.length + index, funcIndex, typeKeys)
+    );
+    if (module.branchHints) {
+      const branchHintSection = wasmBranchHintSection(encodedFunctions);
+      if (branchHintSection) section(bytes, 0, branchHintSection);
+    }
     section(
       bytes,
       10,
-      vecItems(module.functions.map((fn) => encodeFunction(fn, funcIndex, typeKeys))),
+      vecItems(encodedFunctions.map((fn) => fn.bytes)),
     );
   }
   if (module.data.length) {
@@ -4099,6 +4253,27 @@ function nameSubsection(bytes: number[], id: number, payload: number[]) {
   for (const byte of payload) bytes.push(byte);
 }
 
+function wasmBranchHintSection(
+  functions: { branchHints: FunctionBranchHints }[],
+): number[] | undefined {
+  const entries = functions
+    .map((fn) => fn.branchHints)
+    .filter((fn) => fn.hints.length > 0)
+    .toSorted((left, right) => left.functionIndex - right.functionIndex)
+    .map((fn) => [
+      ...uleb(fn.functionIndex),
+      ...vecItems(
+        fn.hints.toSorted((left, right) => left.offset - right.offset).map((hint) => [
+          ...uleb(hint.offset),
+          ...uleb(1),
+          ...uleb(hint.hint === "likely" ? 1 : 0),
+        ]),
+      ),
+    ]);
+  if (!entries.length) return undefined;
+  return [...nameBytes("metadata.code.branch_hint"), ...vecItems(entries)];
+}
+
 function collectBlockTypes(functions: BackendFunction[]): ValueType[][] {
   const types: ValueType[][] = [];
   const visit = (instr: Instr) => {
@@ -4120,17 +4295,106 @@ function collectBlockTypes(functions: BackendFunction[]): ValueType[][] {
 
 function encodeFunction(
   fn: BackendFunction,
+  functionIndex: number,
   funcIndex: Map<string, number>,
   typeKeys: Map<string, number>,
-): number[] {
+): { bytes: number[]; branchHints: FunctionBranchHints } {
   const localIndex = new Map<string, number>();
   [...fn.params, ...fn.locals].forEach((slot, index) => localIndex.set(slot.name, index));
+  const locals = localDecls(fn.locals);
+  const encoded = encodeInstrsWithBranchHints(
+    fn.body,
+    localIndex,
+    funcIndex,
+    typeKeys,
+    locals.length,
+  );
   const body = [
-    ...localDecls(fn.locals),
-    ...encodeInstrs(fn.body, localIndex, funcIndex, typeKeys),
+    ...locals,
+    ...encoded.bytes,
     0x0b,
   ];
-  return [...uleb(body.length), ...body];
+  return {
+    bytes: [...uleb(body.length), ...body],
+    branchHints: { functionIndex, hints: encoded.hints },
+  };
+}
+
+interface FunctionBranchHints {
+  functionIndex: number;
+  hints: BranchHintEntry[];
+}
+
+interface BranchHintEntry {
+  offset: number;
+  hint: BranchHint;
+}
+
+function encodeInstrsWithBranchHints(
+  instrs: Instr[],
+  locals: Map<string, number>,
+  funcIndex: Map<string, number>,
+  typeKeys: Map<string, number>,
+  startOffset: number,
+): { bytes: number[]; hints: BranchHintEntry[] } {
+  const bytes: number[] = [];
+  const hints: BranchHintEntry[] = [];
+  for (const instr of instrs) {
+    const offset = startOffset + bytes.length;
+    if ((instr.op === "if" || instr.op === "br_if") && instr.branchHint) {
+      hints.push({ offset, hint: instr.branchHint });
+    }
+    const encoded = encodeInstrWithBranchHints(instr, locals, funcIndex, typeKeys, offset);
+    bytes.push(...encoded.bytes);
+    hints.push(...encoded.hints);
+  }
+  return { bytes, hints };
+}
+
+function encodeInstrWithBranchHints(
+  instr: Instr,
+  locals: Map<string, number>,
+  funcIndex: Map<string, number>,
+  typeKeys: Map<string, number>,
+  offset: number,
+): { bytes: number[]; hints: BranchHintEntry[] } {
+  if (instr.op === "if") {
+    const prefix = [0x04, ...blockType(instr.results, typeKeys)];
+    const thenEncoded = encodeInstrsWithBranchHints(
+      instr.thenBody,
+      locals,
+      funcIndex,
+      typeKeys,
+      offset + prefix.length,
+    );
+    const elseOffset = offset + prefix.length + thenEncoded.bytes.length + 1;
+    const elseEncoded = encodeInstrsWithBranchHints(
+      instr.elseBody,
+      locals,
+      funcIndex,
+      typeKeys,
+      elseOffset,
+    );
+    return {
+      bytes: [...prefix, ...thenEncoded.bytes, 0x05, ...elseEncoded.bytes, 0x0b],
+      hints: [...thenEncoded.hints, ...elseEncoded.hints],
+    };
+  }
+  if (instr.op === "block" || instr.op === "loop") {
+    const prefix = [
+      instr.op === "block" ? 0x02 : 0x03,
+      ...blockType(instr.results ?? [], typeKeys),
+    ];
+    const body = encodeInstrsWithBranchHints(
+      instr.body,
+      locals,
+      funcIndex,
+      typeKeys,
+      offset + prefix.length,
+    );
+    return { bytes: [...prefix, ...body.bytes, 0x0b], hints: body.hints };
+  }
+  return { bytes: encodeInstr(instr, locals, funcIndex, typeKeys), hints: [] };
 }
 
 function encodeInstrs(
@@ -5573,6 +5837,8 @@ function usesTemporalIntrinsic(expr: Expr | BlockExpr, functions: Map<string, Fn
       case "var":
       case "placeholder":
         return false;
+      case "const_fn":
+        return visit(item.body);
       case "call":
         return (item.callee.kind === "var" &&
           isTemporalIntrinsic(item.callee.name, functions)) ||
@@ -5614,6 +5880,8 @@ function usesBranchIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
       case "var":
       case "placeholder":
         return false;
+      case "const_fn":
+        return visit(item.body);
       case "call":
         return (item.callee.kind === "var" &&
           isBranchIntrinsic(item.callee.name, functions)) ||

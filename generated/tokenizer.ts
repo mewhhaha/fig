@@ -5,6 +5,8 @@ export const tokenKinds = [
   "type",
   "const",
   "fn",
+  "if",
+  "else",
   "let",
   "match",
   "pub",

@@ -416,6 +416,8 @@ function optimizeExpr(
   functions: Map<string, FnDecl>,
 ): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: optimizeExpr(expr.body, forwarding, inlineable, functions) };
     case "call": {
       const callee = optimizeExpr(expr.callee, forwarding, inlineable, functions);
       const args = expr.args.map((arg) => optimizeExpr(arg, forwarding, inlineable, functions));
@@ -720,6 +722,8 @@ function rewriteDroppedCallArgs<T extends Expr | BlockExpr>(
 
 function rewriteExpr(expr: Expr, drops: Map<string, Set<number>>): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: rewriteExpr(expr.body, drops) };
     case "call": {
       const callee = rewriteExpr(expr.callee, drops);
       const indexes = callee.kind === "var" ? drops.get(callee.name) : undefined;
@@ -861,6 +865,8 @@ function samePureExpr(left: Expr, right: Expr, functions: Map<string, FnDecl>): 
 
 function stableExprKey(expr: Expr): string {
   switch (expr.kind) {
+    case "const_fn":
+      return `const_fn:${expr.params.join(",")}=>${stableExprKey(expr.body)}`;
     case "literal":
       return `literal:${expr.literalKind}:${expr.value}`;
     case "var":
@@ -986,6 +992,8 @@ function statementCost(stmt: Statement): number {
 
 function exprCost(expr: Expr): number {
   switch (expr.kind) {
+    case "const_fn":
+      return 1 + exprCost(expr.body);
     case "call":
       return 2 + exprCost(expr.callee) + expr.args.reduce((sum, arg) => sum + exprCost(arg), 0);
     case "index":
@@ -1029,6 +1037,8 @@ function staticForSourceCost(source: StaticForSource): number {
 function exprCallsFunction(expr: Expr | BlockExpr | undefined, name: string): boolean {
   if (!expr) return false;
   switch (expr.kind) {
+    case "const_fn":
+      return exprCallsFunction(expr.body, name);
     case "call":
       return (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprCallsFunction(expr.callee, name) ||
@@ -1214,6 +1224,8 @@ function exprMentionsName(expr: Expr, name: string): boolean {
 
 function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
   switch (expr.kind) {
+    case "const_fn":
+      return [expr.body];
     case "call":
       return [expr.callee, ...expr.args];
     case "index":
@@ -1329,6 +1341,8 @@ function renameBlockBindings(
 
 function renameExprBindings(expr: Expr, env: Map<string, string>, fnName: string): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: renameExprBindings(expr.body, env, fnName) };
     case "var": {
       const base = baseName(expr.name);
       const renamed = env.get(base);
@@ -1586,6 +1600,8 @@ function baseName(name: string): string {
 
 function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
   switch (expr.kind) {
+    case "const_fn":
+      return hasRuntimeEffect(expr.body, functions);
     case "call":
       return (expr.callee.kind === "var" &&
         (functions.get(expr.callee.name)?.effects.length ?? 0) > 0) ||
@@ -1644,6 +1660,10 @@ function substituteStaticForSource(
 
 function substituteVar(expr: Expr, name: string, value: Expr): Expr {
   switch (expr.kind) {
+    case "const_fn":
+      return expr.params.includes(name)
+        ? expr
+        : { ...expr, body: substituteVar(expr.body, name, value) };
     case "var":
       if (expr.name === name) return value;
       if (

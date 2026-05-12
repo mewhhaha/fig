@@ -392,6 +392,8 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
         callee: qualifyExpr(expr.callee, alias, names),
         args: expr.args.map((arg) => qualifyExpr(arg, alias, names)),
       });
+    case "const_fn":
+      return withMeta(expr, { ...expr, body: qualifyExpr(expr.body, alias, names) });
     case "index":
       return withMeta(expr, {
         ...expr,

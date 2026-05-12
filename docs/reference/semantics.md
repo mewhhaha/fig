@@ -51,6 +51,27 @@ Static slots in records and product constructors evaluate a compile-time shape a
 field per key. Static `for` statement blocks and array-comprehension-style `[for ...]` literals are
 rejected.
 
+## Lowering Policy
+
+Prelude functions are allowed to be canonical fixtures, but optimization eligibility is structural.
+The compiler should optimize a fixed update, edit chain, fixed fold, or range fold because the
+checked source/IR has that shape, not because the callee name belongs to `prelude.*`.
+
+For example, these two functions are expected to be equivalent lowering candidates:
+
+```fig
+fn prelude_path(xs: fixed.Array(4, u3), i: i32, v: u3) -> fixed.Array(4, u3) {
+  fixed.Array.set(4, u3, xs, i, v)
+}
+
+fn user_path(xs: fixed.Array(4, u3), i: i32, v: u3) -> fixed.Array(4, u3) {
+  [...xs, [i]: v]
+}
+```
+
+When a prelude helper gets optimized, an equivalent user-written shape should get the same
+representation decision and Wasm shape modulo names.
+
 ## WebAssembly Target
 
 Fig targets WebAssembly 3.0 features supported by current Chromium- and Firefox-family engines and
