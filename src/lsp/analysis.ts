@@ -1166,6 +1166,17 @@ function symbolsForExpr(
 ): IndexedSymbol[] {
   if (!expr) return [];
   switch (expr.kind) {
+    case "do":
+      return [
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? symbolsForExpr(uri, stmt.value, source, mapper, container, program, localTypes)
+            : []
+        ),
+        ...symbolsForExpr(uri, expr.expr, source, mapper, container, program, localTypes),
+      ];
+    case "const_fn":
+      return symbolsForExpr(uri, expr.body, source, mapper, container, program, localTypes);
     case "block": {
       const blockTypes = new Map(localTypes);
       const symbols: IndexedSymbol[] = [];
@@ -2453,6 +2464,17 @@ function smallestExprAt(
 
 function childExprs(expr: Expr): Expr[] {
   switch (expr.kind) {
+    case "do":
+      return [
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? [stmt.value]
+            : []
+        ),
+        ...(expr.expr ? [expr.expr] : []),
+      ];
+    case "const_fn":
+      return [expr.body];
     case "block":
       return [
         ...expr.statements.flatMap((stmt) => statementValue(stmt) ? [statementValue(stmt)!] : []),
@@ -2528,6 +2550,10 @@ function expressionSyntaxInfo(
   expr: Expr,
 ): { name: string; kind: IndexedSymbol["kind"]; detail?: string; documentation?: string } {
   switch (expr.kind) {
+    case "do":
+      return { name: "do expression", kind: "local" };
+    case "const_fn":
+      return { name: "const function", kind: "local" };
     case "binary":
       return { name: `${expr.op} expression`, kind: "local", detail: "binary expression" };
     case "index":

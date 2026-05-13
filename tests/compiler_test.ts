@@ -179,7 +179,7 @@ Deno.test("static literal expansion and const-label field access lower", async (
       xs[2] + @field(p, #right)
     }
   `);
-  assertStringIncludes(wat, "i32.const 0");
+  assertStringIncludes(wat, "local.get $xs$2");
   assertStringIncludes(wat, "local.get $p$right");
 });
 

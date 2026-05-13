@@ -180,6 +180,49 @@ Deno.test("backend folds scalar literal arithmetic", async () => {
   assert(!wat.includes("i32.add"));
 });
 
+Deno.test("backend lowers parity remainder comparisons through bit tests", async () => {
+  const source = `
+    pub fn main(x: i32) -> i32 {
+      if x % 2 == 0 { 1 } else { 0 }
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.and");
+  assertStringIncludes(wat, "i32.eqz");
+  assert(!wat.includes("i32.rem_s"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(4), 1);
+  assertEquals(main(5), 0);
+  assertEquals(main(-3), 0);
+  assertEquals(main(-4), 1);
+});
+
+Deno.test("backend lowers zero comparisons through eqz", async () => {
+  const source = `
+    pub fn main(x: i32) -> i32 {
+      let zero = if x == 0 { 10 } else { 0 };
+      let nonzero = if x != 0 { 1 } else { 0 };
+      zero + nonzero
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.eqz");
+  assert(!/i32\.eqz\s+i32\.eqz\s+if/.test(wat));
+  assert(!wat.includes("i32.const 0\n    i32.eq"));
+  assert(!wat.includes("i32.const 0\n    i32.ne"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(0), 10);
+  assertEquals(main(5), 1);
+});
+
 Deno.test("backend lowers runtime inline-array indexing with scalar select", async () => {
   const wat = await watFromSource(`
     type fn InlineArray(n: count, a: type) -> type {
@@ -817,6 +860,191 @@ Deno.test("tail-recursive scalar inline-array swap mutates local slots in loop",
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 4321);
+});
+
+Deno.test("tail-recursive product fixed-array field update stays backed in loop", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Counts() -> type { layout.InlineArray(4, u3) }
+    type fn State() -> type {
+      let State = {values: Counts, r: i32};
+      struct(State)
+    }
+    fn prepare(state: State) -> State {
+      if state.r != 1 {
+        prepare(State {
+          values: layout.InlineArray.set(4, u3, state.values, state.r - 1, state.r),
+          r: state.r - 1,
+        })
+      } else {
+        state
+      }
+    }
+    pub fn main() -> i32 {
+      let result = prepare(State { values: <0, 0, 0, 0>, r: 3 });
+      result.values[1] * 10 + result.values[2] + result.r
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const prepare = wat.match(/\(func \$prepare[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(prepare, "__fixed_array_packed_state$values");
+  assert(!prepare.includes("local.set $state$values$0"));
+  assert(!prepare.includes("local.set $state$values$1"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 24);
+});
+
+Deno.test("tail-recursive product update keeps multiple fixed-array fields backed", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Small() -> type { layout.InlineArray(4, u3) }
+    type fn State() -> type {
+      let State = {left: Small, right: Small, r: i32};
+      struct(State)
+    }
+    fn prepare(state: State) -> State {
+      if state.r != 0 {
+        prepare(State {
+          left: layout.InlineArray.set(4, u3, state.left, state.r, state.r),
+          right: layout.InlineArray.set(4, u3, state.right, state.r, state.r + 1),
+          r: state.r - 1,
+        })
+      } else {
+        state
+      }
+    }
+    pub fn main() -> i32 {
+      let result = prepare(State { left: <0, 0, 0, 0>, right: <0, 0, 0, 0>, r: 3 });
+      result.left[2] * 100 + result.right[2] * 10 + result.r
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const prepare = wat.match(/\(func \$prepare[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(prepare, "__fixed_array_packed_state$left");
+  assertStringIncludes(prepare, "__fixed_array_packed_state$right");
+  assert(!prepare.includes("local.set $state$left$0"));
+  assert(!prepare.includes("local.set $state$right$0"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 230);
+});
+
+Deno.test("tail-recursive product update keeps recursive fixed-array transformer field backed", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Small() -> type { layout.InlineArray(4, u3) }
+    type fn State() -> type {
+      let State = {xs: Small, r: i32};
+      struct(State)
+    }
+    fn rotate_loop(xs: Small, i: i32, first: u3) -> Small {
+      if i < 3 {
+        rotate_loop(layout.InlineArray.set(4, u3, xs, i, xs[i + 1]), i + 1, first)
+      } else {
+        layout.InlineArray.set(4, u3, xs, 3, first)
+      }
+    }
+    fn step(state: State) -> State {
+      if state.r != 0 {
+        let first: u3 = state.xs[0];
+        step(State { xs: rotate_loop(state.xs, 0, first), r: state.r - 1 })
+      } else {
+        state
+      }
+    }
+    pub fn main() -> i32 {
+      let result = step(State { xs: <1, 2, 3, 0>, r: 1 });
+      result.xs[0] * 100 + result.xs[1] * 10 + result.xs[2]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const step = wat.match(/\(func \$step[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(step, "__fixed_array_packed_state$xs");
+  assert(!step.includes("local.set $state$xs$0"));
+  assert(!/__inl_rotate_loop_[0-9]+_xs\$0/.test(step));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 230);
+});
+
+Deno.test("tail-recursive product update defers let-bound fixed-array update into backing", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Small() -> type { layout.InlineArray(4, u3) }
+    type fn State() -> type {
+      let State = {count: Small, r: i32};
+      struct(State)
+    }
+    fn step(state: State) -> State {
+      if state.r != 0 {
+        let count = layout.InlineArray.set(4, u3, state.count, state.r, state.r);
+        step(State { count: count, r: state.r - 1 })
+      } else {
+        state
+      }
+    }
+    pub fn main() -> i32 {
+      let result = step(State { count: <0, 0, 0, 0>, r: 2 });
+      result.count[1] * 100 + result.count[2] * 10 + result.r
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const step = wat.match(/\(func \$step[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(step, "__fixed_array_packed_state$count");
+  assert(!step.includes("local.set $count$0"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 120);
+});
+
+Deno.test("tail-recursive fixed-array transformer stays backed across caller loop", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Perm() -> type { layout.InlineArray(4, u3) }
+    fn swap(xs: Perm, left: i32, right: i32) -> Perm {
+      let a = xs[left];
+      let b = xs[right];
+      layout.InlineArray.set(4, u3, xs, left, b)
+        \\ys -> layout.InlineArray.set(4, u3, ys, right, a)
+    }
+    fn reverse_loop(xs: Perm, left: i32, right: i32) -> Perm {
+      if left < right {
+        reverse_loop(swap(xs, left, right), left + 1, right - 1)
+      } else {
+        xs
+      }
+    }
+    fn flip_loop(xs: Perm, flips: i32) -> i32 {
+      let first: u3 = xs[0];
+      if first != 0 {
+        flip_loop(reverse_loop(xs, 0, first), flips + 1)
+      } else {
+        flips
+      }
+    }
+    pub fn main() -> i32 {
+      flip_loop(<2, 1, 0, 3>, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const flip = wat.match(/\(func \$flip_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(flip, "__fixed_array_packed_xs");
+  assert(!flip.includes("local.set $xs$0"));
+  assert(!/__inl_reverse_loop_[0-9]+_xs\$0/.test(flip));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 1);
 });
 
 Deno.test("private product fixed-array field dynamic set uses scratch storage", async () => {

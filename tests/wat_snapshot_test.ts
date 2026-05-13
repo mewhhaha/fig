@@ -140,7 +140,7 @@ Deno.test("WAT specializes perf array const dictionary dispatch", async () => {
   );
 
   assert(wat.includes("(func $apply_tile__scalar_map4 (param $x$value i32) (result i32)"));
-  assertEquals(wat.match(/call \$add1_box/g)?.length, 3);
+  assertEquals(wat.match(/call \$add1_box/g)?.length ?? 0, 0);
   assert(!wat.includes("(func $apply_tile "));
 
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";

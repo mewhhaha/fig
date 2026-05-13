@@ -15,7 +15,7 @@ old exported-call shape and the new internal-loop shape:
 
 ## Environment
 
-- Date: 2026-05-12
+- Date: 2026-05-13
 - OS: Linux 7.0.5-1-cachyos x86_64
 - Deno: 2.7.14, V8 14.7.173.20-rusty, TypeScript 5.9.2
 - Rust: rustc 1.96.0-nightly (3645249d7 2026-03-16)
@@ -57,7 +57,7 @@ compiled as a single exported kernel, which is the fair size comparison to `Rust
 | `range_fold_1k`                  |              241 |             143 |       333 |
 | `monadic_do_id_chain`            |              184 |              78 |       182 |
 | `applicative_do_id_map`          |              159 |              63 |       160 |
-| `fannkuch_redux_7`               |             2659 |            2521 |      1190 |
+| `fannkuch_redux_7`               |             1756 |            1665 |      1190 |
 | `mat4_dot1`                      |              296 |             209 |       416 |
 | `mat4_full`                      |             2123 |            1658 |       648 |
 
@@ -78,7 +78,7 @@ Timed rows from the same run:
 | `range_fold_1k`                  |                518.6 |                214.7 |              462.5 |        243.7 |
 | `monadic_do_id_chain`            |                 17.7 |                  2.1 |                6.4 |          1.0 |
 | `applicative_do_id_map`          |                 14.7 |                  1.8 |                6.0 |          0.8 |
-| `fannkuch_redux_7`               |             160569.0 |             189143.5 |           255659.7 |      89489.3 |
+| `fannkuch_redux_7`               |             130794.4 |             114763.0 |           234810.9 |     106057.2 |
 | `mat4_dot1`                      |                 16.9 |                  4.8 |               33.7 |          2.1 |
 | `mat4_full`                      |                 30.1 |                 19.6 |               67.2 |         24.8 |
 
@@ -100,10 +100,10 @@ Current findings:
 
 | Check                             | Result |
 | --------------------------------- | -----: |
-| WAT bytes                         |  60083 |
-| Wasm bytes                        |   2521 |
-| Wasm bytes without hints          |   2521 |
-| Wasm code-section payload         |   2404 |
+| WAT bytes                         |  36579 |
+| Wasm bytes                        |   1665 |
+| Wasm bytes without hints          |   1665 |
+| Wasm code-section payload         |   1559 |
 | Remaining `dec` calls             |      0 |
 | Remaining `step_*` calls          |      0 |
 | Remaining `flip_count_loop` calls |      1 |
@@ -113,12 +113,32 @@ The release path is already doing several important things correctly: `search` l
 do not survive as calls, packed `u3` fixed arrays are used, and `fig_buffers` is absent.
 
 The remaining perf pressure appears to be executable-code shape, not custom-section overhead. The
-analyzer reports a 2404 byte code section inside the 2521 byte module, and disabling branch hints
-does not reduce the binary. Narrow unsigned scalars inline predictably, product-state helpers are
-fused into the `search` loop, packed swaps now use a direct bitfield XOR update, and non-packable
-recursive fixed arrays can stay in local slots instead of scratch memory. The important remaining
-miss is runtime: `fannkuch_redux_7` is still about 2.1x slower than native Rust on this local run,
-so the next work should focus on loop/code-shape simplification rather than helper-call removal.
+analyzer reports a 1559 byte code section inside the 1665 byte kernel module, and disabling branch
+hints does not reduce the binary. Narrow unsigned scalars inline predictably, product-state helpers
+are fused into the `search` loop, packed swaps now use a direct bitfield XOR update, and
+non-packable recursive fixed arrays can stay in local slots instead of scratch memory. Dead product
+arguments can now alias private inlined product calls when the caller no longer observes the
+original product, deadness propagates through simple inlined forwarding branches, locals are ordered
+by use frequency before Wasm binary encoding, duplicate lowered locals are removed, and spread-shape
+updates reuse backed fixed-array storage before materializing result slots. Packed-array updates
+also avoid re-masking values that already came from a compatible packed-array read, parity checks of
+the form `(x % 2) == 0` lower through `i32.and` instead of signed remainder, and release cleanup
+folds adjacent constant binary instruction sequences into one constant. Tail-recursive product
+updates can now keep backed fixed-array fields in their backing store across the self-loop instead
+of unpacking and repacking unchanged product slots, including multiple backed fields in the same
+product update and direct recursive fixed-array transformer fields. Private fixed-array transformer
+results can also stay backed across the caller's self-loop. Single-forward let-bound fixed-array
+updates can now be deferred into the backed product update as well, which keeps that fold general
+without changing branch evaluation semantics.
+
+The important remaining miss is runtime and size together: `fannkuch_redux_7` is still slower than
+native Rust on local timings and about 1.40x the Rust/Wasm kernel size. The largest emitted pattern
+is still materialization of intermediate `search` products (`prepared`, `scored`, and `next`) plus
+the `rotate_left` wrapper path, which unpacks and repacks fixed-array fields around the hot
+`step_continue` body instead of writing the branch result directly into the tail-loop targets. The
+current folding pass deliberately does not defer multi-use branch-local aliases yet; doing that
+safely still needs destination-aware branch result lowering so old packed storage is read before any
+branch arm overwrites it.
 
 ## Notes
 
