@@ -26,10 +26,9 @@ old exported-call shape and the new internal-loop shape:
 deno run --allow-read --allow-write --allow-run scripts/bench_memory_model_compare.ts 50000
 ```
 
-Current status: the release-gated command above completes. `fannkuch_redux_7` now meets the 1.2x
-Rust/Wasm size target locally, while internal timing remains noisy around the 1.2x Rust target. The
-table records the latest local run and the investigation section calls out the remaining emitted
-pattern.
+Current status: the release-gated command above completes. `fannkuch_redux_7` remains about 1.07x
+the stripped Rust/Wasm kernel size and the latest full run is about 1.05x Rust runtime. The table
+records the latest local run and the investigation section calls out the remaining emitted pattern.
 
 The Rust comparison is compiled by the benchmark harness with:
 
@@ -47,7 +46,7 @@ compiled as a single exported kernel, which is the fair size comparison to `Rust
 | -------------------------------- | ---------------: | --------------: | --------: |
 | `scalar_reuse_nway`              |              141 |              54 |       140 |
 | `product_shadow_update`          |              186 |             107 |       225 |
-| `tail_product_loop_1k`           |              270 |             125 |       348 |
+| `tail_product_loop_1k`           |              272 |             125 |       348 |
 | `inline_array_builder_map`       |              536 |             249 |       530 |
 | `compact_filter_collect`         |              695 |             616 |       317 |
 | `alias_snapshot_update`          |              245 |             204 |       224 |
@@ -58,7 +57,7 @@ compiled as a single exported kernel, which is the fair size comparison to `Rust
 | `range_fold_1k`                  |              229 |             137 |       333 |
 | `monadic_do_id_chain`            |              173 |              74 |       182 |
 | `applicative_do_id_map`          |              145 |              55 |       160 |
-| `fannkuch_redux_7`               |             1428 |            1270 |      1190 |
+| `fannkuch_redux_7`               |             1427 |            1270 |      1190 |
 | `mat4_dot1`                      |              290 |             209 |       416 |
 | `mat4_full`                      |             2111 |            1652 |       648 |
 
@@ -66,22 +65,22 @@ Timed rows from the same run:
 
 | Scenario                         | Fig external ns/call | Fig internal ns/call | JavaScript ns/call | Rust ns/call |
 | -------------------------------- | -------------------: | -------------------: | -----------------: | -----------: |
-| `scalar_reuse_nway`              |                 14.0 |                  1.1 |                6.9 |          0.8 |
-| `product_shadow_update`          |                 14.9 |                  6.1 |               19.9 |          2.4 |
-| `tail_product_loop_1k`           |                355.7 |                990.5 |              593.6 |        442.2 |
-| `inline_array_builder_map`       |                 24.1 |                  6.2 |              783.7 |         22.6 |
-| `compact_filter_collect`         |                 35.2 |                  6.3 |               71.4 |         13.9 |
-| `alias_snapshot_update`          |                 19.8 |                  7.5 |               21.5 |          8.8 |
-| `fixed_collection_update`        |                 23.6 |                 15.2 |              598.7 |          3.4 |
-| `fixed_collection_spread_update` |                 14.3 |                  8.4 |               32.1 |          2.1 |
-| `collision_aabb_64`              |                159.4 |                 91.5 |              260.5 |         68.2 |
-| `path_grid_score_16`             |                562.1 |                318.3 |              536.9 |        171.0 |
-| `range_fold_1k`                  |                413.8 |                217.8 |              463.5 |        240.0 |
-| `monadic_do_id_chain`            |                 15.7 |                  1.8 |                5.7 |          1.0 |
-| `applicative_do_id_map`          |                 14.6 |                  1.4 |                5.8 |          0.8 |
-| `fannkuch_redux_7`               |             119430.2 |             105224.6 |           214372.3 |      99007.7 |
-| `mat4_dot1`                      |                 20.8 |                  5.1 |               29.3 |          2.9 |
-| `mat4_full`                      |                 32.0 |                 19.2 |               69.7 |         29.5 |
+| `scalar_reuse_nway`              |                 14.7 |                  0.9 |                7.1 |          0.8 |
+| `product_shadow_update`          |                 15.1 |                  6.0 |               20.9 |          2.3 |
+| `tail_product_loop_1k`           |                343.0 |                998.6 |              590.0 |        434.2 |
+| `inline_array_builder_map`       |                 23.1 |                  6.1 |              661.9 |         22.4 |
+| `compact_filter_collect`         |                 33.4 |                  7.1 |               73.1 |         16.4 |
+| `alias_snapshot_update`          |                 25.9 |                  4.9 |               21.3 |         10.7 |
+| `fixed_collection_update`        |                 18.6 |                 12.6 |              580.9 |          3.2 |
+| `fixed_collection_spread_update` |                 13.6 |                  6.2 |               31.4 |          2.3 |
+| `collision_aabb_64`              |                137.3 |                 75.4 |              244.2 |         63.8 |
+| `path_grid_score_16`             |                458.7 |                317.0 |              567.2 |        214.3 |
+| `range_fold_1k`                  |                437.9 |                260.2 |              611.5 |        374.2 |
+| `monadic_do_id_chain`            |                 14.7 |                  1.9 |                5.8 |          1.0 |
+| `applicative_do_id_map`          |                 18.3 |                  1.9 |                8.1 |          0.8 |
+| `fannkuch_redux_7`               |             120503.6 |             120498.2 |           269780.7 |     114291.5 |
+| `mat4_dot1`                      |                 16.2 |                  4.3 |               26.2 |          2.2 |
+| `mat4_full`                      |                 31.4 |                 19.0 |               69.8 |         23.2 |
 
 Dynamic fixed-array diagnostics from the same run:
 
@@ -101,7 +100,7 @@ Current findings:
 
 | Check                             | Result |
 | --------------------------------- | -----: |
-| WAT bytes                         |  27157 |
+| WAT bytes                         |  27024 |
 | Wasm bytes                        |   1270 |
 | Wasm bytes without hints          |   1270 |
 | Wasm code-section payload         |   1187 |
@@ -143,8 +142,9 @@ callee lane locals when doing so would not duplicate argument evaluation. Struct
 packed prefix-shift fixed-array transformers now fold into direct packed bit operations, removing
 the hot `rotate_left_loop` helper loop without depending on benchmark-specific function names.
 Packed dynamic stores that immediately follow a cached read of the same lane now use an XOR-delta
-update instead of clearing and OR-ing the lane, and the prefix-shift fold reuses the packed source
-local directly rather than copying it through a second temporary.
+update instead of clearing and OR-ing the lane, the prefix-shift fold reuses the packed source local
+directly rather than copying it through a second temporary, and cleanup folds multi-value block
+results that are immediately stored to locals into direct branch-exit stores.
 
 `fannkuch_redux_7` now has no remaining private helper calls inside `search`, and the kernel size is
 about 1.07x Rust/Wasm. The largest emitted pattern is still materialization of
@@ -155,9 +155,10 @@ size further but was backed out because inlined tail-loop lowering mutates calle
 preserving correctness there needs alias invalidation or destination-aware branch result lowering.
 
 Recent local comparison reruns on this final tree produced `fannkuch_redux_7` internal timings of
-`103679.3`, `108065.6`, and `105224.6 ns/call`, against Rust timings of `107435.2`, `97123.5`, and
-`99007.7 ns/call`. Each run is within the 1.2x Rust target; the median is `105224.6 ns/call` versus
-`99007.7 ns/call`.
+`103679.3`, `108065.6`, `105224.6`, `108650.2`, and `120498.2 ns/call`, against Rust timings of
+`107435.2`, `97123.5`, `99007.7`, `107722.6`, and `114291.5 ns/call`. The latest full run is about
+`1.054x` Rust runtime; across these runs the best Fig result is faster than Rust and the median stays
+close to the 1.0x line.
 
 ## Notes
 
@@ -185,5 +186,6 @@ Recent local comparison reruns on this final tree produced `fannkuch_redux_7` in
 - `fannkuch_redux_7` is adapted from the Computer Language Benchmarks Game benchmark description and
   uses fixed arrays, dynamic indexing, and repeated public `InlineArray.update`/`set` paths. The
   current lowering uses packed bounded arrays for the dynamic reverse/rotate/count paths and fuses
-  the private product-state search step in release mode. Its current kernel size is under the 1.2x
-  Rust/Wasm size target; the remaining release pressure is stable internal-loop timing.
+  the private product-state search step in release mode. Its current kernel size is about 1.07x the
+  Rust/Wasm size reference; the remaining release pressure is mostly binary section overhead and
+  stable internal-loop timing.

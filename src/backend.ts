@@ -1437,6 +1437,14 @@ function cleanupInstrs(
     if (instr.op === "loop" && !instr.results?.length && instr.body.length === 0) {
       continue;
     }
+    const blockStoreFold = instr.op === "block"
+      ? foldBlockResultStores(instr, instrs.slice(index + 1))
+      : undefined;
+    if (blockStoreFold) {
+      cleaned.push(blockStoreFold.block);
+      index += blockStoreFold.consumed;
+      continue;
+    }
     const previous = cleaned[cleaned.length - 1];
     if (previous?.op === "local.set" && instr.op === "local.get" && previous.name === instr.name) {
       if (
@@ -1503,6 +1511,127 @@ function cleanupInstrs(
     if (isTerminator(instr)) break;
   }
   return cleaned;
+}
+
+function foldBlockResultStores(
+  instr: Extract<Instr, { op: "block" }>,
+  following: Instr[],
+): { block: Instr; consumed: number } | undefined {
+  const resultCount = instr.results?.length ?? 0;
+  if (resultCount === 0) return undefined;
+  const stores = following.slice(0, resultCount);
+  if (stores.length !== resultCount || !stores.every((item) => item.op === "local.set")) {
+    return undefined;
+  }
+  const rewritten = rewriteBranchResultStores(instr.body, 0, resultCount, stores);
+  if (!rewritten.changed) return undefined;
+  return {
+    block: { ...instr, results: [], body: rewritten.body },
+    consumed: resultCount,
+  };
+}
+
+function rewriteBranchResultStores(
+  instrs: Instr[],
+  targetDepth: number,
+  resultCount: number,
+  stores: Instr[],
+): { body: Instr[]; changed: boolean } {
+  const body: Instr[] = [];
+  let changed = false;
+  for (const instr of instrs) {
+    if (instr.op === "br" && instr.depth === targetDepth) {
+      const split = splitStackProducerSuffix(body, resultCount);
+      if (!split) return { body: instrs, changed: false };
+      body.splice(0, body.length, ...split.prefix, ...split.suffix, ...stores, instr);
+      changed = true;
+      continue;
+    }
+    if (instr.op === "if") {
+      const thenBody = rewriteBranchResultStores(
+        instr.thenBody,
+        targetDepth + 1,
+        resultCount,
+        stores,
+      );
+      const elseBody = rewriteBranchResultStores(
+        instr.elseBody,
+        targetDepth + 1,
+        resultCount,
+        stores,
+      );
+      body.push({
+        ...instr,
+        thenBody: thenBody.body,
+        elseBody: elseBody.body,
+      });
+      changed = changed || thenBody.changed || elseBody.changed;
+      continue;
+    }
+    if (instr.op === "block" || instr.op === "loop") {
+      const nested = rewriteBranchResultStores(
+        instr.body,
+        targetDepth + 1,
+        resultCount,
+        stores,
+      );
+      body.push({ ...instr, body: nested.body });
+      changed = changed || nested.changed;
+      continue;
+    }
+    body.push(instr);
+  }
+  return { body, changed };
+}
+
+function splitStackProducerSuffix(
+  instrs: Instr[],
+  resultCount: number,
+): { prefix: Instr[]; suffix: Instr[] } | undefined {
+  for (let start = instrs.length; start >= 0; start--) {
+    const suffix = instrs.slice(start);
+    const effect = straightLineStackEffect(suffix);
+    if (effect && effect.net === resultCount && effect.min >= 0) {
+      return { prefix: instrs.slice(0, start), suffix };
+    }
+  }
+  return undefined;
+}
+
+function straightLineStackEffect(instrs: Instr[]): { net: number; min: number } | undefined {
+  let height = 0;
+  let min = 0;
+  for (const instr of instrs) {
+    const effect = instrStackEffect(instr);
+    if (!effect) return undefined;
+    height -= effect.pops;
+    min = Math.min(min, height);
+    height += effect.pushes;
+  }
+  return { net: height, min };
+}
+
+function instrStackEffect(instr: Instr): { pops: number; pushes: number } | undefined {
+  switch (instr.op) {
+    case "const":
+    case "local.get":
+      return { pops: 0, pushes: 1 };
+    case "local.set":
+    case "drop":
+      return { pops: 1, pushes: 0 };
+    case "local.tee":
+    case "unary":
+    case "load":
+      return { pops: 1, pushes: 1 };
+    case "binary":
+      return { pops: 2, pushes: 1 };
+    case "select":
+      return { pops: 3, pushes: 1 };
+    case "store":
+      return { pops: 2, pushes: 0 };
+    default:
+      return undefined;
+  }
 }
 
 function foldForwardedTempBranch(
