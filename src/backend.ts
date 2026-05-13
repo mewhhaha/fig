@@ -115,8 +115,10 @@ interface LowerContext {
   intrinsicIdsByName: Map<string, string>;
   scratchPlansByFunction?: Map<string, Map<string, ScratchArrayPlan>>;
   packedPlansByFunction?: Map<string, Map<string, PackedArrayPlan>>;
+  localSlotPlansByFunction?: Map<string, Map<string, LocalSlotArrayPlan>>;
   scratchArrays?: Map<string, ScratchArrayPlan>;
   packedArrays?: Map<string, PackedArrayPlan>;
+  localSlotArrays?: Map<string, LocalSlotArrayPlan>;
   tempIndex: number;
   tempLocals: BackendLocal[];
   currentFn?: FnDecl;
@@ -145,6 +147,13 @@ interface PackedArrayPlan {
   valueType: ValueType;
   packedType: ValueType;
   bitWidth: number;
+}
+
+interface LocalSlotArrayPlan {
+  name: string;
+  capacity: number;
+  itemType: string;
+  valueType: ValueType;
 }
 
 interface LayoutEnv {
@@ -239,6 +248,7 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
   const fixedArrayPlans = analyzeFixedArrayPlans(functions, ctx);
   ctx.scratchPlansByFunction = fixedArrayPlans.scratch;
   ctx.packedPlansByFunction = fixedArrayPlans.packed;
+  ctx.localSlotPlansByFunction = fixedArrayPlans.localSlots;
 
   const loweredFunctions = functions.map((fn) => lowerFunction(fn, ctx));
   const needsScratchMemory = [...ctx.scratchPlansByFunction.values()].some((plans) =>
@@ -308,6 +318,7 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
     localTypes: new Map(fn.params.map((param) => [param.name, param.type])),
     scratchArrays: ctx.scratchPlansByFunction?.get(fn.name),
     packedArrays: ctx.packedPlansByFunction?.get(fn.name),
+    localSlotArrays: ctx.localSlotPlansByFunction?.get(fn.name),
   };
   for (const plan of fnCtx.packedArrays?.values() ?? []) {
     fnCtx.tempLocals.push({ name: packedArrayLocalName(plan.name), type: plan.packedType });
@@ -414,21 +425,32 @@ function analyzeFixedArrayPlans(
 ): {
   scratch: Map<string, Map<string, ScratchArrayPlan>>;
   packed: Map<string, Map<string, PackedArrayPlan>>;
+  localSlots: Map<string, Map<string, LocalSlotArrayPlan>>;
 } {
   const scratchByFunction = new Map<string, Map<string, ScratchArrayPlan>>();
   const packedByFunction = new Map<string, Map<string, PackedArrayPlan>>();
+  const localSlotByFunction = new Map<string, Map<string, LocalSlotArrayPlan>>();
   let nextOffset = 4096;
   const addPlan = (
     fn: FnDecl,
     scratchPlans: Map<string, ScratchArrayPlan>,
     packedPlans: Map<string, PackedArrayPlan>,
+    localSlotPlans: Map<string, LocalSlotArrayPlan>,
     target: string,
     type: string | undefined,
   ): boolean => {
-    if (scratchPlans.has(target) || packedPlans.has(target)) return false;
+    if (scratchPlans.has(target) || packedPlans.has(target) || localSlotPlans.has(target)) {
+      return false;
+    }
     const args = inlineArrayLikeTypeArgs(type, ctx.layouts);
     if (!args) return false;
     const [capacity, itemType] = args;
+    const localSlot = localSlotArrayPlan(target, capacity, itemType, ctx.layouts);
+    if (localSlot && shouldPreferLocalSlotArray(fn, target, ctx)) {
+      localSlotPlans.set(target, localSlot);
+      localSlotByFunction.set(fn.name, localSlotPlans);
+      return true;
+    }
     const packed = packedArrayPlan(target, capacity, itemType, ctx.layouts);
     if (packed) {
       packedPlans.set(target, packed);
@@ -459,15 +481,17 @@ function analyzeFixedArrayPlans(
   for (const fn of functions) {
     const scratchPlans = new Map<string, ScratchArrayPlan>();
     const packedPlans = new Map<string, PackedArrayPlan>();
+    const localSlotPlans = new Map<string, LocalSlotArrayPlan>();
     if (fn.public) {
       scratchByFunction.set(fn.name, scratchPlans);
       packedByFunction.set(fn.name, packedPlans);
+      localSlotByFunction.set(fn.name, localSlotPlans);
       continue;
     }
     const scratchTargets = scratchWorthyFixedArrayTargets(fn.body, ctx);
     for (const param of fn.params) {
       if (scratchTargets.has(param.name)) {
-        addPlan(fn, scratchPlans, packedPlans, param.name, param.type);
+        addPlan(fn, scratchPlans, packedPlans, localSlotPlans, param.name, param.type);
       }
     }
     for (const target of scratchTargets) {
@@ -476,10 +500,18 @@ function analyzeFixedArrayPlans(
       ) {
         continue;
       }
-      addPlan(fn, scratchPlans, packedPlans, target, varTypeWithParamTypes(target, fn, ctx));
+      addPlan(
+        fn,
+        scratchPlans,
+        packedPlans,
+        localSlotPlans,
+        target,
+        varTypeWithParamTypes(target, fn, ctx),
+      );
     }
     scratchByFunction.set(fn.name, scratchPlans);
     packedByFunction.set(fn.name, packedPlans);
+    localSlotByFunction.set(fn.name, localSlotPlans);
   }
   let changed = true;
   while (changed) {
@@ -487,7 +519,10 @@ function analyzeFixedArrayPlans(
     for (const caller of functions) {
       const callerScratchPlans = scratchByFunction.get(caller.name);
       const callerPackedPlans = packedByFunction.get(caller.name);
-      if (!callerScratchPlans?.size && !callerPackedPlans?.size) continue;
+      const callerLocalSlotPlans = localSlotByFunction.get(caller.name);
+      if (!callerScratchPlans?.size && !callerPackedPlans?.size && !callerLocalSlotPlans?.size) {
+        continue;
+      }
       for (const call of privateCallsInBlock(caller.body, ctx)) {
         if (call.callee.kind !== "var") continue;
         const callee = ctx.functions.get(call.callee.name);
@@ -498,25 +533,42 @@ function analyzeFixedArrayPlans(
           new Map<string, ScratchArrayPlan>();
         const calleePackedPlans = packedByFunction.get(callee.name) ??
           new Map<string, PackedArrayPlan>();
+        const calleeLocalSlotPlans = localSlotByFunction.get(callee.name) ??
+          new Map<string, LocalSlotArrayPlan>();
         const argOffset = Math.max(0, call.args.length - callee.params.length);
         for (const [index, param] of callee.params.entries()) {
           if (
-            !dynamicReads.has(param.name) || calleeScratchPlans.has(param.name) ||
-            calleePackedPlans.has(param.name)
+            !dynamicReads.has(param.name) ||
+            calleeScratchPlans.has(param.name) ||
+            calleePackedPlans.has(param.name) ||
+            calleeLocalSlotPlans.has(param.name)
           ) continue;
           const arg = call.args[index + argOffset];
           if (
             !arg ||
-            !backedFixedArrayExpr(arg, callerScratchPlans, callerPackedPlans, ctx)
+            !backedFixedArrayExpr(
+              arg,
+              callerScratchPlans,
+              callerPackedPlans,
+              callerLocalSlotPlans,
+              ctx,
+            )
           ) continue;
           if (
-            addPlan(callee, calleeScratchPlans, calleePackedPlans, param.name, param.type)
+            addPlan(
+              callee,
+              calleeScratchPlans,
+              calleePackedPlans,
+              calleeLocalSlotPlans,
+              param.name,
+              param.type,
+            )
           ) changed = true;
         }
       }
     }
   }
-  return { scratch: scratchByFunction, packed: packedByFunction };
+  return { scratch: scratchByFunction, packed: packedByFunction, localSlots: localSlotByFunction };
 }
 
 function scratchWorthyFixedArrayTargets(block: BlockExpr, ctx: LowerContext): Set<string> {
@@ -585,6 +637,19 @@ function scratchWorthyFixedArrayTargets(block: BlockExpr, ctx: LowerContext): Se
   for (const stmt of block.statements) visitStatement(stmt);
   if (block.expr) visit(block.expr);
   return targets;
+}
+
+function shouldPreferLocalSlotArray(fn: FnDecl, target: string, ctx: LowerContext): boolean {
+  if (ctx.optMode !== "release") return false;
+  if (!hasSelfCall(fn.body, fn.name)) return false;
+  const type = varTypeWithParamTypes(target, fn, ctx) ??
+    fn.params.find((param) => param.name === target)?.type;
+  const args = inlineArrayLikeTypeArgs(type, ctx.layouts);
+  if (!args) return false;
+  const [capacity, itemType] = args;
+  const plan = localSlotArrayPlan(target, capacity, itemType, ctx.layouts);
+  if (!plan || capacity > 16) return false;
+  return !packedArrayPlan(target, capacity, itemType, ctx.layouts);
 }
 
 function fixedArraySpreadUpdateExpr(
@@ -735,18 +800,22 @@ function backedFixedArrayExpr(
   expr: Expr,
   scratchPlans: Map<string, ScratchArrayPlan> | undefined,
   packedPlans: Map<string, PackedArrayPlan> | undefined,
+  localSlotPlans: Map<string, LocalSlotArrayPlan> | undefined,
   ctx: LowerContext,
 ): boolean {
   if (expr.kind === "var") {
     return Boolean(
-      scratchPlanForName(expr.name, scratchPlans) ?? packedPlanForName(expr.name, packedPlans),
+      scratchPlanForName(expr.name, scratchPlans) ??
+        packedPlanForName(expr.name, packedPlans) ??
+        localSlotPlanForName(expr.name, localSlotPlans),
     );
   }
   const update = fixedArrayUpdateCall(expr, ctx);
   if (update) {
     return Boolean(
       scratchPlanForName(update.source.name, scratchPlans) ??
-        packedPlanForName(update.source.name, packedPlans),
+        packedPlanForName(update.source.name, packedPlans) ??
+        localSlotPlanForName(update.source.name, localSlotPlans),
     );
   }
   return false;
@@ -858,12 +927,21 @@ function lowerInlineArrayHelperCall(
   const fn = ctx.functions.get(expr.callee.name);
   if (!fn) return undefined;
   const fixedUpdate = fixedArrayUpdateCall(expr, ctx);
+  const localSlotUpdate = fixedUpdate
+    ? localSlotPlanForName(fixedUpdate.source.name, ctx.localSlotArrays)
+    : undefined;
+  if (fixedUpdate && localSlotUpdate) {
+    return [
+      ...lowerLocalSlotArrayUpdateStore(localSlotUpdate, fixedUpdate, ctx, locals),
+      ...lowerLocalSlotArrayMaterialize(localSlotUpdate, ctx, locals),
+    ];
+  }
   const packedUpdate = fixedUpdate
     ? packedPlanForName(fixedUpdate.source.name, ctx.packedArrays)
     : undefined;
   if (fixedUpdate && packedUpdate) {
     return [
-      ...lowerPackedArrayStore(packedUpdate, fixedUpdate.index, fixedUpdate.value, ctx, locals),
+      ...lowerPackedArrayUpdateStore(packedUpdate, fixedUpdate, ctx, locals),
       ...lowerPackedArrayMaterialize(packedUpdate, ctx, locals),
     ];
   }
@@ -1485,6 +1563,24 @@ function lowerTailLoopExpr(
       ...lowerTailLoopExpr(expr.body, fn, ctx, locals, continueDepth, exitDepth),
     ];
   }
+  if (expr.kind === "block") {
+    const statements: Instr[] = [];
+    for (let index = 0; index < expr.statements.length; index++) {
+      const stmt = expr.statements[index];
+      const usedLater = usedNames({
+        kind: "block",
+        statements: expr.statements.slice(index + 1),
+        ...(expr.expr ? { expr: expr.expr } : {}),
+      });
+      statements.push(...lowerStatement(stmt, ctx, locals, usedLater));
+    }
+    return [
+      ...statements,
+      ...(expr.expr
+        ? lowerTailLoopExpr(expr.expr, fn, ctx, locals, continueDepth, exitDepth)
+        : [{ op: "br", depth: exitDepth } as Instr]),
+    ];
+  }
   return [...lowerExpr(expr, ctx, locals, fn.returnType), { op: "br", depth: exitDepth }];
 }
 
@@ -1713,6 +1809,8 @@ function lowerExpr(
       if (componentStoreGet) return componentStoreGet;
       const inlined = lowerPrivateProductCallInline(expr, ctx, locals);
       if (inlined) return inlined;
+      const scalarInlined = lowerPrivateScalarCallInline(expr, ctx, locals, expectedType);
+      if (scalarInlined) return scalarInlined;
       const callee = ctx.signatures.get(expr.callee.name);
       if (!callee) {
         if (!hasRuntimeEffect(expr, ctx.functions)) return [{ op: "const", type: "i32", value: 0 }];
@@ -2095,6 +2193,10 @@ function lowerPrivateProductCallInline(
     ctx.packedPlansByFunction?.get(callee.name),
     renames,
   );
+  const localSlotArrays = renamedLocalSlotPlans(
+    ctx.localSlotPlansByFunction?.get(callee.name),
+    renames,
+  );
   const inlineCtx: LowerContext = {
     ...ctx,
     currentFn: renamed,
@@ -2102,6 +2204,7 @@ function lowerPrivateProductCallInline(
     inlineStack: new Set([...(ctx.inlineStack ?? []), callee.name]),
     scratchArrays,
     packedArrays,
+    localSlotArrays,
   };
   const paramBindings = renamed.params.flatMap((param) =>
     flattenBinding(param.name, param.type, ctx.layouts)
@@ -2145,6 +2248,119 @@ function lowerPrivateProductCallInline(
   ];
 }
 
+const SCALAR_BACKEND_INLINE_COST_BUDGET = 18;
+
+function lowerPrivateScalarCallInline(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] | undefined {
+  if (ctx.optMode !== "release" || expr.callee.kind !== "var") return undefined;
+  if (!ctx.currentFn) return undefined;
+  if (ctx.currentFn.public) return undefined;
+  const callee = ctx.functions.get(expr.callee.name);
+  if (!callee || callee.public || callee.name === ctx.currentFn.name) return undefined;
+  if (ctx.inlineStack?.has(callee.name)) return undefined;
+  if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
+  if (flattenType(callee.returnType, ctx.layouts).length !== 1) return undefined;
+  if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
+  if (hasSelfCall(callee.body, callee.name)) return undefined;
+  if (backendInlineBlockCost(callee.body) > SCALAR_BACKEND_INLINE_COST_BUDGET) return undefined;
+  const argOffset = Math.max(0, expr.args.length - callee.params.length);
+  const runtimeArgs = expr.args.slice(argOffset);
+  if (runtimeArgs.length !== callee.params.length) return undefined;
+
+  const prefix = `__inl_${callee.name.replaceAll(/[^A-Za-z0-9_]/g, "_")}_${ctx.tempIndex++}`;
+  const renames = new Map<string, string>();
+  for (const param of callee.params) renames.set(param.name, `${prefix}_${param.name}`);
+  const renamed = renameFunctionLocals(callee, renames);
+  const localSlotArrays = renamedLocalSlotPlans(
+    ctx.localSlotPlansByFunction?.get(callee.name),
+    renames,
+  );
+  const inlineCtx: LowerContext = {
+    ...ctx,
+    currentFn: renamed,
+    localTypes: new Map(renamed.params.map((param) => [param.name, param.type])),
+    inlineStack: new Set([...(ctx.inlineStack ?? []), callee.name]),
+    localSlotArrays,
+  };
+  const paramBindings = renamed.params.flatMap((param) =>
+    flattenBinding(param.name, param.type, ctx.layouts)
+  );
+  for (const binding of paramBindings) {
+    locals.add(binding.name);
+    ctx.tempLocals.push({ name: binding.name, type: binding.wat });
+  }
+  for (const local of collectIrLocals(renamed.body, inlineCtx)) {
+    if (locals.has(local.name) || ctx.tempLocals.some((item) => item.name === local.name)) continue;
+    locals.add(local.name);
+    ctx.tempLocals.push(local);
+  }
+
+  return [
+    ...runtimeArgs.flatMap((arg, index) => lowerExpr(arg, ctx, locals, callee.params[index]?.type)),
+    ...paramBindings.toReversed().map((binding): Instr => ({
+      op: "local.set",
+      name: binding.name,
+    })),
+    ...lowerBlock(renamed.body, inlineCtx, locals, expectedType ?? renamed.returnType),
+  ];
+}
+
+function backendInlineBlockCost(block: BlockExpr): number {
+  return block.statements.reduce((sum, stmt) => sum + backendInlineStatementCost(stmt), 0) +
+    (block.expr ? backendInlineExprCost(block.expr) : 0);
+}
+
+function backendInlineStatementCost(stmt: Statement): number {
+  if (stmt.kind === "proof_const") return 0;
+  return 1 + backendInlineExprCost(stmt.value);
+}
+
+function backendInlineExprCost(expr: Expr): number {
+  switch (expr.kind) {
+    case "do":
+      return 100;
+    case "const_fn":
+      return 1 + backendInlineExprCost(expr.body);
+    case "call":
+      return 2 + backendInlineExprCost(expr.callee) +
+        expr.args.reduce((sum, arg) => sum + backendInlineExprCost(arg), 0);
+    case "index":
+      return 2 + backendInlineExprCost(expr.target) + backendInlineExprCost(expr.index);
+    case "binary":
+      return 1 + backendInlineExprCost(expr.left) + backendInlineExprCost(expr.right);
+    case "pipe_bind":
+      return 1 + backendInlineExprCost(expr.value) + backendInlineExprCost(expr.body);
+    case "match":
+      return 2 + backendInlineExprCost(expr.value) +
+        expr.arms.reduce((sum, arm) => sum + backendInlineExprCost(arm.value), 0);
+    case "shape":
+    case "product_constructor":
+      return 1 +
+        expr.slots.reduce(
+          (sum, slot) =>
+            sum + (slot.index ? backendInlineExprCost(slot.index) : 0) +
+            backendInlineExprCost(slot.value),
+          0,
+        );
+    case "static_for_slots":
+      return 4 + backendInlineExprCost(expr.value);
+    case "range":
+      return 1 + backendInlineExprCost(expr.start) + backendInlineExprCost(expr.end);
+    case "field":
+      return 1 + backendInlineExprCost(expr.value) + backendInlineExprCost(expr.key);
+    case "block":
+      return backendInlineBlockCost(expr);
+    case "literal":
+    case "var":
+    case "placeholder":
+      return 1;
+  }
+}
+
 function renamedScratchPlans(
   plans: Map<string, ScratchArrayPlan> | undefined,
   renames: Map<string, string>,
@@ -2162,6 +2378,19 @@ function renamedPackedPlans(
   plans: Map<string, PackedArrayPlan> | undefined,
   renames: Map<string, string>,
 ): Map<string, PackedArrayPlan> | undefined {
+  if (!plans?.size) return plans;
+  return new Map(
+    [...plans].map(([name, plan]) => {
+      const renamed = renameDottedName(name, renames);
+      return [renamed, { ...plan, name: renamed }];
+    }),
+  );
+}
+
+function renamedLocalSlotPlans(
+  plans: Map<string, LocalSlotArrayPlan> | undefined,
+  renames: Map<string, string>,
+): Map<string, LocalSlotArrayPlan> | undefined {
   if (!plans?.size) return plans;
   return new Map(
     [...plans].map(([name, plan]) => {
@@ -2489,6 +2718,8 @@ function lowerRuntimeInlineArrayIndex(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  const localSlot = localSlotPlanForName(target, ctx.localSlotArrays);
+  if (localSlot) return lowerLocalSlotArrayLoad(localSlot, index, ctx, locals);
   const packed = packedPlanForName(target, ctx.packedArrays);
   if (packed) return lowerPackedArrayLoad(packed, index, ctx, locals);
   const scratch = ctx.scratchArrays?.get(target);
@@ -2599,6 +2830,21 @@ function packedArrayPlan(
   };
 }
 
+function localSlotArrayPlan(
+  name: string,
+  capacity: number,
+  itemType: string,
+  layouts: LayoutEnv,
+): LocalSlotArrayPlan | undefined {
+  const itemSlots = flattenType(itemType, layouts);
+  const valueType = itemSlots[0]?.wat;
+  if (
+    !Number.isFinite(capacity) || capacity <= 0 || itemSlots.length !== 1 ||
+    !isSelectableValueType(valueType)
+  ) return undefined;
+  return { name, capacity, itemType, valueType };
+}
+
 function packedArrayItemBitWidth(type: string): number | undefined {
   if (type === "bool") return 1;
   return unsignedBitWidth(type);
@@ -2697,6 +2943,107 @@ function lowerScratchArrayAddress(
   ];
 }
 
+function lowerLocalSlotArrayMaterialize(
+  plan: LocalSlotArrayPlan,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  return Array.from(
+    { length: plan.capacity },
+    (_, index) => lowerLocalSlotArrayLoad(plan, staticIndexExpr(index), ctx, locals),
+  ).flat();
+}
+
+function lowerLocalSlotArrayLoad(
+  plan: LocalSlotArrayPlan,
+  index: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const literal = staticIntegerLiteral(index);
+  if (literal !== undefined) {
+    return lowerVar(localSlotArraySlotName(plan.name, literal), ctx, locals, plan.itemType);
+  }
+  const cached = cacheRepeatedIndex(index, ctx, locals);
+  return [
+    ...cached.prefix,
+    ...lowerScalarInlineArraySelectChain(
+      plan.name,
+      cached.index,
+      plan.capacity,
+      plan.itemType,
+      plan.valueType,
+      ctx,
+      locals,
+    ),
+  ];
+}
+
+function lowerLocalSlotArrayStore(
+  plan: LocalSlotArrayPlan,
+  index: Expr,
+  value: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  ensureLoweringLocals(value, ctx, locals);
+  const cachedIndex = cacheRepeatedIndex(index, ctx, locals);
+  const valueName = `__fixed_local_slot_value${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: valueName, type: plan.valueType });
+  locals.add(valueName);
+  return [
+    ...cachedIndex.prefix,
+    ...lowerExpr(value, ctx, locals, plan.itemType),
+    { op: "local.set", name: valueName },
+    ...Array.from({ length: plan.capacity }, (_, item): Instr[] => [
+      { op: "local.get", name: valueName },
+      ...lowerVar(localSlotArraySlotName(plan.name, item), ctx, locals, plan.itemType),
+      ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
+      { op: "const", type: "i32", value: item },
+      { op: "binary", wasm: "i32.eq" },
+      { op: "select", type: plan.valueType },
+      { op: "local.set", name: localSlotArraySlotName(plan.name, item) },
+    ]).flat(),
+  ];
+}
+
+function lowerLocalSlotArrayUpdateStore(
+  plan: LocalSlotArrayPlan,
+  update: FixedArrayUpdateCall,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const rmw = fixedArrayReadModifyWrite(update);
+  if (!rmw) return lowerLocalSlotArrayStore(plan, update.index, update.value, ctx, locals);
+  const cachedIndex = cacheRepeatedIndex(update.index, ctx, locals);
+  const oldName = `__fixed_local_slot_old${ctx.tempIndex++}`;
+  const valueName = `__fixed_local_slot_value${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: oldName, type: plan.valueType });
+  ctx.tempLocals.push({ name: valueName, type: plan.valueType });
+  locals.add(oldName);
+  locals.add(valueName);
+  const updated = substituteExpr(
+    rmw.value,
+    new Map([[rmw.oldName, { kind: "var", name: oldName }]]),
+  );
+  return [
+    ...cachedIndex.prefix,
+    ...lowerLocalSlotArrayLoad(plan, cachedIndex.index, ctx, locals),
+    { op: "local.set", name: oldName },
+    ...lowerExpr(updated, ctx, locals, plan.itemType),
+    { op: "local.set", name: valueName },
+    ...Array.from({ length: plan.capacity }, (_, item): Instr[] => [
+      { op: "local.get", name: valueName },
+      ...lowerVar(localSlotArraySlotName(plan.name, item), ctx, locals, plan.itemType),
+      ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
+      { op: "const", type: "i32", value: item },
+      { op: "binary", wasm: "i32.eq" },
+      { op: "select", type: plan.valueType },
+      { op: "local.set", name: localSlotArraySlotName(plan.name, item) },
+    ]).flat(),
+  ];
+}
+
 function lowerPackedArrayInit(plan: PackedArrayPlan): Instr[] {
   const packed = Array.from({ length: plan.capacity }, (_, index) =>
     lowerPackedArraySlotValue(
@@ -2790,6 +3137,143 @@ function lowerPackedArrayStore(
     { op: "binary", wasm: `${plan.packedType}.or` },
     { op: "local.set", name: packedArrayLocalName(plan.name) },
   ];
+}
+
+function lowerPackedArrayUpdateStore(
+  plan: PackedArrayPlan,
+  update: FixedArrayUpdateCall,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const rmw = fixedArrayReadModifyWrite(update);
+  if (!rmw) return lowerPackedArrayStore(plan, update.index, update.value, ctx, locals);
+  const cachedIndex = cacheRepeatedIndex(update.index, ctx, locals);
+  const shiftName = `__fixed_array_packed_shift${ctx.tempIndex++}`;
+  const oldName = `__fixed_array_packed_old${ctx.tempIndex++}`;
+  const valueName = `__fixed_array_packed_value${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: shiftName, type: "i32" });
+  ctx.tempLocals.push({ name: oldName, type: plan.valueType });
+  ctx.tempLocals.push({ name: valueName, type: plan.packedType });
+  locals.add(shiftName);
+  locals.add(oldName);
+  locals.add(valueName);
+  const mask = packedMaskInstr(plan.packedType, plan.bitWidth);
+  const updated = substituteExpr(
+    rmw.value,
+    new Map([[rmw.oldName, { kind: "var", name: oldName }]]),
+  );
+  return [
+    ...cachedIndex.prefix,
+    ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: plan.bitWidth },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "local.set", name: shiftName },
+    ...lowerPackedArrayValueToItem(
+      plan,
+      maskValue(
+        [
+          { op: "local.get", name: packedArrayLocalName(plan.name) },
+          { op: "local.get", name: shiftName },
+          { op: "binary", wasm: `${plan.packedType}.shr_u` },
+        ],
+        plan.packedType,
+        plan.bitWidth,
+      ),
+    ),
+    { op: "local.set", name: oldName },
+    ...lowerPackedArrayValueToPacked(plan, lowerExpr(updated, ctx, locals, plan.itemType)),
+    { op: "local.set", name: valueName },
+    { op: "local.get", name: packedArrayLocalName(plan.name) },
+    { op: "const", type: plan.packedType, value: -1 },
+    mask,
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.xor` },
+    { op: "binary", wasm: `${plan.packedType}.and` },
+    { op: "local.get", name: valueName },
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.or` },
+    { op: "local.set", name: packedArrayLocalName(plan.name) },
+  ];
+}
+
+function lowerPackedArraySwapStore(
+  plan: PackedArrayPlan,
+  left: Expr,
+  right: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const cachedLeft = cacheRepeatedIndex(left, ctx, locals);
+  const cachedRight = cacheRepeatedIndex(right, ctx, locals);
+  const leftShift = `__fixed_array_packed_left_shift${ctx.tempIndex++}`;
+  const rightShift = `__fixed_array_packed_right_shift${ctx.tempIndex++}`;
+  const delta = `__fixed_array_packed_swap_delta${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: leftShift, type: "i32" });
+  ctx.tempLocals.push({ name: rightShift, type: "i32" });
+  ctx.tempLocals.push({ name: delta, type: plan.packedType });
+  locals.add(leftShift);
+  locals.add(rightShift);
+  locals.add(delta);
+  const mask = packedMaskInstr(plan.packedType, plan.bitWidth);
+  return [
+    ...cachedLeft.prefix,
+    ...cachedRight.prefix,
+    ...lowerExpr(cachedLeft.index, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: plan.bitWidth },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "local.set", name: leftShift },
+    ...lowerExpr(cachedRight.index, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: plan.bitWidth },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "local.set", name: rightShift },
+    ...maskValue(
+      [
+        { op: "local.get", name: packedArrayLocalName(plan.name) },
+        { op: "local.get", name: leftShift },
+        { op: "binary", wasm: `${plan.packedType}.shr_u` },
+      ],
+      plan.packedType,
+      plan.bitWidth,
+    ),
+    ...maskValue(
+      [
+        { op: "local.get", name: packedArrayLocalName(plan.name) },
+        { op: "local.get", name: rightShift },
+        { op: "binary", wasm: `${plan.packedType}.shr_u` },
+      ],
+      plan.packedType,
+      plan.bitWidth,
+    ),
+    { op: "binary", wasm: `${plan.packedType}.xor` },
+    { op: "local.set", name: delta },
+    { op: "local.get", name: packedArrayLocalName(plan.name) },
+    { op: "local.get", name: delta },
+    { op: "local.get", name: leftShift },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "local.get", name: delta },
+    { op: "local.get", name: rightShift },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.or` },
+    { op: "binary", wasm: `${plan.packedType}.xor` },
+    { op: "local.set", name: packedArrayLocalName(plan.name) },
+  ];
+}
+
+function fixedArrayReadModifyWrite(
+  update: FixedArrayUpdateCall,
+): { oldName: string; value: Expr } | undefined {
+  if (update.value.kind !== "block") return undefined;
+  const [first, ...rest] = update.value.statements;
+  if (!first || first.kind !== "let" || rest.length !== 0 || !update.value.expr) {
+    return undefined;
+  }
+  const oldValue = first.value;
+  if (oldValue.kind !== "index" || oldValue.target.kind !== "var") return undefined;
+  if (oldValue.target.name !== update.source.name) return undefined;
+  if (JSON.stringify(oldValue.index) !== JSON.stringify(update.index)) return undefined;
+  return { oldName: first.name, value: update.value.expr };
 }
 
 function lowerPackedArraySlotValue(
@@ -3034,6 +3518,8 @@ function lowerTransientFixedArraySet(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  const localSlot = ctx.localSlotArrays?.get(param.name);
+  if (localSlot) return lowerLocalSlotArrayStore(localSlot, update.index, update.value, ctx, locals);
   const packed = ctx.packedArrays?.get(param.name);
   if (packed) return lowerPackedArrayStore(packed, update.index, update.value, ctx, locals);
   const scratch = ctx.scratchArrays?.get(param.name);
@@ -3068,34 +3554,38 @@ function lowerTransientFixedArraySwap(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
-  const packed = ctx.packedArrays?.get(param.name);
-  if (packed) {
+  const localSlot = ctx.localSlotArrays?.get(param.name);
+  if (localSlot) {
     const leftValue = `__fixed_swap_left${ctx.tempIndex++}`;
     const rightValue = `__fixed_swap_right${ctx.tempIndex++}`;
-    ctx.tempLocals.push({ name: leftValue, type: packed.valueType });
-    ctx.tempLocals.push({ name: rightValue, type: packed.valueType });
+    ctx.tempLocals.push({ name: leftValue, type: localSlot.valueType });
+    ctx.tempLocals.push({ name: rightValue, type: localSlot.valueType });
     locals.add(leftValue);
     locals.add(rightValue);
     return [
-      ...lowerPackedArrayLoad(packed, swap.left, ctx, locals),
+      ...lowerLocalSlotArrayLoad(localSlot, swap.left, ctx, locals),
       { op: "local.set", name: leftValue },
-      ...lowerPackedArrayLoad(packed, swap.right, ctx, locals),
+      ...lowerLocalSlotArrayLoad(localSlot, swap.right, ctx, locals),
       { op: "local.set", name: rightValue },
-      ...lowerPackedArrayStore(
-        packed,
+      ...lowerLocalSlotArrayStore(
+        localSlot,
         swap.left,
         { kind: "var", name: rightValue },
         ctx,
         locals,
       ),
-      ...lowerPackedArrayStore(
-        packed,
+      ...lowerLocalSlotArrayStore(
+        localSlot,
         swap.right,
         { kind: "var", name: leftValue },
         ctx,
         locals,
       ),
     ];
+  }
+  const packed = ctx.packedArrays?.get(param.name);
+  if (packed) {
+    return lowerPackedArraySwapStore(packed, swap.left, swap.right, ctx, locals);
   }
   const scratch = ctx.scratchArrays?.get(param.name);
   if (scratch) {
@@ -3263,6 +3753,8 @@ function lowerVar(
   expectedType?: string,
 ): Instr[] {
   const layouts = ctx.layouts;
+  const exactLocalSlot = ctx.localSlotArrays?.get(name);
+  if (exactLocalSlot) return lowerLocalSlotArrayMaterialize(exactLocalSlot, ctx, locals);
   const exactPacked = ctx.packedArrays?.get(name);
   if (exactPacked) return lowerPackedArrayMaterialize(exactPacked, ctx, locals);
   const exactScratch = ctx.scratchArrays?.get(name);
@@ -3280,6 +3772,18 @@ function lowerVar(
     return item === undefined
       ? lowerPackedArrayMaterialize(packed, ctx, locals)
       : lowerPackedArrayLoad(packed, staticIndexExpr(item), ctx, locals);
+  }
+  const localSlot = localSlotPlanForName(name, ctx.localSlotArrays);
+  if (localSlot) {
+    const localSlotPath = localSlot.name === base
+      ? projection
+      : name.slice(localSlot.name.length).replace(/^\./, "").replace(/^\[/, "").replace(/\]$/, "");
+    const item = localSlotPath && /^[0-9]+$/.test(localSlotPath)
+      ? Number.parseInt(localSlotPath, 10)
+      : undefined;
+    return item === undefined
+      ? lowerLocalSlotArrayMaterialize(localSlot, ctx, locals)
+      : lowerLocalSlotArrayLoad(localSlot, staticIndexExpr(item), ctx, locals);
   }
   const scratch = scratchPlanForName(name, ctx.scratchArrays);
   if (scratch) {
@@ -3344,8 +3848,25 @@ function packedPlanForName(
     (projection ? plans.get(`${base}.${projection.replaceAll("$", ".")}`) : undefined);
 }
 
+function localSlotPlanForName(
+  name: string,
+  plans: Map<string, LocalSlotArrayPlan> | undefined,
+): LocalSlotArrayPlan | undefined {
+  if (!plans) return undefined;
+  const exact = plans.get(name);
+  if (exact) return exact;
+  const base = baseName(name);
+  const projection = projectionSuffix(name);
+  return plans.get(base) ??
+    (projection ? plans.get(`${base}.${projection.replaceAll("$", ".")}`) : undefined);
+}
+
 function scratchArrayLocalSlotName(name: string, index: number): string {
   return `${name.replaceAll(".", "$")}$${index}`;
+}
+
+function localSlotArraySlotName(name: string, index: number): string {
+  return scratchArrayLocalSlotName(name, index);
 }
 
 function packedArrayLocalName(name: string): string {
@@ -3881,6 +4402,7 @@ function exprHasOnlyTailSelfCalls(expr: Expr, name: string): boolean {
   if (expr.kind === "pipe_bind") {
     return !exprHasSelfCall(expr.value, name) && exprHasOnlyTailSelfCalls(expr.body, name);
   }
+  if (expr.kind === "block") return blockHasOnlyTailSelfCalls(expr, name);
   return !exprHasSelfCall(expr, name);
 }
 

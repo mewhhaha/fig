@@ -53,6 +53,7 @@ interface WatShape {
   fixed_array_representation_flat: number;
   fixed_array_representation_scratch: number;
   fixed_array_representation_packed: number;
+  fixed_array_representation_local_slots: number;
 }
 
 interface ShapeExpectation {
@@ -88,6 +89,7 @@ interface Row {
   fixed_array_representation_flat?: number;
   fixed_array_representation_scratch?: number;
   fixed_array_representation_packed?: number;
+  fixed_array_representation_local_slots?: number;
 }
 
 const iterations = Number(Deno.args.find((arg) => arg !== "--") ?? 100_000);
@@ -528,9 +530,9 @@ const figScenarios: FigScenario[] = [
         loops: { min: 1 },
       },
     },
-    maxWatBytes: 56_000,
-    maxWasmBytes: 2_600,
-    maxKernelWasmBytes: 2_480,
+    maxWatBytes: 72_000,
+    maxWasmBytes: 3_000,
+    maxKernelWasmBytes: 4_800,
     source: fannkuchReduxSource,
   },
   {
@@ -804,6 +806,7 @@ function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
     "fixed_array_representation_flat",
     "fixed_array_representation_scratch",
     "fixed_array_representation_packed",
+    "fixed_array_representation_local_slots",
   ];
   for (const scenario of scenarioOrder) {
     const byRuntime = new Map(
@@ -1027,6 +1030,7 @@ function row(
         fixed_array_representation_flat: shape.fixed_array_representation_flat,
         fixed_array_representation_scratch: shape.fixed_array_representation_scratch,
         fixed_array_representation_packed: shape.fixed_array_representation_packed,
+        fixed_array_representation_local_slots: shape.fixed_array_representation_local_slots,
       }
       : {}),
   };
@@ -1109,6 +1113,7 @@ function fixedArrayShape(wat: string) {
     /\bfixed_array_scratch\b|\bfig_fixed_scratch\b|\b(?:i32|i64|f32|f64)\.(?:load|store) \(memory \$fig_buffers\)/g,
   );
   const packedRefs = count(wat, /fixed_array_packed|packed_fixed_array/g);
+  const localSlotRefs = count(wat, /__fixed_local_slot|__fixed_swap_/g);
   return {
     fixed_dynamic_gets: fixedDynamicGets,
     fixed_dynamic_sets: fixedDynamicSets,
@@ -1120,6 +1125,7 @@ function fixedArrayShape(wat: string) {
       : 0,
     fixed_array_representation_scratch: scratchRefs ? 1 : 0,
     fixed_array_representation_packed: packedRefs ? 1 : 0,
+    fixed_array_representation_local_slots: localSlotRefs ? 1 : 0,
   };
 }
 

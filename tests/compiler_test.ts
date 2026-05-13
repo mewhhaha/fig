@@ -3060,6 +3060,19 @@ Deno.test("optimizes const-parameter forwarding wrappers to direct calls", async
   assertEquals(counts.get("map_box") ?? 0, 0);
 });
 
+Deno.test("optimizer treats narrow unsigned returns as scalar", async () => {
+  const checked = await checkSource(`
+    fn dec(x: u3) -> u3 {
+      x - 1
+    }
+    pub fn main(x: u3) -> u3 {
+      dec(x)
+    }
+  `);
+  const summary = summarizeProgram(checked.program, { optMode: "release" }).get("dec");
+  assertEquals(summary?.returnClass, "scalar");
+});
+
 Deno.test("optimizes repeated forwarding wrapper call sites", async () => {
   const checked = await checkSource(`
     type fn Box() { let Box = {value: i32}; struct(Box) }

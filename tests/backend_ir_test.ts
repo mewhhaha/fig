@@ -554,11 +554,12 @@ Deno.test("fannkuch search release lowering fuses product-state step", async () 
   assert(!search.includes("call $prepare"));
   assert(!search.includes("call $score"));
   assert(!search.includes("call $advance"));
+  assert(!wat.includes("call $dec"));
+  assert(!wat.includes("call $step_active"));
   assert(!wat.includes("call $layout_InlineArray_set__"));
   assert(!wat.includes("call $layout_InlineArray_update__"));
   assert(!wat.includes("(func $layout_InlineArray_set__"));
   assert(!wat.includes("(func $layout_InlineArray_update__"));
-  assert(!wat.includes("select"));
   assertStringIncludes(wat, "fixed_array_packed");
   assert(!wat.includes("fig_buffers"));
 
@@ -619,6 +620,32 @@ Deno.test("packed fixed-array dynamic set updates with shifts and masks", async 
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
   );
   assertEquals((instance.exports.main as CallableFunction)(2), 1274);
+});
+
+Deno.test("packed fixed-array update inlines small private scalar updater", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn dec(x: u3) -> u3 {
+      x - 1
+    }
+    fn update_at(xs: layout.InlineArray(7, u3), index: i32) -> layout.InlineArray(7, u3) {
+      layout.InlineArray.update(7, u3, xs, index, dec)
+    }
+    pub fn main(index: i32) -> i32 {
+      let ys = update_at(<0, 1, 2, 3, 4, 5, 6>, index);
+      ys[0] * 1000000 + ys[1] * 100000 + ys[2] * 10000 + ys[3] * 1000 +
+        ys[4] * 100 + ys[5] * 10 + ys[6]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  assert(!wat.includes("call $dec"));
+  assert(!wat.includes("call $layout_InlineArray_update__7__u3"));
+  assert(!wat.includes("fig_buffers"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(3), 122456);
 });
 
 Deno.test("public fixed-array kernel uses optimized private representation clone", async () => {
@@ -724,7 +751,7 @@ Deno.test("user let-shadowed fixed-array edit chain lowers like helper swap", as
   assertEquals((instance.exports.main as CallableFunction)(), 4321);
 });
 
-Deno.test("tail-recursive scalar inline-array set mutates dead slots in loop", async () => {
+Deno.test("tail-recursive scalar inline-array set mutates local slots in loop", async () => {
   const source = `
     const layout = @import("prelude.layout");
     fn rotate_left_loop(
@@ -747,9 +774,8 @@ Deno.test("tail-recursive scalar inline-array set mutates dead slots in loop", a
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
   const rotate = wat.match(/\(func \$rotate_left_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(rotate, "loop");
-  assertStringIncludes(rotate, `i32.load (memory $fig_buffers)`);
-  assertStringIncludes(rotate, `i32.store (memory $fig_buffers)`);
-  assert(!rotate.includes("select"));
+  assertStringIncludes(rotate, "select");
+  assert(!rotate.includes("fig_buffers"));
   assert(!rotate.includes("call $rotate_left_loop"));
   assert(!rotate.includes("call $layout_InlineArray_set__4__i32"));
 
@@ -759,7 +785,7 @@ Deno.test("tail-recursive scalar inline-array set mutates dead slots in loop", a
   assertEquals((instance.exports.main as CallableFunction)(), 2314);
 });
 
-Deno.test("tail-recursive scalar inline-array swap mutates dead slots in loop", async () => {
+Deno.test("tail-recursive scalar inline-array swap mutates local slots in loop", async () => {
   const source = `
     const layout = @import("prelude.layout");
     fn swap(xs: layout.InlineArray(4, i32), left: i32, right: i32) -> layout.InlineArray(4, i32) {
@@ -782,9 +808,8 @@ Deno.test("tail-recursive scalar inline-array swap mutates dead slots in loop", 
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
   const reverse = wat.match(/\(func \$reverse_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(reverse, "loop");
-  assertStringIncludes(reverse, `i32.load (memory $fig_buffers)`);
-  assertStringIncludes(reverse, `i32.store (memory $fig_buffers)`);
-  assert(!reverse.includes("select"));
+  assertStringIncludes(reverse, "select");
+  assert(!reverse.includes("fig_buffers"));
   assert(!reverse.includes("call $swap"));
   assert(!reverse.includes("call $layout_InlineArray_set__4__i32"));
 

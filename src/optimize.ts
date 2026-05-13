@@ -276,7 +276,11 @@ function optimizeBlock(
   functions: Map<string, FnDecl>,
   options: { allowMultiValueResult?: boolean } = {},
 ): BlockExpr {
-  const expr = block.expr ? optimizeExpr(block.expr, forwarding, inlineable, functions) : undefined;
+  const expr = block.expr
+    ? optimizeExpr(block.expr, forwarding, inlineable, functions, {
+      allowMultiValueResult: options.allowMultiValueResult,
+    })
+    : undefined;
   const optimized: BlockExpr = {
     ...block,
     statements: block.statements.map((stmt) =>
@@ -414,6 +418,7 @@ function optimizeExpr(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  options: { allowMultiValueResult?: boolean } = {},
 ): Expr {
   switch (expr.kind) {
     case "do":
@@ -428,8 +433,11 @@ function optimizeExpr(
       if (callee.kind === "var") {
         const target = forwarding.get(callee.name);
         if (target) return { ...expr, callee: { kind: "var", name: target }, args };
-        const inlined = inlineCall(callee.name, args, inlineable, { allowMultiValue: false });
-        if (inlined) return optimizeExpr(inlined, forwarding, inlineable, functions);
+        const fixedUpdateShape = isFixedUpdateInlineCall({ ...expr, callee, args }, inlineable);
+        const inlined = inlineCall(callee.name, args, inlineable, {
+          allowMultiValue: (options.allowMultiValueResult ?? false) && !fixedUpdateShape,
+        });
+        if (inlined) return optimizeExpr(inlined, forwarding, inlineable, functions, options);
       }
       return { ...expr, callee, args };
     }
@@ -458,7 +466,9 @@ function optimizeExpr(
       return {
         ...expr,
         value,
-        body: optimizeExpr(expr.body, forwarding, inlineable, functions),
+        body: optimizeExpr(expr.body, forwarding, inlineable, functions, {
+          allowMultiValueResult: options.allowMultiValueResult,
+        }),
       };
     }
     case "match": {
@@ -474,7 +484,9 @@ function optimizeExpr(
         value,
         arms: expr.arms.map((arm) => ({
           ...arm,
-          value: optimizeExpr(arm.value, forwarding, inlineable, functions),
+          value: optimizeExpr(arm.value, forwarding, inlineable, functions, {
+            allowMultiValueResult: options.allowMultiValueResult,
+          }),
         })),
       };
     }
@@ -516,7 +528,9 @@ function optimizeExpr(
         key: optimizeExpr(expr.key, forwarding, inlineable, functions),
       };
     case "block":
-      return optimizeBlock(expr, forwarding, inlineable, functions);
+      return optimizeBlock(expr, forwarding, inlineable, functions, {
+        allowMultiValueResult: options.allowMultiValueResult,
+      });
     case "literal":
     case "var":
     case "placeholder":
@@ -969,7 +983,15 @@ function isInlineableFunction(summary: FunctionSummary): boolean {
 
 function isScalarRuntimeReturn(type: string | undefined): boolean {
   return type === "i32" || type === "bool" || type === "char" || type === "count" ||
-    type === "i64" || type === "f32" || type === "f64";
+    type === "i64" || type === "f32" || type === "f64" ||
+    unsignedBitWidth(type) !== undefined;
+}
+
+function unsignedBitWidth(type: string | undefined): number | undefined {
+  const match = type?.match(/^u([1-9][0-9]*)$/);
+  if (!match) return undefined;
+  const width = Number.parseInt(match[1] ?? "", 10);
+  return width >= 1 && width <= 64 ? width : undefined;
 }
 
 function inlineBudget(
@@ -1620,7 +1642,8 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
       return hasRuntimeEffect(expr.body, functions);
     case "call":
       return (expr.callee.kind === "var" &&
-        (functions.get(expr.callee.name)?.effects.length ?? 0) > 0) ||
+        (!functions.has(expr.callee.name) ||
+          (functions.get(expr.callee.name)?.effects.length ?? 0) > 0)) ||
         hasRuntimeEffect(expr.callee, functions) ||
         expr.args.some((arg) => hasRuntimeEffect(arg, functions));
     case "index":
