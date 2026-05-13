@@ -119,7 +119,9 @@ interface LowerContext {
   returnProjectionPlans?: Map<string, ReturnProjectionPlan>;
   scratchArrays?: Map<string, ScratchArrayPlan>;
   packedArrays?: Map<string, PackedArrayPlan>;
+  cleanupPackedArrays?: Map<string, PackedArrayPlan>;
   localSlotArrays?: Map<string, LocalSlotArrayPlan>;
+  packedArrayReadCache?: Map<string, string>;
   tempIndex: number;
   tempLocals: BackendLocal[];
   currentFn?: FnDecl;
@@ -337,12 +339,14 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
     scratchArrays: ctx.scratchPlansByFunction?.get(fn.name),
     packedArrays: ctx.packedPlansByFunction?.get(fn.name),
     localSlotArrays: ctx.localSlotPlansByFunction?.get(fn.name),
+    packedArrayReadCache: new Map(),
     fixedArrayTransformerAliases: new Map(),
   };
   for (const plan of fnCtx.packedArrays?.values() ?? []) {
     fnCtx.tempLocals.push({ name: packedArrayLocalName(plan.name), type: plan.packedType });
     localNames.add(packedArrayLocalName(plan.name));
   }
+  fnCtx.cleanupPackedArrays = new Map(fnCtx.packedArrays);
   const laneParamVectors = materializedLane4I32Params(fn, fnCtx);
   for (const name of laneParamVectors) {
     fnCtx.tempLocals.push({ name, type: "v128" });
@@ -375,7 +379,10 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
   const packedPrologue = [...(fnCtx.packedArrays?.values() ?? [])].flatMap((plan) =>
     lowerPackedArrayInit(plan)
   );
-  const body = cleanupInstrs([...prologue, ...scratchPrologue, ...packedPrologue, ...loweredBody]);
+  const body = cleanupInstrs(
+    [...prologue, ...scratchPrologue, ...packedPrologue, ...loweredBody],
+    fnCtx,
+  );
   const bodyLocals = instrLocalNames(body);
   const useCounts = instrLocalUseCounts(body);
   const locals = uniqueBackendLocals(
@@ -1403,15 +1410,50 @@ function substituteStatement(stmt: Statement, substitutions: Map<string, Expr>):
   return stmt;
 }
 
-function cleanupInstrs(instrs: Instr[]): Instr[] {
+function cleanupInstrs(
+  instrs: Instr[],
+  ctx?: LowerContext,
+  allowDeadLocalRoundtrip = true,
+): Instr[] {
   const cleaned: Instr[] = [];
   for (let index = 0; index < instrs.length; index++) {
-    const instr = cleanupInstr(instrs[index]!);
-    if (instr.op === "block" && !instr.results?.length && instr.body.length === 0) continue;
-    if (instr.op === "loop" && !instr.results?.length && instr.body.length === 0) continue;
+    const instr = cleanupInstr(instrs[index]!, ctx);
+    const branchPair = branchOnlyIf(instr);
+    if (branchPair) {
+      cleaned.push(...branchPair);
+      continue;
+    }
+    if (instr.op === "if") {
+      const folded = foldForwardedTempBranch(cleaned, instr, ctx);
+      if (folded) {
+        cleaned.push(folded);
+        if (isTerminator(folded)) break;
+        continue;
+      }
+    }
+    if (instr.op === "block" && !instr.results?.length && instr.body.length === 0) {
+      continue;
+    }
+    if (instr.op === "loop" && !instr.results?.length && instr.body.length === 0) {
+      continue;
+    }
     const previous = cleaned[cleaned.length - 1];
     if (previous?.op === "local.set" && instr.op === "local.get" && previous.name === instr.name) {
+      if (
+        allowDeadLocalRoundtrip &&
+        !instrs.slice(index + 1).some((item) => instrReadsLocal(item, instr.name))
+      ) {
+        cleaned.pop();
+        continue;
+      }
       cleaned[cleaned.length - 1] = { op: "local.tee", name: instr.name };
+      continue;
+    }
+    if (
+      allowDeadLocalRoundtrip &&
+      instr.op === "local.tee" &&
+      !instrs.slice(index + 1).some((item) => instrReadsLocal(item, instr.name))
+    ) {
       continue;
     }
     cleaned.push(instr);
@@ -1461,6 +1503,187 @@ function cleanupInstrs(instrs: Instr[]): Instr[] {
     if (isTerminator(instr)) break;
   }
   return cleaned;
+}
+
+function foldForwardedTempBranch(
+  cleaned: Instr[],
+  instr: Extract<Instr, { op: "if" }>,
+  ctx?: LowerContext,
+): Instr | undefined {
+  const forwarding = forwardedElseCopy(instr.elseBody);
+  if (!forwarding) return undefined;
+  const setStart = forwardedSetStart(cleaned, forwarding.temps);
+  if (setStart === undefined) return undefined;
+  const condition = cleaned.slice(setStart + forwarding.temps.length);
+  if (!condition.length || !isPureForwardedCondition(condition, forwarding)) return undefined;
+  if (!isPureForwardedBranchResult(instr.thenBody, forwarding.temps)) return undefined;
+  const renames = new Map(
+    forwarding.temps.map((temp, index) => [temp, forwarding.targets[index]!]),
+  );
+  const targetSets = forwarding.targets.toReversed().map((name): Instr => ({
+    op: "local.set",
+    name,
+  }));
+  if (
+    hasForwardedPackedArrayTarget(ctx, forwarding.targets) &&
+    !isCurrentFunctionParamFrame(ctx, forwarding.targets)
+  ) return undefined;
+  cleaned.splice(
+    setStart,
+    cleaned.length - setStart,
+    ...targetSets,
+    ...condition.map((item) => renameInstrLocals(item, renames)),
+  );
+  return {
+    ...instr,
+    thenBody: instr.thenBody.map((item) => renameInstrLocals(item, renames)),
+    elseBody: [{ op: "br", depth: forwarding.depth }],
+  };
+}
+
+function isCurrentFunctionParamFrame(ctx: LowerContext | undefined, targets: string[]): boolean {
+  const fn = ctx?.currentFn;
+  if (!fn) return false;
+  const params = fn.params.flatMap((param) =>
+    flattenBinding(param.name, param.type, ctx.layouts).map((slot) => slot.name)
+  );
+  return params.length === targets.length &&
+    params.every((param, index) => param === targets[index]);
+}
+
+function hasForwardedPackedArrayTarget(ctx: LowerContext | undefined, targets: string[]): boolean {
+  const packedArrays = ctx?.cleanupPackedArrays ?? ctx?.packedArrays;
+  if (!packedArrays?.size) return false;
+  const targetSet = new Set(targets);
+  for (const plan of packedArrays.values()) {
+    const slots = Array.from(
+      { length: plan.capacity },
+      (_, index) => scratchArrayLocalSlotName(plan.name, index),
+    );
+    if (slots.every((slot) => targetSet.has(slot))) return true;
+  }
+  return false;
+}
+
+function forwardedElseCopy(
+  body: Instr[],
+): { temps: string[]; targets: string[]; depth: number } | undefined {
+  const branch = body.at(-1);
+  if (branch?.op !== "br") return undefined;
+  const prefix = body.slice(0, -1);
+  if (prefix.length % 2 !== 0 || prefix.length === 0) return undefined;
+  const slotCount = prefix.length / 2;
+  const gets = prefix.slice(0, slotCount);
+  const sets = prefix.slice(slotCount);
+  if (!gets.every((item) => item.op === "local.get")) return undefined;
+  if (!sets.every((item) => item.op === "local.set")) return undefined;
+  const temps = gets.map((item) => (item as Extract<Instr, { op: "local.get" }>).name);
+  const targets = sets.map((item) => (item as Extract<Instr, { op: "local.set" }>).name)
+    .toReversed();
+  if (new Set(temps).size !== temps.length || new Set(targets).size !== targets.length) {
+    return undefined;
+  }
+  if (temps.some((temp, index) => temp === targets[index])) return undefined;
+  return { temps, targets, depth: branch.depth };
+}
+
+function forwardedSetStart(cleaned: Instr[], temps: string[]): number | undefined {
+  const reversedTemps = temps.toReversed();
+  for (let start = cleaned.length - reversedTemps.length; start >= 0; start--) {
+    let matched = true;
+    for (const [index, temp] of reversedTemps.entries()) {
+      const instr = cleaned[start + index];
+      if (instr?.op !== "local.set" || instr.name !== temp) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return start;
+  }
+  return undefined;
+}
+
+function isPureForwardedCondition(
+  instrs: Instr[],
+  forwarding: { temps: string[]; targets: string[] },
+): boolean {
+  const temps = new Set(forwarding.temps);
+  const targets = new Set(forwarding.targets);
+  for (const instr of instrs) {
+    switch (instr.op) {
+      case "local.get":
+        if (targets.has(instr.name)) return false;
+        break;
+      case "const":
+      case "unary":
+      case "binary":
+      case "select":
+      case "simd":
+        break;
+      default:
+        return false;
+    }
+    if (instr.op === "local.get" && !temps.has(instr.name)) continue;
+  }
+  return true;
+}
+
+function isPureForwardedBranchResult(instrs: Instr[], temps: string[]): boolean {
+  const branch = instrs.at(-1);
+  if (branch?.op !== "br") return false;
+  const tempSet = new Set(temps);
+  return instrs.slice(0, -1).every((instr) => instr.op === "local.get" && tempSet.has(instr.name));
+}
+
+function renameInstrLocals(instr: Instr, renames: Map<string, string>): Instr {
+  switch (instr.op) {
+    case "local.get":
+    case "local.set":
+    case "local.tee":
+      return { ...instr, name: renames.get(instr.name) ?? instr.name };
+    case "if":
+      return {
+        ...instr,
+        thenBody: instr.thenBody.map((item) => renameInstrLocals(item, renames)),
+        elseBody: instr.elseBody.map((item) => renameInstrLocals(item, renames)),
+      };
+    case "block":
+    case "loop":
+      return { ...instr, body: instr.body.map((item) => renameInstrLocals(item, renames)) };
+    default:
+      return instr;
+  }
+}
+
+function instrReadsLocal(instr: Instr, name: string): boolean {
+  switch (instr.op) {
+    case "local.get":
+    case "local.tee":
+      return instr.name === name;
+    case "if":
+      return instr.thenBody.some((item) => instrReadsLocal(item, name)) ||
+        instr.elseBody.some((item) => instrReadsLocal(item, name));
+    case "block":
+    case "loop":
+      return instr.body.some((item) => instrReadsLocal(item, name));
+    default:
+      return false;
+  }
+}
+
+function branchOnlyIf(instr: Instr): Instr[] | undefined {
+  if (instr.op !== "if" || instr.results.length > 0) return undefined;
+  const [thenBranch] = instr.thenBody;
+  const [elseBranch] = instr.elseBody;
+  if (
+    instr.thenBody.length !== 1 || instr.elseBody.length !== 1 ||
+    thenBranch?.op !== "br" || elseBranch?.op !== "br" ||
+    thenBranch.depth === 0 || elseBranch.depth === 0
+  ) return undefined;
+  return [
+    { op: "br_if", depth: thenBranch.depth - 1, branchHint: instr.branchHint },
+    { op: "br", depth: elseBranch.depth - 1 },
+  ];
 }
 
 function foldConstInstrBinary(
@@ -1522,18 +1745,41 @@ function isRightIdentityConst(instr: Extract<Instr, { op: "const" }>, wasm: stri
     (instr.value === 1 && (wasm === `${instr.type}.mul` || wasm.startsWith(`${instr.type}.div_`)));
 }
 
-function cleanupInstr(instr: Instr): Instr {
+function cleanupInstr(instr: Instr, ctx?: LowerContext): Instr {
   if (instr.op === "if") {
     return {
       ...instr,
-      thenBody: cleanupInstrs(instr.thenBody),
-      elseBody: cleanupInstrs(instr.elseBody),
+      thenBody: cleanupInstrs(instr.thenBody, ctx, false),
+      elseBody: cleanupInstrs(instr.elseBody, ctx, false),
     };
   }
-  if (instr.op === "block" || instr.op === "loop") {
-    return { ...instr, body: cleanupInstrs(instr.body) };
+  if (instr.op === "block") {
+    return {
+      ...instr,
+      body: cleanupInstrs(instr.body, ctx, !instr.body.some(instrHasBranch)),
+    };
+  }
+  if (instr.op === "loop") {
+    return { ...instr, body: cleanupInstrs(instr.body, ctx, false) };
   }
   return instr;
+}
+
+function instrHasBranch(instr: Instr): boolean {
+  switch (instr.op) {
+    case "br":
+    case "br_if":
+    case "return_call":
+    case "unreachable":
+      return true;
+    case "if":
+      return instr.thenBody.some(instrHasBranch) || instr.elseBody.some(instrHasBranch);
+    case "block":
+    case "loop":
+      return instr.body.some(instrHasBranch);
+    default:
+      return false;
+  }
 }
 
 function isTerminator(instr: Instr): boolean {
@@ -1763,10 +2009,21 @@ function lowerStatement(
       })),
     ];
   }
+  rememberPackedArrayRead(stmt.value, targets, ctx);
   return [
     ...value,
     ...targets.toReversed().map((target): Instr => ({ op: "local.set", name: target })),
   ];
+}
+
+function rememberPackedArrayRead(
+  value: Expr,
+  targets: string[],
+  ctx: LowerContext,
+) {
+  if (targets.length !== 1) return;
+  const key = packedArrayReadKey(value, ctx);
+  if (key) ctx.packedArrayReadCache?.set(key, targets[0]!);
 }
 
 function projectedReturnBinding(
@@ -2012,20 +2269,35 @@ function lowerTailLoopBlock(
   locals: Set<string>,
 ): Instr[] {
   const statements: Instr[] = [];
-  for (let index = 0; index < block.statements.length; index++) {
+  const paramUpdate = tailLoopParamUpdateSuffix(block, fn, ctx);
+  const statementCount = paramUpdate?.prefixCount ?? block.statements.length;
+  for (let index = 0; index < statementCount; index++) {
     const stmt = block.statements[index];
     const usedLater = usedNames({
       kind: "block",
-      statements: block.statements.slice(index + 1),
-      ...(block.expr ? { expr: block.expr } : {}),
+      statements: block.statements.slice(index + 1, statementCount),
+      ...(paramUpdate
+        ? { expr: paramUpdate.usedLaterExpr }
+        : block.expr
+        ? { expr: block.expr }
+        : {}),
     });
     const remaining: BlockExpr = {
       kind: "block",
-      statements: block.statements.slice(index + 1),
-      ...(block.expr ? { expr: block.expr } : {}),
+      statements: block.statements.slice(index + 1, statementCount),
+      ...(paramUpdate
+        ? { expr: paramUpdate.usedLaterExpr }
+        : block.expr
+        ? { expr: block.expr }
+        : {}),
     };
     statements.push(...lowerStatement(stmt, ctx, locals, usedLater, remaining));
   }
+  const tail = paramUpdate
+    ? lowerTailLoopParamUpdate(paramUpdate, fn, ctx, locals, 0, 1)
+    : block.expr
+    ? lowerTailLoopExpr(block.expr, fn, ctx, locals, 0, 1)
+    : [];
   return [{
     op: "block",
     results: flattenType(fn.returnType, ctx.layouts).map((slot) => slot.wat),
@@ -2033,10 +2305,176 @@ function lowerTailLoopBlock(
       op: "loop",
       body: [
         ...statements,
-        ...(block.expr ? lowerTailLoopExpr(block.expr, fn, ctx, locals, 0, 1) : []),
+        ...tail,
       ],
     }, { op: "unreachable" }],
   }];
+}
+
+interface TailLoopParamUpdate {
+  prefixCount: number;
+  statements: Extract<Statement, { kind: "let" }>[];
+  rewrittenExpr: Expr;
+  usedLaterExpr: Expr;
+}
+
+function tailLoopParamUpdateSuffix(
+  block: BlockExpr,
+  fn: FnDecl,
+  ctx: LowerContext,
+): TailLoopParamUpdate | undefined {
+  if (!block.expr || !fn.params.length || block.statements.length < fn.params.length) {
+    return undefined;
+  }
+  const suffix = block.statements.slice(-fn.params.length);
+  if (!suffix.every((stmt): stmt is Extract<Statement, { kind: "let" }> => stmt.kind === "let")) {
+    return undefined;
+  }
+  const renames = new Map<string, string>();
+  const suffixNames = new Set(suffix.map((stmt) => stmt.name));
+  for (const [index, stmt] of suffix.entries()) {
+    const param = fn.params[index];
+    if (!param) return undefined;
+    if (stmt.value.kind === "call") return undefined;
+    if ([...usedNames(stmt.value)].some((name) => suffixNames.has(name))) return undefined;
+    if (
+      flattenType(stmt.type ?? exprTypeWithLocals(stmt.value, ctx), ctx.layouts).length !==
+        flattenType(param.type, ctx.layouts).length
+    ) return undefined;
+    renames.set(stmt.name, param.name);
+  }
+  const exprNames = usedNames(block.expr);
+  if ([...exprNames].some((name) => !suffixNames.has(name) && name !== fn.name)) {
+    return undefined;
+  }
+  const rewrittenExpr = renameExpr(block.expr, renames);
+  const usedLaterExpr: Expr = {
+    kind: "block",
+    statements: suffix,
+    expr: block.expr,
+  };
+  return {
+    prefixCount: block.statements.length - suffix.length,
+    statements: suffix,
+    rewrittenExpr,
+    usedLaterExpr,
+  };
+}
+
+function lowerTailLoopParamUpdate(
+  update: TailLoopParamUpdate,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+  continueDepth: number,
+  exitDepth: number,
+): Instr[] {
+  const fieldReuse = lowerTailLoopParamUpdateWithFieldReuse(update, fn, ctx, locals);
+  if (fieldReuse) {
+    return [
+      ...fieldReuse,
+      ...lowerTailLoopExpr(update.rewrittenExpr, fn, ctx, locals, continueDepth, exitDepth),
+    ];
+  }
+  const values = update.statements.flatMap((stmt, index) => {
+    const inlined = stmt.value.kind === "call"
+      ? lowerPrivateProductCallInline(stmt.value, ctx, locals, {
+        deadProductArgs: deadProductArgIndexes(stmt.value, ctx, update.usedLaterExpr),
+      })
+      : undefined;
+    return inlined ?? lowerExpr(stmt.value, ctx, locals, fn.params[index]?.type);
+  });
+  const targets = fn.params.flatMap((param) => flattenBinding(param.name, param.type, ctx.layouts));
+  return [
+    ...values,
+    ...targets.toReversed().map((target): Instr => ({ op: "local.set", name: target.name })),
+    ...lowerTailLoopExpr(update.rewrittenExpr, fn, ctx, locals, continueDepth, exitDepth),
+  ];
+}
+
+function lowerTailLoopParamUpdateWithFieldReuse(
+  update: TailLoopParamUpdate,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  const firstParam = fn.params[0];
+  const firstStmt = update.statements[0];
+  if (!firstParam || !firstStmt) return undefined;
+  const product = firstStmt.value.kind === "shape" || firstStmt.value.kind === "product_constructor"
+    ? firstStmt.value
+    : undefined;
+  if (!product || product.slots.some((slot) => slot.spread || slot.index || !slot.label)) {
+    return undefined;
+  }
+  const fieldExprs = new Map(product.slots.map((slot) => [slot.label!, slot.value]));
+  const reusable = update.statements.slice(1).some((stmt, index) => {
+    const param = fn.params[index + 1];
+    const field = param ? productFieldExprForParam(fieldExprs, param.name) : undefined;
+    return Boolean(field && exprReuseKey(field) === exprReuseKey(stmt.value));
+  });
+  if (!reusable) return undefined;
+  const firstTargets = flattenBinding(firstParam.name, firstParam.type, ctx.layouts);
+  const body: Instr[] = [
+    ...lowerExpr(firstStmt.value, ctx, locals, firstParam.type),
+    ...firstTargets.toReversed().map((target): Instr => ({ op: "local.set", name: target.name })),
+  ];
+  for (const [index, stmt] of update.statements.slice(1).entries()) {
+    const param = fn.params[index + 1];
+    if (!param) return undefined;
+    const fieldLabel = productFieldLabelForParam(fieldExprs, param.name);
+    const field = fieldLabel ? fieldExprs.get(fieldLabel) : undefined;
+    const targets = flattenBinding(param.name, param.type, ctx.layouts);
+    const fieldTargets = flattenBinding(
+      `${firstParam.name}$${fieldLabel ?? param.name}`,
+      param.type,
+      ctx.layouts,
+    );
+    if (field && exprReuseKey(field) === exprReuseKey(stmt.value) && targets.length === 1) {
+      body.push({
+        op: "local.get",
+        name: fieldTargets[0]?.name ?? `${firstParam.name}$${param.name}`,
+      });
+    } else {
+      body.push(...lowerExpr(stmt.value, ctx, locals, param.type));
+    }
+    body.push(
+      ...targets.toReversed().map((target): Instr => ({ op: "local.set", name: target.name })),
+    );
+  }
+  return body;
+}
+
+function productFieldExprForParam(
+  fields: Map<string, Expr>,
+  paramName: string,
+): Expr | undefined {
+  const label = productFieldLabelForParam(fields, paramName);
+  return label ? fields.get(label) : undefined;
+}
+
+function productFieldLabelForParam(
+  fields: Map<string, Expr>,
+  paramName: string,
+): string | undefined {
+  if (fields.has(paramName)) return paramName;
+  return [...fields.keys()].find((label) => paramName.endsWith(`_${label}`));
+}
+
+function exprReuseKey(expr: Expr): string | undefined {
+  switch (expr.kind) {
+    case "literal":
+      return `lit:${expr.literalKind}:${expr.value}`;
+    case "var":
+      return `var:${expr.name}`;
+    case "binary": {
+      const left = exprReuseKey(expr.left);
+      const right = exprReuseKey(expr.right);
+      return left && right ? `bin:${expr.op}(${left},${right})` : undefined;
+    }
+    default:
+      return undefined;
+  }
 }
 
 function lowerTailLoopExpr(
@@ -2056,6 +2494,12 @@ function lowerTailLoopExpr(
     const callee = ctx.signatures.get(expr.callee.name);
     const argOffset = Math.max(0, expr.args.length - (callee?.params.length ?? expr.args.length));
     const runtimeArgs = expr.args.slice(argOffset);
+    if (
+      runtimeArgs.length === fn.params.length &&
+      runtimeArgs.every((arg, index) =>
+        arg.kind === "var" && sameStorageName(arg.name, fn.params[index]?.name ?? "")
+      )
+    ) return [{ op: "br", depth: continueDepth }];
     const flatParams = fn.params.flatMap((param) =>
       flattenBinding(param.name, param.type, ctx.layouts)
     );
@@ -2084,26 +2528,36 @@ function lowerTailLoopExpr(
   }
   if (expr.kind === "block") {
     const statements: Instr[] = [];
-    for (let index = 0; index < expr.statements.length; index++) {
+    const paramUpdate = tailLoopParamUpdateSuffix(expr, fn, ctx);
+    const statementCount = paramUpdate?.prefixCount ?? expr.statements.length;
+    for (let index = 0; index < statementCount; index++) {
       const stmt = expr.statements[index];
       const usedLater = usedNames({
         kind: "block",
-        statements: expr.statements.slice(index + 1),
-        ...(expr.expr ? { expr: expr.expr } : {}),
+        statements: expr.statements.slice(index + 1, statementCount),
+        ...(paramUpdate
+          ? { expr: paramUpdate.usedLaterExpr }
+          : expr.expr
+          ? { expr: expr.expr }
+          : {}),
       });
       const remaining: BlockExpr = {
         kind: "block",
-        statements: expr.statements.slice(index + 1),
-        ...(expr.expr ? { expr: expr.expr } : {}),
+        statements: expr.statements.slice(index + 1, statementCount),
+        ...(paramUpdate
+          ? { expr: paramUpdate.usedLaterExpr }
+          : expr.expr
+          ? { expr: expr.expr }
+          : {}),
       };
       statements.push(...lowerStatement(stmt, ctx, locals, usedLater, remaining));
     }
-    return [
-      ...statements,
-      ...(expr.expr
-        ? lowerTailLoopExpr(expr.expr, fn, ctx, locals, continueDepth, exitDepth)
-        : [{ op: "br", depth: exitDepth } as Instr]),
-    ];
+    const tail = paramUpdate
+      ? lowerTailLoopParamUpdate(paramUpdate, fn, ctx, locals, continueDepth, exitDepth)
+      : expr.expr
+      ? lowerTailLoopExpr(expr.expr, fn, ctx, locals, continueDepth, exitDepth)
+      : [{ op: "br", depth: exitDepth } as Instr];
+    return [...statements, ...tail];
   }
   return [
     ...(lowerBackedProductTailExit(expr, fn.returnType, ctx, locals) ??
@@ -2205,6 +2659,11 @@ function lowerFixedArrayTransformerIntoBacking(
   locals: Set<string>,
 ): Instr[] | undefined {
   if (!fixedArrayBackingForName(targetParam.name, ctx)) return undefined;
+  const packedTarget = packedPlanForName(targetParam.name, ctx.packedArrays);
+  const packedPrefixShift = packedTarget
+    ? lowerPackedPrefixShiftIntoPlan(expr, packedTarget, ctx, locals)
+    : undefined;
+  if (packedPrefixShift) return packedPrefixShift;
   const transformed = fixedArrayTransformerCall(expr, targetParam, ctx);
   if (!transformed) return undefined;
   if (ctx.inlineStack?.has(transformed.callee.name)) return undefined;
@@ -2256,6 +2715,7 @@ function lowerFixedArrayTransformerIntoBacking(
     }
   }
   for (const plan of packedArrays?.values() ?? []) {
+    registerInlinedPackedArrayPlan(ctx, plan);
     const name = packedArrayLocalName(plan.name);
     if (!locals.has(name) && !ctx.tempLocals.some((item) => item.name === name)) {
       locals.add(name);
@@ -2852,6 +3312,8 @@ function lowerExpr(
       if (branch) return branch;
       const temporal = lowerTemporalIntrinsic(expr, ctx, locals);
       if (temporal) return temporal;
+      const packedPrefixShift = lowerPackedPrefixShiftCall(expr, ctx, locals, expectedType);
+      if (packedPrefixShift) return packedPrefixShift;
       const inlineArrayHelper = lowerInlineArrayHelperCall(expr, ctx, locals, expectedType);
       if (inlineArrayHelper) return inlineArrayHelper;
       const builder = lowerInlineArrayBuilderPrimitive(expr, ctx, locals, expectedType);
@@ -2864,6 +3326,13 @@ function lowerExpr(
         deadProductArgs: contextDeadProductArgIndexes(expr, ctx),
       });
       if (inlined) return inlined;
+      const scalarTailLoopInlined = lowerPrivateScalarTailLoopCallInline(
+        expr,
+        ctx,
+        locals,
+        expectedType,
+      );
+      if (scalarTailLoopInlined) return scalarTailLoopInlined;
       const scalarInlined = lowerPrivateScalarCallInline(expr, ctx, locals, expectedType);
       if (scalarInlined) return scalarInlined;
       const callee = ctx.signatures.get(expr.callee.name);
@@ -3382,12 +3851,22 @@ function lowerPrivateProductCallInline(
     ctx.tempLocals.push({ name: binding.name, type: binding.wat });
   }
   for (const plan of packedArrays?.values() ?? []) {
+    registerInlinedPackedArrayPlan(ctx, plan);
     const name = packedArrayLocalName(plan.name);
     if (!locals.has(name) && !ctx.tempLocals.some((item) => item.name === name)) {
       locals.add(name);
       ctx.tempLocals.push({ name, type: plan.packedType });
     }
   }
+  const directPackedParamInits = new Map<number, Instr[]>();
+  renamed.params.forEach((param, index) => {
+    const originalParam = callee.params[index];
+    if (!originalParam || aliasedScalarParams.has(originalParam.name)) return;
+    const plan = packedArrays?.get(param.name);
+    const arg = runtimeArgs[index];
+    if (!plan || arg?.kind !== "var") return;
+    directPackedParamInits.set(index, lowerPackedArrayInitFromExpr(plan, arg, ctx, locals));
+  });
   for (const local of collectIrLocals(renamed.body, inlineCtx)) {
     if (locals.has(local.name) || ctx.tempLocals.some((item) => item.name === local.name)) continue;
     locals.add(local.name);
@@ -3401,9 +3880,15 @@ function lowerPrivateProductCallInline(
   const scratchPrologue = [...(scratchArrays?.values() ?? [])].flatMap((plan) =>
     lowerScratchArrayInit(plan)
   );
-  const packedPrologue = [...(packedArrays?.values() ?? [])].flatMap((plan) =>
-    lowerPackedArrayInit(plan)
+  const directPackedPlanNames = new Set(
+    [...directPackedParamInits.keys()].map((index) => renamed.params[index]?.name).filter((
+      name,
+    ): name is string => Boolean(name)),
   );
+  const directPackedPrologue = [...directPackedParamInits.entries()].flatMap(([, init]) => init);
+  const packedPrologue = [...(packedArrays?.values() ?? [])].filter((plan) =>
+    !directPackedPlanNames.has(plan.name)
+  ).flatMap((plan) => lowerPackedArrayInit(plan));
   const forwarded = forwardedDeadProductCallInline(
     renamed.body,
     inlineCtx,
@@ -3415,18 +3900,29 @@ function lowerPrivateProductCallInline(
   return [
     ...runtimeArgs.flatMap((arg, index) =>
       aliasedScalarParams.has(callee.params[index]?.name ?? "") ||
-        aliasedProductParams.has(callee.params[index]?.name ?? "")
+        aliasedProductParams.has(callee.params[index]?.name ?? "") ||
+        directPackedParamInits.has(index)
         ? []
         : lowerExpr(arg, ctx, locals, callee.params[index]?.type)
     ),
-    ...paramBindings.toReversed().map((binding): Instr => ({
+    ...paramBindings.filter((binding) =>
+      ![...directPackedPlanNames].some((name) =>
+        binding.name === name || binding.name.startsWith(`${name}$`)
+      )
+    ).toReversed().map((binding): Instr => ({
       op: "local.set",
       name: binding.name,
     })),
     ...scratchPrologue,
+    ...directPackedPrologue,
     ...packedPrologue,
     ...(forwarded ?? body),
   ];
+}
+
+function registerInlinedPackedArrayPlan(ctx: LowerContext, plan: PackedArrayPlan) {
+  if (!ctx.cleanupPackedArrays) ctx.cleanupPackedArrays = new Map(ctx.packedArrays);
+  if (!ctx.cleanupPackedArrays.has(plan.name)) ctx.cleanupPackedArrays.set(plan.name, plan);
 }
 
 function forwardedDeadProductCallInline(
@@ -3509,6 +4005,127 @@ function canAliasReadOnlyProductParams(callee: FnDecl, ctx: LowerContext): boole
 }
 
 const SCALAR_BACKEND_INLINE_COST_BUDGET = 18;
+const SCALAR_TAIL_LOOP_BACKEND_INLINE_COST_BUDGET = 28;
+
+function lowerPrivateScalarTailLoopCallInline(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] | undefined {
+  if (ctx.optMode !== "release" || expr.callee.kind !== "var") return undefined;
+  if (!ctx.currentFn || ctx.currentFn.public) return undefined;
+  const callee = ctx.functions.get(expr.callee.name);
+  if (!callee || callee.public || callee.name === ctx.currentFn.name) return undefined;
+  if (ctx.inlineStack?.has(callee.name)) return undefined;
+  if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
+  if (flattenType(callee.returnType, ctx.layouts).length !== 1) return undefined;
+  if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
+  const tailCalls = analyzeTailCalls(callee);
+  if (!tailCalls.hasOnlyTailDirectSelfCalls) return undefined;
+  if (backendInlineBlockCost(callee.body) > SCALAR_TAIL_LOOP_BACKEND_INLINE_COST_BUDGET) {
+    return undefined;
+  }
+  if (privateNonSelfCallSiteCount(callee.name, ctx) !== 1) return undefined;
+  const argOffset = Math.max(0, expr.args.length - callee.params.length);
+  const runtimeArgs = expr.args.slice(argOffset);
+  if (runtimeArgs.length !== callee.params.length) return undefined;
+
+  const prefix = `__inl_${callee.name.replaceAll(/[^A-Za-z0-9_]/g, "_")}_${ctx.tempIndex++}`;
+  const renames = new Map<string, string>();
+  for (const param of callee.params) renames.set(param.name, `${prefix}_${param.name}`);
+  const renamed = renameFunctionLocals(callee, renames);
+  const scratchArrays = renamedScratchPlans(
+    ctx.scratchPlansByFunction?.get(callee.name),
+    renames,
+  );
+  const packedArrays = renamedPackedPlans(
+    ctx.packedPlansByFunction?.get(callee.name),
+    renames,
+  );
+  const localSlotArrays = renamedLocalSlotPlans(
+    ctx.localSlotPlansByFunction?.get(callee.name),
+    renames,
+  );
+  const inlineCtx: LowerContext = {
+    ...ctx,
+    currentFn: renamed,
+    localTypes: new Map(renamed.params.map((param) => [param.name, param.type])),
+    inlineStack: new Set([...(ctx.inlineStack ?? []), callee.name]),
+    scratchArrays,
+    packedArrays,
+    localSlotArrays,
+    fixedArrayTransformerAliases: new Map(),
+  };
+  const paramBindings = renamed.params.flatMap((param) =>
+    flattenBinding(param.name, param.type, ctx.layouts)
+  );
+  for (const binding of paramBindings) {
+    locals.add(binding.name);
+    ctx.tempLocals.push({ name: binding.name, type: binding.wat });
+  }
+  for (const plan of packedArrays?.values() ?? []) {
+    registerInlinedPackedArrayPlan(ctx, plan);
+    const name = packedArrayLocalName(plan.name);
+    if (!locals.has(name) && !ctx.tempLocals.some((item) => item.name === name)) {
+      locals.add(name);
+      ctx.tempLocals.push({ name, type: plan.packedType });
+    }
+  }
+  const directPackedParamInits = new Map<number, Instr[]>();
+  renamed.params.forEach((param, index) => {
+    const plan = packedArrays?.get(param.name);
+    const arg = runtimeArgs[index];
+    if (!plan || arg?.kind !== "var") return;
+    directPackedParamInits.set(index, lowerPackedArrayInitFromExpr(plan, arg, ctx, locals));
+  });
+  for (const local of collectIrLocals(renamed.body, inlineCtx)) {
+    if (locals.has(local.name) || ctx.tempLocals.some((item) => item.name === local.name)) continue;
+    locals.add(local.name);
+    ctx.tempLocals.push(local);
+  }
+  const scratchPrologue = [...(scratchArrays?.values() ?? [])].flatMap((plan) =>
+    lowerScratchArrayInit(plan)
+  );
+  const directPackedPlanNames = new Set(
+    [...directPackedParamInits.keys()].map((index) => renamed.params[index]?.name).filter((
+      name,
+    ): name is string => Boolean(name)),
+  );
+  const directPackedPrologue = [...directPackedParamInits.entries()].flatMap(([, init]) => init);
+  const filteredPackedPrologue = [...(packedArrays?.values() ?? [])].filter((plan) =>
+    !directPackedPlanNames.has(plan.name)
+  ).flatMap((plan) => lowerPackedArrayInit(plan));
+
+  return [
+    ...runtimeArgs.flatMap((arg, index) =>
+      directPackedParamInits.has(index)
+        ? []
+        : lowerExpr(arg, ctx, locals, callee.params[index]?.type)
+    ),
+    ...paramBindings.filter((binding) =>
+      ![...directPackedPlanNames].some((name) =>
+        binding.name === name || binding.name.startsWith(`${name}$`)
+      )
+    ).toReversed().map((binding): Instr => ({
+      op: "local.set",
+      name: binding.name,
+    })),
+    ...scratchPrologue,
+    ...directPackedPrologue,
+    ...filteredPackedPrologue,
+    ...lowerTailLoopBlock(renamed.body, renamed, inlineCtx, locals),
+  ];
+}
+
+function privateNonSelfCallSiteCount(name: string, ctx: LowerContext): number {
+  let count = 0;
+  for (const fn of ctx.functions.values()) {
+    if (fn.public || fn.name === name) continue;
+    count += callCountInExpr(fn.body, name);
+  }
+  return count;
+}
 
 function lowerPrivateScalarCallInline(
   expr: Extract<Expr, { kind: "call" }>,
@@ -3981,7 +4598,11 @@ function lowerRuntimeInlineArrayIndex(
   const localSlot = localSlotPlanForName(target, ctx.localSlotArrays);
   if (localSlot) return lowerLocalSlotArrayLoad(localSlot, index, ctx, locals);
   const packed = packedPlanForName(target, ctx.packedArrays);
-  if (packed) return lowerPackedArrayLoad(packed, index, ctx, locals);
+  if (packed) {
+    const cached = ctx.packedArrayReadCache?.get(packedArrayReadKeyForPlan(packed, index));
+    if (cached) return [{ op: "local.get", name: cached }];
+    return lowerPackedArrayLoad(packed, index, ctx, locals);
+  }
   const scratch = ctx.scratchArrays?.get(target);
   if (scratch) return lowerScratchArrayLoad(scratch, index, ctx, locals);
   const fallback = lowerVar(`${target}[${Math.max(0, capacity - 1)}]`, ctx, locals, itemType);
@@ -4310,6 +4931,42 @@ function lowerPackedArrayInit(plan: PackedArrayPlan): Instr[] {
       plan,
       [{ op: "local.get", name: scratchArrayLocalSlotName(plan.name, index) }],
       index * plan.bitWidth,
+      true,
+    ));
+  const value = packed.reduce(
+    (body, slot) =>
+      body.length
+        ? [...body, ...slot, { op: "binary", wasm: `${plan.packedType}.or` } as Instr]
+        : slot,
+    [] as Instr[],
+  );
+  return [
+    ...(value.length ? value : [{ op: "const", type: plan.packedType, value: 0 } as Instr]),
+    { op: "local.set", name: packedArrayLocalName(plan.name) },
+  ];
+}
+
+function lowerPackedArrayInitFromExpr(
+  plan: PackedArrayPlan,
+  source: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const packed = Array.from({ length: plan.capacity }, (_, index) =>
+    lowerPackedArraySlotValue(
+      plan,
+      lowerExpr(
+        {
+          kind: "index",
+          target: source,
+          index: staticIndexExpr(index),
+        },
+        ctx,
+        locals,
+        plan.itemType,
+      ),
+      index * plan.bitWidth,
+      true,
     ));
   const value = packed.reduce(
     (body, slot) =>
@@ -4357,7 +5014,11 @@ function lowerPackedArrayLoad(
       { op: "binary", wasm: "i32.mul" },
       { op: "binary", wasm: `${plan.packedType}.shr_u` },
     ];
-  return lowerPackedArrayValueToItem(plan, maskValue(shifted, plan.packedType, plan.bitWidth));
+  const isLastStaticLane = literal === plan.capacity - 1;
+  return lowerPackedArrayValueToItem(
+    plan,
+    isLastStaticLane ? shifted : maskValue(shifted, plan.packedType, plan.bitWidth),
+  );
 }
 
 function lowerPackedArrayStore(
@@ -4367,6 +5028,16 @@ function lowerPackedArrayStore(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  const adjacentCopy = lowerPackedArrayAdjacentCopyStore(plan, index, value, ctx, locals);
+  if (adjacentCopy) {
+    invalidatePackedArrayReadCache(plan, ctx);
+    return adjacentCopy;
+  }
+  const cachedOldStore = lowerPackedArrayCachedOldStore(plan, index, value, ctx, locals);
+  if (cachedOldStore) {
+    invalidatePackedArrayReadCache(plan, ctx);
+    return cachedOldStore;
+  }
   ensureLoweringLocals(value, ctx, locals);
   const cachedIndex = cacheRepeatedIndex(index, ctx, locals);
   const shiftName = `__fixed_array_packed_shift${ctx.tempIndex++}`;
@@ -4376,6 +5047,7 @@ function lowerPackedArrayStore(
   locals.add(shiftName);
   locals.add(valueName);
   const mask = packedMaskInstr(plan.packedType, plan.bitWidth);
+  invalidatePackedArrayReadCache(plan, ctx);
   return [
     ...cachedIndex.prefix,
     ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
@@ -4403,6 +5075,127 @@ function lowerPackedArrayStore(
   ];
 }
 
+function lowerPackedArrayCachedOldStore(
+  plan: PackedArrayPlan,
+  index: Expr,
+  value: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  const cachedOld = ctx.packedArrayReadCache?.get(packedArrayReadKeyForPlan(plan, index));
+  if (!cachedOld || !exprMentionsName(value, cachedOld)) return undefined;
+  if (hasRuntimeEffect(value, ctx.functions)) return undefined;
+  ensureLoweringLocals(value, ctx, locals);
+  const cachedIndex = cacheRepeatedIndex(index, ctx, locals);
+  const shiftName = `__fixed_array_packed_shift${ctx.tempIndex++}`;
+  const valueName = `__fixed_array_packed_value${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: shiftName, type: "i32" });
+  ctx.tempLocals.push({ name: valueName, type: plan.packedType });
+  locals.add(shiftName);
+  locals.add(valueName);
+  return [
+    ...cachedIndex.prefix,
+    ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: plan.bitWidth },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "local.set", name: shiftName },
+    ...lowerPackedArrayValueToPacked(
+      plan,
+      lowerExpr(value, ctx, locals, plan.itemType),
+      packedArrayValueAlreadyMasked(value, plan, ctx),
+    ),
+    { op: "local.set", name: valueName },
+    { op: "local.get", name: packedArrayLocalName(plan.name) },
+    ...lowerPackedArrayValueToPacked(
+      plan,
+      [{ op: "local.get", name: cachedOld }],
+      true,
+    ),
+    { op: "local.get", name: valueName },
+    { op: "binary", wasm: `${plan.packedType}.xor` },
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.xor` },
+    { op: "local.set", name: packedArrayLocalName(plan.name) },
+  ];
+}
+
+function lowerPackedArrayAdjacentCopyStore(
+  plan: PackedArrayPlan,
+  index: Expr,
+  value: Expr,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (value.kind !== "index" || value.target.kind !== "var") return undefined;
+  if (!sameStorageName(value.target.name, plan.name)) return undefined;
+  const indexOffset = indexOffsetFrom(value.index, index);
+  if (!indexOffset) return undefined;
+  const bitOffset = indexOffset * plan.bitWidth;
+  const cachedIndex = cacheRepeatedIndex(index, ctx, locals);
+  const shiftName = `__fixed_array_packed_shift${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: shiftName, type: "i32" });
+  locals.add(shiftName);
+  const shiftedSource: Instr[] = [
+    { op: "local.get", name: packedArrayLocalName(plan.name) },
+    { op: "const", type: "i32", value: Math.abs(bitOffset) },
+    { op: "binary", wasm: `${plan.packedType}.${bitOffset > 0 ? "shr_u" : "shl"}` },
+  ];
+  return [
+    ...cachedIndex.prefix,
+    ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: plan.bitWidth },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "local.set", name: shiftName },
+    { op: "local.get", name: packedArrayLocalName(plan.name) },
+    { op: "const", type: plan.packedType, value: -1 },
+    packedMaskInstr(plan.packedType, plan.bitWidth),
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.xor` },
+    { op: "binary", wasm: `${plan.packedType}.and` },
+    ...shiftedSource,
+    packedMaskInstr(plan.packedType, plan.bitWidth),
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.and` },
+    { op: "binary", wasm: `${plan.packedType}.or` },
+    { op: "local.set", name: packedArrayLocalName(plan.name) },
+  ];
+}
+
+function indexOffsetFrom(index: Expr, base: Expr): number | undefined {
+  if (JSON.stringify(index) === JSON.stringify(base)) return 0;
+  if (index.kind !== "binary") return undefined;
+  const right = staticIntegerLiteral(index.right);
+  if (right !== undefined && JSON.stringify(index.left) === JSON.stringify(base)) {
+    return index.op === "+" ? right : index.op === "-" ? -right : undefined;
+  }
+  const left = staticIntegerLiteral(index.left);
+  if (
+    left !== undefined && index.op === "+" && JSON.stringify(index.right) === JSON.stringify(base)
+  ) {
+    return left;
+  }
+  return undefined;
+}
+
+function packedArrayReadKey(value: Expr, ctx: LowerContext): string | undefined {
+  if (value.kind !== "index" || value.target.kind !== "var") return undefined;
+  const plan = packedPlanForName(value.target.name, ctx.packedArrays);
+  return plan ? packedArrayReadKeyForPlan(plan, value.index) : undefined;
+}
+
+function packedArrayReadKeyForPlan(plan: PackedArrayPlan, index: Expr): string {
+  return `${plan.name}:${JSON.stringify(index)}`;
+}
+
+function invalidatePackedArrayReadCache(plan: PackedArrayPlan, ctx: LowerContext) {
+  for (const key of ctx.packedArrayReadCache?.keys() ?? []) {
+    if (key.startsWith(`${plan.name}:`)) ctx.packedArrayReadCache?.delete(key);
+  }
+}
+
 function lowerPackedArrayUpdateStore(
   plan: PackedArrayPlan,
   update: FixedArrayUpdateCall,
@@ -4413,10 +5206,13 @@ function lowerPackedArrayUpdateStore(
   if (!rmw) return lowerPackedArrayStore(plan, update.index, update.value, ctx, locals);
   const cachedIndex = cacheRepeatedIndex(update.index, ctx, locals);
   const shiftName = `__fixed_array_packed_shift${ctx.tempIndex++}`;
-  const oldName = `__fixed_array_packed_old${ctx.tempIndex++}`;
+  const cachedOld = ctx.packedArrayReadCache?.get(
+    packedArrayReadKeyForPlan(plan, update.index),
+  );
+  const oldName = cachedOld ?? `__fixed_array_packed_old${ctx.tempIndex++}`;
   const valueName = `__fixed_array_packed_value${ctx.tempIndex++}`;
   ctx.tempLocals.push({ name: shiftName, type: "i32" });
-  ctx.tempLocals.push({ name: oldName, type: plan.valueType });
+  if (!cachedOld) ctx.tempLocals.push({ name: oldName, type: plan.valueType });
   ctx.tempLocals.push({ name: valueName, type: plan.packedType });
   locals.add(shiftName);
   locals.add(oldName);
@@ -4426,25 +5222,27 @@ function lowerPackedArrayUpdateStore(
     rmw.value,
     new Map([[rmw.oldName, { kind: "var", name: oldName }]]),
   );
-  return [
+  const body: Instr[] = [
     ...cachedIndex.prefix,
     ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
     { op: "const", type: "i32", value: plan.bitWidth },
     { op: "binary", wasm: "i32.mul" },
     { op: "local.set", name: shiftName },
-    ...lowerPackedArrayValueToItem(
-      plan,
-      maskValue(
-        [
-          { op: "local.get", name: packedArrayLocalName(plan.name) },
-          { op: "local.get", name: shiftName },
-          { op: "binary", wasm: `${plan.packedType}.shr_u` },
-        ],
-        plan.packedType,
-        plan.bitWidth,
+    ...(cachedOld ? [] : [
+      ...lowerPackedArrayValueToItem(
+        plan,
+        maskValue(
+          [
+            { op: "local.get", name: packedArrayLocalName(plan.name) },
+            { op: "local.get", name: shiftName },
+            { op: "binary", wasm: `${plan.packedType}.shr_u` },
+          ],
+          plan.packedType,
+          plan.bitWidth,
+        ),
       ),
-    ),
-    { op: "local.set", name: oldName },
+      { op: "local.set", name: oldName } as Instr,
+    ]),
     ...lowerPackedArrayValueToPacked(
       plan,
       lowerExpr(updated, ctx, locals, plan.itemType),
@@ -4464,6 +5262,8 @@ function lowerPackedArrayUpdateStore(
     { op: "binary", wasm: `${plan.packedType}.xor` },
     { op: "local.set", name: packedArrayLocalName(plan.name) },
   ];
+  invalidatePackedArrayReadCache(plan, ctx);
+  return body;
 }
 
 function lowerPackedArraySwapStore(
@@ -4473,6 +5273,7 @@ function lowerPackedArraySwapStore(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  invalidatePackedArrayReadCache(plan, ctx);
   const cachedLeft = cacheRepeatedIndex(left, ctx, locals);
   const cachedRight = cacheRepeatedIndex(right, ctx, locals);
   const leftShift = `__fixed_array_packed_left_shift${ctx.tempIndex++}`;
@@ -4529,6 +5330,331 @@ function lowerPackedArraySwapStore(
   ];
 }
 
+interface PackedPrefixShiftLoopPlan {
+  capacity: number;
+  itemType: string;
+  arrayParam: string;
+  indexParam: string;
+  limitParam: string;
+  firstParam: string;
+}
+
+interface PackedPrefixShiftCallParts {
+  capacity: number;
+  itemType: string;
+  source: Expr;
+  limit: Expr;
+  first: Expr;
+}
+
+function lowerPackedPrefixShiftCall(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] | undefined {
+  if (ctx.optMode !== "release") return undefined;
+  const parts = packedPrefixShiftCallParts(expr, ctx);
+  if (!parts) return undefined;
+  const expectedArgs = inlineArrayLikeTypeArgs(expectedType, ctx.layouts);
+  if (
+    expectedArgs &&
+    (expectedArgs[0] !== parts.capacity || expectedArgs[1] !== parts.itemType)
+  ) {
+    return undefined;
+  }
+  const resultPlan = packedArrayPlan(
+    `__fixed_array_packed_prefix_shift${ctx.tempIndex++}`,
+    parts.capacity,
+    parts.itemType,
+    ctx.layouts,
+  );
+  if (!resultPlan) return undefined;
+  ctx.tempLocals.push({ name: packedArrayLocalName(resultPlan.name), type: resultPlan.packedType });
+  locals.add(packedArrayLocalName(resultPlan.name));
+  const lowered = lowerPackedPrefixShiftIntoPlan(expr, resultPlan, ctx, locals, parts);
+  if (!lowered) return undefined;
+  return [
+    ...lowered,
+    ...lowerPackedArrayMaterialize(resultPlan, ctx, locals),
+  ];
+}
+
+function lowerPackedPrefixShiftIntoPlan(
+  expr: Expr,
+  target: PackedArrayPlan,
+  ctx: LowerContext,
+  locals: Set<string>,
+  knownParts?: PackedPrefixShiftCallParts,
+): Instr[] | undefined {
+  const parts = knownParts ??
+    (expr.kind === "call" ? packedPrefixShiftCallParts(expr, ctx) : undefined);
+  if (!parts || parts.capacity !== target.capacity || parts.itemType !== target.itemType) {
+    return undefined;
+  }
+  let sourcePlan = parts.source.kind === "var"
+    ? packedPlanForName(parts.source.name, ctx.packedArrays)
+    : undefined;
+  if (
+    sourcePlan &&
+    (sourcePlan.capacity !== target.capacity ||
+      sourcePlan.itemType !== target.itemType ||
+      sourcePlan.packedType !== target.packedType ||
+      sourcePlan.bitWidth !== target.bitWidth)
+  ) {
+    return undefined;
+  }
+  const sourceInit: Instr[] = [];
+  if (!sourcePlan) {
+    sourcePlan = packedArrayPlan(
+      `__fixed_array_packed_prefix_source${ctx.tempIndex++}`,
+      parts.capacity,
+      parts.itemType,
+      ctx.layouts,
+    );
+    if (!sourcePlan) return undefined;
+    ctx.tempLocals.push({
+      name: packedArrayLocalName(sourcePlan.name),
+      type: sourcePlan.packedType,
+    });
+    locals.add(packedArrayLocalName(sourcePlan.name));
+    sourceInit.push(...lowerPackedArrayInitFromExpr(sourcePlan, parts.source, ctx, locals));
+  }
+
+  const shiftName = `__fixed_array_packed_shift${ctx.tempIndex++}`;
+  const endShiftName = `__fixed_array_packed_shift_end${ctx.tempIndex++}`;
+  const firstName = `__fixed_array_packed_shift_first${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: shiftName, type: "i32" });
+  ctx.tempLocals.push({ name: endShiftName, type: "i32" });
+  ctx.tempLocals.push({ name: firstName, type: target.packedType });
+  locals.add(shiftName);
+  locals.add(endShiftName);
+  locals.add(firstName);
+  invalidatePackedArrayReadCache(target, ctx);
+  const storageBits = target.packedType === "i64" ? 64 : 32;
+  const sourcePackedName = packedArrayLocalName(sourcePlan.name);
+  return [
+    ...sourceInit,
+    ...lowerExpr(parts.limit, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: target.bitWidth },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "local.tee", name: shiftName },
+    { op: "const", type: "i32", value: target.bitWidth },
+    { op: "binary", wasm: "i32.add" },
+    { op: "local.set", name: endShiftName },
+    ...lowerPackedArrayValueToPacked(
+      target,
+      lowerExpr(parts.first, ctx, locals, target.itemType),
+      packedArrayValueAlreadyMasked(parts.first, target, ctx),
+    ),
+    { op: "local.set", name: firstName },
+    ...lowerPackedPrefixShiftValue(
+      target,
+      sourcePackedName,
+      shiftName,
+      endShiftName,
+      firstName,
+      storageBits,
+    ),
+    { op: "local.set", name: packedArrayLocalName(target.name) },
+  ];
+}
+
+function lowerPackedPrefixShiftValue(
+  plan: PackedArrayPlan,
+  sourceName: string,
+  shiftName: string,
+  endShiftName: string,
+  firstName: string,
+  storageBits: number,
+): Instr[] {
+  const lowPart: Instr[] = [
+    { op: "local.get", name: sourceName },
+    { op: "const", type: "i32", value: plan.bitWidth },
+    { op: "binary", wasm: `${plan.packedType}.shr_u` },
+    { op: "const", type: plan.packedType, value: 1 },
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "const", type: plan.packedType, value: 1 },
+    { op: "binary", wasm: `${plan.packedType}.sub` },
+    { op: "binary", wasm: `${plan.packedType}.and` },
+  ];
+  const firstPart: Instr[] = [
+    { op: "local.get", name: firstName },
+    { op: "local.get", name: shiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+  ];
+  const computedHighPart: Instr[] = [
+    { op: "local.get", name: sourceName },
+    { op: "const", type: plan.packedType, value: -1 },
+    { op: "local.get", name: endShiftName },
+    { op: "binary", wasm: `${plan.packedType}.shl` },
+    { op: "binary", wasm: `${plan.packedType}.and` },
+  ];
+  const totalBits = plan.capacity * plan.bitWidth;
+  const highPart: Instr[] = totalBits < storageBits ? computedHighPart : [
+    { op: "const", type: plan.packedType, value: 0 },
+    ...computedHighPart,
+    { op: "local.get", name: endShiftName },
+    { op: "const", type: "i32", value: storageBits },
+    { op: "binary", wasm: "i32.eq" },
+    { op: "select", type: plan.packedType },
+  ];
+  return [
+    ...lowPart,
+    ...firstPart,
+    { op: "binary", wasm: `${plan.packedType}.or` },
+    ...highPart,
+    { op: "binary", wasm: `${plan.packedType}.or` },
+  ];
+}
+
+function packedPrefixShiftCallParts(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  depth = 0,
+): PackedPrefixShiftCallParts | undefined {
+  if (depth > 2 || expr.callee.kind !== "var") return undefined;
+  const callee = ctx.functions.get(expr.callee.name);
+  if (!callee || callee.public || callee.params.some((param) => param.const)) return undefined;
+  if (!callee.returnType) return undefined;
+  const direct = packedPrefixShiftLoopPlan(callee, ctx);
+  const argOffset = Math.max(0, expr.args.length - callee.params.length);
+  const runtimeArgs = expr.args.slice(argOffset);
+  if (runtimeArgs.length !== callee.params.length) return undefined;
+  if (direct) return packedPrefixShiftPartsFromLoopCall(direct, callee, runtimeArgs);
+  if (!callee.body.expr || callee.body.expr.kind !== "call") return undefined;
+  const substitutions = new Map<string, Expr>();
+  callee.params.forEach((param, index) => {
+    const arg = runtimeArgs[index];
+    if (arg) substitutions.set(param.name, arg);
+  });
+  for (const stmt of callee.body.statements) {
+    if (stmt.kind !== "let") return undefined;
+    if (hasRuntimeEffect(stmt.value, ctx.functions)) return undefined;
+    substitutions.set(stmt.name, substitutePrefixShiftExpr(stmt.value, substitutions));
+  }
+  const lowered = substitutePrefixShiftExpr(callee.body.expr, substitutions);
+  return lowered.kind === "call" ? packedPrefixShiftCallParts(lowered, ctx, depth + 1) : undefined;
+}
+
+function substitutePrefixShiftExpr(expr: Expr, substitutions: Map<string, Expr>): Expr {
+  if (expr.kind === "var") {
+    const exact = substitutions.get(expr.name);
+    if (exact) return exact;
+    const indexed = expr.name.match(/^(.+)\[([0-9]+)\]$/);
+    const target = indexed ? substitutions.get(indexed[1] ?? "") : undefined;
+    if (indexed && target) {
+      return {
+        kind: "index",
+        target,
+        index: staticIndexExpr(Number.parseInt(indexed[2] ?? "0", 10)),
+      };
+    }
+  }
+  return substituteExpr(expr, substitutions);
+}
+
+function packedPrefixShiftPartsFromLoopCall(
+  plan: PackedPrefixShiftLoopPlan,
+  fn: FnDecl,
+  runtimeArgs: Expr[],
+): PackedPrefixShiftCallParts | undefined {
+  const paramIndex = new Map(fn.params.map((param, index) => [param.name, index]));
+  const initial = runtimeArgs[paramIndex.get(plan.indexParam) ?? -1];
+  if (staticIntegerLiteral(initial) !== 0) return undefined;
+  const source = runtimeArgs[paramIndex.get(plan.arrayParam) ?? -1];
+  const limit = runtimeArgs[paramIndex.get(plan.limitParam) ?? -1];
+  const first = runtimeArgs[paramIndex.get(plan.firstParam) ?? -1];
+  if (!source || !limit || !first) return undefined;
+  return { capacity: plan.capacity, itemType: plan.itemType, source, limit, first };
+}
+
+function packedPrefixShiftLoopPlan(
+  fn: FnDecl,
+  ctx: LowerContext,
+): PackedPrefixShiftLoopPlan | undefined {
+  const [capacity, itemType] = inlineArrayLikeTypeArgs(fn.returnType, ctx.layouts) ?? [];
+  if (
+    !capacity || !itemType ||
+    !packedArrayPlan(fn.params[0]?.name ?? "", capacity, itemType, ctx.layouts)
+  ) {
+    return undefined;
+  }
+  if (fn.body.statements.length !== 0 || !fn.body.expr || fn.body.expr.kind !== "match") {
+    return undefined;
+  }
+  const condition = fn.body.expr.value;
+  if (condition.kind !== "binary" || condition.op !== "<") return undefined;
+  if (condition.left.kind !== "var" || condition.right.kind !== "var") return undefined;
+  const indexParam = condition.left.name;
+  const limitParam = condition.right.name;
+  const recursiveArm = fn.body.expr.arms.find((arm) =>
+    isTrueLikePattern(arm.pattern) && arm.value.kind === "call" &&
+    arm.value.callee.kind === "var" && arm.value.callee.name === fn.name
+  );
+  const doneArm = fn.body.expr.arms.find((arm) => arm !== recursiveArm);
+  if (!recursiveArm || !doneArm || recursiveArm.value.kind !== "call") return undefined;
+  const recursiveCall = recursiveArm.value;
+  const argOffset = Math.max(0, recursiveCall.args.length - fn.params.length);
+  const recursiveArgs = recursiveCall.args.slice(argOffset);
+  if (recursiveArgs.length !== fn.params.length) return undefined;
+  const paramIndex = new Map(fn.params.map((param, index) => [param.name, index]));
+  const arrayParam = fn.params.find((param) =>
+    sameInlineArrayType(param.type, fn.returnType, ctx.layouts)
+  )?.name;
+  if (!arrayParam) return undefined;
+  const arrayIndex = paramIndex.get(arrayParam);
+  const indexIndex = paramIndex.get(indexParam);
+  const limitIndex = paramIndex.get(limitParam);
+  if (arrayIndex === undefined || indexIndex === undefined || limitIndex === undefined) {
+    return undefined;
+  }
+  const update = fixedArrayUpdateCall(recursiveArgs[arrayIndex]!, ctx);
+  if (!update || update.source.name !== arrayParam) return undefined;
+  if (!isVarNamed(update.index, indexParam)) return undefined;
+  if (!isAdjacentIndexRead(update.value, arrayParam, indexParam, 1)) return undefined;
+  if (!isIncrementByOne(recursiveArgs[indexIndex]!, indexParam)) return undefined;
+  if (!isVarNamed(recursiveArgs[limitIndex]!, limitParam)) return undefined;
+  const done = fixedArrayUpdateCall(doneArm.value, ctx);
+  if (!done || done.source.name !== arrayParam || !isVarNamed(done.index, limitParam)) {
+    return undefined;
+  }
+  if (done.capacity !== capacity || done.itemType !== itemType) return undefined;
+  if (update.capacity !== capacity || update.itemType !== itemType) return undefined;
+  const firstParam = fn.params.find((param, index) =>
+    index !== arrayIndex && index !== indexIndex && index !== limitIndex &&
+    isVarNamed(recursiveArgs[index]!, param.name) && isVarNamed(done.value, param.name)
+  )?.name;
+  if (!firstParam) return undefined;
+  return { capacity, itemType, arrayParam, indexParam, limitParam, firstParam };
+}
+
+function isTrueLikePattern(pattern: ParamPattern): boolean {
+  return (pattern.kind === "literal" && pattern.value === "true") ||
+    (pattern.kind === "type" && pattern.name === "true");
+}
+
+function isVarNamed(expr: Expr | undefined, name: string): boolean {
+  return expr?.kind === "var" && expr.name === name;
+}
+
+function isIncrementByOne(expr: Expr, name: string): boolean {
+  return expr.kind === "binary" && expr.op === "+" &&
+    ((isVarNamed(expr.left, name) && staticIntegerLiteral(expr.right) === 1) ||
+      (isVarNamed(expr.right, name) && staticIntegerLiteral(expr.left) === 1));
+}
+
+function isAdjacentIndexRead(
+  expr: Expr,
+  source: string,
+  indexName: string,
+  offset: number,
+): boolean {
+  return expr.kind === "index" && isVarNamed(expr.target, source) &&
+    indexOffsetFrom(expr.index, { kind: "var", name: indexName }) === offset;
+}
+
 function fixedArrayReadModifyWrite(
   update: FixedArrayUpdateCall,
 ): { oldName: string; value: Expr } | undefined {
@@ -4548,8 +5674,9 @@ function lowerPackedArraySlotValue(
   plan: PackedArrayPlan,
   value: Instr[],
   offset: number,
+  alreadyMasked = false,
 ): Instr[] {
-  const packed = lowerPackedArrayValueToPacked(plan, value);
+  const packed = lowerPackedArrayValueToPacked(plan, value, alreadyMasked);
   if (offset === 0) return packed;
   return [
     ...packed,
@@ -4575,14 +5702,32 @@ function packedArrayValueAlreadyMasked(
   plan: PackedArrayPlan,
   ctx: LowerContext,
 ): boolean {
-  if (value.kind !== "index" || value.target.kind !== "var") return false;
-  const source = packedPlanForName(value.target.name, ctx.packedArrays);
-  return Boolean(
-    source &&
-      source.bitWidth === plan.bitWidth &&
-      source.valueType === plan.valueType &&
-      source.packedType === plan.packedType,
-  );
+  const literal = staticIntegerLiteral(value);
+  if (literal !== undefined && literal >= 0 && literal < 2 ** plan.bitWidth) return true;
+  if (value.kind === "var") {
+    return narrowUnsignedTypeFits(exprTypeWithLocals(value, ctx), plan.bitWidth, ctx.layouts);
+  }
+  if (value.kind === "index" && value.target.kind === "var") {
+    const source = packedPlanForName(value.target.name, ctx.packedArrays);
+    return Boolean(
+      source &&
+        source.bitWidth === plan.bitWidth &&
+        source.valueType === plan.valueType &&
+        source.packedType === plan.packedType,
+    );
+  }
+  return false;
+}
+
+function narrowUnsignedTypeFits(
+  type: string | undefined,
+  bitWidth: number,
+  layouts: LayoutEnv,
+): boolean {
+  const resolved = resolveAlias(type, layouts);
+  if (resolved === "bool") return bitWidth >= 1;
+  const width = resolved ? unsignedBitWidth(resolved) : undefined;
+  return width !== undefined && width <= bitWidth;
 }
 
 function lowerPackedArrayValueToItem(plan: PackedArrayPlan, value: Instr[]): Instr[] {
@@ -4667,17 +5812,19 @@ function fixedArrayUpdateExpr(
   expectedType: string | undefined,
   ctx: LowerContext,
 ): FixedArrayUpdateCall | undefined {
-  const update = fixedArraySpreadUpdateShape(expr);
+  const updateExpr = expr.kind === "block" && expr.expr ? expr.expr : expr;
+  const update = fixedArraySpreadUpdateShape(updateExpr);
   if (!update) return undefined;
   const args = inlineArrayTypeArgs(expectedType, ctx.layouts);
   if (!args) return undefined;
   const [capacity, itemType] = args;
   const itemSlots = flattenType(itemType, ctx.layouts);
   if (itemSlots.length !== 1 || !isSelectableValueType(itemSlots[0]?.wat)) return undefined;
+  const value = expr.kind === "block" ? { ...expr, expr: update.value } : update.value;
   return {
     source: update.source,
     index: update.index,
-    value: update.value,
+    value,
     capacity,
     itemType,
     valueType: itemSlots[0].wat,
@@ -5930,6 +7077,24 @@ function exprChildren(expr: Expr): Expr[] {
     case "placeholder":
       return [];
   }
+}
+
+function callCountInExpr(expr: Expr | BlockExpr, name: string): number {
+  let count = 0;
+  const visit = (item: Expr | undefined) => {
+    if (!item) return;
+    if (item.kind === "call" && item.callee.kind === "var" && item.callee.name === name) count++;
+    for (const child of exprChildren(item)) visit(child);
+  };
+  if (expr.kind === "block") {
+    for (const stmt of expr.statements) {
+      if (stmt.kind !== "proof_const") visit(stmt.value);
+    }
+    visit(expr.expr);
+  } else {
+    visit(expr);
+  }
+  return count;
 }
 
 function removeUnreachableBackendFunctions(functions: BackendFunction[]): BackendFunction[] {

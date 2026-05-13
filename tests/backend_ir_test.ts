@@ -255,7 +255,7 @@ Deno.test("backend does not allocate unused pure locals", async () => {
   assert(!wat.includes("i32.const 3"));
 });
 
-Deno.test("backend uses local tee for immediate set get roundtrips", async () => {
+Deno.test("backend folds immediate set get roundtrips", async () => {
   const wat = await watFromSource(
     `
     pub fn main() -> i32 {
@@ -267,7 +267,8 @@ Deno.test("backend uses local tee for immediate set get roundtrips", async () =>
   );
   const main = wat.match(/\(func \$main__optimized[\s\S]*?\n  \)/)?.[0] ??
     wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-  assertStringIncludes(main, "local.tee $x");
+  assertStringIncludes(main, "i32.const 42");
+  assert(!main.includes("local.tee $x"));
   assert(!main.includes("local.set $x\n    local.get $x"));
 });
 
@@ -599,10 +600,14 @@ Deno.test("fannkuch search release lowering fuses product-state step", async () 
   assert(!search.includes("call $advance"));
   assert(!wat.includes("call $dec"));
   assert(!wat.includes("call $step_active"));
+  assert(!wat.includes("call $flip_count_loop"));
   assert(!wat.includes("call $layout_InlineArray_set__"));
   assert(!wat.includes("call $layout_InlineArray_update__"));
   assert(!wat.includes("(func $layout_InlineArray_set__"));
   assert(!wat.includes("(func $layout_InlineArray_update__"));
+  assert(!search.includes("__inl_step_active_state"));
+  assert(!/__inl_flip_count_loop_[^\s)]*_xs\$[0-9]/.test(search));
+  assert(!/__inl_rotate_left_loop_[^\s)]*_xs\$[0-9]/.test(search));
   assertStringIncludes(wat, "fixed_array_packed");
   assert(!wat.includes("fig_buffers"));
 
@@ -627,10 +632,10 @@ Deno.test("packed fixed-array dynamic read lowers through shift and mask", async
   `;
   const wat = await watFromSource(source, { resolveModule });
   const read = wat.match(/\(func \$read[\s\S]*?\n  \)/)?.[0] ?? "";
-  assertStringIncludes(read, "fixed_array_packed");
   assertStringIncludes(read, "i32.shr_u");
   assertStringIncludes(read, "i32.and");
   assert(!read.includes("select"));
+  assert(!read.includes("call $layout_InlineArray_index__"));
   assert(!wat.includes("fig_buffers"));
 
   const instance = new WebAssembly.Instance(
@@ -689,6 +694,35 @@ Deno.test("packed fixed-array update inlines small private scalar updater", asyn
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(3), 122456);
+});
+
+Deno.test("packed fixed-array read/update reuses old dynamic lane", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn dec(x: u3) -> u3 {
+      x - 1
+    }
+    fn update_after_read(xs: layout.InlineArray(7, u3), index: i32) -> i32 {
+      let old = xs[index];
+      let ys = layout.InlineArray.update(7, u3, xs, index, dec);
+      old * 10 + ys[index]
+    }
+    pub fn main(index: i32) -> i32 {
+      update_after_read(<0, 1, 2, 3, 4, 5, 6>, index)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const update = wat.match(/\(func \$update_after_read[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(update, "fixed_array_packed");
+  assert(!update.includes("__fixed_array_packed_old"));
+  assertStringIncludes(update, "i32.xor");
+  assert(!update.includes("i32.const -1"));
+  assert(!wat.includes("call $dec"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(4), 43);
 });
 
 Deno.test("public fixed-array kernel uses optimized private representation clone", async () => {
@@ -826,6 +860,40 @@ Deno.test("tail-recursive scalar inline-array set mutates local slots in loop", 
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 2314);
+});
+
+Deno.test("tail-recursive packed adjacent lane copy folds dynamic shifts", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn rotate_left_loop(
+      xs: layout.InlineArray(7, u3),
+      i: i32,
+      r: i32,
+      first: u3
+    ) -> layout.InlineArray(7, u3) {
+      match i < r {
+        true => rotate_left_loop(layout.InlineArray.set(7, u3, xs, i, xs[i + 1]), i + 1, r, first),
+        false => layout.InlineArray.set(7, u3, xs, r, first),
+      }
+    }
+    pub fn main() -> i32 {
+      let xs: layout.InlineArray(7, u3) = <1, 2, 3, 4, 5, 6, 0>;
+      let ys = rotate_left_loop(xs, 0, 4, xs[0]);
+      ys[0] * 1000000 + ys[1] * 100000 + ys[2] * 10000 + ys[3] * 1000 +
+        ys[4] * 100 + ys[5] * 10 + ys[6]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(main, "fixed_array_packed_prefix_shift");
+  assert(!main.includes("call $rotate_left_loop"));
+  assert(!main.includes("call $layout_InlineArray_set__7__u3"));
+  assert(!main.includes("loop"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 2345160);
 });
 
 Deno.test("tail-recursive scalar inline-array swap mutates local slots in loop", async () => {

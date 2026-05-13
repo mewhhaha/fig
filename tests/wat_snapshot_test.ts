@@ -23,11 +23,7 @@ Deno.test("golden WAT for direct function calls", async () => {
     ),
     `(module
   (func $main (export "main") (result i32)
-    (local $__inl_add1_x i32)
-    i32.const 41
-    local.tee $__inl_add1_x
-    i32.const 1
-    i32.add
+    i32.const 42
   )
 )`,
   );
@@ -114,11 +110,7 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
     ),
     `(module
   (func $main (export "main") (result i32)
-    (local $__inl_map_box_x$value i32)
-    i32.const 41
-    local.tee $__inl_map_box_x$value
-    i32.const 1
-    i32.add
+    i32.const 42
   )
 )`,
   );
