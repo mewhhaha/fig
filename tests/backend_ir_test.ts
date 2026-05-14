@@ -180,6 +180,219 @@ Deno.test("backend folds scalar literal arithmetic", async () => {
   assert(!wat.includes("i32.add"));
 });
 
+Deno.test("release folds static projections from let-bound values", async () => {
+  const source = `
+    type fn Lane4I32() -> type {
+      let Lane4I32 = {4*i32};
+      struct(Lane4I32)
+    }
+    pub fn main(seed: i32) -> i32 {
+      let row: Lane4I32 = <1 + seed - seed, 2, 3, 4>;
+      let col: Lane4I32 = <1, 5, 9, 13>;
+      row[0] * col[0] + row[1] * col[1] + row[2] * col[2] + row[3] * col[3]
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.const 90");
+  assert(!wat.includes("i32x4"));
+  assert(!wat.includes("i32.mul"));
+});
+
+Deno.test("release folds const locals and inlines trivial private scalar helpers", async () => {
+  const source = `
+    fn kernel() -> i32 {
+      let x = 8;
+      let y = x + 3;
+      x + y + 16
+    }
+    fn loop_sum(i: i32, end: i32, checksum: i32) -> i32 {
+      match i < end {
+        true => loop_sum(i + 1, end, checksum + kernel()),
+        false => checksum,
+      }
+    }
+    pub fn main(iterations: i32) -> i32 {
+      loop_sum(0, iterations, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const loop = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(loop, "i32.const 35");
+  assert(!loop.includes("call $kernel"));
+});
+
+Deno.test("backend lowers power-of-two multiplication through shifts", async () => {
+  const source = `
+    pub fn main(x: i32) -> i32 {
+      (x + 3) * 8
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.const 3");
+  assertStringIncludes(wat, "i32.shl");
+  assert(!wat.includes("i32.mul"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(2), 40);
+  assertEquals(main(-5), -16);
+});
+
+Deno.test("optimizer combines repeated pure scalar adds into multiplication", async () => {
+  const source = `
+    pub fn main(seed: i32) -> i32 {
+      let x = seed + 10;
+      x + x + x + x
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.shl");
+  assertEquals((wat.match(/i32\.add/g) ?? []).length, 1);
+});
+
+Deno.test("backend lowers signed power-of-two div rem through shifts", async () => {
+  const source = `
+    pub fn main(x: i32) -> i32 {
+      (x / 8) * 100 + (x % 8)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.shr_s");
+  assertStringIncludes(wat, "i32.and");
+  assert(!wat.includes("i32.div_s"));
+  assert(!wat.includes("i32.rem_s"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(17), 201);
+  assertEquals(main(-17), -201);
+});
+
+Deno.test("backend reuses repeated scalar div rem subexpressions across match arms", async () => {
+  const source = `
+    fn score_loop(i: i32, total: i32) -> i32 {
+      match i < 256 {
+        true => score_loop(
+          i + 1,
+          match ((i % (0 - 10)) + (i / (0 - 10))) % 5 != 0 {
+            true => total + (i % (0 - 10)) + (i / (0 - 10)),
+            false => total,
+          }
+        ),
+        false => total,
+      }
+    }
+    pub fn main(seed: i32) -> i32 {
+      score_loop(seed - seed, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "__match_shared");
+  assertEquals((wat.match(/i32\.div_s/g) ?? []).length, 1);
+  assertEquals((wat.match(/i32\.rem_s/g) ?? []).length, 2);
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), -1590);
+});
+
+Deno.test("backend uses unsigned power-of-two reductions for nonnegative tail indexes", async () => {
+  const source = `
+    fn score_loop(i: i32, total: i32) -> i32 {
+      match i < 16 {
+        true => score_loop(i + 1, total + (i % 4) + (i / 4)),
+        false => total,
+      }
+    }
+    pub fn main() -> i32 {
+      score_loop(0, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.shr_u");
+  assertStringIncludes(wat, "i32.and");
+  assert(!wat.includes("i32.shr_s"));
+  assert(!wat.includes("i32.div_s"));
+  assert(!wat.includes("i32.rem_s"));
+});
+
+Deno.test("backend lowers nonnegative constant remainder through reciprocal multiply", async () => {
+  const source = `
+    fn score_loop(i: i32, total: i32) -> i32 {
+      match i < 1024 {
+        true => score_loop(i + 1, total + (i % 5)),
+        false => total,
+      }
+    }
+    pub fn main() -> i32 {
+      score_loop(0, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i64.mul");
+  assertStringIncludes(wat, "i64.shr_u");
+  assert(!wat.includes("i32.rem_s"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 2046);
+});
+
+Deno.test("backend lowers small-range divisibility checks through bit masks", async () => {
+  const source = `
+    fn score_loop(i: i32, total: i32) -> i32 {
+      match i < 32 {
+        true => score_loop(i + 1, match i % 5 != 0 { true => total + i, false => total }),
+        false => total,
+      }
+    }
+    pub fn main() -> i32 {
+      score_loop(0, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.shr_u");
+  assertStringIncludes(wat, "i32.and");
+  assert(!wat.includes("i64.mul"));
+  assert(!wat.includes("i32.mul"));
+  assert(!wat.includes("i32.rem_s"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 391);
+});
+
+Deno.test("backend lowers nonnegative odd divisibility checks through modular inverses", async () => {
+  const source = `
+    fn score_loop(i: i32, total: i32) -> i32 {
+      match i < 64 {
+        true => score_loop(i + 1, match i % 5 != 0 { true => total + i, false => total }),
+        false => total,
+      }
+    }
+    pub fn main() -> i32 {
+      score_loop(0, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.mul");
+  assertStringIncludes(wat, "i32.le_u");
+  assert(!wat.includes("i64.mul"));
+  assert(!wat.includes("i32.rem_s"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 1626);
+});
+
 Deno.test("backend lowers parity remainder comparisons through bit tests", async () => {
   const source = `
     pub fn main(x: i32) -> i32 {
@@ -280,7 +493,8 @@ Deno.test("backend removes unreachable instructions after branch terminators", a
   `,
     { optMode: "release" },
   );
-  const loop = wat.match(/\(func \$loop_forever[\s\S]*?\n  \)/)?.[0] ?? "";
+  const loop = wat.match(/\(func \$loop_forever[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(loop, "br 0");
   assert(!loop.includes("br 0\n        unreachable"));
 });
@@ -305,6 +519,16 @@ Deno.test("optimizer simplifies numeric identities without dropping effects", as
   const samePureMain = samePure.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(samePureMain, "i32.const 0");
   assert(!samePureMain.includes("i32.sub"));
+
+  const cancelAdd = await watFromSource(
+    `
+    pub fn main(seed: i32) -> i32 { (1 + seed) - seed }
+  `,
+    { optMode: "release" },
+  );
+  const cancelAddMain = cancelAdd.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(cancelAddMain, "i32.const 1");
+  assert(!cancelAddMain.includes("local.get $seed"));
 
   const effectful = await watFromSource(
     `
@@ -337,7 +561,8 @@ Deno.test("benchmark-style internal loop calls private kernel directly", async (
     }
   `;
   const wat = await watFromSource(source, { memoryModel: "branch", optMode: "release" });
-  const benchLoop = wat.match(/\(func \$bench_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  const benchLoop = wat.match(/\(func \$bench_loop[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$bench[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(benchLoop, "loop");
   assert(!benchLoop.includes("call $main"));
   assert(!benchLoop.includes("call $bench_loop"));
@@ -391,6 +616,166 @@ Deno.test("backend removes private functions unreachable from exports", async ()
   assert(!wat.includes("call $used"));
 });
 
+Deno.test("public exports inline private scalar product helpers", async () => {
+  const source = `
+    type fn Vec2() -> type {
+      let Vec2 = {x: i32, y: i32};
+      struct(Vec2)
+    }
+    fn translate(point: Vec2, dx: i32, dy: i32) -> Vec2 {
+      Vec2 {x: point.x + dx, y: point.y + dy}
+    }
+    pub fn main(seed: i32) -> i32 {
+      let point: Vec2 = Vec2 {x: seed + 1, y: 2};
+      let moved = translate(point, 10, 20);
+      point.x + point.y + moved.x + moved.y
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assert(!wat.includes("call $translate"));
+  assert(!wat.includes("(func $translate"));
+  assert(!wat.includes("__inl_translate_"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(3), 42);
+});
+
+Deno.test("public exports inline single-use private product tail loops", async () => {
+  const source = `
+    type fn Acc() -> type {
+      let Acc = {sum: i32, ticks: i32};
+      struct(Acc)
+    }
+    fn run_loop(i: i32, limit: i32, acc: Acc) -> Acc {
+      match i < limit {
+        true => run_loop(i + 1, limit, Acc {sum: acc.sum + i, ticks: acc.ticks + 1}),
+        false => acc,
+      }
+    }
+    pub fn main(seed: i32) -> i32 {
+      let start: Acc = Acc {sum: 0, ticks: 0};
+      let out = run_loop(seed - seed, 1000, start);
+      out.sum + out.ticks
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(main, "loop");
+  assert(!wat.includes("call $run_loop"));
+  assert(!wat.includes("(func $run_loop"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 500500);
+});
+
+Deno.test("private wrappers keep array-free product tail loops callable", async () => {
+  const source = `
+    type fn Acc() -> type {
+      let Acc = {sum: i32, ticks: i32};
+      struct(Acc)
+    }
+    fn run_loop(i: i32, limit: i32, acc: Acc) -> Acc {
+      match i < limit {
+        true => run_loop(i + 1, limit, Acc {sum: acc.sum + i, ticks: acc.ticks + 1}),
+        false => acc,
+      }
+    }
+    fn __bench_kernel(seed: i32) -> i32 {
+      let start: Acc = Acc {sum: 0, ticks: 0};
+      let out = run_loop(seed - seed, 1000, start);
+      out.sum + out.ticks
+    }
+    pub fn main(seed: i32) -> i32 {
+      __bench_kernel(seed)
+    }
+    pub fn bench(iterations: i32) -> i32 {
+      bench_loop(0, iterations, 0)
+    }
+    fn bench_loop(i: i32, end: i32, checksum: i32) -> i32 {
+      match i < end {
+        true => bench_loop(i + 1, end, checksum + __bench_kernel(i)),
+        false => checksum,
+      }
+    }
+  `;
+  const wat = await watFromSource(source, { memoryModel: "branch", optMode: "release" });
+  const benchLoop = wat.match(/\(func \$bench_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(wat, "(func $run_loop");
+  assertStringIncludes(benchLoop, "call $run_loop");
+  assert(!benchLoop.includes("__inl_run_loop"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(source, { memoryModel: "branch", optMode: "release" }),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 500500);
+  assertEquals((instance.exports.bench as CallableFunction)(1), 500500);
+});
+
+Deno.test("public exports inline private pure scalar helpers", async () => {
+  const source = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn twice(x: i32) -> i32 { x * 2 }
+    pub fn main(seed: i32) -> i32 {
+      twice(inc(seed))
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assert(!wat.includes("call $inc"));
+  assert(!wat.includes("call $twice"));
+  assert(!wat.includes("(func $inc"));
+  assert(!wat.includes("(func $twice"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(3), 8);
+});
+
+Deno.test("release inlines generated pure const-function helpers", async () => {
+  const source = `
+    type fn Id(a: type) -> type { a }
+
+    fn Id.pure(value: a) -> Id(a) {
+      value
+    }
+
+    fn Id.bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) {
+      f(value)
+    }
+
+    fn get(seed: i32) -> Id(i32) {
+      seed + 1
+    }
+
+    fn add_id(x: i32) -> Id(i32) {
+      x + 2
+    }
+
+    pub fn main(seed: i32) -> i32 {
+      do @monad(Id) {
+        x <- get(seed);
+        let y = x + 3;
+        z <- add_id(y);
+        x + z
+      }
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assert(!wat.includes("call $__const_fn"));
+  assert(!wat.includes("(func $__const_fn"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1), 9);
+});
+
 Deno.test("optimizer drops pure unused private call arguments only when safe", async () => {
   const pure = await watFromSource(
     `
@@ -401,7 +786,7 @@ Deno.test("optimizer drops pure unused private call arguments only when safe", a
   `,
     { optMode: "release" },
   );
-  assertStringIncludes(pure, `(func $keep_second (param $b i32) (result i32)`);
+  assertStringIncludes(pure, "i32.const 72");
   assert(!pure.includes("i32.const 42"));
 
   const effectful = await watFromSource(
@@ -414,9 +799,9 @@ Deno.test("optimizer drops pure unused private call arguments only when safe", a
   `,
     { optMode: "release" },
   );
-  assertStringIncludes(effectful, `(func $keep_second (param $__pattern_`);
   assertStringIncludes(effectful, "call $clock");
-  assertStringIncludes(effectful, "call $keep_second");
+  assertStringIncludes(effectful, "i32.const 72");
+  assert(!effectful.includes("call $keep_second"));
 });
 
 Deno.test("tail-recursive self calls lower to loops by default", async () => {
@@ -437,6 +822,49 @@ Deno.test("tail-recursive self calls lower to loops by default", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 5050);
 });
 
+Deno.test("public exports inline single-use private scalar tail loops", async () => {
+  const source = `
+    fn sum(n: i32, acc: i32) -> i32 {
+      match n { 0 => acc, _ => sum(n - 1, acc + n) }
+    }
+    pub fn main() -> i32 { sum(100, 0) }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(main, "loop");
+  assert(!wat.includes("call $sum"));
+  assert(!wat.includes("(func $sum"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 5050);
+});
+
+Deno.test("tail-loop lowering skips unchanged scalar parameters", async () => {
+  const source = `
+    fn sum_to(i: i32, limit: i32, acc: i32) -> i32 {
+      match i < limit {
+        true => sum_to(i + 1, limit, acc + i),
+        false => acc,
+      }
+    }
+    pub fn main(seed: i32) -> i32 {
+      sum_to(seed - seed, 1000, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const limitSets = wat.match(/local\.set \$__inl_sum_to_\d+_limit/g) ?? [];
+  assertEquals(limitSets.length, 1);
+  assert(!wat.includes("call $sum_to"));
+  assert(!wat.includes("(func $sum_to"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 499500);
+});
+
 Deno.test("boolean true match patterns branch directly", async () => {
   const wat = await watFromSource(`
     pub fn lt(x: i32, y: i32) -> i32 {
@@ -447,6 +875,41 @@ Deno.test("boolean true match patterns branch directly", async () => {
   const lt = wat.match(/\(func \$lt[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(lt, "i32.lt_s");
   assert(!lt.includes("i32.const 1\n    i32.eq"));
+});
+
+Deno.test("release lowers pure conditional scalar updates through select", async () => {
+  const source = `
+    pub fn main(x: i32, total: i32) -> i32 {
+      match x != 0 {
+        true => total + x,
+        false => total,
+      }
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "select");
+  assert(!wat.includes("if (result i32)"));
+
+  const trapping = await watFromSource(
+    `
+    pub fn main(x: i32, total: i32) -> i32 {
+      match x != 0 {
+        true => total / x,
+        false => total,
+      }
+    }
+  `,
+    { optMode: "release" },
+  );
+  assert(!trapping.includes("select"));
+  assertStringIncludes(trapping, "if (result i32)");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(0, 10), 10);
+  assertEquals(main(5, 10), 15);
 });
 
 Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
@@ -505,11 +968,12 @@ Deno.test("private pipe-bind product search chain fuses into tail loop", async (
     }
   `;
   const wat = await watFromSource(source, { optMode: "release" });
-  const search = wat.match(/\(func \$search[\s\S]*?\n  \)/)?.[0] ?? "";
-  assertStringIncludes(search, "loop");
-  assert(!search.includes("call $prepare"));
-  assert(!search.includes("call $score"));
-  assert(!search.includes("call $advance"));
+  const lowered = wat.match(/\(func \$search[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(lowered, "loop");
+  assert(!lowered.includes("call $prepare"));
+  assert(!lowered.includes("call $score"));
+  assert(!lowered.includes("call $advance"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
@@ -547,11 +1011,12 @@ Deno.test("private let-chain product search chain fuses into same tail loop shap
     }
   `;
   const wat = await watFromSource(source, { optMode: "release" });
-  const search = wat.match(/\(func \$search[\s\S]*?\n  \)/)?.[0] ?? "";
-  assertEquals((search.match(/\bloop\b/g) ?? []).length, 1);
-  assert(!search.includes("call $prepare"));
-  assert(!search.includes("call $score"));
-  assert(!search.includes("call $advance"));
+  const lowered = wat.match(/\(func \$search[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertEquals((lowered.match(/\bloop\b/g) ?? []).length, 1);
+  assert(!lowered.includes("call $prepare"));
+  assert(!lowered.includes("call $score"));
+  assert(!lowered.includes("call $advance"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
@@ -607,7 +1072,10 @@ Deno.test("fannkuch search release lowering fuses product-state step", async () 
   assert(!wat.includes("(func $layout_InlineArray_update__"));
   assert(!search.includes("__inl_step_active_state"));
   assert(!/__inl_flip_count_loop_[^\s)]*_xs\$[0-9]/.test(search));
+  assert(!/__inl_rotate_left_[^\s)]*_xs\$[0-9]/.test(search));
   assert(!/__inl_rotate_left_loop_[^\s)]*_xs\$[0-9]/.test(search));
+  assert(!/scored_rotated\$[0-9]/.test(search));
+  assert(!/scored_count\$[0-9]/.test(search));
   assertStringIncludes(wat, "fixed_array_packed");
   assert(!wat.includes("fig_buffers"));
 
@@ -876,8 +1344,8 @@ Deno.test("tail-recursive packed adjacent lane copy folds dynamic shifts", async
         false => layout.InlineArray.set(7, u3, xs, r, first),
       }
     }
-    pub fn main() -> i32 {
-      let xs: layout.InlineArray(7, u3) = <1, 2, 3, 4, 5, 6, 0>;
+    pub fn main(seed: i32) -> i32 {
+      let xs: layout.InlineArray(7, u3) = <seed, 2, 3, 4, 5, 6, 0>;
       let ys = rotate_left_loop(xs, 0, 4, xs[0]);
       ys[0] * 1000000 + ys[1] * 100000 + ys[2] * 10000 + ys[3] * 1000 +
         ys[4] * 100 + ys[5] * 10 + ys[6]
@@ -893,7 +1361,76 @@ Deno.test("tail-recursive packed adjacent lane copy folds dynamic shifts", async
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
-  assertEquals((instance.exports.main as CallableFunction)(), 2345160);
+  assertEquals((instance.exports.main as CallableFunction)(1), 2345160);
+});
+
+Deno.test("private fixed-array forwarding transformer parameter stays packed when inlined", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Perm() -> type { layout.InlineArray(7, u3) }
+    fn rotate_left_loop(xs: Perm, i: i32, r: i32, first: u3) -> Perm {
+      if i < r {
+        rotate_left_loop(layout.InlineArray.set(7, u3, xs, i, xs[i + 1]), i + 1, r, first)
+      } else {
+        layout.InlineArray.set(7, u3, xs, r, first)
+      }
+    }
+    fn rotate_left(xs: Perm, r: i32) -> Perm {
+      let first: u3 = xs[0];
+      rotate_left_loop(xs, 0, r, first)
+    }
+    fn step(xs: Perm, r: i32) -> Perm {
+      rotate_left(xs, r)
+    }
+    pub fn main() -> i32 {
+      let ys = step(<0, 1, 2, 3, 4, 5, 6>, 3);
+      ys[0] * 100 + ys[1] * 10 + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  assertStringIncludes(wat, "fixed_array_packed_prefix_shift");
+  assert(!/__inl_rotate_left_[^\s)]*_xs\$[0-9]/.test(wat));
+  assert(!wat.includes("call $rotate_left_loop"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 120);
+});
+
+Deno.test("backed fixed-array transformer folds pure scalar aliases into prefix shift", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Perm() -> type { layout.InlineArray(7, u3) }
+    fn rotate_left_loop(xs: Perm, i: i32, r: i32, first: u3) -> Perm {
+      if i < r {
+        rotate_left_loop(layout.InlineArray.set(7, u3, xs, i, xs[i + 1]), i + 1, r, first)
+      } else {
+        layout.InlineArray.set(7, u3, xs, r, first)
+      }
+    }
+    fn apply(xs: Perm, r: i32) -> Perm {
+      let first: u3 = xs[0];
+      rotate_left_loop(xs, 0, r, first)
+    }
+    fn spin(xs: Perm, i: i32) -> Perm {
+      if i < 1 { spin(apply(xs, 3), i + 1) } else { xs }
+    }
+    pub fn main() -> i32 {
+      let ys = spin(<0, 1, 2, 3, 4, 5, 6>, 0);
+      ys[0] * 100 + ys[1] * 10 + ys[3]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  assertStringIncludes(wat, "__fixed_array_packed_xs");
+  assert(!/__inl_apply_[^\s)]*first/.test(wat));
+  assert(!wat.includes("call $apply"));
+  assert(!wat.includes("call $rotate_left_loop"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 120);
 });
 
 Deno.test("tail-recursive scalar inline-array swap mutates local slots in loop", async () => {
@@ -1351,11 +1888,59 @@ Deno.test("public inline array update folds statically known index", async () =>
   assert(!main.includes("InlineArray.update_loop"));
   assert(!main.includes("InlineArrayBuilder"));
   assert(!main.includes("if"));
+  assertStringIncludes(main, "i32.const 13");
+  assert(!main.includes("local.set $ys$0"));
+  assert(!main.includes("local.set $ys$1"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(10), 13);
+});
+
+Deno.test("projected fixed-array update only tabulates source indexes used later", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
+    fn bump(x: i32) -> i32 { x + 3 }
+    pub fn main(seed: i32) -> i32 {
+      let xs = layout.InlineArray.tabulate(16, i32, make);
+      let ys = layout.InlineArray.update(16, i32, xs, seed - seed + 7, bump);
+      xs[7] + ys[7] + ys[15]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(main, "i32.const 35");
+  assert(!main.includes("local.set $xs$0"));
+  assert(!main.includes("local.set $xs$14"));
+  assert(!main.includes("call $make"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 35);
+});
+
+Deno.test("projected fixed-array spread update only materializes used source indexes", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    pub fn main(seed: i32) -> i32 {
+      let xs: layout.InlineArray(16, i32) = <1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>;
+      let ys: layout.InlineArray(16, i32) = [...xs, [7]: xs[7] + 3];
+      xs[7] + ys[7] + ys[15]
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(main, "i32.const 35");
+  assert(!main.includes("local.set $xs$0"));
+  assert(!main.includes("local.set $xs$14"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 35);
 });
 
 Deno.test("backend prunes lowered helpers unused after fixed update lowering", async () => {
@@ -1375,6 +1960,25 @@ Deno.test("backend prunes lowered helpers unused after fixed update lowering", a
   assert(!wat.includes("InlineArray.update_loop"));
   assert(!wat.includes("InlineArrayBuilder"));
   assert(!wat.includes("call $"));
+});
+
+Deno.test("tail-loop lowering folds pure scalar branch aliases", async () => {
+  const source = `
+    const array = @import("prelude.array_static");
+    fn add(acc: i32, x: i32) -> i32 { acc + x }
+    pub fn main(seed: i32) -> i32 {
+      array.RangeIter.fold(array.RangeI32.Iter(seed - seed .. 1000), 0, add)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const loop = wat.match(/\(func \$array_RangeIter_fold_loop__add[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(!loop.includes("acc_then"));
+  assert(!loop.includes("acc_else"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 499500);
 });
 
 Deno.test("dynamic scalar inline array indexing lowers through select", async () => {
@@ -1478,7 +2082,8 @@ Deno.test("if sugar preserves self-tail loop lowering", async () => {
     pub fn main() -> i32 { sum(5, 0) }
   `;
   const wat = await watFromSource(source, { optMode: "release" });
-  const sum = wat.match(/\(func \$sum[\s\S]*?\n  \)/)?.[0] ?? "";
+  const sum = wat.match(/\(func \$sum[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(sum, "loop");
   assert(!sum.includes("call $sum"));
 
@@ -1629,14 +2234,18 @@ Deno.test("SIMD lane add matches scalar result", async () => {
 
 Deno.test("SIMD dot product lowers matrix multiply kernel", async () => {
   const source = await Deno.readTextFile("examples/perf_matmul_simd.fig");
-  const wat = await watFromSource(source);
+  const wat = await watFromSource(source, { optMode: "release" });
 
   assertStringIncludes(wat, "i32x4.mul");
   assertStringIncludes(wat, "i8x16.shuffle");
   assertStringIncludes(wat, "i32x4.add");
   assertStringIncludes(wat, "i32x4.extract_lane");
+  assertStringIncludes(wat, "(func $__fig_dot4_i32");
+  assertStringIncludes(wat, "call $__fig_dot4_i32");
 
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
   assertEquals(
     (instance.exports.main as CallableFunction)(
       1,

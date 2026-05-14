@@ -4357,6 +4357,7 @@ function synthesizeConstFnHelper(
       body: { kind: "block", statements: [], expr: body },
       generated: true,
     };
+    fn.generatedInlineable = !exprCallsFunction(fn.body, fn.name);
     context.cache.set(key, fn);
     context.functions.set(name, fn);
     context.constFnCaptures.set(name, captures.filter((capture): capture is Param => !!capture));

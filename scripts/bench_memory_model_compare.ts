@@ -420,13 +420,14 @@ const figScenarios: FigScenario[] = [
     source: `
       fn score_loop(i: i32, total: i32) -> i32 {
         match i < 256 {
-          true => score_loop(
-            i + 1,
-            match ((i % 16) + (i / 16)) % 5 != 0 {
-              true => total + (i % 16) + (i / 16),
-              false => total,
-            }
-          ),
+          true => ((i % 16) + (i / 16)) \\score ->
+            score_loop(
+              i + 1,
+              match score % 5 != 0 {
+                true => total + score,
+                false => total,
+              }
+            ),
           false => total,
         }
       }
@@ -538,13 +539,7 @@ const figScenarios: FigScenario[] = [
   {
     name: "mat4_dot1",
     expected: 90,
-    expectedShape: {
-      ...scalarFlatShape,
-      module: {
-        ...scalarFlatShape.module,
-        simd_ops: { min: 1 },
-      },
-    },
+    expectedShape: scalarFlatShape,
     source: simdDot1Source,
   },
   {

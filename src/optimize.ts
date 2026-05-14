@@ -290,13 +290,23 @@ function optimizeBlock(
       ? inlineCallExpr(expr, inlineable, { allowMultiValue: true }) ?? expr
       : expr,
   };
+  const singleUseInlined = inlineSingleUsePureLets(optimized, functions);
   const fixedUpdateFolded = foldFixedUpdateIndexLets(
-    optimized,
+    singleUseInlined,
     forwarding,
     inlineable,
     functions,
   );
-  return removeUnusedPureLets(fixedUpdateFolded, functions);
+  const staticProjectionFolded = foldStaticProjectionLets(
+    fixedUpdateFolded,
+    forwarding,
+    inlineable,
+    functions,
+  );
+  return removeUnusedPureLets(
+    inlineSingleUsePureLets(staticProjectionFolded, functions),
+    functions,
+  );
 }
 
 function foldFixedUpdateIndexLets(
@@ -385,6 +395,326 @@ function substituteMany(expr: Expr, replacements: Map<string, Expr>): Expr {
   return result;
 }
 
+function inlineSingleUsePureLets(block: BlockExpr, functions: Map<string, FnDecl>): BlockExpr {
+  const uses = usedNameCounts(block);
+  const active = new Map<string, Expr>();
+  const statements: Statement[] = [];
+  for (const stmt of block.statements) {
+    if (stmt.kind === "proof_const") {
+      statements.push(stmt);
+      continue;
+    }
+    const value = substituteMany(stmt.value, active);
+    const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
+    for (const name of bindings) active.delete(name);
+    if (
+      stmt.kind === "let" &&
+      (uses.get(stmt.name) ?? 0) === 1 &&
+      !usedNames(value).has(stmt.name) &&
+      isSpeculablePureInlineValue(value, functions)
+    ) {
+      active.set(stmt.name, value);
+      continue;
+    }
+    statements.push({ ...stmt, value });
+  }
+  return {
+    ...block,
+    statements,
+    expr: block.expr ? substituteMany(block.expr, active) : undefined,
+  };
+}
+
+function isSpeculablePureInlineValue(expr: Expr, functions: Map<string, FnDecl>): boolean {
+  if (hasRuntimeEffect(expr, functions)) return false;
+  switch (expr.kind) {
+    case "literal":
+    case "var":
+    case "placeholder":
+      return true;
+    case "binary":
+      return expr.op !== "/" && expr.op !== "%" &&
+        isSpeculablePureInlineValue(expr.left, functions) &&
+        isSpeculablePureInlineValue(expr.right, functions);
+    case "field":
+      return isSpeculablePureInlineValue(expr.value, functions) &&
+        isSpeculablePureInlineValue(expr.key, functions);
+    case "shape":
+      if (
+        expr.syntax === "collection" ||
+        expr.slots.some((slot) => !slot.label || slot.spread || slot.index || slot.repeat)
+      ) {
+        return false;
+      }
+      return expr.slots.every((slot) => isSpeculablePureInlineValue(slot.value, functions));
+    case "product_constructor":
+      return expr.slots.every((slot) => isSpeculablePureInlineValue(slot.value, functions));
+    case "block":
+      return expr.statements.length === 0 && Boolean(expr.expr) &&
+        isSpeculablePureInlineValue(expr.expr!, functions);
+    default:
+      return false;
+  }
+}
+
+function foldStaticProjectionLets(
+  block: BlockExpr,
+  forwarding: Map<string, string>,
+  inlineable: Map<string, FnDecl>,
+  functions: Map<string, FnDecl>,
+  initialActive: Map<string, Expr> = new Map(),
+): BlockExpr {
+  const active = new Map(initialActive);
+  const statements = block.statements.map((stmt) => {
+    if (stmt.kind === "proof_const") return stmt;
+    const value = optimizeExpr(
+      rewriteStaticProjections(stmt.value, active, forwarding, inlineable, functions),
+      forwarding,
+      inlineable,
+      functions,
+    );
+    const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
+    for (const name of bindings) active.delete(name);
+    if (stmt.kind === "let") {
+      const projected = staticProjectionSource(value, functions);
+      if (projected) active.set(stmt.name, projected);
+    }
+    return { ...stmt, value };
+  });
+  return {
+    ...block,
+    statements,
+    expr: block.expr
+      ? optimizeExpr(
+        rewriteStaticProjections(block.expr, active, forwarding, inlineable, functions),
+        forwarding,
+        inlineable,
+        functions,
+      )
+      : undefined,
+  };
+}
+
+function staticProjectionSource(expr: Expr, functions: Map<string, FnDecl>): Expr | undefined {
+  if (expr.kind === "block" && expr.statements.length === 0 && expr.expr) {
+    return staticProjectionSource(expr.expr, functions);
+  }
+  if (expr.kind !== "shape" && expr.kind !== "product_constructor") return undefined;
+  if (hasRuntimeEffect(expr, functions)) return undefined;
+  if (expr.slots.some((slot) => slot.spread || slot.index)) return undefined;
+  return expr;
+}
+
+function rewriteStaticProjections(
+  expr: Expr,
+  active: Map<string, Expr>,
+  forwarding: Map<string, string>,
+  inlineable: Map<string, FnDecl>,
+  functions: Map<string, FnDecl>,
+): Expr {
+  switch (expr.kind) {
+    case "index": {
+      const target = rewriteStaticProjections(
+        expr.target,
+        active,
+        forwarding,
+        inlineable,
+        functions,
+      );
+      const index = rewriteStaticProjections(
+        expr.index,
+        active,
+        forwarding,
+        inlineable,
+        functions,
+      );
+      const literalIndex = staticIntegerLiteral(index);
+      if (target.kind === "var" && literalIndex !== undefined) {
+        const source = active.get(target.name);
+        const replacement = source?.kind === "shape" || source?.kind === "product_constructor"
+          ? source.slots[literalIndex]?.value
+          : undefined;
+        if (replacement) {
+          return rewriteStaticProjections(
+            replacement,
+            active,
+            forwarding,
+            inlineable,
+            functions,
+          );
+        }
+      }
+      return { ...expr, target, index };
+    }
+    case "field": {
+      const value = rewriteStaticProjections(
+        expr.value,
+        active,
+        forwarding,
+        inlineable,
+        functions,
+      );
+      const key = rewriteStaticProjections(expr.key, active, forwarding, inlineable, functions);
+      const label = literalFieldLabel(key);
+      if (value.kind === "var" && label) {
+        const source = active.get(value.name);
+        const replacement = source?.kind === "shape" || source?.kind === "product_constructor"
+          ? source.slots.find((slot) => slot.label === label)?.value
+          : undefined;
+        if (replacement) {
+          return rewriteStaticProjections(
+            replacement,
+            active,
+            forwarding,
+            inlineable,
+            functions,
+          );
+        }
+      }
+      return { ...expr, value, key };
+    }
+    case "binary":
+      return {
+        ...expr,
+        left: rewriteStaticProjections(expr.left, active, forwarding, inlineable, functions),
+        right: rewriteStaticProjections(expr.right, active, forwarding, inlineable, functions),
+      };
+    case "call":
+      return {
+        ...expr,
+        callee: rewriteStaticProjections(expr.callee, active, forwarding, inlineable, functions),
+        args: expr.args.map((arg) =>
+          rewriteStaticProjections(arg, active, forwarding, inlineable, functions)
+        ),
+      };
+    case "pipe_bind": {
+      const value = rewriteStaticProjections(
+        expr.value,
+        active,
+        forwarding,
+        inlineable,
+        functions,
+      );
+      const scoped = new Map(active);
+      scoped.delete(expr.name);
+      return {
+        ...expr,
+        value,
+        body: rewriteStaticProjections(expr.body, scoped, forwarding, inlineable, functions),
+      };
+    }
+    case "match":
+      return {
+        ...expr,
+        value: rewriteStaticProjections(expr.value, active, forwarding, inlineable, functions),
+        arms: expr.arms.map((arm) => {
+          const scoped = new Map(active);
+          for (const name of patternBindingNames(arm.pattern)) scoped.delete(name);
+          return {
+            ...arm,
+            value: rewriteStaticProjections(
+              arm.value,
+              scoped,
+              forwarding,
+              inlineable,
+              functions,
+            ),
+          };
+        }),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          index: slot.index
+            ? rewriteStaticProjections(slot.index, active, forwarding, inlineable, functions)
+            : undefined,
+          value: rewriteStaticProjections(slot.value, active, forwarding, inlineable, functions),
+        })),
+      };
+    case "static_for_slots": {
+      const scoped = new Map(active);
+      scoped.delete(expr.iterator);
+      if (expr.valueIterator) scoped.delete(expr.valueIterator);
+      return {
+        ...expr,
+        source: rewriteStaticForProjectionSource(
+          expr.source,
+          active,
+          forwarding,
+          inlineable,
+          functions,
+        ),
+        value: rewriteStaticProjections(expr.value, scoped, forwarding, inlineable, functions),
+      };
+    }
+    case "range":
+      return {
+        ...expr,
+        start: rewriteStaticProjections(expr.start, active, forwarding, inlineable, functions),
+        end: rewriteStaticProjections(expr.end, active, forwarding, inlineable, functions),
+      };
+    case "block":
+      return foldStaticProjectionLets(
+        expr,
+        forwarding,
+        inlineable,
+        functions,
+        active,
+      );
+    case "const_fn":
+      return {
+        ...expr,
+        body: rewriteStaticProjections(expr.body, active, forwarding, inlineable, functions),
+      };
+    case "var": {
+      const [base, field] = expr.name.split(".", 2);
+      if (base && field) {
+        const source = active.get(base);
+        const replacement = source?.kind === "shape" || source?.kind === "product_constructor"
+          ? source.slots.find((slot) => slot.label === field)?.value
+          : undefined;
+        if (replacement) {
+          return rewriteStaticProjections(
+            replacement,
+            active,
+            forwarding,
+            inlineable,
+            functions,
+          );
+        }
+      }
+      return expr;
+    }
+    case "do":
+    case "literal":
+    case "placeholder":
+      return expr;
+  }
+}
+
+function rewriteStaticForProjectionSource(
+  source: StaticForSource,
+  active: Map<string, Expr>,
+  forwarding: Map<string, string>,
+  inlineable: Map<string, FnDecl>,
+  functions: Map<string, FnDecl>,
+): StaticForSource {
+  if (source.kind === "range") {
+    return {
+      ...source,
+      start: rewriteStaticProjections(source.start, active, forwarding, inlineable, functions),
+      end: rewriteStaticProjections(source.end, active, forwarding, inlineable, functions),
+    };
+  }
+  return {
+    ...source,
+    shape: rewriteStaticProjections(source.shape, active, forwarding, inlineable, functions),
+  };
+}
+
 function optimizeStatement(
   stmt: Statement,
   forwarding: Map<string, string>,
@@ -393,7 +723,9 @@ function optimizeStatement(
 ): Statement {
   if (stmt.kind === "let" || stmt.kind === "destructure_let") {
     const value = optimizeExpr(stmt.value, forwarding, inlineable, functions);
-    const inlined = stmt.kind === "destructure_let" || isFixedUpdateInlineCall(value, inlineable)
+    const inlined = stmt.kind === "destructure_let" ||
+        isFixedUpdateInlineCall(value, inlineable) ||
+        isMultiValueInlineLetCall(value, inlineable, functions)
       ? inlineCallExpr(value, inlineable, { allowMultiValue: true })
       : undefined;
     return {
@@ -402,6 +734,22 @@ function optimizeStatement(
     };
   }
   return stmt;
+}
+
+function isMultiValueInlineLetCall(
+  expr: Expr,
+  inlineable: Map<string, FnDecl>,
+  functions: Map<string, FnDecl>,
+): boolean {
+  if (expr.kind !== "call" || expr.callee.kind !== "var") return false;
+  const fn = inlineable.get(expr.callee.name);
+  return Boolean(
+    fn &&
+      !isScalarRuntimeReturn(fn.returnType) &&
+      fn.body.statements.length === 0 &&
+      fn.body.expr &&
+      isSpeculablePureInlineValue(fn.body.expr, functions),
+  );
 }
 
 function isFixedUpdateInlineCall(expr: Expr, inlineable: Map<string, FnDecl>): boolean {
@@ -428,6 +776,9 @@ function optimizeExpr(
     case "call": {
       const callee = optimizeExpr(expr.callee, forwarding, inlineable, functions);
       const args = expr.args.map((arg) => optimizeExpr(arg, forwarding, inlineable, functions));
+      if (args.length === 0 && callee.kind !== "var") {
+        return optimizeExpr(callee, forwarding, inlineable, functions, options);
+      }
       const staticValue = optimizeStaticShapeCall(callee, args);
       if (staticValue) return staticValue;
       if (callee.kind === "var") {
@@ -527,10 +878,12 @@ function optimizeExpr(
         value: optimizeExpr(expr.value, forwarding, inlineable, functions),
         key: optimizeExpr(expr.key, forwarding, inlineable, functions),
       };
-    case "block":
-      return optimizeBlock(expr, forwarding, inlineable, functions, {
+    case "block": {
+      const block = optimizeBlock(expr, forwarding, inlineable, functions, {
         allowMultiValueResult: options.allowMultiValueResult,
       });
+      return block.statements.length === 0 && block.expr ? block.expr : block;
+    }
     case "literal":
     case "var":
     case "placeholder":
@@ -838,12 +1191,20 @@ function optimizeBinary(
   expr: Extract<Expr, { kind: "binary" }>,
   functions: Map<string, FnDecl>,
 ): Expr {
+  const literal = foldIntegerLiteralBinary(expr);
+  if (literal) return literal;
   if (isNumberLiteral(expr.right, 0) && (expr.op === "+" || expr.op === "-")) return expr.left;
   if (isNumberLiteral(expr.left, 0) && expr.op === "+") return expr.right;
+  const combinedAdd = combineRepeatedAdd(expr, functions);
+  if (combinedAdd) return combinedAdd;
   if (
     expr.op === "-" && samePureExpr(expr.left, expr.right, functions)
   ) {
     return { kind: "literal", literalKind: "number", value: "0" };
+  }
+  if (expr.op === "-" && expr.left.kind === "binary" && expr.left.op === "+") {
+    if (samePureExpr(expr.left.left, expr.right, functions)) return expr.left.right;
+    if (samePureExpr(expr.left.right, expr.right, functions)) return expr.left.left;
   }
   if (isNumberLiteral(expr.right, 1) && expr.op === "*") return expr.left;
   if (isNumberLiteral(expr.left, 1) && expr.op === "*") return expr.right;
@@ -863,13 +1224,149 @@ function optimizeBinary(
   return expr;
 }
 
+function combineRepeatedAdd(
+  expr: Extract<Expr, { kind: "binary" }>,
+  functions: Map<string, FnDecl>,
+): Expr | undefined {
+  if (expr.op !== "+") return undefined;
+  const leftLiteral = staticIntegerLiteral(expr.left);
+  const rightLiteral = staticIntegerLiteral(expr.right);
+  const left = affinePureTerm(expr.left, functions);
+  const right = affinePureTerm(expr.right, functions);
+  if (left && rightLiteral !== undefined) {
+    return buildAffineTerm(left.term, left.scale, left.offset + rightLiteral);
+  }
+  if (right && leftLiteral !== undefined) {
+    return buildAffineTerm(right.term, right.scale, right.offset + leftLiteral);
+  }
+  if (!left || !right || left.key !== right.key) return undefined;
+  return buildAffineTerm(left.term, left.scale + right.scale, left.offset + right.offset);
+}
+
+function affinePureTerm(
+  expr: Expr,
+  functions: Map<string, FnDecl>,
+): { key: string; term: Expr; scale: number; offset: number } | undefined {
+  if (!hasRuntimeEffect(expr, functions) && expr.kind === "binary" && expr.op === "+") {
+    const right = staticIntegerLiteral(expr.right);
+    const left = affinePureTerm(expr.left, functions);
+    if (left && right !== undefined) return { ...left, offset: left.offset + right };
+    const leftLiteral = staticIntegerLiteral(expr.left);
+    const rightTerm = affinePureTerm(expr.right, functions);
+    if (rightTerm && leftLiteral !== undefined) {
+      return { ...rightTerm, offset: rightTerm.offset + leftLiteral };
+    }
+  }
+  const scaled = scaledPureTerm(expr, functions);
+  return scaled ? { ...scaled, offset: 0 } : undefined;
+}
+
+function buildAffineTerm(term: Expr, scale: number, offset: number): Expr | undefined {
+  if (
+    scale < -0x8000_0000 || scale > 0x7fff_ffff ||
+    offset < -0x8000_0000 || offset > 0x7fff_ffff
+  ) {
+    return undefined;
+  }
+  const scaled: Expr = scale === 0
+    ? { kind: "literal", literalKind: "number", value: "0" }
+    : scale === 1
+    ? term
+    : {
+      kind: "binary",
+      op: "*",
+      left: term,
+      right: { kind: "literal", literalKind: "number", value: String(scale) },
+    };
+  if (offset === 0) return scaled;
+  return {
+    kind: "binary",
+    op: "+",
+    left: scaled,
+    right: { kind: "literal", literalKind: "number", value: String(offset) },
+  };
+}
+
+function scaledPureTerm(
+  expr: Expr,
+  functions: Map<string, FnDecl>,
+): { key: string; term: Expr; scale: number } | undefined {
+  if (!hasRuntimeEffect(expr, functions) && expr.kind === "binary" && expr.op === "*") {
+    const right = staticIntegerLiteral(expr.right);
+    if (right !== undefined && !hasRuntimeEffect(expr.left, functions)) {
+      return { key: stableExprKey(expr.left), term: expr.left, scale: right };
+    }
+    const left = staticIntegerLiteral(expr.left);
+    if (left !== undefined && !hasRuntimeEffect(expr.right, functions)) {
+      return { key: stableExprKey(expr.right), term: expr.right, scale: left };
+    }
+  }
+  if (hasRuntimeEffect(expr, functions)) return undefined;
+  return { key: stableExprKey(expr), term: expr, scale: 1 };
+}
+
+function foldIntegerLiteralBinary(expr: Extract<Expr, { kind: "binary" }>): Expr | undefined {
+  const left = staticIntegerLiteral(expr.left);
+  const right = staticIntegerLiteral(expr.right);
+  if (left === undefined || right === undefined) return undefined;
+  switch (expr.op) {
+    case "+":
+      return numberLiteralIfI32(left + right);
+    case "-":
+      return numberLiteralIfI32(left - right);
+    case "*":
+      return numberLiteralIfI32(left * right);
+    case "/":
+      if (right === 0 || (left === -0x8000_0000 && right === -1)) return undefined;
+      return numberLiteralIfI32(Math.trunc(left / right));
+    case "%":
+      if (right === 0 || (left === -0x8000_0000 && right === -1)) return undefined;
+      return numberLiteralIfI32(left % right);
+    case "==":
+      return boolLiteral(left === right);
+    case "!=":
+      return boolLiteral(left !== right);
+    case "<":
+      return boolLiteral(left < right);
+    case "<=":
+      return boolLiteral(left <= right);
+    case ">":
+      return boolLiteral(left > right);
+    case ">=":
+      return boolLiteral(left >= right);
+    default:
+      return undefined;
+  }
+}
+
+function numberLiteralIfI32(value: number): Expr | undefined {
+  return Number.isInteger(value) && value >= -0x8000_0000 && value <= 0x7fff_ffff
+    ? { kind: "literal", literalKind: "number", value: String(value) }
+    : undefined;
+}
+
+function boolLiteral(value: boolean): Expr {
+  return { kind: "literal", literalKind: "bool", value: String(value) };
+}
+
 function isNumberLiteral(expr: Expr, value: number): boolean {
   return expr.kind === "literal" && expr.literalKind === "number" &&
     Number.parseInt(expr.value, 10) === value;
 }
 
-function isIntegerLiteral(expr: Expr): boolean {
+function isIntegerLiteral(expr: Expr): expr is Extract<Expr, { kind: "literal" }> {
   return expr.kind === "literal" && expr.literalKind === "number" && /^-?[0-9]+$/.test(expr.value);
+}
+
+function staticIntegerLiteral(expr: Expr): number | undefined {
+  if (!isIntegerLiteral(expr)) return undefined;
+  return Number.parseInt(expr.value, 10);
+}
+
+function literalFieldLabel(expr: Expr): string | undefined {
+  if (expr.kind !== "literal") return undefined;
+  if (expr.literalKind !== "literalType" && expr.literalKind !== "string") return undefined;
+  return expr.value.replace(/^#/, "").replace(/^"|"$/g, "");
 }
 
 function isBoolLiteral(expr: Expr, value: boolean): boolean {
@@ -1615,6 +2112,106 @@ function usedNames(expr: Expr | undefined): Set<string> {
   };
   visit(expr);
   return names;
+}
+
+function usedNameCounts(block: BlockExpr): Map<string, number> {
+  const counts = new Map<string, number>();
+  const add = (name: string, count = 1) => counts.set(name, (counts.get(name) ?? 0) + count);
+  const merge = (items: Map<string, number>) => {
+    for (const [name, count] of items) add(name, count);
+  };
+  const exprCounts = (expr: Expr | undefined): Map<string, number> => {
+    const result = new Map<string, number>();
+    const addLocal = (name: string, count = 1) => result.set(name, (result.get(name) ?? 0) + count);
+    const mergeLocal = (items: Map<string, number>) => {
+      for (const [name, count] of items) addLocal(name, count);
+    };
+    const visit = (item: Expr | undefined) => {
+      if (!item) return;
+      switch (item.kind) {
+        case "var":
+          addLocal(baseName(item.name));
+          return;
+        case "call":
+          visit(item.callee);
+          for (const arg of item.args) visit(arg);
+          return;
+        case "index":
+          visit(item.target);
+          visit(item.index);
+          return;
+        case "binary":
+          visit(item.left);
+          visit(item.right);
+          return;
+        case "pipe_bind": {
+          visit(item.value);
+          const body = exprCounts(item.body);
+          body.delete(item.name);
+          mergeLocal(body);
+          return;
+        }
+        case "match":
+          visit(item.value);
+          for (const arm of item.arms) {
+            const armCounts = exprCounts(arm.value);
+            for (const binding of patternBindingNames(arm.pattern)) armCounts.delete(binding);
+            mergeLocal(armCounts);
+          }
+          return;
+        case "shape":
+        case "product_constructor":
+          for (const slot of item.slots) {
+            visit(slot.index);
+            visit(slot.value);
+          }
+          return;
+        case "static_for_slots":
+          if (item.source.kind === "range") {
+            visit(item.source.start);
+            visit(item.source.end);
+          } else {
+            visit(item.source.shape);
+          }
+          visit(item.value);
+          return;
+        case "range":
+          visit(item.start);
+          visit(item.end);
+          return;
+        case "field":
+          visit(item.value);
+          visit(item.key);
+          return;
+        case "block":
+          mergeLocal(usedNameCounts(item));
+          return;
+        case "const_fn":
+          visit(item.body);
+          return;
+        case "do":
+          for (const stmt of item.statements) {
+            if (stmt.kind === "do_bind") {
+              visit(stmt.value);
+              continue;
+            }
+            if (stmt.kind !== "proof_const") visit(stmt.value);
+          }
+          visit(item.expr);
+          return;
+        case "literal":
+        case "placeholder":
+          return;
+      }
+    };
+    visit(expr);
+    return result;
+  };
+  for (const stmt of block.statements) {
+    if (stmt.kind !== "proof_const") merge(exprCounts(stmt.value));
+  }
+  merge(exprCounts(block.expr));
+  return counts;
 }
 
 function blockUsedNames(block: BlockExpr): Set<string> {
