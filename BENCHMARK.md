@@ -1,17 +1,12 @@
 # Benchmarks
 
-These numbers compare Fig compiled to Wasm against equivalent JavaScript and Rust kernels. They are
-machine-local measurements from the current working tree and should be used mainly for regression
-tracking.
+These numbers compare Fig compiled to Wasm against equivalent Rust kernels. They are machine-local
+measurements from the current working tree and should be used mainly for regression tracking.
 
-Fig is compiled with `optMode: "release"` and `memoryModel: "branch"`. The tables report both the
-old exported-call shape and the new internal-loop shape:
-
-- `Fig/Wasm external`: JavaScript calls the exported Wasm `main(seed)` once per measured iteration.
-- `Fig/Wasm internal`: JavaScript calls exported Wasm `bench(iterations)` once, and the measured
-  loop runs inside Wasm.
-- `Fig/Wasm kernel`: the scenario compiled without the internal benchmark wrapper, used for
-  apples-to-apples binary-size comparison with `Rust/Wasm`.
+Fig is compiled with `optMode: "release"` and `memoryModel: "branch"`. The benchmark harness only
+reports the internal-loop shape: Deno instantiates the Fig Wasm module and calls exported
+`bench(iterations)` once, while the measured loop runs inside Wasm. The comparison table is limited
+to Fig internal-loop rows and native Rust rows.
 
 ## Environment
 
@@ -26,10 +21,10 @@ old exported-call shape and the new internal-loop shape:
 deno run --allow-read --allow-write --allow-run scripts/bench_memory_model_compare.ts 100000
 ```
 
-Current status: the release-gated command above completes. `fannkuch_redux_7` is now slightly
-smaller than the stripped Rust/Wasm kernel size reference. In the latest full timing run every
-Fig/Wasm internal-loop row is within 1.2x of the native Rust timing, and several rows are faster
-than Rust.
+Current status: the release-gated command above completes. The suite includes branchy scalar
+systems-style kernels such as collision checks, path-grid scoring, and a small CPU grid raycaster.
+The latest saved run has 13 of 17 rows at or under 1.2x native Rust; the remaining over-target rows
+are `collision_aabb_64`, `cpu_raycaster_64`, `range_fold_1k`, and `fannkuch_redux_7`.
 
 The Rust comparison is compiled by the benchmark harness with:
 
@@ -39,55 +34,27 @@ rustc -C opt-level=3 -C target-cpu=native
 
 ## Results
 
-The table below focuses on generated Wasm size. `Fig compare` is the module used for the timed
-external/internal benchmark and includes both `main` and `bench`. `Fig kernel` is the same scenario
-compiled as a single exported kernel, which is the fair size comparison to `Rust/Wasm`.
+Timed rows from the latest run:
 
-| Scenario                         | Fig compare Wasm | Fig kernel Wasm | Rust/Wasm |
-| -------------------------------- | ---------------: | --------------: | --------: |
-| `scalar_reuse_nway`              |              108 |              44 |       140 |
-| `product_shadow_update`          |              108 |              44 |       225 |
-| `tail_product_loop_1k`           |              197 |             109 |       348 |
-| `inline_array_builder_map`       |              105 |              38 |       530 |
-| `compact_filter_collect`         |              620 |             529 |       317 |
-| `alias_snapshot_update`          |              154 |              77 |       224 |
-| `fixed_collection_update`        |              105 |              38 |       278 |
-| `fixed_collection_spread_update` |              105 |              38 |       261 |
-| `collision_aabb_64`              |              283 |             204 |       275 |
-| `path_grid_score_16`             |              196 |             116 |       189 |
-| `range_fold_1k`                  |              180 |              92 |       333 |
-| `monadic_do_id_chain`            |              123 |              47 |       182 |
-| `applicative_do_id_map`          |              120 |              44 |       160 |
-| `fannkuch_redux_7`               |             1262 |            1185 |      1190 |
-| `mat4_dot1`                      |              107 |              41 |       416 |
-| `mat4_full`                      |              904 |             575 |       648 |
-
-Timed rows from the same run:
-
-| Scenario                         | Fig external ns/call | Fig internal ns/call | JavaScript ns/call | Rust ns/call |
-| -------------------------------- | -------------------: | -------------------: | -----------------: | -----------: |
-| `scalar_reuse_nway`              |                 11.8 |                  0.7 |                6.9 |          0.6 |
-| `product_shadow_update`          |                 10.4 |                  0.8 |               11.6 |          1.9 |
-| `tail_product_loop_1k`           |                295.9 |                237.7 |              484.5 |        344.4 |
-| `inline_array_builder_map`       |                 16.5 |                  0.8 |              625.5 |         22.1 |
-| `compact_filter_collect`         |                 24.1 |                  2.6 |               90.9 |         15.6 |
-| `alias_snapshot_update`          |                 13.7 |                  2.9 |               12.4 |         10.7 |
-| `fixed_collection_update`        |                 15.9 |                  1.3 |              557.4 |          4.8 |
-| `fixed_collection_spread_update` |                 11.3 |                  0.7 |               40.0 |          2.3 |
-| `collision_aabb_64`              |                116.2 |                 53.4 |              175.5 |         59.7 |
-| `path_grid_score_16`             |                185.5 |                174.7 |              487.8 |        177.6 |
-| `range_fold_1k`                  |                349.7 |                212.5 |              427.5 |        263.6 |
-| `monadic_do_id_chain`            |                 10.3 |                  0.7 |                5.4 |          1.0 |
-| `applicative_do_id_map`          |                 12.1 |                  0.9 |                5.3 |          0.8 |
-| `fannkuch_redux_7`               |             118472.9 |             109179.6 |           192271.6 |      93203.3 |
-| `mat4_dot1`                      |                 11.9 |                  0.7 |               18.6 |          2.2 |
-| `mat4_full`                      |                 26.7 |                 12.7 |               51.9 |         25.2 |
-
-Dynamic fixed-array diagnostics from the same run:
-
-| Scenario           | Dynamic selectors | Set/update calls | Spread helpers | Slot-copy/select sites | Transient sets | Flat | Scratch | Packed | Local slots |
-| ------------------ | ----------------: | ---------------: | -------------: | ---------------------: | -------------: | ---: | ------: | -----: | ----------: |
-| `fannkuch_redux_7` |                 0 |                0 |              0 |                      0 |              0 |    0 |       0 |      1 |           0 |
+| Scenario                         |  Calls | Fig internal ns/call | Rust ns/call | Ratio |    Checksum |
+| -------------------------------- | -----: | -------------------: | -----------: | ----: | ----------: |
+| `scalar_reuse_nway`              | 100000 |                  0.8 |          0.8 |  1.00 | -1471036480 |
+| `product_shadow_update`          | 100000 |                  0.7 |          2.3 |  0.30 |  1413565408 |
+| `tail_product_loop_1k`           |   5000 |                309.4 |        430.4 |  0.72 | -1792467296 |
+| `inline_array_builder_map`       |  25000 |                  0.8 |         18.3 |  0.04 |      475000 |
+| `compact_filter_collect`         |  50000 |                 15.0 |         12.8 |  1.17 |      100000 |
+| `alias_snapshot_update`          | 100000 |                  4.1 |         10.1 |  0.41 |  1418165408 |
+| `fixed_collection_update`        |  25000 |                  0.8 |          3.2 |  0.25 |      875000 |
+| `fixed_collection_spread_update` |  25000 |                  0.8 |          2.3 |  0.35 |      875000 |
+| `collision_aabb_64`              |  12500 |                100.8 |         60.6 |  1.66 |      112500 |
+| `path_grid_score_16`             |  12500 |                195.1 |        169.3 |  1.15 |    38250000 |
+| `cpu_raycaster_64`               |  12500 |                279.8 |        225.0 |  1.24 |    72124247 |
+| `range_fold_1k`                  |   5000 |                336.5 |        263.6 |  1.28 | -1797467296 |
+| `monadic_do_id_chain`            | 100000 |                  0.9 |          1.4 |  0.64 |  1410665408 |
+| `applicative_do_id_map`          | 100000 |                  0.9 |          1.2 |  0.75 |  1410765408 |
+| `fannkuch_redux_7`               |    100 |             123520.5 |      97941.8 |  1.26 |     2281600 |
+| `mat4_dot1`                      | 100000 |                  0.8 |          2.0 |  0.40 |     9000000 |
+| `mat4_full`                      | 100000 |                 20.1 |         26.0 |  0.77 |   494400000 |
 
 ## Fannkuch Lowering Investigation
 
@@ -187,27 +154,22 @@ invalidation or destination-aware branch result lowering.
 Recent local comparison reruns on this final tree produced `fannkuch_redux_7` internal timings of
 `103679.3`, `108065.6`, `105224.6`, `108650.2`, `120498.2`, `103818.7`, `106591.3`, `192031.7`,
 `118779.1`, `102704.3`, `131926.0`, `115562.5`, `114405.9`, `109495.8`, `123779.4`, `112639.3`,
-`122702.9`, `105304.4`, `138790.7`, `116102.8`, `109109.7`, `116669.0`, and `109179.6 ns/call`,
-against Rust timings of `107435.2`, `97123.5`, `99007.7`, `107722.6`, `114291.5`, `96560.8`,
-`98842.2`, `105409.1`, `87820.7`, `84673.4`, `89164.0`, `112099.6`, `89493.6`, `91065.3`, `90703.0`,
-`95209.4`, `96173.4`, `100131.4`, `86586.3`, `102757.3`, `86336.5`, `98276.7`, and
-`93203.3 ns/call`. The latest saved full run is about `1.17x` Rust runtime, and the best historical
-Fig result remains faster than Rust.
+`122702.9`, `105304.4`, `138790.7`, `116102.8`, `109109.7`, `116669.0`, `109179.6`, `134063.8`, and
+`123520.5 ns/call`, against Rust timings of `107435.2`, `97123.5`, `99007.7`, `107722.6`,
+`114291.5`, `96560.8`, `98842.2`, `105409.1`, `87820.7`, `84673.4`, `89164.0`, `112099.6`,
+`89493.6`, `91065.3`, `90703.0`, `95209.4`, `96173.4`, `100131.4`, `86586.3`, `102757.3`, `86336.5`,
+`98276.7`, `93203.3`, `105906.5`, and `97941.8 ns/call`. The latest saved full run above is about
+`1.26x` Rust runtime, and the best historical Fig result remains faster than Rust.
 
 ## Notes
 
 - Fig/Wasm is produced by the local compiler and instantiated through Deno's WebAssembly runtime.
 - The Fig internal-loop checksum is an exported `i32`, so it intentionally shows Wasm `i32` wrapping
   for high-volume scalar/product checksums.
-- JavaScript runs in the same Deno/V8 process as the benchmark harness.
 - Rust is compiled to a native binary with `black_box` around inputs and loop bodies where the
   harness needs to prevent constant-folding away the measured work.
-- `Rust/Wasm` reports the size of a separate stripped `no_std` `wasm32-unknown-unknown` module for
-  the equivalent Rust kernel. It is a binary-size reference only, not a timed runtime column.
 - The `calls` count is reduced for heavier 1k-loop and builder scenarios by the benchmark harness,
   so `ns/call` is the most comparable per-scenario column.
-- The size table reports binary module sizes in bytes. `Fig compare Wasm` includes benchmark wrapper
-  code; `Fig kernel Wasm` does not.
 - `alias_snapshot_update`, `fixed_collection_update`, and `fixed_collection_spread_update` are
   deliberately adversarial value-reuse cases. `fixed_collection_update` now projects both the
   updated result slots and the pure tabulated source slots that are actually read later, and
@@ -217,9 +179,9 @@ Fig result remains faster than Rust.
   iterator pipeline cost.
 - `mat4_full` shares repeated SIMD dot-product bodies through a generated private helper in release
   mode and avoids packing fully literal lane arrays only to extract them back to scalar ABI slots.
-  Its kernel is now smaller than Rust's stripped Wasm reference.
-- `collision_aabb_64` and `path_grid_score_16` are common systems-style kernels that stress flat
-  products, nested conditionals, integer division/modulo, and scalar loop lowering.
+- `collision_aabb_64`, `path_grid_score_16`, and `cpu_raycaster_64` are common systems-style kernels
+  that stress flat products, nested conditionals, integer division/modulo, scalar loop lowering, and
+  branchy grid traversal.
 - `fannkuch_redux_7` is adapted from the Computer Language Benchmarks Game benchmark description and
   uses fixed arrays, dynamic indexing, and repeated public `InlineArray.update`/`set` paths. The
   current lowering uses packed bounded arrays for the dynamic reverse/rotate/count paths and fuses
