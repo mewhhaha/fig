@@ -21,6 +21,11 @@ import {
   isIntrinsicWrapper,
 } from "./primitives.ts";
 import {
+  createCompilerPluginRegistry,
+  type CompilerPluginOptions,
+  type CompilerPluginRegistry,
+} from "./plugins.ts";
+import {
   type I32Range,
   parseRefinedI32Type,
   type ScalarFacts,
@@ -128,6 +133,7 @@ interface LowerContext {
   functions: Map<string, FnDecl>;
   signatures: Map<string, FnDecl>;
   intrinsicIdsByName: Map<string, string>;
+  pluginRegistry: CompilerPluginRegistry;
   scratchPlansByFunction?: Map<string, Map<string, ScratchArrayPlan>>;
   packedPlansByFunction?: Map<string, Map<string, PackedArrayPlan>>;
   localSlotPlansByFunction?: Map<string, Map<string, LocalSlotArrayPlan>>;
@@ -192,7 +198,7 @@ interface LayoutEnv {
 export type TailCallMode = "opcode";
 export type MemoryModel = "temporal" | "branch-debug" | "branch";
 
-export interface BackendOptions {
+export interface BackendOptions extends CompilerPluginOptions {
   tailCallMode?: TailCallMode;
   memoryModel?: MemoryModel;
   optMode?: OptMode;
@@ -240,11 +246,13 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
     }]);
   }
   const optMode = options.optMode ?? "debug";
+  const pluginRegistry = createCompilerPluginRegistry(options.plugins);
+  if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
   const optimized = optimizeProgram(program, { optMode });
   const layouts = createLayoutEnv(optimized);
   const imports = optimized.imports.map((item) => importAsFn(item));
   const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
-    decl.kind === "fn" && !decl.primitiveId && !isIntrinsicWrapper(decl) &&
+    decl.kind === "fn" && !decl.primitiveId && !isIntrinsicWrapper(decl, pluginRegistry) &&
     !decl.params.some((param) => param.const) &&
     Boolean(decl.returnType)
   );
@@ -263,7 +271,8 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
       fn,
     ])),
     signatures: new Map([...imports, ...projectedRuntimeFns].map((fn) => [fn.name, fn])),
-    intrinsicIdsByName: intrinsicIdsByFunctionName(optimized.declarations),
+    intrinsicIdsByName: intrinsicIdsByFunctionName(optimized.declarations, pluginRegistry),
+    pluginRegistry,
     returnProjectionPlans,
     tempIndex: 0,
     tempLocals: [],
@@ -466,7 +475,10 @@ function exprParamGuardUpperBound(expr: Expr | undefined, param: string): number
     return undefined;
   }
   const right = staticIntegerLiteral(value.right);
-  if (right === undefined) return undefined;
+  if (right === undefined) {
+    if (value.op === "<" && value.right.kind === "var") return I32_MAX;
+    return undefined;
+  }
   if (value.op === "<" && right > 0) return right;
   if (value.op === "<=" && right >= 0 && right < I32_MAX) return right + 1;
   return undefined;
@@ -1635,6 +1647,11 @@ function substituteExpr(expr: Expr, substitutions: Map<string, Expr>): Expr {
     case "static_for_slots":
       return { ...expr, value: substituteExpr(expr.value, substitutions) };
     case "field":
+      {
+        const direct = fieldAccessName(expr);
+        const replacement = direct ? substitutions.get(direct) : undefined;
+        if (replacement) return replacement;
+      }
       return {
         ...expr,
         value: substituteExpr(expr.value, substitutions),
@@ -1695,6 +1712,11 @@ function cleanupInstrs(
         if (isTerminator(folded)) break;
         continue;
       }
+      const flattened = flattenStraightLineLoopGuard(cleaned, instr);
+      if (flattened) {
+        cleaned.push(...flattened);
+        continue;
+      }
     }
     if (instr.op === "block" && !instr.results?.length && instr.body.length === 0) {
       continue;
@@ -1752,10 +1774,45 @@ function cleanupInstrs(
     }
     if (beforeCurrent?.op === "const" && current?.op === "local.set") {
       cleaned.splice(cleaned.length - 2, 2);
-      constLocals.set(current.name, beforeCurrent);
+      if (
+        !allowDeadLocalRoundtrip ||
+        instrs.slice(index + 1).some((item) => instrReadsLocal(item, current.name))
+      ) {
+        constLocals.set(current.name, beforeCurrent);
+      }
       continue;
     }
     const beforeBeforeCurrent = cleaned[cleaned.length - 3];
+    if (
+      beforeBeforeCurrent?.op === "local.get" &&
+      beforeCurrent?.op === "local.set" &&
+      current?.op === "local.get" &&
+      beforeCurrent.name === current.name &&
+      beforeBeforeCurrent.name !== current.name &&
+      !instrs.slice(index + 1).some((item) => instrReadsLocal(item, current.name))
+    ) {
+      cleaned.splice(cleaned.length - 3, 3, { op: "local.get", name: beforeBeforeCurrent.name });
+      continue;
+    }
+    if (
+      beforeCurrent?.op === "local.set" && current?.op === "local.get" &&
+      beforeCurrent.name === current.name
+    ) {
+      cleaned.splice(cleaned.length - 2, 2, { op: "local.tee", name: current.name });
+      continue;
+    }
+    if (foldSetGetTeeSuffix(cleaned)) continue;
+    if (
+      current?.op === "br_if" &&
+      beforeCurrent?.op === "binary" && beforeCurrent.wasm === "i32.eqz" &&
+      beforeBeforeCurrent?.op === "binary"
+    ) {
+      const inverted = invertI32Comparison(beforeBeforeCurrent.wasm);
+      if (inverted) {
+        cleaned.splice(cleaned.length - 3, 2, { op: "binary", wasm: inverted });
+        continue;
+      }
+    }
     if (
       (current?.op === "if" || current?.op === "br_if") &&
       beforeCurrent?.op === "binary" && beforeCurrent.wasm === "i32.eqz" &&
@@ -1785,11 +1842,182 @@ function cleanupInstrs(
         continue;
       }
     }
+    if (foldNestedIntegerMaskSuffix(cleaned)) continue;
+    if (foldRepeatedLocalComputationSuffix(cleaned)) continue;
+    if (foldRepeatedLocalComputationSetSuffix(cleaned)) continue;
+    if (foldRepeatedLocalComputationUseSuffix(cleaned)) continue;
     if (foldConstSimdDotSuffix(cleaned)) continue;
     if (isTerminator(instr)) break;
   }
   if (!allowDeadLocalRoundtrip) flushConstLocals();
   return cleaned;
+}
+
+function foldNestedIntegerMaskSuffix(instrs: Instr[]): boolean {
+  if (instrs.length < 4) return false;
+  const current = instrs[instrs.length - 1];
+  const maskRight = instrs[instrs.length - 2];
+  const previousAnd = instrs[instrs.length - 3];
+  const maskLeft = instrs[instrs.length - 4];
+  if (
+    current?.op !== "binary" ||
+    (current.wasm !== "i32.and" && current.wasm !== "i64.and") ||
+    maskRight?.op !== "const" ||
+    previousAnd?.op !== "binary" ||
+    previousAnd.wasm !== current.wasm ||
+    maskLeft?.op !== "const"
+  ) return false;
+  const foldedMask = foldConstInstrBinary(maskLeft, maskRight, current.wasm);
+  if (!foldedMask) return false;
+  instrs.splice(instrs.length - 4, 4, foldedMask, current);
+  return true;
+}
+
+function foldRepeatedLocalComputationSuffix(instrs: Instr[]): boolean {
+  if (instrs.length < 8) return false;
+  const currentSet = instrs[instrs.length - 1];
+  const currentBinary = instrs[instrs.length - 2];
+  const currentConst = instrs[instrs.length - 3];
+  const currentGet = instrs[instrs.length - 4];
+  if (
+    currentSet?.op !== "local.set" ||
+    currentBinary?.op !== "binary" ||
+    currentConst?.op !== "const" ||
+    currentGet?.op !== "local.get"
+  ) return false;
+  const currentStart = instrs.length - 4;
+  for (let index = currentStart - 4; index >= 0; index--) {
+    const previousGet = instrs[index];
+    const previousConst = instrs[index + 1];
+    const previousBinary = instrs[index + 2];
+    const previousSet = instrs[index + 3];
+    if (
+      previousGet?.op !== "local.get" ||
+      previousConst?.op !== "const" ||
+      previousBinary?.op !== "binary" ||
+      (previousSet?.op !== "local.set" && previousSet?.op !== "local.tee")
+    ) continue;
+    if (
+      previousGet.name !== currentGet.name ||
+      previousConst.type !== currentConst.type ||
+      previousConst.value !== currentConst.value ||
+      previousBinary.wasm !== currentBinary.wasm
+    ) continue;
+    if (previousSet.name === currentSet.name) return false;
+    const between = instrs.slice(index + 4, currentStart);
+    if (
+      between.some((item) =>
+        instrWritesLocal(item, currentGet.name) || instrWritesLocal(item, previousSet.name)
+      )
+    ) return false;
+    instrs.splice(
+      currentStart,
+      4,
+      { op: "local.get", name: previousSet.name },
+      { op: "local.set", name: currentSet.name },
+    );
+    return true;
+  }
+  return false;
+}
+
+function foldRepeatedLocalComputationSetSuffix(instrs: Instr[]): boolean {
+  if (instrs.length < 7) return false;
+  const currentSet = instrs[instrs.length - 1];
+  const currentBinary = instrs[instrs.length - 2];
+  const currentConst = instrs[instrs.length - 3];
+  const currentGet = instrs[instrs.length - 4];
+  if (
+    currentSet?.op !== "local.set" ||
+    currentBinary?.op !== "binary" ||
+    currentConst?.op !== "const" ||
+    currentGet?.op !== "local.get"
+  ) return false;
+  const currentStart = instrs.length - 4;
+  for (let index = currentStart - 3; index >= 0; index--) {
+    const previousGet = instrs[index];
+    const previousConst = instrs[index + 1];
+    const previousBinary = instrs[index + 2];
+    if (
+      previousGet?.op !== "local.get" ||
+      previousConst?.op !== "const" ||
+      previousBinary?.op !== "binary"
+    ) continue;
+    if (
+      previousGet.name !== currentGet.name ||
+      previousConst.type !== currentConst.type ||
+      previousConst.value !== currentConst.value ||
+      previousBinary.wasm !== currentBinary.wasm
+    ) continue;
+    const between = instrs.slice(index + 3, currentStart);
+    if (
+      between.some((item) =>
+        instrWritesLocal(item, currentGet.name) || instrWritesLocal(item, currentSet.name)
+      )
+    ) return false;
+    instrs.splice(index, 3, previousGet, previousConst, previousBinary, {
+      op: "local.tee",
+      name: currentSet.name,
+    });
+    instrs.splice(currentStart + 1, 4);
+    return true;
+  }
+  return false;
+}
+
+function foldRepeatedLocalComputationUseSuffix(instrs: Instr[]): boolean {
+  if (instrs.length < 7) return false;
+  const currentBinary = instrs[instrs.length - 1];
+  const currentConst = instrs[instrs.length - 2];
+  const currentGet = instrs[instrs.length - 3];
+  if (
+    currentBinary?.op !== "binary" ||
+    currentConst?.op !== "const" ||
+    currentGet?.op !== "local.get"
+  ) return false;
+  const currentStart = instrs.length - 3;
+  for (let index = currentStart - 4; index >= 0; index--) {
+    const previousGet = instrs[index];
+    const previousConst = instrs[index + 1];
+    const previousBinary = instrs[index + 2];
+    const previousSet = instrs[index + 3];
+    if (
+      previousGet?.op !== "local.get" ||
+      previousConst?.op !== "const" ||
+      previousBinary?.op !== "binary" ||
+      (previousSet?.op !== "local.set" && previousSet?.op !== "local.tee")
+    ) continue;
+    if (
+      previousGet.name !== currentGet.name ||
+      previousConst.type !== currentConst.type ||
+      previousConst.value !== currentConst.value ||
+      previousBinary.wasm !== currentBinary.wasm
+    ) continue;
+    const between = instrs.slice(index + 4, currentStart);
+    if (
+      between.some((item) =>
+        instrWritesLocal(item, currentGet.name) || instrWritesLocal(item, previousSet.name)
+      )
+    ) return false;
+    instrs.splice(currentStart, 3, { op: "local.get", name: previousSet.name });
+    return true;
+  }
+  return false;
+}
+
+function foldSetGetTeeSuffix(instrs: Instr[]): boolean {
+  if (instrs.length < 3) return false;
+  const tee = instrs[instrs.length - 1];
+  const get = instrs[instrs.length - 2];
+  const set = instrs[instrs.length - 3];
+  if (
+    tee?.op !== "local.tee" ||
+    get?.op !== "local.get" ||
+    set?.op !== "local.set" ||
+    set.name !== get.name
+  ) return false;
+  instrs.splice(instrs.length - 3, 3, { op: "local.tee", name: set.name }, tee);
+  return true;
 }
 
 function foldConstSimdDotSuffix(instrs: Instr[]): boolean {
@@ -1831,6 +2059,44 @@ function foldConstSimdDotSuffix(instrs: Instr[]): boolean {
   }
   instrs.splice(start, suffixLength, { op: "const", type: "i32", value: total });
   return true;
+}
+
+function flattenStraightLineLoopGuard(
+  cleaned: Instr[],
+  instr: Extract<Instr, { op: "if" }>,
+): Instr[] | undefined {
+  if (instr.results.length !== 0 || instr.elseBody.length !== 1) return undefined;
+  const elseBranch = instr.elseBody[0];
+  const thenBranch = instr.thenBody.at(-1);
+  if (elseBranch?.op !== "br" || thenBranch?.op !== "br") return undefined;
+  if (elseBranch.depth < 1 || thenBranch.depth < 1) return undefined;
+  const thenPrefix = instr.thenBody.slice(0, -1);
+  if (thenPrefix.some((item) => instrHasBranch(item) || item.op === "if" || item.op === "block" || item.op === "loop")) {
+    return undefined;
+  }
+  const condition = splitStackProducerSuffix(cleaned, 1);
+  if (!condition) return undefined;
+  cleaned.splice(0, cleaned.length, ...condition.prefix);
+  const invertedCondition = invertConditionInstrs(condition.suffix);
+  return [
+    ...invertedCondition,
+    {
+      op: "br_if",
+      depth: elseBranch.depth - 1,
+      ...(instr.branchHint ? { branchHint: invertBranchHint(instr.branchHint) } : {}),
+    },
+    ...thenPrefix,
+    { op: "br", depth: thenBranch.depth - 1 },
+  ];
+}
+
+function invertConditionInstrs(instrs: Instr[]): Instr[] {
+  const last = instrs.at(-1);
+  if (last?.op === "binary") {
+    const inverted = invertI32Comparison(last.wasm);
+    if (inverted) return [...instrs.slice(0, -1), { op: "binary", wasm: inverted }];
+  }
+  return [...instrs, { op: "binary", wasm: "i32.eqz" }];
 }
 
 function constLanePackAt(
@@ -2358,6 +2624,33 @@ function instrWritesLocal(instr: Instr, name: string): boolean {
       return instr.body.some((item) => instrWritesLocal(item, name));
     default:
       return false;
+  }
+}
+
+function invertI32Comparison(wasm: string): string | undefined {
+  switch (wasm) {
+    case "i32.eq":
+      return "i32.ne";
+    case "i32.ne":
+      return "i32.eq";
+    case "i32.lt_s":
+      return "i32.ge_s";
+    case "i32.le_s":
+      return "i32.gt_s";
+    case "i32.gt_s":
+      return "i32.le_s";
+    case "i32.ge_s":
+      return "i32.lt_s";
+    case "i32.lt_u":
+      return "i32.ge_u";
+    case "i32.le_u":
+      return "i32.gt_u";
+    case "i32.gt_u":
+      return "i32.le_u";
+    case "i32.ge_u":
+      return "i32.lt_u";
+    default:
+      return undefined;
   }
 }
 
@@ -3232,6 +3525,48 @@ function lowerTailLoopBlock(
   locals: Set<string>,
 ): Instr[] {
   block = foldScalarVarAliasesInTailBlock(block, ctx);
+  const simple = simpleScalarTailLoop(block, fn, ctx);
+  if (simple) {
+    const hoisted = hoistSimpleTailLoopInvariants(simple, fn, ctx, locals);
+    const continueArm = hoisted?.continueArm ?? simple.continueArm;
+    const exitHint = branchHintForTestedArm(simple.exitArm, [continueArm]);
+    const loopBody = [
+      ...lowerExpr(hoisted?.condition ?? simple.condition, ctx, locals, "bool"),
+      ...lowerPatternTest(continueArm.pattern),
+      { op: "binary", wasm: "i32.eqz" } as Instr,
+      {
+        op: "br_if",
+        depth: 1,
+        ...(exitHint ? { branchHint: exitHint } : {}),
+      } as Instr,
+      ...lowerTailLoopExpr(
+        continueArm.value,
+        fn,
+        narrowedCtxForPattern(hoisted?.condition ?? simple.condition, continueArm.pattern, ctx),
+        locals,
+        0,
+        1,
+      ),
+    ];
+    const instrHoist = hoistInvariantLocalAdds(
+      loopBody,
+      invariantLocalNamesForSimpleTailLoop(simple, fn, ctx),
+      ctx,
+      locals,
+    );
+    return [
+      ...(hoisted?.prefix ?? []),
+      ...instrHoist.prefix,
+      {
+        op: "block",
+        body: [{
+          op: "loop",
+          body: instrHoist.body,
+        }],
+      },
+      { op: "local.get", name: simple.exitParam },
+    ];
+  }
   const statements: Instr[] = [];
   const paramUpdate = tailLoopParamUpdateSuffix(block, fn, ctx);
   const statementCount = paramUpdate?.prefixCount ?? block.statements.length;
@@ -3273,6 +3608,289 @@ function lowerTailLoopBlock(
       ],
     }, { op: "unreachable" }],
   }];
+}
+
+function simpleScalarTailLoop(
+  block: BlockExpr,
+  fn: FnDecl,
+  ctx: LowerContext,
+): {
+  condition: Expr;
+  continueArm: MatchArm;
+  exitArm: MatchArm;
+  exitParam: string;
+} | undefined {
+  if (block.statements.length || !block.expr || block.expr.kind !== "match") return undefined;
+  if (flattenType(fn.returnType, ctx.layouts).length !== 1) return undefined;
+  const continueArm = block.expr.arms.find((arm) => isTrueLikePattern(arm.pattern));
+  const exitArm = block.expr.arms.find((arm) => arm !== continueArm);
+  if (!continueArm || !exitArm || block.expr.arms.length !== 2) return undefined;
+  if (branchHintForTestedArm(continueArm, [exitArm])) return undefined;
+  if (exitArm.value.kind !== "var") return undefined;
+  const exitParam = exitArm.value.name;
+  if (!fn.params.some((param) => param.name === exitParam)) return undefined;
+  if (!exprHasDirectSelfCall(continueArm.value, fn.name)) return undefined;
+  return {
+    condition: block.expr.value,
+    continueArm,
+    exitArm,
+    exitParam,
+  };
+}
+
+function exprHasDirectSelfCall(expr: Expr, name: string): boolean {
+  if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === name) return true;
+  return exprChildren(expr).some((child) => exprHasDirectSelfCall(child, name));
+}
+
+function invariantLocalNamesForSimpleTailLoop(
+  simple: ReturnType<typeof simpleScalarTailLoop> & {},
+  fn: FnDecl,
+  ctx: LowerContext,
+): Set<string> {
+  const names = new Set<string>();
+  if (!simple) return names;
+  const selfCalls = directCallExprs(simple.continueArm.value).filter((call) =>
+    call.callee.kind === "var" && call.callee.name === fn.name
+  );
+  for (const [index, param] of fn.params.entries()) {
+    if (
+      selfCalls.length &&
+      selfCalls.every((call) => tailLoopArgIsIdentity(runtimeCallArgs(call, fn)[index], param, ctx))
+    ) {
+      names.add(param.name);
+      for (const binding of flattenBinding(param.name, param.type, ctx.layouts)) names.add(binding.name);
+    }
+  }
+  return names;
+}
+
+function hoistInvariantLocalAdds(
+  body: Instr[],
+  invariantNames: Set<string>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): { prefix: Instr[]; body: Instr[] } {
+  if (!invariantNames.size) return { prefix: [], body };
+  const hoists = new Map<string, string>();
+  const prefix: Instr[] = [];
+  const tempFor = (left: string, right: string): string => {
+    const key = `${left}+${right}`;
+    const existing = hoists.get(key);
+    if (existing) return existing;
+    const name = `__loop_inv${ctx.tempIndex++}`;
+    hoists.set(key, name);
+    locals.add(name);
+    ctx.tempLocals.push({ name, type: "i32" });
+    prefix.push(
+      { op: "local.get", name: left },
+      { op: "local.get", name: right },
+      { op: "binary", wasm: "i32.add" },
+      { op: "local.set", name },
+    );
+    return name;
+  };
+  const rewrite = (instrs: Instr[]): Instr[] => {
+    const out: Instr[] = [];
+    for (let index = 0; index < instrs.length; index++) {
+      const a = instrs[index];
+      const b = instrs[index + 1];
+      const c = instrs[index + 2];
+      if (
+        a?.op === "local.get" &&
+        b?.op === "local.get" &&
+        c?.op === "binary" &&
+        c.wasm === "i32.add" &&
+        invariantNames.has(a.name) &&
+        invariantNames.has(b.name)
+      ) {
+        out.push({ op: "local.get", name: tempFor(a.name, b.name) });
+        index += 2;
+        continue;
+      }
+      if (a?.op === "if") {
+        out.push({
+          ...a,
+          thenBody: rewrite(a.thenBody),
+          elseBody: rewrite(a.elseBody),
+        });
+        continue;
+      }
+      if (a?.op === "block" || a?.op === "loop") {
+        out.push({ ...a, body: rewrite(a.body) });
+        continue;
+      }
+      if (a) out.push(a);
+    }
+    return out;
+  };
+  return { prefix, body: rewrite(body) };
+}
+
+function hoistSimpleTailLoopInvariants(
+  simple: ReturnType<typeof simpleScalarTailLoop> & {},
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+): { prefix: Instr[]; condition: Expr; continueArm: MatchArm } | undefined {
+  if (!simple) return undefined;
+  const selfCalls = directCallExprs(simple.continueArm.value).filter((call) =>
+    call.callee.kind === "var" && call.callee.name === fn.name
+  );
+  if (!selfCalls.length) return undefined;
+  const invariantNames = new Set<string>();
+  for (const [index, param] of fn.params.entries()) {
+    if (
+      selfCalls.every((call) => tailLoopArgIsIdentity(runtimeCallArgs(call, fn)[index], param, ctx))
+    ) {
+      invariantNames.add(param.name);
+      for (const binding of flattenBinding(param.name, param.type, ctx.layouts)) {
+        invariantNames.add(binding.name);
+      }
+    }
+  }
+  if (!invariantNames.size) return undefined;
+
+  const candidates = new Map<string, Expr>();
+  const collect = (expr: Expr) => {
+    for (const child of exprChildren(expr)) collect(child);
+    const key = invariantScalarHoistKey(expr, invariantNames, ctx);
+    if (key && !candidates.has(key)) candidates.set(key, expr);
+  };
+  collect(simple.condition);
+  collect(simple.continueArm.value);
+  const hoists = [...candidates.entries()].slice(0, 4).map(([key, expr]) => ({
+    key,
+    expr,
+    name: `__loop_inv${ctx.tempIndex++}`,
+  }));
+  if (!hoists.length) return undefined;
+
+  const replacements = new Map(hoists.map(({ key, name }) => [
+    key,
+    { kind: "var", name } as Expr,
+  ]));
+  for (const hoist of hoists) {
+    locals.add(hoist.name);
+    ctx.tempLocals.push({ name: hoist.name, type: "i32" });
+  }
+  return {
+    prefix: hoists.flatMap(({ expr, name }) => [
+      ...lowerExpr(expr, ctx, locals, "i32"),
+      { op: "local.set", name } as Instr,
+    ]),
+    condition: replaceExprByHoistKey(simple.condition, replacements, invariantNames, ctx),
+    continueArm: {
+      ...simple.continueArm,
+      value: replaceExprByHoistKey(simple.continueArm.value, replacements, invariantNames, ctx),
+    },
+  };
+}
+
+function invariantScalarHoistKey(
+  expr: Expr,
+  invariantNames: Set<string>,
+  ctx: LowerContext,
+): string | undefined {
+  if (expr.kind !== "binary") return undefined;
+  if (!["+", "-", "*", "&", "|", "^", "<<", ">>"].includes(expr.op)) return undefined;
+  if (!isSpeculableNonTrappingExpr(expr, ctx.functions)) return undefined;
+  const names = usedNames(expr);
+  if (!names.size || [...names].some((name) => !invariantNames.has(name))) return undefined;
+  return exprReuseKey(expr);
+}
+
+function replaceExprByHoistKey(
+  expr: Expr,
+  replacements: Map<string, Expr>,
+  invariantNames: Set<string>,
+  ctx: LowerContext,
+): Expr {
+  const key = invariantScalarHoistKey(expr, invariantNames, ctx);
+  const replacement = key ? replacements.get(key) : undefined;
+  if (replacement) return replacement;
+  switch (expr.kind) {
+    case "do":
+      return expr.expr ? { ...expr, expr: replaceExprByHoistKey(expr.expr, replacements, invariantNames, ctx) } : expr;
+    case "const_fn":
+      return { ...expr, body: replaceExprByHoistKey(expr.body, replacements, invariantNames, ctx) };
+    case "call":
+      return {
+        ...expr,
+        callee: replaceExprByHoistKey(expr.callee, replacements, invariantNames, ctx),
+        args: expr.args.map((arg) => replaceExprByHoistKey(arg, replacements, invariantNames, ctx)),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: replaceExprByHoistKey(expr.target, replacements, invariantNames, ctx),
+        index: replaceExprByHoistKey(expr.index, replacements, invariantNames, ctx),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: replaceExprByHoistKey(expr.left, replacements, invariantNames, ctx),
+        right: replaceExprByHoistKey(expr.right, replacements, invariantNames, ctx),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: replaceExprByHoistKey(expr.value, replacements, invariantNames, ctx),
+        body: replaceExprByHoistKey(expr.body, replacements, invariantNames, ctx),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: replaceExprByHoistKey(expr.value, replacements, invariantNames, ctx),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: replaceExprByHoistKey(arm.value, replacements, invariantNames, ctx),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          value: replaceExprByHoistKey(slot.value, replacements, invariantNames, ctx),
+        })),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: replaceExprByHoistKey(expr.start, replacements, invariantNames, ctx),
+        end: replaceExprByHoistKey(expr.end, replacements, invariantNames, ctx),
+      };
+    case "static_for_slots":
+      return { ...expr, value: replaceExprByHoistKey(expr.value, replacements, invariantNames, ctx) };
+    case "field":
+      return {
+        ...expr,
+        value: replaceExprByHoistKey(expr.value, replacements, invariantNames, ctx),
+        key: replaceExprByHoistKey(expr.key, replacements, invariantNames, ctx),
+      };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) => {
+          if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+            return {
+              ...stmt,
+              value: replaceExprByHoistKey(stmt.value, replacements, invariantNames, ctx),
+            } as Statement;
+          }
+          return stmt;
+        }),
+        ...(expr.expr
+          ? { expr: replaceExprByHoistKey(expr.expr, replacements, invariantNames, ctx) }
+          : {}),
+      };
+    case "literal":
+    case "placeholder":
+    case "var":
+      return expr;
+  }
 }
 
 function foldScalarVarAliasesInTailBlock(block: BlockExpr, ctx: LowerContext): BlockExpr {
@@ -3373,6 +3991,13 @@ function lowerTailLoopParamUpdate(
     if (param && tailLoopParamUpdateIsIdentity(stmt, param, ctx)) return [];
     return [{ stmt, index }];
   });
+  const immediateStores = lowerOrderedTailParamUpdateStores(activeUpdates, fn, ctx, locals);
+  if (immediateStores) {
+    return [
+      ...immediateStores,
+      ...lowerTailLoopExpr(update.rewrittenExpr, fn, ctx, locals, continueDepth, exitDepth),
+    ];
+  }
   const values = activeUpdates.flatMap(({ stmt, index }) => {
     const inlined = stmt.value.kind === "call"
       ? lowerPrivateProductCallInline(stmt.value, ctx, locals, {
@@ -3390,6 +4015,32 @@ function lowerTailLoopParamUpdate(
     ...targets.toReversed().map((target): Instr => ({ op: "local.set", name: target.name })),
     ...lowerTailLoopExpr(update.rewrittenExpr, fn, ctx, locals, continueDepth, exitDepth),
   ];
+}
+
+function lowerOrderedTailParamUpdateStores(
+  activeUpdates: { stmt: Extract<Statement, { kind: "let" }>; index: number }[],
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (activeUpdates.length < 2) return undefined;
+  if (activeUpdates.some(({ stmt }) => stmt.value.kind === "call")) return undefined;
+  if (activeUpdates.some(({ stmt }) => hasRuntimeEffect(stmt.value, ctx.functions))) return undefined;
+  const ordered = dependencyOrderedTailUpdates(
+    activeUpdates.map(({ stmt, index }) => ({ expr: stmt.value, stmt, index })),
+    fn,
+    ctx,
+  );
+  if (!ordered) return undefined;
+  return ordered.flatMap(({ stmt, index }) => {
+    const param = fn.params[index];
+    const targets = param ? flattenBinding(param.name, param.type, ctx.layouts) : [];
+    if (!targets.length) return [];
+    return [
+      ...lowerExpr(stmt.value, ctx, locals, param?.type),
+      ...targets.toReversed().map((target): Instr => ({ op: "local.set", name: target.name })),
+    ];
+  });
 }
 
 function tailLoopParamUpdateIsIdentity(
@@ -3495,6 +4146,10 @@ function exprReuseKey(expr: Expr): string | undefined {
       const right = exprReuseKey(expr.right);
       return left && right ? `bin:${expr.op}(${left},${right})` : undefined;
     }
+    case "field": {
+      const name = fieldAccessName(expr);
+      return name ? `field:${name}` : undefined;
+    }
     default:
       return undefined;
   }
@@ -3527,12 +4182,26 @@ function lowerTailLoopExpr(
       const param = fn.params[index];
       return param && tailLoopArgIsIdentity(arg, param, ctx) ? [] : [{ arg, index }];
     });
+    const cse = tailCallArgCommonSubexprs(activeArgs.map(({ arg }) => arg), ctx, locals);
+    const loweredArgs = cse ? activeArgs.map(({ arg, index }) => ({
+      arg: replaceExprByReuseKey(arg, cse.replacements),
+      index,
+    })) : activeArgs;
     const flatParams = activeArgs.flatMap(({ index }) => {
       const param = fn.params[index];
       return param ? flattenBinding(param.name, param.type, ctx.layouts) : [];
     });
+    const immediateStores = lowerOrderedTailCallParamStores(loweredArgs, fn, callee, ctx, locals);
+    if (immediateStores) {
+      return [
+        ...(cse?.prefix ?? []),
+        ...immediateStores,
+        { op: "br", depth: continueDepth },
+      ];
+    }
     return [
-      ...activeArgs.flatMap(({ arg, index }) =>
+      ...(cse?.prefix ?? []),
+      ...loweredArgs.flatMap(({ arg, index }) =>
         lowerExpr(arg, ctx, locals, callee?.params[index]?.type)
       ),
       ...flatParams.toReversed().map((param): Instr => ({ op: "local.set", name: param.name })),
@@ -3598,6 +4267,194 @@ function lowerTailLoopExpr(
       lowerExpr(expr, ctx, locals, fn.returnType)),
     { op: "br", depth: exitDepth },
   ];
+}
+
+function lowerOrderedTailCallParamStores(
+  activeArgs: { arg: Expr; index: number }[],
+  fn: FnDecl,
+  callee: FnDecl | undefined,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (activeArgs.length < 2) return undefined;
+  if (activeArgs.some(({ arg }) => hasRuntimeEffect(arg, ctx.functions))) return undefined;
+  const ordered = dependencyOrderedTailUpdates(
+    activeArgs.map(({ arg, index }) => ({ expr: arg, index })),
+    fn,
+    ctx,
+  );
+  if (!ordered) return undefined;
+  return ordered.flatMap(({ expr, index }) => {
+    const param = fn.params[index];
+    const targets = param ? flattenBinding(param.name, param.type, ctx.layouts) : [];
+    if (!targets.length) return [];
+    return [
+      ...lowerExpr(expr, ctx, locals, callee?.params[index]?.type),
+      ...targets.toReversed().map((target): Instr => ({ op: "local.set", name: target.name })),
+    ];
+  });
+}
+
+function dependencyOrderedTailUpdates<T extends { expr: Expr; index: number }>(
+  updates: T[],
+  fn: FnDecl,
+  ctx: LowerContext,
+): T[] | undefined {
+  const targetNamesByIndex = new Map<number, Set<string>>();
+  for (const { index } of updates) {
+    const param = fn.params[index];
+    if (!param) return undefined;
+    targetNamesByIndex.set(index, tailUpdateTargetNames(param, ctx));
+  }
+  const remaining = new Set(updates.map((_, index) => index));
+  const ordered: T[] = [];
+  while (remaining.size) {
+    let selected: number | undefined;
+    for (const itemIndex of remaining) {
+      const item = updates[itemIndex];
+      if (!item) continue;
+      const itemTargets = targetNamesByIndex.get(item.index);
+      if (!itemTargets) continue;
+      let remainingUpdateNeedsOldTarget = false;
+      for (const otherIndex of remaining) {
+        if (otherIndex === itemIndex) continue;
+        const other = updates[otherIndex];
+        if (!other) continue;
+        const otherNames = usedNames(other.expr);
+        if ([...otherNames].some((name) => itemTargets.has(name))) {
+          remainingUpdateNeedsOldTarget = true;
+          break;
+        }
+      }
+      if (!remainingUpdateNeedsOldTarget) {
+        selected = itemIndex;
+        break;
+      }
+    }
+    if (selected === undefined) return undefined;
+    remaining.delete(selected);
+    const item = updates[selected];
+    if (item) ordered.push(item);
+  }
+  return ordered;
+}
+
+function tailUpdateTargetNames(param: Param, ctx: LowerContext): Set<string> {
+  const names = new Set<string>([param.name]);
+  for (const binding of flattenBinding(param.name, param.type, ctx.layouts)) {
+    names.add(binding.name);
+    names.add(binding.name.replaceAll("$", "."));
+  }
+  return names;
+}
+
+function tailCallArgCommonSubexprs(
+  args: Expr[],
+  ctx: LowerContext,
+  locals: Set<string>,
+): { prefix: Instr[]; replacements: Map<string, Expr> } | undefined {
+  const counts = new Map<string, { expr: Expr; count: number }>();
+  const visit = (expr: Expr) => {
+    for (const child of exprChildren(expr)) visit(child);
+    if (expr.kind !== "binary" || expr.op !== "+") return;
+    const key = exprReuseKey(expr);
+    if (!key || !isSpeculableNonTrappingExpr(expr, ctx.functions)) return;
+    if (flattenType(exprTypeWithLocals(expr, ctx) ?? "i32", ctx.layouts).length !== 1) return;
+    const current = counts.get(key);
+    counts.set(key, { expr, count: (current?.count ?? 0) + 1 });
+  };
+  for (const arg of args) visit(arg);
+  const hoists = [...counts.entries()]
+    .filter(([, item]) => item.count > 1 && backendInlineExprCost(item.expr) > 1)
+    .slice(0, 2);
+  if (!hoists.length) return undefined;
+  const replacements = new Map<string, Expr>();
+  const prefix: Instr[] = [];
+  for (const [key, { expr }] of hoists) {
+    const name = `__tail_cse${ctx.tempIndex++}`;
+    locals.add(name);
+    ctx.tempLocals.push({ name, type: "i32" });
+    prefix.push(...lowerExpr(expr, ctx, locals, "i32"), { op: "local.set", name });
+    replacements.set(key, { kind: "var", name });
+  }
+  return { prefix, replacements };
+}
+
+function replaceExprByReuseKey(expr: Expr, replacements: Map<string, Expr>): Expr {
+  const key = exprReuseKey(expr);
+  const replacement = key ? replacements.get(key) : undefined;
+  if (replacement) return replacement;
+  switch (expr.kind) {
+    case "do":
+      return expr.expr ? { ...expr, expr: replaceExprByReuseKey(expr.expr, replacements) } : expr;
+    case "const_fn":
+      return { ...expr, body: replaceExprByReuseKey(expr.body, replacements) };
+    case "call":
+      return {
+        ...expr,
+        callee: replaceExprByReuseKey(expr.callee, replacements),
+        args: expr.args.map((arg) => replaceExprByReuseKey(arg, replacements)),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: replaceExprByReuseKey(expr.target, replacements),
+        index: replaceExprByReuseKey(expr.index, replacements),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: replaceExprByReuseKey(expr.left, replacements),
+        right: replaceExprByReuseKey(expr.right, replacements),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: replaceExprByReuseKey(expr.value, replacements),
+        body: replaceExprByReuseKey(expr.body, replacements),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: replaceExprByReuseKey(expr.value, replacements),
+        arms: expr.arms.map((arm) => ({ ...arm, value: replaceExprByReuseKey(arm.value, replacements) })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({ ...slot, value: replaceExprByReuseKey(slot.value, replacements) })),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: replaceExprByReuseKey(expr.start, replacements),
+        end: replaceExprByReuseKey(expr.end, replacements),
+      };
+    case "static_for_slots":
+      return { ...expr, value: replaceExprByReuseKey(expr.value, replacements) };
+    case "field":
+      return {
+        ...expr,
+        value: replaceExprByReuseKey(expr.value, replacements),
+        key: replaceExprByReuseKey(expr.key, replacements),
+      };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) => {
+          if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+            return { ...stmt, value: replaceExprByReuseKey(stmt.value, replacements) } as Statement;
+          }
+          return stmt;
+        }),
+        ...(expr.expr ? { expr: replaceExprByReuseKey(expr.expr, replacements) } : {}),
+      };
+    case "literal":
+    case "placeholder":
+    case "var":
+      return expr;
+  }
 }
 
 function lowerTransientFixedArrayTailCall(
@@ -3864,6 +4721,7 @@ function lowerBackedFixedArrayTailLoopBlock(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] | undefined {
+  block = retargetBackedProductAliases(block, backedParam, ctx);
   const statements: Instr[] = [];
   for (let index = 0; index < block.statements.length; index++) {
     const stmt = block.statements[index];
@@ -3888,6 +4746,56 @@ function lowerBackedFixedArrayTailLoopBlock(
     results: [],
     body: [{ op: "loop", body: [...statements, ...tail] }, { op: "unreachable" }],
   }];
+}
+
+function retargetBackedProductAliases(
+  block: BlockExpr,
+  backedParam: Param,
+  ctx: LowerContext,
+): BlockExpr {
+  if (flattenType(backedParam.type, ctx.layouts).length <= 1) return block;
+  const aliases = new Map<string, Expr>();
+  const statements: Statement[] = [];
+  const substitute = (expr: Expr) => aliases.size ? substituteExpr(expr, aliases) : expr;
+  for (let index = 0; index < block.statements.length; index++) {
+    const stmt = block.statements[index]!;
+    if (stmt.kind === "proof_const") {
+      statements.push(stmt);
+      continue;
+    }
+    const value = substitute(stmt.value);
+    const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
+    for (const name of bindings) aliases.delete(name);
+    if (stmt.kind === "let") {
+      const statementType = stmt.type ?? exprTypeWithLocals(value, ctx);
+      const remaining = substituteBlockExpr({
+        kind: "block",
+        statements: block.statements.slice(index + 1),
+        ...(block.expr ? { expr: block.expr } : {}),
+      }, aliases);
+      const remainingUses = usedNames(remaining);
+      if (
+        statementType === backedParam.type &&
+        value.kind === "call" &&
+        !remainingUses.has(backedParam.name) &&
+        remainingUses.has(stmt.name)
+      ) {
+        statements.push({ ...stmt, name: backedParam.name, type: backedParam.type, value });
+        aliases.set(stmt.name, { kind: "var", name: backedParam.name });
+        continue;
+      }
+    }
+    statements.push({ ...stmt, value } as Statement);
+  }
+  return {
+    ...block,
+    statements,
+    ...(block.expr ? { expr: substitute(block.expr) } : {}),
+  };
+}
+
+function substituteBlockExpr(block: BlockExpr, substitutions: Map<string, Expr>): BlockExpr {
+  return substituteExpr(block as Expr, substitutions) as BlockExpr;
 }
 
 function lowerBackedFixedArrayTailLoopExpr(
@@ -4233,6 +5141,8 @@ function lowerTailLoopMatch(
 ): Instr[] {
   const step = lowerTailStepMatch(expr.value, expr.arms, fn, ctx, locals, continueDepth, exitDepth);
   if (step) return step;
+  const guard = lowerTailBooleanContinueGuard(expr, fn, ctx, locals, continueDepth, exitDepth);
+  if (guard) return guard;
   const [arm, ...rest] = expr.arms;
   if (!arm) return [{ op: "br", depth: exitDepth }];
   if (isCatchAllPattern(arm.pattern) || rest.length === 0) {
@@ -4269,6 +5179,57 @@ function lowerTailLoopMatch(
       branchHint: branchHintForTestedArm(arm, rest),
     },
   ];
+}
+
+function lowerTailBooleanContinueGuard(
+  expr: Extract<Expr, { kind: "match" }>,
+  fn: FnDecl,
+  ctx: LowerContext,
+  locals: Set<string>,
+  continueDepth: number,
+  exitDepth: number,
+): Instr[] | undefined {
+  if (expr.arms.length !== 2) return undefined;
+  const [first, second] = expr.arms;
+  if (!first || !second) return undefined;
+  if (!isTrueLikePattern(first.pattern) && !isFalseLikePattern(first.pattern)) return undefined;
+  if (
+    !isCatchAllPattern(second.pattern) &&
+    !isTrueLikePattern(second.pattern) &&
+    !isFalseLikePattern(second.pattern)
+  ) return undefined;
+  const firstContinues = identitySelfTailCall(first.value, fn, ctx);
+  const secondContinues = identitySelfTailCall(second.value, fn, ctx);
+  if (firstContinues === secondContinues) return undefined;
+  const continueOnFirst = firstContinues;
+  const continueArm = continueOnFirst ? first : second;
+  const exitArm = continueOnFirst ? second : first;
+  if (!isTrueLikePattern(continueArm.pattern) && !isFalseLikePattern(continueArm.pattern)) {
+    return undefined;
+  }
+  return [
+    ...lowerExpr(expr.value, ctx, locals, "bool"),
+    ...lowerPatternTest(continueArm.pattern),
+    { op: "br_if", depth: continueDepth },
+    ...lowerTailLoopExpr(
+      exitArm.value,
+      fn,
+      narrowedCtxForPattern(expr.value, exitArm.pattern, ctx),
+      locals,
+      continueDepth,
+      exitDepth,
+    ),
+  ];
+}
+
+function identitySelfTailCall(expr: Expr, fn: FnDecl, ctx: LowerContext): boolean {
+  if (expr.kind !== "call" || expr.callee.kind !== "var" || expr.callee.name !== fn.name) {
+    return false;
+  }
+  const argOffset = Math.max(0, expr.args.length - fn.params.length);
+  const runtimeArgs = expr.args.slice(argOffset);
+  return runtimeArgs.length === fn.params.length &&
+    runtimeArgs.every((arg, index) => tailLoopArgIsIdentity(arg, fn.params[index]!, ctx));
 }
 
 function lowerTailStepMatch(
@@ -4531,13 +5492,12 @@ function lowerParityRemainderComparison(
   const pattern = parityRemainderZeroPattern(expr.left, expr.right, ctx) ??
     parityRemainderZeroPattern(expr.right, expr.left, ctx);
   if (!pattern) return undefined;
-  return [
+  const test: Instr[] = [
     ...lowerExpr(pattern.dividend, ctx, locals, "i32"),
     { op: "const", type: "i32", value: 1 },
     { op: "binary", wasm: "i32.and" },
-    { op: "binary", wasm: "i32.eqz" },
-    ...(expr.op === "!=" ? [{ op: "binary", wasm: "i32.eqz" } as Instr] : []),
   ];
+  return expr.op === "!=" ? test : [...test, { op: "binary", wasm: "i32.eqz" }];
 }
 
 function lowerOddDivisibilityComparison(
@@ -4568,13 +5528,13 @@ function lowerSmallRangeDivisibilityComparison(
   const pattern = smallRangeDivisibilityPattern(expr.left, expr.right, ctx) ??
     smallRangeDivisibilityPattern(expr.right, expr.left, ctx);
   if (!pattern) return undefined;
+  const mask = expr.op === "!=" ? ~pattern.mask : pattern.mask;
   return [
-    { op: "const", type: "i32", value: signedI32Const(pattern.mask) },
+    { op: "const", type: "i32", value: signedI32Const(mask) },
     ...lowerExpr(pattern.dividend, ctx, locals, "i32"),
     { op: "binary", wasm: "i32.shr_u" },
     { op: "const", type: "i32", value: 1 },
     { op: "binary", wasm: "i32.and" },
-    ...(expr.op === "!=" ? [{ op: "binary", wasm: "i32.eqz" } as Instr] : []),
   ];
 }
 
@@ -5265,7 +6225,7 @@ function canAliasReadOnlyProductParams(callee: FnDecl, ctx: LowerContext): boole
 }
 
 const SCALAR_BACKEND_INLINE_COST_BUDGET = 18;
-const SCALAR_TAIL_LOOP_BACKEND_INLINE_COST_BUDGET = 80;
+const SCALAR_TAIL_LOOP_BACKEND_INLINE_COST_BUDGET = 160;
 
 function lowerPrivateScalarTailLoopCallInline(
   expr: Extract<Expr, { kind: "call" }>,
@@ -5296,31 +6256,52 @@ function lowerPrivateScalarTailLoopCallInline(
   if (runtimeArgs.length !== callee.params.length) return undefined;
   if (runtimeArgs.some((arg) => hasRuntimeEffect(arg, ctx.functions))) return undefined;
 
+  const prefix = `__inl_${callee.name.replaceAll(/[^A-Za-z0-9_]/g, "_")}_${ctx.tempIndex++}`;
   const scalarArgSubstitutions = new Map<string, Expr>();
+  const productFieldSubstitutions = new Map<string, Expr>();
   for (const [index, param] of callee.params.entries()) {
     const arg = runtimeArgs[index];
-    if (!arg || arg.kind === "var") continue;
-    if (flattenType(param.type, ctx.layouts).length !== 1) continue;
-    if (countNameUses(callee.body, param.name) > 1) continue;
-    scalarArgSubstitutions.set(param.name, arg);
+    if (!arg) continue;
+    if (flattenType(param.type, ctx.layouts).length === 1) {
+      if (arg.kind === "var") continue;
+      if (countNameUses(callee.body, param.name) > 1) continue;
+      scalarArgSubstitutions.set(param.name, arg);
+      continue;
+    }
+    const fields = productFieldTypes(param.type, ctx.layouts);
+    if (!fields?.length) continue;
+    const fieldValues = productArgFieldValues(arg, fields);
+    if (!fieldValues) continue;
+    for (const [field, value] of fieldValues) {
+      if (hasRuntimeEffect(value, ctx.functions) || countFieldAccessUses(callee.body, param.name, field) > 1) {
+        continue;
+      }
+      productFieldSubstitutions.set(`${param.name}.${field}`, value);
+    }
   }
-  const inlineCallee = scalarArgSubstitutions.size
+  const substitutions = new Map([...scalarArgSubstitutions, ...productFieldSubstitutions]);
+  const inlineCallee = substitutions.size
     ? {
       ...callee,
-      body: substituteExpr(callee.body as Expr, scalarArgSubstitutions) as BlockExpr,
+      body: substituteExpr(callee.body as Expr, substitutions) as BlockExpr,
     }
     : callee;
 
-  const prefix = `__inl_${callee.name.replaceAll(/[^A-Za-z0-9_]/g, "_")}_${ctx.tempIndex++}`;
   const renames = new Map<string, string>();
   const aliasedScalarParams = new Set<string>();
+  const selfCalls = directCallExprs(callee.body).filter((call) =>
+    call.callee.kind === "var" && call.callee.name === callee.name
+  );
   for (const [index, param] of inlineCallee.params.entries()) {
     const originalParam = callee.params[index];
     const arg = runtimeArgs[index];
     if (
       originalParam &&
       arg?.kind === "var" &&
-      flattenType(param.type, ctx.layouts).length === 1
+      flattenType(param.type, ctx.layouts).length === 1 &&
+      selfCalls.every((call) =>
+        tailLoopArgIsIdentity(runtimeCallArgs(call, callee)[index], originalParam, ctx)
+      )
     ) {
       renames.set(param.name, arg.name);
       aliasedScalarParams.add(originalParam.name);
@@ -5345,9 +6326,6 @@ function lowerPrivateScalarTailLoopCallInline(
     renames,
   );
   const localScalarFacts = scalarFactsForFunctionParams(renamed, ctx, callee.name, renames);
-  const selfCalls = directCallExprs(callee.body).filter((call) =>
-    call.callee.kind === "var" && call.callee.name === callee.name
-  );
   callee.params.forEach((param, index) => {
     if (
       param.type === "i32" &&
@@ -5490,30 +6468,69 @@ function lowerPrivateScalarCallInline(
   if (flattenType(callee.returnType, ctx.layouts).length !== 1) return undefined;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
   if (hasSelfCall(callee.body, callee.name)) return undefined;
-  if (backendInlineBlockCost(callee.body) > SCALAR_BACKEND_INLINE_COST_BUDGET) return undefined;
+  const cost = backendInlineBlockCost(callee.body);
+  const canInlineTailLoopPredicate =
+    callee.returnType === "bool" &&
+    !callee.generated &&
+    analyzeTailCalls(ctx.currentFn).hasOnlyTailDirectSelfCalls &&
+    cost <= 32;
+  if (cost > SCALAR_BACKEND_INLINE_COST_BUDGET && !canInlineTailLoopPredicate) return undefined;
   const argOffset = Math.max(0, expr.args.length - callee.params.length);
   const runtimeArgs = expr.args.slice(argOffset);
   if (runtimeArgs.length !== callee.params.length) return undefined;
   if (runtimeArgs.some((arg) => hasRuntimeEffect(arg, ctx.functions))) return undefined;
 
+  const prefix = `__inl_${callee.name.replaceAll(/[^A-Za-z0-9_]/g, "_")}_${ctx.tempIndex++}`;
   const scalarArgSubstitutions = new Map<string, Expr>();
+  const productFieldSubstitutions = new Map<string, Expr>();
+  const productFieldTempInits: Instr[] = [];
   for (const [index, param] of callee.params.entries()) {
     const arg = runtimeArgs[index];
-    if (!arg || arg.kind === "var") continue;
-    if (flattenType(param.type, ctx.layouts).length !== 1) continue;
-    if (countNameUses(callee.body, param.name) > 1) continue;
-    scalarArgSubstitutions.set(param.name, arg);
+    if (!arg) continue;
+    if (flattenType(param.type, ctx.layouts).length === 1) {
+      if (arg.kind === "var") continue;
+      if (countNameUses(callee.body, param.name) > 1) continue;
+      scalarArgSubstitutions.set(param.name, arg);
+      continue;
+    }
+    const fields = productFieldTypes(param.type, ctx.layouts);
+    if (!fields?.length) continue;
+    const fieldValues = productArgFieldValues(arg, fields);
+    if (!fieldValues) continue;
+    for (const [field, value] of fieldValues) {
+      if (hasRuntimeEffect(value, ctx.functions)) continue;
+      const uses = countFieldAccessUses(callee.body, param.name, field);
+      if (value.kind !== "var" && value.kind !== "field" && uses > 1) {
+        const slots = flattenType(fields.find((item) => item.label === field)?.type, ctx.layouts);
+        const slot = slots[0];
+        if (!slot || slots.length !== 1 || !isSpeculableNonTrappingExpr(value, ctx.functions)) {
+          continue;
+        }
+        const name = `${prefix}_${param.name}_${field}`;
+        locals.add(name);
+        ctx.tempLocals.push({ name, type: slot.wat });
+        productFieldTempInits.push(
+          ...lowerExpr(value, ctx, locals, fields.find((item) => item.label === field)?.type),
+          { op: "local.set", name },
+        );
+        productFieldSubstitutions.set(`${param.name}.${field}`, { kind: "var", name });
+        continue;
+      }
+      if (value.kind !== "var" && value.kind !== "field" && uses > 1) continue;
+      productFieldSubstitutions.set(`${param.name}.${field}`, value);
+    }
   }
-  const inlineCallee = scalarArgSubstitutions.size
+  const substitutions = new Map([...scalarArgSubstitutions, ...productFieldSubstitutions]);
+  const inlineCallee = substitutions.size
     ? {
       ...callee,
-      body: substituteExpr(callee.body as Expr, scalarArgSubstitutions) as BlockExpr,
+      body: substituteExpr(callee.body as Expr, substitutions) as BlockExpr,
     }
     : callee;
 
-  const prefix = `__inl_${callee.name.replaceAll(/[^A-Za-z0-9_]/g, "_")}_${ctx.tempIndex++}`;
   const renames = new Map<string, string>();
   const aliasedScalarParams = new Set<string>();
+  const elidedProductParams = new Set<string>();
   for (const [index, param] of inlineCallee.params.entries()) {
     const originalParam = callee.params[index];
     const arg = runtimeArgs[index];
@@ -5526,9 +6543,18 @@ function lowerPrivateScalarCallInline(
       aliasedScalarParams.add(originalParam.name);
       continue;
     }
+    if (
+      originalParam &&
+      flattenType(param.type, ctx.layouts).length > 1 &&
+      !exprMentionsName(inlineCallee.body, param.name)
+    ) {
+      renames.set(param.name, param.name);
+      elidedProductParams.add(originalParam.name);
+      continue;
+    }
     renames.set(
       param.name,
-      scalarArgSubstitutions.has(param.name) ? param.name : `${prefix}_${param.name}`,
+      substitutions.has(param.name) ? param.name : `${prefix}_${param.name}`,
     );
   }
   const renamed = renameFunctionLocals(inlineCallee, renames);
@@ -5544,7 +6570,8 @@ function lowerPrivateScalarCallInline(
     localSlotArrays,
   };
   const paramBindings = renamed.params.flatMap((param, index) =>
-    scalarArgSubstitutions.has(callee.params[index]?.name ?? "") ||
+    substitutions.has(callee.params[index]?.name ?? "") ||
+      elidedProductParams.has(callee.params[index]?.name ?? "") ||
       aliasedScalarParams.has(callee.params[index]?.name ?? "")
       ? []
       : flattenBinding(param.name, param.type, ctx.layouts)
@@ -5560,8 +6587,10 @@ function lowerPrivateScalarCallInline(
   }
 
   return [
+    ...productFieldTempInits,
     ...runtimeArgs.flatMap((arg, index) =>
-      scalarArgSubstitutions.has(callee.params[index]?.name ?? "") ||
+      substitutions.has(callee.params[index]?.name ?? "") ||
+        elidedProductParams.has(callee.params[index]?.name ?? "") ||
         aliasedScalarParams.has(callee.params[index]?.name ?? "")
         ? []
         : lowerExpr(arg, ctx, locals, callee.params[index]?.type)
@@ -5572,6 +6601,49 @@ function lowerPrivateScalarCallInline(
     })),
     ...lowerBlock(renamed.body, inlineCtx, locals, expectedType ?? renamed.returnType),
   ];
+}
+
+function productArgFieldValues(
+  arg: Expr,
+  fields: { label: string; type: string }[],
+): Map<string, Expr> | undefined {
+  if (arg.kind === "var") {
+    return new Map(fields.map((field) => [
+      field.label,
+      {
+        kind: "field",
+        value: arg,
+        key: { kind: "literal", literalKind: "literalType", value: `#${field.label}` },
+      } as Expr,
+    ]));
+  }
+  if (arg.kind !== "product_constructor" && arg.kind !== "shape") return undefined;
+  if (arg.slots.some((slot) => slot.spread || slot.index || !slot.label)) return undefined;
+  const slots = new Map(arg.slots.map((slot) => [slot.label!, slot.value]));
+  if (fields.some((field) => !slots.has(field.label))) return undefined;
+  return new Map(fields.map((field) => [field.label, slots.get(field.label)!]));
+}
+
+function countFieldAccessUses(expr: Expr | BlockExpr, base: string, field: string): number {
+  let count = 0;
+  const visit = (item: Expr | BlockExpr | Statement | undefined) => {
+    if (!item) return;
+    if ("kind" in item && item.kind === "var" && item.name === `${base}.${field}`) {
+      count++;
+      return;
+    }
+    if ("kind" in item && item.kind === "field" && fieldAccessName(item) === `${base}.${field}`) {
+      count++;
+      return;
+    }
+    if ("kind" in item && (item.kind === "let" || item.kind === "destructure_let")) {
+      visit(item.value);
+      return;
+    }
+    for (const child of exprChildren(item as Expr | BlockExpr)) visit(child);
+  };
+  visit(expr);
+  return count;
 }
 
 function backendInlineBlockCost(block: BlockExpr): number {
@@ -6475,33 +7547,23 @@ function lowerPackedArrayCachedOldStore(
   if (hasRuntimeEffect(value, ctx.functions)) return undefined;
   ensureLoweringLocals(value, ctx, locals);
   const cachedIndex = cacheRepeatedIndex(index, ctx, locals);
-  const shiftName = `__fixed_array_packed_shift${ctx.tempIndex++}`;
-  const valueName = `__fixed_array_packed_value${ctx.tempIndex++}`;
-  ctx.tempLocals.push({ name: shiftName, type: "i32" });
-  ctx.tempLocals.push({ name: valueName, type: plan.packedType });
-  locals.add(shiftName);
-  locals.add(valueName);
   return [
     ...cachedIndex.prefix,
-    ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
-    { op: "const", type: "i32", value: plan.bitWidth },
-    { op: "binary", wasm: "i32.mul" },
-    { op: "local.set", name: shiftName },
-    ...lowerPackedArrayValueToPacked(
-      plan,
-      lowerExpr(value, ctx, locals, plan.itemType),
-      packedArrayValueAlreadyMasked(value, plan, ctx),
-    ),
-    { op: "local.set", name: valueName },
     { op: "local.get", name: packedArrayLocalName(plan.name) },
     ...lowerPackedArrayValueToPacked(
       plan,
       [{ op: "local.get", name: cachedOld }],
       true,
     ),
-    { op: "local.get", name: valueName },
+    ...lowerPackedArrayValueToPacked(
+      plan,
+      lowerExpr(value, ctx, locals, plan.itemType),
+      packedArrayValueAlreadyMasked(value, plan, ctx),
+    ),
     { op: "binary", wasm: `${plan.packedType}.xor` },
-    { op: "local.get", name: shiftName },
+    ...lowerExpr(cachedIndex.index, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: plan.bitWidth },
+    { op: "binary", wasm: "i32.mul" },
     { op: "binary", wasm: `${plan.packedType}.shl` },
     { op: "binary", wasm: `${plan.packedType}.xor` },
     { op: "local.set", name: packedArrayLocalName(plan.name) },
@@ -6598,13 +7660,10 @@ function lowerPackedArrayUpdateStore(
     packedArrayReadKeyForPlan(plan, update.index),
   );
   const oldName = cachedOld ?? `__fixed_array_packed_old${ctx.tempIndex++}`;
-  const valueName = `__fixed_array_packed_value${ctx.tempIndex++}`;
   ctx.tempLocals.push({ name: shiftName, type: "i32" });
   if (!cachedOld) ctx.tempLocals.push({ name: oldName, type: plan.valueType });
-  ctx.tempLocals.push({ name: valueName, type: plan.packedType });
   locals.add(shiftName);
   locals.add(oldName);
-  locals.add(valueName);
   const mask = packedMaskInstr(plan.packedType, plan.bitWidth);
   const updated = substituteExpr(
     rmw.value,
@@ -6620,10 +7679,10 @@ function lowerPackedArrayUpdateStore(
       ...lowerPackedArrayValueToItem(
         plan,
         maskValue(
-          [
-            { op: "local.get", name: packedArrayLocalName(plan.name) },
-            { op: "local.get", name: shiftName },
-            { op: "binary", wasm: `${plan.packedType}.shr_u` },
+        [
+          { op: "local.get", name: packedArrayLocalName(plan.name) },
+          { op: "local.get", name: shiftName },
+          { op: "binary", wasm: `${plan.packedType}.shr_u` },
           ],
           plan.packedType,
           plan.bitWidth,
@@ -6631,19 +7690,17 @@ function lowerPackedArrayUpdateStore(
       ),
       { op: "local.set", name: oldName } as Instr,
     ]),
-    ...lowerPackedArrayValueToPacked(
-      plan,
-      lowerExpr(updated, ctx, locals, plan.itemType),
-      packedArrayValueAlreadyMasked(updated, plan, ctx),
-    ),
-    { op: "local.set", name: valueName },
     { op: "local.get", name: packedArrayLocalName(plan.name) },
     ...lowerPackedArrayValueToPacked(
       plan,
       [{ op: "local.get", name: oldName }],
       true,
     ),
-    { op: "local.get", name: valueName },
+    ...lowerPackedArrayValueToPacked(
+      plan,
+      lowerExpr(updated, ctx, locals, plan.itemType),
+      packedArrayValueAlreadyMasked(updated, plan, ctx),
+    ),
     { op: "binary", wasm: `${plan.packedType}.xor` },
     { op: "local.get", name: shiftName },
     { op: "binary", wasm: `${plan.packedType}.shl` },
@@ -8293,6 +9350,8 @@ function lowerMatchArms(
       ...lowerExpr(arm.value, ctx, locals, expectedType),
     ];
   }
+  const accumulator = lowerBooleanScalarAccumulator(value, arm, rest, ctx, locals, expectedType);
+  if (accumulator) return accumulator;
   const selected = lowerScalarBooleanMatchSelect(value, arm, rest, ctx, locals, expectedType);
   if (selected) return selected;
   return [
@@ -8311,6 +9370,109 @@ function lowerMatchArms(
       branchHint: branchHintForTestedArm(arm, rest),
     },
   ];
+}
+
+function lowerBooleanScalarAccumulator(
+  value: Expr,
+  arm: { pattern: ParamPattern; value: Expr },
+  rest: { pattern: ParamPattern; value: Expr }[],
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] | undefined {
+  if (ctx.optMode !== "release" || rest.length !== 1) return undefined;
+  if (branchHintForTestedArm(arm, rest)) return undefined;
+  if (!isTrueLikePattern(arm.pattern) && !isFalseLikePattern(arm.pattern)) return undefined;
+  const fallback = rest[0]!;
+  if (
+    !isCatchAllPattern(fallback.pattern) &&
+    !isTrueLikePattern(fallback.pattern) &&
+    !isFalseLikePattern(fallback.pattern)
+  ) return undefined;
+  const resultType = expectedType ?? exprTypeWithLocals(arm.value, ctx);
+  const slot = flattenType(resultType, ctx.layouts)[0];
+  if (!slot || slot.wat !== "i32" || flattenType(resultType, ctx.layouts).length !== 1) return undefined;
+
+  const armDelta = scalarAccumulatorDelta(fallback.value, arm.value);
+  const fallbackDelta = scalarAccumulatorDelta(arm.value, fallback.value);
+  const active = armDelta
+    ? { base: fallback.value, delta: armDelta, onTestedArm: true }
+    : fallbackDelta
+    ? { base: arm.value, delta: fallbackDelta, onTestedArm: false }
+    : undefined;
+  if (!active) {
+    const signed = scalarAccumulatorSignedDelta(arm.value, fallback.value);
+    if (!signed || !isSpeculableNonTrappingExpr(signed.delta, ctx.functions)) return undefined;
+    return [
+      ...lowerExpr(signed.base, ctx, locals, resultType),
+      ...lowerExpr(signed.delta, ctx, locals, "i32"),
+      { op: "const", type: "i32", value: 0 },
+      ...lowerExpr(signed.delta, ctx, locals, "i32"),
+      { op: "binary", wasm: "i32.sub" },
+      ...lowerExpr(value, ctx, locals, "bool"),
+      ...lowerPatternTest(arm.pattern),
+      { op: "select", type: "i32" },
+      { op: "binary", wasm: "i32.add" },
+    ];
+  }
+  if (active.base.kind !== "var") return undefined;
+  if (!isSpeculableNonTrappingExpr(active.delta, ctx.functions)) return undefined;
+
+  const literalDelta = staticIntegerLiteral(active.delta);
+  return [
+    ...lowerExpr(active.base, ctx, locals, resultType),
+    ...(literalDelta === 1
+      ? [
+        ...lowerExpr(value, ctx, locals, "bool"),
+        ...lowerPatternTest(arm.pattern),
+        ...(active.onTestedArm ? [] : [{ op: "binary", wasm: "i32.eqz" } as Instr]),
+      ]
+      : [
+        ...(active.onTestedArm
+          ? lowerExpr(active.delta, ctx, locals, "i32")
+          : [{ op: "const", type: "i32", value: 0 } as Instr]),
+        ...(active.onTestedArm
+          ? [{ op: "const", type: "i32", value: 0 } as Instr]
+          : lowerExpr(active.delta, ctx, locals, "i32")),
+        ...lowerExpr(value, ctx, locals, "bool"),
+        ...lowerPatternTest(arm.pattern),
+        { op: "select", type: "i32" } as Instr,
+      ]),
+    { op: "binary", wasm: "i32.add" },
+  ];
+}
+
+function scalarAccumulatorDelta(base: Expr, updated: Expr): Expr | undefined {
+  if (base.kind !== "var" || updated.kind !== "binary" || updated.op !== "+") return undefined;
+  if (updated.left.kind === "var" && updated.left.name === base.name) {
+    return exprMentionsName(updated.right, base.name) ? undefined : updated.right;
+  }
+  if (updated.right.kind === "var" && updated.right.name === base.name) {
+    return exprMentionsName(updated.left, base.name) ? undefined : updated.left;
+  }
+  return undefined;
+}
+
+function scalarAccumulatorSignedDelta(
+  positive: Expr,
+  negative: Expr,
+): { base: Expr; delta: Expr } | undefined {
+  if (
+    positive.kind === "binary" && positive.op === "+" &&
+    negative.kind === "binary" && negative.op === "-"
+  ) {
+    const leftBase = positive.left.kind === "var" && negative.left.kind === "var" &&
+      positive.left.name === negative.left.name;
+    if (leftBase && exprReuseKey(positive.right) === exprReuseKey(negative.right)) {
+      return { base: positive.left, delta: positive.right };
+    }
+    const rightBase = positive.right.kind === "var" && negative.left.kind === "var" &&
+      positive.right.name === negative.left.name;
+    if (rightBase && exprReuseKey(positive.left) === exprReuseKey(negative.right)) {
+      return { base: positive.right, delta: positive.left };
+    }
+  }
+  return undefined;
 }
 
 function narrowedCtxForPattern(
@@ -8429,25 +9591,27 @@ function lowerScalarBooleanMatchSelect(
     !isTrueLikePattern(fallback.pattern) &&
     !isFalseLikePattern(fallback.pattern)
   ) return undefined;
-  if (!conditionalScalarUpdateBase(arm.value, fallback.value)) return undefined;
+  if (
+    !conditionalScalarUpdateBase(arm.value, fallback.value) &&
+    (!cheapScalarSelectValue(arm.value) || !cheapScalarSelectValue(fallback.value))
+  ) return undefined;
   if (!isSpeculableNonTrappingExpr(arm.value, ctx.functions)) return undefined;
   if (!isSpeculableNonTrappingExpr(fallback.value, ctx.functions)) return undefined;
   const resultType = expectedType ?? exprTypeWithLocals(arm.value, ctx);
   const slots = flattenType(resultType, ctx.layouts);
   const slot = slots[0];
   if (!slot || slots.length !== 1) return undefined;
-  const condition = `__match_select${ctx.tempIndex++}`;
-  locals.add(condition);
-  ctx.tempLocals.push({ name: condition, type: "i32" });
   return [
-    ...lowerExpr(value, ctx, locals, "bool"),
-    ...lowerPatternTest(arm.pattern),
-    { op: "local.set", name: condition },
     ...lowerExpr(arm.value, ctx, locals, resultType),
     ...lowerExpr(fallback.value, ctx, locals, resultType),
-    { op: "local.get", name: condition },
+    ...lowerExpr(value, ctx, locals, "bool"),
+    ...lowerPatternTest(arm.pattern),
     { op: "select", type: slot.wat },
   ];
+}
+
+function cheapScalarSelectValue(expr: Expr): boolean {
+  return expr.kind === "var" || expr.kind === "literal";
 }
 
 function conditionalScalarUpdateBase(thenValue: Expr, elseValue: Expr): string | undefined {

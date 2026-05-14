@@ -1,8 +1,11 @@
 import type { Expr, Program } from "../src/core_ast.ts";
 import { checkSource, optimizeProgram } from "../src/mod.ts";
 
-const sizes = [10, 100, 500, 1000];
-const iterations = 25;
+const sizes = stringArg("--sizes")
+  ?.split(",")
+  .map((value) => Number(value.trim()))
+  .filter((value) => Number.isFinite(value) && value > 0) ?? [10, 100, 500, 1000];
+const iterations = numberArg("--iterations", 25);
 
 for (const size of sizes) {
   const rows = [];
@@ -134,4 +137,17 @@ function avg(values: number[]): number {
 function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((left, right) => left - right);
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+}
+
+function stringArg(name: string): string | undefined {
+  const prefix = `${name}=`;
+  const inline = Deno.args.find((arg) => arg.startsWith(prefix));
+  if (inline) return inline.slice(prefix.length);
+  const index = Deno.args.indexOf(name);
+  return index >= 0 ? Deno.args[index + 1] : undefined;
+}
+
+function numberArg(name: string, fallback: number): number {
+  const value = Number(stringArg(name));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

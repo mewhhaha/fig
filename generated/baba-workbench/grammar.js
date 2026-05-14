@@ -48,7 +48,7 @@ export default grammar({
     TypeExprArgs: $ => seq($.TypeExpr, repeat(seq(",", $.TypeExpr)), optional(",")),
     FnDecl: $ => seq(optional($.Visibility), $.FnTail),
     FnTail: $ => seq(optional($.BranchHint), "fn", $.FnName, "(", optional($.Params), ")", optional($.ReturnSig), optional($.EffectRow), $.Block),
-    BranchHint: $ => seq("@", choice("likely", "unlikely")),
+    BranchHint: $ => seq("@", $.LowerIdent),
     FnName: $ => seq(choice($.LowerIdent, $.PascalIdent), repeat(seq(".", choice($.LowerIdent, $.PascalIdent)))),
     FnSig: $ => seq("fn", $.FnName, "(", optional($.Params), ")", optional($.ReturnSig), optional($.EffectRow), ";"),
     ConstDecl: $ => seq("const", choice($.ImportBindingList, seq($.FieldName, $.Type, optional($.EffectRow)), seq($.LowerIdent, optional($.TypeAnn))), "=", $.ConstValue, optional(";")),

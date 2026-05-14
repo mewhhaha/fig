@@ -22,13 +22,14 @@ import type {
 } from "./core_ast.ts";
 import { CompileError, type Diagnostic } from "./diagnostics.ts";
 import { copyAstMetadata, hideAstMetadata } from "./ast_meta.ts";
+import type { CompilerPluginOptions } from "./plugins.ts";
 
 export interface ModuleSource {
   text: string;
   sourceId?: string;
 }
 
-export interface CheckSourceOptions {
+export interface CheckSourceOptions extends CompilerPluginOptions {
   sourceId?: string;
   resolveModule?: (
     moduleName: string,
@@ -39,9 +40,10 @@ export interface CompileSourceOptions extends CheckSourceOptions, BackendOptions
 
 export async function checkSource(source: string, options: CheckSourceOptions = {}) {
   const program = await parse(source, { sourceId: options.sourceId });
-  if (!options.resolveModule) return checkProgram(program);
+  if (!options.resolveModule) return checkProgram(program, options);
   return checkProgram(
     await resolveSourceImports(program, { resolveModule: options.resolveModule }),
+    options,
   );
 }
 
@@ -54,9 +56,10 @@ export async function checkParsedSourceForAnalysis(
   program: Program,
   options: CheckSourceOptions = {},
 ) {
-  if (!options.resolveModule) return checkProgramForAnalysis(program);
+  if (!options.resolveModule) return checkProgramForAnalysis(program, options);
   return checkProgramForAnalysis(
     await resolveSourceImports(program, { resolveModule: options.resolveModule }),
+    options,
   );
 }
 
@@ -79,6 +82,21 @@ export { formatSource, isFormatted } from "./format.ts";
 export { tokenize } from "./tokenize.ts";
 export { optimizeProgram, type OptMode, summarizeProgram } from "./optimize.ts";
 export { CompileError, formatDiagnostic } from "./diagnostics.ts";
+export {
+  COMPILER_PLUGIN_API_VERSION,
+  createCompilerPluginRegistry,
+  type CompilerAnnotationBuiltin,
+  type CompilerDeclarationBuiltin,
+  type CompilerDoStrategyBuiltin,
+  type CompilerIntrinsicBuiltin,
+  type CompilerPlugin,
+  type CompilerPluginRegistry,
+  type CompilerStaticBuiltin,
+  type ConstBuiltinContext,
+  type ConstPluginValue,
+  type TypeBuiltinContext,
+  type TypePluginValue,
+} from "./plugins.ts";
 
 async function resolveSourceImports(
   root: Program,

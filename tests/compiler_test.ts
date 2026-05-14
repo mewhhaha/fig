@@ -1,6 +1,8 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import {
   checkSource,
+  COMPILER_PLUGIN_API_VERSION,
+  createCompilerPluginRegistry,
   optimizeProgram,
   parse,
   summarizeProgram,
@@ -10,6 +12,7 @@ import {
 } from "../src/mod.ts";
 import { CompileError } from "../src/diagnostics.ts";
 import type { Expr, FnDecl, Program, TypeDecl } from "../src/core_ast.ts";
+import type { CompilerPlugin } from "../src/plugins.ts";
 
 const resolveProjectModule = async (moduleName: string) => {
   try {
@@ -114,6 +117,96 @@ Deno.test("branch hints reject unmapped source locations", async () => {
   await assertThrowsCompile(
     `pub fn main(x: i32) -> i32 { match x { @likely 0 => 1, @unlikely _ => 2 } }`,
     "branch_hint.unmapped",
+  );
+});
+
+Deno.test("compiler plugin registry rejects duplicate ids and names", () => {
+  const first: CompilerPlugin = {
+    apiVersion: COMPILER_PLUGIN_API_VERSION,
+    id: "test-plugin",
+    staticBuiltins: [{ name: "test_builtin" }],
+  };
+  const second: CompilerPlugin = {
+    apiVersion: COMPILER_PLUGIN_API_VERSION,
+    id: "test-plugin",
+    staticBuiltins: [{ name: "test_builtin" }],
+  };
+  const registry = createCompilerPluginRegistry([first, second]);
+  assertEquals(registry.diagnostics.map((diagnostic) => diagnostic.code), [
+    "plugin.duplicate",
+    "plugin.duplicate_builtin",
+  ]);
+});
+
+Deno.test("compiler plugins can add static builtins", async () => {
+  const plugin: CompilerPlugin = {
+    apiVersion: COMPILER_PLUGIN_API_VERSION,
+    id: "test-static",
+    staticBuiltins: [{
+      name: "always_true",
+      evaluateConst: () => ({ kind: "bool", value: true }),
+      evaluateType: () => ({ kind: "bool", value: true }),
+    }],
+  };
+
+  const checked = await checkSource(
+    `
+      const truth: bool = @always_true();
+      type fn NeedsTrue() -> type {
+        @require(@always_true(), "plugin static builtin failed");
+        i32
+      }
+      pub fn main() -> NeedsTrue { match truth { true => 1, false => 0 } }
+    `,
+    { plugins: [plugin] },
+  );
+
+  assertEquals(checked.program.declarations.some((decl) => decl.kind === "const"), true);
+});
+
+Deno.test("compiler plugin diagnostics flow through compile options", async () => {
+  const plugin: CompilerPlugin = {
+    apiVersion: COMPILER_PLUGIN_API_VERSION,
+    id: "core-static",
+  };
+  try {
+    await checkSource("pub fn main() -> i32 { 1 }", { plugins: [plugin] });
+  } catch (error) {
+    assert(error instanceof CompileError);
+    assertEquals(error.diagnostics[0]?.code, "plugin.duplicate");
+    return;
+  }
+  throw new Error("expected plugin duplicate diagnostic");
+});
+
+Deno.test("compiler plugins can add branch-hint annotations", async () => {
+  const plugin: CompilerPlugin = {
+    apiVersion: COMPILER_PLUGIN_API_VERSION,
+    id: "test-annotations",
+    annotationBuiltins: [{ name: "hot", branchHint: "likely" }],
+  };
+
+  const checked = await checkSource(
+    `
+      @hot fn score(true: bool) -> i32 { 1 }
+      fn score(false: bool) -> i32 { 0 }
+      pub fn main() -> i32 { score(true) }
+    `,
+    { plugins: [plugin] },
+  );
+  const dispatcher = findFn(checked.program, "score");
+  assert(dispatcher?.body.expr?.kind === "match");
+  assertEquals(dispatcher.body.expr.arms[0]?.branchHint, "likely");
+});
+
+Deno.test("unknown plugin annotations are diagnostics after parsing", async () => {
+  await assertThrowsCompile(
+    `
+      @hot fn score(true: bool) -> i32 { 1 }
+      fn score(false: bool) -> i32 { 0 }
+      pub fn main() -> i32 { score(true) }
+    `,
+    "plugin.unknown_annotation",
   );
 });
 

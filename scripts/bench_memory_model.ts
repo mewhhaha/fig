@@ -73,7 +73,7 @@ const simdDot1Source = `
   }
 
   pub fn main(seed: i32) -> i32 {
-    let row: Lane4I32 = <1 + seed - seed, 2, 3, 4>;
+    let row: Lane4I32 = <1 + seed, 2, 3, 4>;
     let col: Lane4I32 = <1, 5, 9, 13>;
     row[0] * col[0] + row[1] * col[1] + row[2] * col[2] + row[3] * col[3]
   }
@@ -482,9 +482,15 @@ const rows = [];
 for (const scenario of scenarios) {
   let wat: string;
   let wasm: Uint8Array<ArrayBuffer>;
+  let compileWatMs = 0;
+  let compileWasmMs = 0;
   try {
+    const watStart = performance.now();
     wat = await watFromSource(scenario.source, compileOptions);
+    compileWatMs = performance.now() - watStart;
+    const wasmStart = performance.now();
     wasm = await wasmFromSource(scenario.source, compileOptions);
+    compileWasmMs = performance.now() - wasmStart;
   } catch (error) {
     throw new Error(`failed to compile benchmark scenario ${scenario.name}: ${String(error)}`);
   }
@@ -506,6 +512,9 @@ for (const scenario of scenarios) {
     elapsed_ms: timed.elapsedMs.toFixed(3),
     calls_per_ms: (calls / timed.elapsedMs).toFixed(3),
     ns_per_call: ((timed.elapsedMs * 1_000_000) / calls).toFixed(1),
+    compile_wat_ms: compileWatMs.toFixed(3),
+    compile_wasm_ms: compileWasmMs.toFixed(3),
+    compile_total_ms: (compileWatMs + compileWasmMs).toFixed(3),
     wat_bytes: wat.length,
     wasm_bytes: wasm.byteLength,
     main_locals: count(mainWat, /\(local \$/g),

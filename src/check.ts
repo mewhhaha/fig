@@ -1,5 +1,6 @@
 import type {
   BlockExpr,
+  BranchHint,
   ConstDecl,
   DoStatement,
   Expr,
@@ -23,6 +24,16 @@ import type {
 import { CompileError, type Diagnostic, type Span } from "./diagnostics.ts";
 import { isCatchAllPattern, patternBindingNames } from "./patterns.ts";
 import { intrinsicWrapperId, isIntrinsicWrapper, isKnownIntrinsicId } from "./primitives.ts";
+import {
+  annotationBranchHint,
+  createCompilerPluginRegistry,
+  defaultCompilerPluginRegistry,
+  isStaticBuiltinName,
+  type CompilerPluginOptions,
+  type CompilerPluginRegistry,
+  staticBuiltinName,
+  staticBuiltinParamKind,
+} from "./plugins.ts";
 import {
   type DomainInterval,
   endpointFromTypeExprText,
@@ -78,21 +89,26 @@ function exprDiagnosticSpan(expr: Expr | undefined): Span | undefined {
   return { ...childSpans[0], start, end };
 }
 
-export function checkProgram(program: Program): CheckResult {
-  const result = checkProgramInternal(program, { recoverTypes: false });
+export function checkProgram(program: Program, options: CompilerPluginOptions = {}): CheckResult {
+  const result = checkProgramInternal(program, { recoverTypes: false, ...options });
   if (result.diagnostics.length) throw new CompileError(result.diagnostics);
   return { program: result.program, shaderManifest: result.shaderManifest };
 }
 
-export function checkProgramForAnalysis(program: Program): AnalysisCheckResult {
-  return checkProgramInternal(program, { recoverTypes: true });
+export function checkProgramForAnalysis(
+  program: Program,
+  options: CompilerPluginOptions = {},
+): AnalysisCheckResult {
+  return checkProgramInternal(program, { recoverTypes: true, ...options });
 }
 
 function checkProgramInternal(
   program: Program,
-  options: { recoverTypes: boolean },
+  options: { recoverTypes: boolean } & CompilerPluginOptions,
 ): AnalysisCheckResult {
   const diagnostics: Diagnostic[] = [];
+  const pluginRegistry = createCompilerPluginRegistry(options.plugins);
+  diagnostics.push(...pluginRegistry.diagnostics);
   const shaderManifest = new Map<number, ShaderManifestEntry>();
   const addShader = (source: string) => {
     const entry = shaderManifestEntry(source);
@@ -103,12 +119,12 @@ function checkProgramInternal(
   lowerDoExpressions(program, diagnostics);
   checkBorrowTypeRestrictions(program, diagnostics);
   groupFunctionClauses(program, diagnostics);
-  checkBranchHints(program, diagnostics);
+  checkBranchHints(program, diagnostics, pluginRegistry);
   const typeDecls = mergeTypeFragments(program, diagnostics);
   checkTypeFunctionCasing(typeDecls, program, diagnostics);
   let fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
   let functions = new Set(fnDecls.map((decl) => decl.name));
-  checkPrimitiveDecls(fnDecls, diagnostics);
+  checkPrimitiveDecls(fnDecls, diagnostics, pluginRegistry);
   evaluateTypeDecls(typeDecls, diagnostics);
   attachQualifiedTypeMembers(typeDecls, fnDecls, diagnostics);
   const constValues = evaluateConstDecls(
@@ -118,6 +134,7 @@ function checkProgramInternal(
     capabilities,
     addShader,
     diagnostics,
+    pluginRegistry,
   );
   resolveAttachedMemberCalls(program, typeDecls);
   specializeInferredTypeCalls(
@@ -170,7 +187,15 @@ function checkProgramInternal(
     functions,
     diagnostics,
   );
-  checkTypeContracts(program, typeDecls, fnDecls, capabilities, constValues, diagnostics);
+  checkTypeContracts(
+    program,
+    typeDecls,
+    fnDecls,
+    capabilities,
+    constValues,
+    diagnostics,
+    pluginRegistry,
+  );
   lowerResolvedOperators(program, typeDecls, fnDecls, diagnostics);
   lowerCollectorLiterals(program, typeDecls, fnDecls, diagnostics);
   lowerProductConstructors(program, typeDecls, diagnostics);
@@ -475,13 +500,17 @@ function exprChildValues(expr: Expr): Expr[] {
   }
 }
 
-function checkPrimitiveDecls(fnDecls: FnDecl[], diagnostics: Diagnostic[]) {
+function checkPrimitiveDecls(
+  fnDecls: FnDecl[],
+  diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry,
+) {
   const ids = new Map<string, string>();
   for (const decl of fnDecls) {
     const directWrapperId = directCompilerCallId(decl);
     const id = decl.primitiveId ?? directWrapperId;
     if (!id) continue;
-    if (!isKnownIntrinsicId(id)) {
+    if (!isKnownIntrinsicId(id, pluginRegistry)) {
       diagnostics.push({
         code: "primitive.unknown",
         message: `unknown compiler intrinsic ${id} on function ${decl.name}`,
@@ -1344,9 +1373,29 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
   );
 }
 
-function checkBranchHints(program: Program, diagnostics: Diagnostic[]) {
+function checkBranchHints(
+  program: Program,
+  diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry,
+) {
+  const likely = annotationBranchHint("likely", pluginRegistry);
+  const unlikely = annotationBranchHint("unlikely", pluginRegistry);
+  if (likely !== "likely" || unlikely !== "unlikely") {
+    diagnostics.push({
+      code: "plugin.annotation",
+      message: "core branch hint annotations @likely and @unlikely must be registered",
+    });
+  }
   for (const decl of program.declarations) {
     if (decl.kind !== "fn") continue;
+    if (decl.branchHint) {
+      decl.branchHint = normalizeBranchHintAnnotation(
+        decl.branchHint,
+        decl,
+        diagnostics,
+        pluginRegistry,
+      );
+    }
     if (decl.branchHint && !decl.generated) {
       diagnostics.push({
         code: "branch_hint.unused",
@@ -1354,62 +1403,70 @@ function checkBranchHints(program: Program, diagnostics: Diagnostic[]) {
         span: decl.nameSpan ?? decl.span,
       });
     }
-    checkBranchHintsInBlock(decl.body, diagnostics);
+    checkBranchHintsInBlock(decl.body, diagnostics, pluginRegistry);
   }
 }
 
-function checkBranchHintsInBlock(block: BlockExpr, diagnostics: Diagnostic[]) {
+function checkBranchHintsInBlock(
+  block: BlockExpr,
+  diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry,
+) {
   for (const stmt of block.statements) {
     if (stmt.kind === "let" || stmt.kind === "destructure_let") {
-      checkBranchHintsInExpr(stmt.value, diagnostics);
+      checkBranchHintsInExpr(stmt.value, diagnostics, pluginRegistry);
     }
   }
-  if (block.expr) checkBranchHintsInExpr(block.expr, diagnostics);
+  if (block.expr) checkBranchHintsInExpr(block.expr, diagnostics, pluginRegistry);
 }
 
-function checkBranchHintsInExpr(expr: Expr, diagnostics: Diagnostic[]) {
+function checkBranchHintsInExpr(
+  expr: Expr,
+  diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry,
+) {
   switch (expr.kind) {
     case "block":
-      checkBranchHintsInBlock(expr, diagnostics);
+      checkBranchHintsInBlock(expr, diagnostics, pluginRegistry);
       return;
     case "call":
-      checkBranchHintsInExpr(expr.callee, diagnostics);
-      expr.args.forEach((arg) => checkBranchHintsInExpr(arg, diagnostics));
+      checkBranchHintsInExpr(expr.callee, diagnostics, pluginRegistry);
+      expr.args.forEach((arg) => checkBranchHintsInExpr(arg, diagnostics, pluginRegistry));
       return;
     case "index":
-      checkBranchHintsInExpr(expr.target, diagnostics);
-      checkBranchHintsInExpr(expr.index, diagnostics);
+      checkBranchHintsInExpr(expr.target, diagnostics, pluginRegistry);
+      checkBranchHintsInExpr(expr.index, diagnostics, pluginRegistry);
       return;
     case "binary":
-      checkBranchHintsInExpr(expr.left, diagnostics);
-      checkBranchHintsInExpr(expr.right, diagnostics);
+      checkBranchHintsInExpr(expr.left, diagnostics, pluginRegistry);
+      checkBranchHintsInExpr(expr.right, diagnostics, pluginRegistry);
       return;
     case "pipe_bind":
-      checkBranchHintsInExpr(expr.value, diagnostics);
-      checkBranchHintsInExpr(expr.body, diagnostics);
+      checkBranchHintsInExpr(expr.value, diagnostics, pluginRegistry);
+      checkBranchHintsInExpr(expr.body, diagnostics, pluginRegistry);
       return;
     case "match":
-      checkBranchHintsInExpr(expr.value, diagnostics);
-      validateMatchBranchHints(expr, diagnostics);
-      expr.arms.forEach((arm) => checkBranchHintsInExpr(arm.value, diagnostics));
+      checkBranchHintsInExpr(expr.value, diagnostics, pluginRegistry);
+      validateMatchBranchHints(expr, diagnostics, pluginRegistry);
+      expr.arms.forEach((arm) => checkBranchHintsInExpr(arm.value, diagnostics, pluginRegistry));
       return;
     case "shape":
     case "product_constructor":
       expr.slots.forEach((slot) => {
-        if (slot.index) checkBranchHintsInExpr(slot.index, diagnostics);
-        checkBranchHintsInExpr(slot.value, diagnostics);
+        if (slot.index) checkBranchHintsInExpr(slot.index, diagnostics, pluginRegistry);
+        checkBranchHintsInExpr(slot.value, diagnostics, pluginRegistry);
       });
       return;
     case "range":
-      checkBranchHintsInExpr(expr.start, diagnostics);
-      checkBranchHintsInExpr(expr.end, diagnostics);
+      checkBranchHintsInExpr(expr.start, diagnostics, pluginRegistry);
+      checkBranchHintsInExpr(expr.end, diagnostics, pluginRegistry);
       return;
     case "static_for_slots":
-      checkBranchHintsInExpr(expr.value, diagnostics);
+      checkBranchHintsInExpr(expr.value, diagnostics, pluginRegistry);
       return;
     case "field":
-      checkBranchHintsInExpr(expr.value, diagnostics);
-      checkBranchHintsInExpr(expr.key, diagnostics);
+      checkBranchHintsInExpr(expr.value, diagnostics, pluginRegistry);
+      checkBranchHintsInExpr(expr.key, diagnostics, pluginRegistry);
       return;
     case "literal":
     case "var":
@@ -1418,12 +1475,45 @@ function checkBranchHintsInExpr(expr: Expr, diagnostics: Diagnostic[]) {
   }
 }
 
+function normalizeBranchHintAnnotation(
+  name: string,
+  node: { span?: Span; nameSpan?: Span },
+  diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry,
+): BranchHint {
+  const annotation = pluginRegistry.annotationBuiltins.get(name);
+  if (!annotation) {
+    diagnostics.push({
+      code: "plugin.unknown_annotation",
+      message: `unknown annotation @${name}`,
+      span: node.nameSpan ?? node.span,
+    });
+    return name;
+  }
+  if (!annotation.branchHint) {
+    diagnostics.push({
+      code: "plugin.annotation_phase",
+      message: `annotation @${name} cannot be used as a branch hint`,
+      span: node.nameSpan ?? node.span,
+    });
+    return name;
+  }
+  return annotation.branchHint;
+}
+
 function validateMatchBranchHints(
   expr: Extract<Expr, { kind: "match" }>,
   diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry,
 ) {
   expr.arms.forEach((arm, index) => {
     if (!arm.branchHint) return;
+    arm.branchHint = normalizeBranchHintAnnotation(
+      arm.branchHint,
+      arm,
+      diagnostics,
+      pluginRegistry,
+    );
     const isLast = index === expr.arms.length - 1;
     const previous = expr.arms[index - 1];
     if (!isLast && !isCatchAllPattern(arm.pattern)) return;
@@ -1490,7 +1580,7 @@ function buildClauseBranch(
   };
 }
 
-function invertBranchHint(hint: "likely" | "unlikely"): "likely" | "unlikely" {
+function invertBranchHint(hint: BranchHint): BranchHint {
   return hint === "likely" ? "unlikely" : "likely";
 }
 
@@ -2012,6 +2102,7 @@ function evaluateConstDecls(
   capabilities: Map<string, string[]>,
   addShader: (source: string) => ShaderManifestEntry,
   diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry,
 ): Map<string, ConstValue> {
   const byConst = new Map(consts.map((decl) => [decl.name, decl]));
   const values = new Map<string, ConstValue>();
@@ -2044,6 +2135,7 @@ function evaluateConstDecls(
     addShader,
     diagnostics,
     (name) => evaluateConst(name),
+    pluginRegistry,
   );
 
   const evaluateConst = (name: string): ConstValue | undefined => {
@@ -2085,6 +2177,7 @@ class ConstEvaluator {
     private addShader: (source: string) => ShaderManifestEntry,
     private diagnostics: Diagnostic[],
     private constLookup: (name: string) => ConstValue | undefined,
+    private pluginRegistry: CompilerPluginRegistry,
   ) {}
 
   evalExpr(
@@ -2256,6 +2349,12 @@ class ConstEvaluator {
   }
 
   private evalBuiltin(name: string, args: ConstValue[]): ConstValue | undefined {
+    const pluginBuiltin = this.pluginRegistry.staticBuiltins.get(staticBuiltinName(name));
+    const pluginValue = pluginBuiltin?.evaluateConst?.(args, {
+      addShader: this.addShader,
+      report: (diagnostic) => this.diagnostics.push(diagnostic),
+    });
+    if (pluginValue) return pluginValue as ConstValue;
     if (name === "compile_error") {
       const message = args[0]?.kind === "string" ? args[0].value : "compile-time error";
       this.report("const.compile_error", message, args[0]?.span);
@@ -2504,6 +2603,7 @@ class ConstEvaluator {
       this.types,
       this.diagnostics,
       this.addShader,
+      this.pluginRegistry,
       this.diagnosticSpan,
     );
     const parsedName = parseAnnotationType(type.name);
@@ -3634,6 +3734,7 @@ function substituteInferredExpr(
         context.consts ?? new Map(),
         context.diagnostics,
         shaderManifestEntry,
+        defaultCompilerPluginRegistry,
         context.diagnosticSpan,
       )
       : undefined;
@@ -5644,6 +5745,7 @@ function resolveStaticTypeConst(
     context.consts ?? new Map(),
     context.diagnostics ?? [],
     shaderManifestEntry,
+    defaultCompilerPluginRegistry,
     context.diagnosticSpan,
   );
   const resolved = evaluator.resolve({
@@ -5978,49 +6080,6 @@ function inferKinds(
 function lookupTypeDecl(byName: Map<string, TypeDecl>, name: string): TypeDecl | undefined {
   return byName.get(name) ?? byName.get(terminalName(name)) ??
     Array.from(byName.values()).find((decl) => terminalName(decl.name) === terminalName(name));
-}
-
-function staticBuiltinParamKind(
-  name: string | undefined,
-  index: number,
-): TypeParamKind | undefined {
-  const shapeFirstArg = new Set([
-    "shape_map",
-    "shape_concat",
-    "shape_has_slot",
-    "shape_slot",
-    "shape_count",
-    "shape_first_key",
-    "shape_tail",
-    "shape_pick",
-    "shape_omit",
-    "shape_intersect",
-    "shape_difference",
-    "shape_rename",
-    "shape_map_with_key",
-    "shape_filter",
-  ]);
-  if (name && shapeFirstArg.has(name) && index === 0) return "const";
-  if (name === "shape_map" && index === 1) return "type fn(_: const) -> type";
-  if ((name === "shape_map_with_key" || name === "shape_filter") && index === 1) {
-    return "type fn(_: const, _: const) -> type";
-  }
-  if (
-    (name === "shape_pick" || name === "shape_omit" || name === "shape_intersect" ||
-      name === "shape_difference" || name === "shape_rename") && index === 1
-  ) return "const";
-  if (name === "shape_concat") return "const";
-  if (
-    (name === "type_slots" || name === "type_slot_count" || name === "type_variant_slots" ||
-      name === "type_variants") && index === 0
-  ) return "type";
-  if (
-    (name === "wgsl_shader_id" || name === "wgsl_bindings" || name === "wgsl_locations") &&
-    index === 0
-  ) {
-    return "string";
-  }
-  return undefined;
 }
 
 function inferShapeKinds(
@@ -6557,6 +6616,7 @@ function checkTypeContracts(
   capabilities: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry,
 ) {
   const byName = new Map(types.map((decl) => [decl.name, decl]));
   const byFn = new Map(functions.map((decl) => [decl.name, decl]));
@@ -6571,6 +6631,7 @@ function checkTypeContracts(
           consts,
           diagnostics,
           decl.span,
+          pluginRegistry,
         );
       }
     } else if (decl.kind === "fn") {
@@ -6588,6 +6649,7 @@ function checkTypeContracts(
             consts,
             diagnostics,
             param.span ?? decl.span,
+            pluginRegistry,
           );
         }
         if (param.const && (param.type === "type" || param.inferStaticType)) {
@@ -6606,6 +6668,7 @@ function checkTypeContracts(
           consts,
           diagnostics,
           decl.span,
+          pluginRegistry,
         );
       }
       checkBlockTypeContracts(
@@ -6616,6 +6679,7 @@ function checkTypeContracts(
         consts,
         diagnostics,
         constTypeParams,
+        pluginRegistry,
       );
     }
   }
@@ -6629,6 +6693,7 @@ function checkBlockTypeContracts(
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   deferredTypeParams = new Set<string>(),
+  pluginRegistry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
 ) {
   for (const stmt of block.statements) {
     if (
@@ -6643,14 +6708,31 @@ function checkBlockTypeContracts(
         consts,
         diagnostics,
         stmt.span,
+        pluginRegistry,
       );
     }
     if (stmt.kind === "let") {
-      checkExprTypeContracts(stmt.value, typesByName, functions, capabilities, consts, diagnostics);
+      checkExprTypeContracts(
+        stmt.value,
+        typesByName,
+        functions,
+        capabilities,
+        consts,
+        diagnostics,
+        pluginRegistry,
+      );
     }
   }
   if (block.expr) {
-    checkExprTypeContracts(block.expr, typesByName, functions, capabilities, consts, diagnostics);
+    checkExprTypeContracts(
+      block.expr,
+      typesByName,
+      functions,
+      capabilities,
+      consts,
+      diagnostics,
+      pluginRegistry,
+    );
   }
 }
 
@@ -6661,17 +6743,51 @@ function checkExprTypeContracts(
   capabilities: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
+  pluginRegistry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
 ) {
   if (expr.kind === "block") {
-    checkBlockTypeContracts(expr, typesByName, functions, capabilities, consts, diagnostics);
+    checkBlockTypeContracts(
+      expr,
+      typesByName,
+      functions,
+      capabilities,
+      consts,
+      diagnostics,
+      new Set(),
+      pluginRegistry,
+    );
   } else if (expr.kind === "match") {
-    checkExprTypeContracts(expr.value, typesByName, functions, capabilities, consts, diagnostics);
+    checkExprTypeContracts(
+      expr.value,
+      typesByName,
+      functions,
+      capabilities,
+      consts,
+      diagnostics,
+      pluginRegistry,
+    );
     for (const arm of expr.arms) {
-      checkExprTypeContracts(arm.value, typesByName, functions, capabilities, consts, diagnostics);
+      checkExprTypeContracts(
+        arm.value,
+        typesByName,
+        functions,
+        capabilities,
+        consts,
+        diagnostics,
+        pluginRegistry,
+      );
     }
   } else if (expr.kind === "product_constructor" || expr.kind === "shape") {
     for (const slot of expr.slots) {
-      checkExprTypeContracts(slot.value, typesByName, functions, capabilities, consts, diagnostics);
+      checkExprTypeContracts(
+        slot.value,
+        typesByName,
+        functions,
+        capabilities,
+        consts,
+        diagnostics,
+        pluginRegistry,
+      );
     }
   }
 }
@@ -6872,6 +6988,7 @@ function instantiateNestedAnnotations(
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   diagnosticSpan?: Span,
+  pluginRegistry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
 ) {
   for (const typeExpr of parseAnnotationTypeCalls(annotation)) {
     instantiateTypeExpr(
@@ -6883,6 +7000,7 @@ function instantiateNestedAnnotations(
       diagnostics,
       new Map(),
       diagnosticSpan,
+      pluginRegistry,
     );
   }
 }
@@ -6895,6 +7013,7 @@ function instantiateAnnotation(
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   diagnosticSpan?: Span,
+  pluginRegistry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
 ): TypeBody | undefined {
   const expr = parseAnnotationType(annotation);
   if (!expr) return undefined;
@@ -6907,6 +7026,7 @@ function instantiateAnnotation(
     diagnostics,
     new Map(),
     diagnosticSpan,
+    pluginRegistry,
   );
   return value?.kind === "type" ? value.normalized : undefined;
 }
@@ -6920,6 +7040,7 @@ function instantiateTypeExpr(
   diagnostics: Diagnostic[],
   locals = new Map<string, TypeEvalValue>(),
   diagnosticSpan?: Span,
+  pluginRegistry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
 ): TypeEvalValue | undefined {
   const evaluator = new TypeEvaluator(
     typesByName,
@@ -6928,6 +7049,7 @@ function instantiateTypeExpr(
     consts,
     diagnostics,
     shaderManifestEntry,
+    pluginRegistry,
     diagnosticSpan,
   );
   return evaluator.eval(expr, locals);
@@ -6941,6 +7063,7 @@ class TypeEvaluator {
     private consts: Map<string, ConstValue>,
     private diagnostics: Diagnostic[],
     private addShader: (source: string) => ShaderManifestEntry,
+    private pluginRegistry: CompilerPluginRegistry,
     private diagnosticSpan?: Span,
   ) {}
 
@@ -7068,7 +7191,7 @@ class TypeEvaluator {
         expr.span,
       );
     }
-    if (callee && isStaticBuiltinName(callee) && !callee.startsWith("@")) {
+    if (callee && isStaticBuiltinName(callee, this.pluginRegistry) && !callee.startsWith("@")) {
       this.reportDiagnostic({
         code: "type.static_builtin_prefix",
         message: `static builtin ${callee} must be called as @${callee}`,
@@ -7220,6 +7343,12 @@ class TypeEvaluator {
   }
 
   private evalBuiltin(name: string, args: TypeEvalValue[]): TypeEvalValue | undefined {
+    const pluginBuiltin = this.pluginRegistry.staticBuiltins.get(staticBuiltinName(name));
+    const pluginValue = pluginBuiltin?.evaluateType?.(args, {
+      addShader: this.addShader,
+      report: (diagnostic) => this.diagnostics.push(diagnostic),
+    });
+    if (pluginValue) return pluginValue as TypeEvalValue;
     if (!name.startsWith("@")) return undefined;
     name = name.slice(1);
     if (name === "require") {
@@ -7380,7 +7509,7 @@ class TypeEvaluator {
             arg.span,
           )
         );
-        if (isStaticBuiltinName(name) && !name.startsWith("@")) {
+        if (isStaticBuiltinName(name, this.pluginRegistry) && !name.startsWith("@")) {
           this.reportDiagnostic({
             code: "type.static_builtin_prefix",
             message: `static builtin ${name} must be called as @${name}`,
@@ -8348,45 +8477,6 @@ function typeLiteralName(value: TypeEvalValue | undefined): string | undefined {
   return value?.kind === "literal" || value?.kind === "string" || value?.kind === "char"
     ? value.value
     : undefined;
-}
-
-function isStaticBuiltinName(name: string): boolean {
-  const bare = name.startsWith("@") ? name.slice(1) : name;
-  return [
-    "compile_error",
-    "type_is_product",
-    "type_is_sum",
-    "type_is_alias",
-    "type_is_number",
-    "type_has_slot",
-    "type_slot_type",
-    "type_has_member",
-    "type_member_type",
-    "type_has_variant",
-    "type_variant_has_slot",
-    "type_slots",
-    "type_slot_count",
-    "type_variant_slots",
-    "type_variants",
-    "require",
-    "wgsl_shader_id",
-    "wgsl_bindings",
-    "wgsl_locations",
-    "shape_map",
-    "shape_concat",
-    "shape_has_slot",
-    "shape_slot",
-    "shape_count",
-    "shape_first_key",
-    "shape_tail",
-    "shape_pick",
-    "shape_omit",
-    "shape_intersect",
-    "shape_difference",
-    "shape_rename",
-    "shape_map_with_key",
-    "shape_filter",
-  ].includes(bare);
 }
 
 function typePatternMatches(pattern: TypePattern, value: TypeEvalValue): boolean {

@@ -20,7 +20,6 @@ const keywords = new Set<string>([
   "import",
   "in",
   "let",
-  "likely",
   "match",
   "operator",
   "pub",
@@ -28,7 +27,6 @@ const keywords = new Set<string>([
   "true",
   "type",
   "union",
-  "unlikely",
   "zip",
 ]);
 const symbols: string[] = [

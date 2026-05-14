@@ -44,8 +44,6 @@
 "for" @keyword
 "if" @keyword
 "in" @keyword
-"likely" @keyword
-"unlikely" @keyword
 "zip" @keyword
 "!" @operator
 "%" @operator

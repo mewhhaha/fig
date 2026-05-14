@@ -1,28 +1,19 @@
 import type { Declaration, FnDecl } from "./core_ast.ts";
+import {
+  defaultCompilerPluginRegistry,
+  type CompilerPluginRegistry,
+  isKnownIntrinsicId as registryHasIntrinsicId,
+} from "./plugins.ts";
 
-export const intrinsicIds = [
-  "temporal_alloc",
-  "temporal_handle",
-  "temporal_handle_ptr",
-  "temporal_handle_rev",
-  "branch_handle",
-  "branch_handle_ptr",
-  "branch_mark",
-  "branch_is_branched",
-  "branch_ensure_editable",
-  "branch_materialize",
-  "index_cursor_next",
-  "inline_array_builder_start",
-  "inline_array_builder_push",
-  "inline_array_builder_finish",
-] as const;
+export const intrinsicIds = [...defaultCompilerPluginRegistry.intrinsics.keys()] as const;
 
-export type IntrinsicId = typeof intrinsicIds[number];
+export type IntrinsicId = string;
 
-const intrinsicIdSet = new Set<string>(intrinsicIds);
-
-export function isKnownIntrinsicId(id: string): id is IntrinsicId {
-  return intrinsicIdSet.has(id);
+export function isKnownIntrinsicId(
+  id: string,
+  registry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
+): id is IntrinsicId {
+  return registryHasIntrinsicId(id, registry);
 }
 
 export function intrinsicCallId(
@@ -34,25 +25,32 @@ export function intrinsicCallId(
 
 export function intrinsicIdsByFunctionName(
   declarations: Iterable<Declaration>,
+  registry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
 ): Map<string, string> {
   const byName = new Map<string, string>();
   for (const decl of declarations) {
     if (decl.kind !== "fn" || !decl.name) continue;
-    const id = decl.primitiveId ?? intrinsicWrapperId(decl);
+    const id = decl.primitiveId ?? intrinsicWrapperId(decl, registry);
     if (id) byName.set(decl.name, id);
   }
   return byName;
 }
 
-export function intrinsicWrapperId(fn: FnDecl): IntrinsicId | undefined {
-  if (fn.primitiveId && isKnownIntrinsicId(fn.primitiveId)) return fn.primitiveId;
+export function intrinsicWrapperId(
+  fn: FnDecl,
+  registry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
+): IntrinsicId | undefined {
+  if (fn.primitiveId && isKnownIntrinsicId(fn.primitiveId, registry)) return fn.primitiveId;
   const expr = fn.body.expr;
   if (fn.body.statements.length !== 0 || !expr || expr.kind !== "call") return undefined;
   if (expr.callee.kind !== "var" || !expr.callee.name.startsWith("@")) return undefined;
   const id = expr.callee.name.slice(1);
-  return isKnownIntrinsicId(id) ? id : undefined;
+  return isKnownIntrinsicId(id, registry) ? id : undefined;
 }
 
-export function isIntrinsicWrapper(fn: FnDecl): boolean {
-  return intrinsicWrapperId(fn) !== undefined;
+export function isIntrinsicWrapper(
+  fn: FnDecl,
+  registry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
+): boolean {
+  return intrinsicWrapperId(fn, registry) !== undefined;
 }

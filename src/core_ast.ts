@@ -13,7 +13,7 @@ export interface Program {
 }
 
 export type Declaration = FnDecl | LetDecl | ConstDecl | TypeDecl;
-export type BranchHint = "likely" | "unlikely";
+export type BranchHint = string;
 
 export interface CapabilityImport extends AstNodeMeta {
   kind: "import";

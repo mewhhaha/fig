@@ -3,6 +3,27 @@
 Builtins are called with `@name(...)` in Fig source. Static type evaluation strips the `@` before
 dispatching internally; source code should keep it.
 
+## Compiler Plugin API
+
+The compiler exposes a stable TypeScript plugin API for `@` forms. Hosts pass plugins through
+compile/check options; v1 plugins are registered in-process and are not loaded from manifests at
+runtime. Each plugin declares `apiVersion: 1`, a unique `id`, and any declaration, static,
+annotation, intrinsic, or do-strategy builtins it provides.
+
+First-party compiler behavior is registered through built-in plugins:
+
+| Plugin             | Builtins                                                            |
+| ------------------ | ------------------------------------------------------------------- |
+| `core-imports`     | `@import`, `@capability`                                            |
+| `core-static`      | `@require`, `@compile_error`, `@shape_*`, `@type_*`, `@wgsl_*`      |
+| `core-annotations` | `@likely`, `@unlikely`                                              |
+| `core-intrinsics`  | backend/compiler intrinsics such as `@branch_*` and `@temporal_*`   |
+
+Plugin ids and builtin names must be unique after the built-in plugins are registered. Duplicate
+registrations are compile diagnostics. In v1, backend plugins register compiler intrinsic identities;
+the low-level lowering for those identities still runs through compiler-owned IR paths rather than
+raw Wasm byte emission.
+
 ## Module and Capability Builtins
 
 | Builtin       | Arguments               | Returns                       | Phase                             |

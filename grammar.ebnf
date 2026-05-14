@@ -38,7 +38,7 @@ TypeInlineMember = FnDecl ;
 TypeExprArgs = TypeExpr ("," TypeExpr)* ","? ;
 FnDecl = Visibility? FnTail ;
 FnTail = BranchHint? "fn" FnName "(" Params? ")" ReturnSig? EffectRow? Block ;
-BranchHint = "@" ("likely" | "unlikely") ;
+BranchHint = "@" LowerIdent ;
 FnName = (LowerIdent | PascalIdent) ("." (LowerIdent | PascalIdent))* ;
 FnSig = "fn" FnName "(" Params? ")" ReturnSig? EffectRow? ";" ;
 ConstDecl = "const" (ImportBindingList | FieldName Type EffectRow? | LowerIdent TypeAnn?) "=" ConstValue ";"? ;

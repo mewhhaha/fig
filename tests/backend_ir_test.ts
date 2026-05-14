@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertMatch, assertRejects, assertStringIncludes } from "jsr:@std/assert@1";
 import { wasmFromSource, watFromSource } from "../src/mod.ts";
 
 const resolveModule = async (moduleName: string) => {
@@ -325,7 +325,7 @@ Deno.test("backend lowers nonnegative constant remainder through reciprocal mult
   const source = `
     fn score_loop(i: i32, total: i32) -> i32 {
       match i < 1024 {
-        true => score_loop(i + 1, total + (i % 5)),
+        true => score_loop(i + 1, total + (i % 3) + (i % 5)),
         false => total,
       }
     }
@@ -341,7 +341,7 @@ Deno.test("backend lowers nonnegative constant remainder through reciprocal mult
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
   );
-  assertEquals((instance.exports.main as CallableFunction)(), 2046);
+  assertEquals((instance.exports.main as CallableFunction)(), 3069);
 });
 
 Deno.test("backend lowers small-range divisibility checks through bit masks", async () => {
@@ -920,6 +920,32 @@ Deno.test("tail-loop lowering skips unchanged scalar parameters", async () => {
   assertEquals((instance.exports.main as CallableFunction)(10), 499500);
 });
 
+Deno.test("tail-loop lowering stores dependent scalar updates before clobbering old params", async () => {
+  const source = `
+    fn sum_to(i: i32, limit: i32, acc: i32) -> i32 {
+      match i < limit {
+        true => sum_to(i + 1, limit, acc + ((i + 10) * 4)),
+        false => acc,
+      }
+    }
+    pub fn main(seed: i32) -> i32 {
+      sum_to(seed - seed, 4, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertMatch(
+    main,
+    /local\.set \$__inl_sum_to_\d+_acc[\s\S]*local\.set \$__inl_sum_to_\d+_i/,
+  );
+  assert(!wat.includes("call $sum_to"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(10), 184);
+});
+
 Deno.test("boolean true match patterns branch directly", async () => {
   const wat = await watFromSource(`
     pub fn lt(x: i32, y: i32) -> i32 {
@@ -1481,6 +1507,7 @@ Deno.test("backed fixed-array transformer folds pure scalar aliases into prefix 
   assert(!/__inl_apply_[^\s)]*first/.test(wat));
   assert(!wat.includes("call $apply"));
   assert(!wat.includes("call $rotate_left_loop"));
+  assert(!/i32\.const 7\s+i32\.and\s+i32\.const 7\s+i32\.and/.test(wat));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),

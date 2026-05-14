@@ -73,6 +73,9 @@ interface Row {
   elapsed_ms?: string;
   calls_per_ms?: string;
   ns_per_call?: string;
+  compile_wat_ms?: string;
+  compile_wasm_ms?: string;
+  compile_total_ms?: string;
   wat_bytes?: number;
   wasm_bytes?: number;
   fixed_dynamic_gets?: number;
@@ -637,6 +640,9 @@ function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
     "elapsed_ms",
     "calls_per_ms",
     "ns_per_call",
+    "compile_wat_ms",
+    "compile_wasm_ms",
+    "compile_total_ms",
     "wat_bytes",
     "wasm_bytes",
     "fixed_dynamic_gets",
@@ -666,8 +672,12 @@ function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
 
 async function benchFig(scenario: FigScenario, calls: number): Promise<Row> {
   const source = withInternalBench(scenario.source);
+  const watStart = performance.now();
   const wat = await watFromSource(source, compileOptions);
+  const compileWatMs = performance.now() - watStart;
+  const wasmStart = performance.now();
   const wasm = await wasmFromSource(source, compileOptions);
+  const compileWasmMs = performance.now() - wasmStart;
   const exports = new WebAssembly.Instance(new WebAssembly.Module(wasm)).exports;
   const bench = exports.bench as CallableFunction;
   const shape = scopedWatShape(wat);
@@ -685,6 +695,7 @@ async function benchFig(scenario: FigScenario, calls: number): Promise<Row> {
     wat.length,
     wasm.byteLength,
     shape.module,
+    { compileWatMs, compileWasmMs },
   );
 }
 
@@ -741,6 +752,7 @@ function row(
   watBytes?: number,
   wasmBytes?: number,
   shape?: WatShape,
+  compile?: { compileWatMs: number; compileWasmMs: number },
 ): Row {
   return {
     runtime,
@@ -758,6 +770,13 @@ function row(
       : {}),
     ...(watBytes !== undefined ? { wat_bytes: watBytes } : {}),
     ...(wasmBytes !== undefined ? { wasm_bytes: wasmBytes } : {}),
+    ...(compile
+      ? {
+        compile_wat_ms: compile.compileWatMs.toFixed(3),
+        compile_wasm_ms: compile.compileWasmMs.toFixed(3),
+        compile_total_ms: (compile.compileWatMs + compile.compileWasmMs).toFixed(3),
+      }
+      : {}),
     ...(shape
       ? {
         fixed_dynamic_gets: shape.fixed_dynamic_gets,

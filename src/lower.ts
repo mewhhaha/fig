@@ -30,6 +30,7 @@ import type {
 import { fail, type Span } from "./diagnostics.ts";
 import { hideAstMetadata, stripAstMetadata } from "./ast_meta.ts";
 import { patternBindingNames } from "./patterns.ts";
+import { annotationBranchHint, defaultCompilerPluginRegistry, staticBuiltinName } from "./plugins.ts";
 import type { SyntaxNodeLike } from "../generated/baba-workbench/ast/types.ts";
 import { projectNode } from "../generated/baba-workbench/ast/visitor.ts";
 
@@ -112,14 +113,19 @@ function lowerSourceImportConst(node: Node): SourceImport {
 
 function isSourceImportConst(node: Node): boolean {
   if (node.type !== "ConstDecl") return false;
-  if (optional(node, "ImportBindingList") && !/@\s*import\s*\(/.test(node.text)) {
+  if (optional(node, "ImportBindingList") && !isDeclarationBuiltinConst(node, "import")) {
     fail("parse.lower", 'const deconstruction requires @import("specifier")', spanFor(node));
   }
-  return /@\s*import\s*\(/.test(node.text);
+  return isDeclarationBuiltinConst(node, "import");
 }
 
 function isCapabilityConst(node: Node): boolean {
-  return node.type === "ConstDecl" && /@\s*capability\s*\(/.test(node.text);
+  return node.type === "ConstDecl" && isDeclarationBuiltinConst(node, "capability");
+}
+
+function isDeclarationBuiltinConst(node: Node, name: string): boolean {
+  return defaultCompilerPluginRegistry.declarationBuiltins.has(name) &&
+    new RegExp(`@\\s*${name}\\s*\\(`).test(node.text);
 }
 
 function lowerDecl(node: Node): Declaration {
@@ -198,10 +204,8 @@ function lowerFn(node: Node): FnDecl {
 
 function lowerBranchHint(node: Node | undefined): { branchHint: BranchHint } | undefined {
   if (!node) return undefined;
-  const hint = node.text.replace(/\s+/g, "");
-  if (hint === "@likely") return { branchHint: "likely" };
-  if (hint === "@unlikely") return { branchHint: "unlikely" };
-  fail("parse.lower", `unknown branch hint ${node.text}`, spanFor(node));
+  const hint = staticBuiltinName(node.text.replace(/\s+/g, ""));
+  return { branchHint: annotationBranchHint(hint) ?? hint };
 }
 
 function lowerFnName(
