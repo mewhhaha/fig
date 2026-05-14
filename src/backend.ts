@@ -1683,21 +1683,41 @@ function cleanupInstrs(
 ): Instr[] {
   const cleaned: Instr[] = [];
   const constLocals = new Map<string, Extract<Instr, { op: "const" }>>();
+  const localAliases = new Map<string, string>();
   const flushConstLocals = () => {
     for (const [name, value] of constLocals) {
       cleaned.push(value, { op: "local.set", name });
     }
     constLocals.clear();
   };
+  const resolveAlias = (name: string): string => {
+    const seen = new Set<string>();
+    let current = name;
+    while (localAliases.has(current) && !seen.has(current)) {
+      seen.add(current);
+      current = localAliases.get(current)!;
+    }
+    return current;
+  };
+  const clearAliasesForWrite = (name: string) => {
+    localAliases.delete(name);
+    for (const [alias, source] of [...localAliases]) {
+      if (source === name) localAliases.delete(alias);
+    }
+  };
   for (let index = 0; index < instrs.length; index++) {
     let instr = cleanupInstr(instrs[index]!, ctx);
     if (instr.op === "local.get") {
+      const aliased = resolveAlias(instr.name);
+      if (aliased !== instr.name) instr = { op: "local.get", name: aliased };
       const folded = constLocals.get(instr.name);
       if (folded) instr = folded;
     } else if (instr.op === "local.set" || instr.op === "local.tee") {
       constLocals.delete(instr.name);
+      clearAliasesForWrite(instr.name);
     } else if (instr.op === "if" || instr.op === "block" || instr.op === "loop") {
       flushConstLocals();
+      localAliases.clear();
     }
     const branchPair = branchOnlyIf(instr);
     if (branchPair) {
@@ -1733,6 +1753,16 @@ function cleanupInstrs(
       continue;
     }
     const previous = cleaned[cleaned.length - 1];
+    if (previous?.op === "local.get" && instr.op === "local.set" && previous.name !== instr.name) {
+      const source = resolveAlias(previous.name);
+      if (canAliasLocalCopyInStraightLine(instrs.slice(index + 1), source, instr.name)) {
+        cleaned.pop();
+        constLocals.delete(instr.name);
+        clearAliasesForWrite(instr.name);
+        localAliases.set(instr.name, source);
+        continue;
+      }
+    }
     if (previous?.op === "local.set" && instr.op === "local.get" && previous.name === instr.name) {
       if (
         allowDeadLocalRoundtrip &&
@@ -1851,6 +1881,24 @@ function cleanupInstrs(
   }
   if (!allowDeadLocalRoundtrip) flushConstLocals();
   return cleaned;
+}
+
+function canAliasLocalCopyInStraightLine(
+  future: Instr[],
+  source: string,
+  dest: string,
+): boolean {
+  let readBeforeBarrier = false;
+  for (let index = 0; index < future.length; index++) {
+    const instr = future[index]!;
+    const barrier = instr.op === "if" || instr.op === "block" || instr.op === "loop" ||
+      instrWritesLocal(instr, source) || instrWritesLocal(instr, dest);
+    if (barrier) {
+      return readBeforeBarrier && !future.slice(index).some((item) => instrReadsLocal(item, dest));
+    }
+    if (instrReadsLocal(instr, dest)) readBeforeBarrier = true;
+  }
+  return readBeforeBarrier;
 }
 
 function foldNestedIntegerMaskSuffix(instrs: Instr[]): boolean {
