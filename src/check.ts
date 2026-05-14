@@ -23,6 +23,22 @@ import type {
 import { CompileError, type Diagnostic, type Span } from "./diagnostics.ts";
 import { isCatchAllPattern, patternBindingNames } from "./patterns.ts";
 import { intrinsicWrapperId, isIntrinsicWrapper, isKnownIntrinsicId } from "./primitives.ts";
+import {
+  type DomainInterval,
+  endpointFromTypeExprText,
+  I32_MAX_EXCLUSIVE,
+  I32_MIN,
+  intersectRefinedI32Type,
+  literalEndpoint,
+  parseRefinedI32Type,
+  refinedI32Assignable,
+  refinedI32ContainsLiteral,
+  refinedI32FromRange,
+  refinedI32TypeCanonical,
+  scalarDomainRuntimeType,
+  scalarFactsFromRefinedI32Type,
+  validateScalarDomainType,
+} from "./refined_scalar.ts";
 import { type ShaderManifestEntry, shaderManifestEntry, wgslShaderId } from "./wgsl.ts";
 
 export interface CheckResult {
@@ -1102,6 +1118,8 @@ function typeMatches(expected: string, actual: string): boolean {
   const expectedLiteral = canonicalLiteralType(expected);
   const actualLiteral = canonicalLiteralType(actual);
   if (expectedLiteral || actualLiteral) return runtimeValueTypeAssignable(expected, actual);
+  const refined = refinedI32Assignable(expected, actual);
+  if (refined !== undefined) return refined;
   if (expected === actual || isInferredTypeVarName(expected)) return true;
   return runtimeTypePatternMatches(expected, actual, new Map());
 }
@@ -1128,6 +1146,8 @@ function runtimeTypePatternMatches(
   const expectedLiteral = canonicalLiteralType(expected);
   const actualLiteral = canonicalLiteralType(actual);
   if (expectedLiteral || actualLiteral) return runtimeValueTypeAssignable(expected, actual);
+  const refined = refinedI32Assignable(expected, actual);
+  if (refined !== undefined) return refined;
   if (expected === actual) return true;
   if (isInferredTypeVarName(expected)) {
     const bound = bindings.get(expected);
@@ -4766,7 +4786,13 @@ function escapeRegExp(source: string): string {
 }
 
 function renderTypeProofArg(expr: Expr): string | undefined {
+  if (expr.kind === "literal" && expr.literalKind === "number") return expr.value;
   if (expr.kind === "var") return expr.name;
+  if (expr.kind === "range") {
+    const start = renderTypeProofArg(expr.start);
+    const end = renderTypeProofArg(expr.end);
+    return start && end ? `${start}..${end}` : undefined;
+  }
   if (expr.kind === "call" && expr.callee.kind === "var") {
     const args = expr.args.map(renderTypeProofArg);
     if (args.some((arg) => arg === undefined)) return undefined;
@@ -5682,9 +5708,11 @@ function evaluateTypeDecls(types: TypeDecl[], diagnostics: Diagnostic[]) {
       );
       const locals = new Map(clause.body.statements.map((stmt) => [stmt.name, stmt.value]));
       for (const stmt of clause.body.statements) {
+        validateTypeExprScalarDomains(stmt.value, diagnostics);
         inferKinds(stmt.value, clause, kinds, locals, byName, diagnostics);
       }
       if (clause.body.expr) {
+        validateTypeExprScalarDomains(clause.body.expr, diagnostics);
         inferKinds(clause.body.expr, clause, kinds, locals, byName, diagnostics);
       }
       clause.paramKinds = Object.fromEntries(kinds);
@@ -5705,6 +5733,22 @@ function evaluateTypeDecls(types: TypeDecl[], diagnostics: Diagnostic[]) {
   };
 
   for (const decl of types) evaluate(decl);
+}
+
+function validateTypeExprScalarDomains(expr: TypeExpr, diagnostics: Diagnostic[]) {
+  if (expr.kind === "type_call") diagnoseScalarDomainTypeExpr(expr, diagnostics);
+  if (expr.kind === "type_call") {
+    validateTypeExprScalarDomains(expr.callee, diagnostics);
+    for (const arg of expr.args) validateTypeExprScalarDomains(arg, diagnostics);
+  } else if (expr.kind === "type_shape") {
+    for (const slot of expr.shape.slots) validateTypeExprScalarDomains(slot.type, diagnostics);
+  } else if (expr.kind === "type_match") {
+    validateTypeExprScalarDomains(expr.value, diagnostics);
+    for (const arm of expr.arms) validateTypeExprScalarDomains(arm.value, diagnostics);
+  } else if (expr.kind === "type_binary") {
+    validateTypeExprScalarDomains(expr.left, diagnostics);
+    validateTypeExprScalarDomains(expr.right, diagnostics);
+  }
 }
 
 function checkTypeFunctionCasing(
@@ -5787,6 +5831,7 @@ function checkTypeExprCasing(
   if (expr.kind === "type_ref") {
     diagnoseTypeRefCasing(expr.name, false, typeNames, diagnostics, expr.span);
   } else if (expr.kind === "type_call") {
+    diagnoseScalarDomainTypeExpr(expr, diagnostics);
     if (expr.callee.kind === "type_ref") {
       diagnoseTypeRefCasing(expr.callee.name, true, typeNames, diagnostics, expr.callee.span);
     } else {
@@ -5825,6 +5870,19 @@ function checkTypeAnnotationCasing(
   }
   const parsed = parseAnnotationType(annotation);
   checkTypeExprCasing(parsed, typeNames, diagnostics);
+}
+
+function diagnoseScalarDomainTypeExpr(
+  expr: Extract<TypeExpr, { kind: "type_call" }>,
+  diagnostics: Diagnostic[],
+) {
+  const diagnostic = validateScalarDomainType(renderTypeExpr(expr));
+  if (!diagnostic) return;
+  diagnostics.push({
+    code: diagnostic.code,
+    message: diagnostic.message,
+    span: expr.span,
+  });
 }
 
 function diagnoseTypeRefCasing(
@@ -5889,10 +5947,12 @@ function inferKinds(
       markKind(decl, kinds, calleeName, constructorKind, diagnostics);
     }
     expr.args.forEach((arg, index) => {
-      const calleeKind = staticBuiltinParamKind(staticBuiltinName, index) ??
-        calleeDecl?.paramKinds?.[calleeDecl.params[index]?.name] ??
-        calleeDecl?.params[index]?.kind ??
-        "type";
+      const calleeKind = calleeName === "i32" && index === 0
+        ? "count"
+        : staticBuiltinParamKind(staticBuiltinName, index) ??
+          calleeDecl?.paramKinds?.[calleeDecl.params[index]?.name] ??
+          calleeDecl?.params[index]?.kind ??
+          "type";
       inferKinds(arg, decl, kinds, locals, byName, diagnostics, calleeKind);
     });
     return;
@@ -6149,12 +6209,13 @@ function normalizeTop(
   }
   if (resolved.kind === "type_call" && resolved.callee.kind === "type_ref") {
     const target = byName.get(resolved.callee.name);
-    if (!target) {
+    const rendered = renderTypeExpr(resolved);
+    if (!target && !/^(?:i32|i64|u32|u64|f32|f64)\s*\(/.test(rendered)) {
       diagnostics.push({
         code: "type.unknown_type",
         message: `unknown type function ${resolved.callee.name}`,
       });
-    } else {
+    } else if (target) {
       evaluate(target);
     }
   }
@@ -6376,11 +6437,20 @@ function runtimeValueTypeAssignable(
   actual: string | undefined,
 ): boolean {
   if (!expected || !actual) return true;
+  const refined = refinedI32Assignable(resolveAliasFree(expected), resolveAliasFree(actual));
+  if (refined !== undefined) return refined;
   const expectedLiteral = canonicalLiteralType(expected);
   const actualLiteral = canonicalLiteralType(actual);
   if (expectedLiteral) return actualLiteral === expectedLiteral;
   if (actualLiteral && literalTypeCarrier(actualLiteral) === expected.trim()) return true;
+  const expectedRuntime = scalarDomainRuntimeType(expected);
+  const actualRuntime = scalarDomainRuntimeType(actual);
+  if (expectedRuntime && actualRuntime && expectedRuntime === actualRuntime) return true;
   return true;
+}
+
+function resolveAliasFree(type: string | undefined): string | undefined {
+  return type?.trim();
 }
 
 function renderTypePattern(pattern: TypePattern): string {
@@ -6942,7 +7012,13 @@ class TypeEvaluator {
             ...(literalTypeMembersFromEval(left) ?? []),
             ...(literalTypeMembersFromEval(right) ?? []),
           ];
-          if (members.length) return this.namedType(renderLiteralUnionType(members));
+          const leftMembers = literalTypeMembersFromEval(left);
+          const rightMembers = literalTypeMembersFromEval(right);
+          if (leftMembers && rightMembers) return this.namedType(renderLiteralUnionType(members));
+          return this.namedType(`${renderTypeEvalValue(left)} | ${renderTypeEvalValue(right)}`);
+        }
+        if (expr.op === "..") {
+          return this.namedType(`${renderTypeEvalValue(left)}..${renderTypeEvalValue(right)}`);
         }
         return this.unsupported(
           "type.unsupported_expr",
@@ -8546,13 +8622,25 @@ class AnnotationTypeParser {
   }
 
   private parseUnion(): TypeExpr | undefined {
-    let expr = this.parsePrimaryType();
+    let expr = this.parseRange();
     if (!expr) return undefined;
     while (this.peek("|")) {
       this.index++;
-      const right = this.parsePrimaryType();
+      const right = this.parseRange();
       if (!right) return undefined;
       expr = { kind: "type_binary", op: "|", left: expr, right };
+    }
+    return expr;
+  }
+
+  private parseRange(): TypeExpr | undefined {
+    let expr = this.parsePrimaryType();
+    if (!expr) return undefined;
+    if (this.peek("..")) {
+      this.index += 2;
+      const right = this.parsePrimaryType();
+      if (!right) return undefined;
+      expr = { kind: "type_binary", op: "..", left: expr, right };
     }
     return expr;
   }
@@ -9028,7 +9116,8 @@ function checkExpr(
       checkProjection(expr.name, env, types, diagnostics);
       const binding = env.get(expr.name);
       if (
-        expectedType && binding?.type && !runtimeValueTypeAssignable(expectedType, binding.type)
+        expectedType && binding?.type &&
+        !runtimeValueTypeAssignable(expectedType, binding.type)
       ) {
         diagnostics.push(diagnosticAt(
           "type.literal_mismatch",
@@ -9092,7 +9181,10 @@ function checkExpr(
           options,
         );
         const actual = exprBindingType(arg, env, types, functions, options.recoverTypes);
-        if (expected && actual && !runtimeValueTypeAssignable(expected, actual)) {
+        if (
+          expected && actual &&
+          !runtimeValueTypeAssignable(expected, actual)
+        ) {
           diagnostics.push(diagnosticAt(
             "type.literal_mismatch",
             `expected ${expected} but got ${actual}`,
@@ -9231,7 +9323,7 @@ function checkExpr(
         options.recoverTypes,
       );
       for (const arm of expr.arms) {
-        const armEnv = new Map(env);
+        const armEnv = narrowedEnvForMatchPattern(expr.value, arm.pattern, env, types);
         bindMatchPatternLocals(arm.pattern, matchValueType, armEnv, diagnostics, types);
         checkExpr(
           arm.value,
@@ -9390,6 +9482,20 @@ function checkExpr(
       );
       return;
     case "literal":
+      const refinedExpectedType = resolveAliasType(expectedType, types) ?? expectedType;
+      if (refinedExpectedType && parseRefinedI32Type(refinedExpectedType)) {
+        const value = staticIntegerLiteral(expr);
+        if (value !== undefined && refinedI32ContainsLiteral(refinedExpectedType, value)) {
+          expr.inferredType = refinedI32TypeCanonical(refinedExpectedType);
+        } else {
+          diagnostics.push(diagnosticAt(
+            "type.literal_mismatch",
+            `literal ${expr.value} is not assignable to ${expectedType}`,
+            expr,
+          ));
+        }
+        return;
+      }
       if (expectedType && literalTypeMembers(expectedType)) {
         if (literalExprFitsType(expr, expectedType)) {
           expr.inferredType = canonicalLiteralType(expectedType);
@@ -9923,6 +10029,109 @@ function checkProjection(
   }
 }
 
+function narrowedEnvForMatchPattern(
+  value: Expr,
+  pattern: ParamPattern,
+  env: Map<string, OwnershipBinding>,
+  types: TypeDecl[],
+): Map<string, OwnershipBinding> {
+  const scoped = new Map(env);
+  if (!isTrueLikePattern(pattern)) return scoped;
+  const narrowed = conditionI32Narrowing(value);
+  if (!narrowed) return scoped;
+  const binding = scoped.get(narrowed.name);
+  const currentType = resolveAliasType(binding?.type, types) ?? binding?.type;
+  if (scalarDomainRuntimeType(currentType) !== "i32") return scoped;
+  if (
+    !scalarFactsFromRefinedI32Type(currentType) &&
+    isUpperOnlyI32Narrowing(narrowed.interval)
+  ) {
+    return scoped;
+  }
+  const refined = intersectRefinedI32Type(currentType, narrowed.interval);
+  if (!refined) return scoped;
+  scoped.set(narrowed.name, { moved: binding?.moved ?? false, type: refined });
+  return scoped;
+}
+
+function isUpperOnlyI32Narrowing(interval: DomainInterval): boolean {
+  if (interval.start.kind !== "literal" || interval.start.value !== I32_MIN) return false;
+  return !(
+    interval.end.kind === "literal" &&
+    interval.end.value === interval.start.value + 1
+  );
+}
+
+function conditionI32Narrowing(
+  expr: Expr,
+): { name: string; interval: DomainInterval } | undefined {
+  if (expr.kind !== "binary") return undefined;
+  if (expr.op === "==" && expr.left.kind === "var") {
+    const right = endpointForI32Condition(expr.right);
+    if (right?.kind === "literal") {
+      return {
+        name: expr.left.name,
+        interval: { start: right, end: literalEndpoint(right.value + 1) },
+      };
+    }
+  }
+  if (expr.op === "==" && expr.right.kind === "var") {
+    const left = endpointForI32Condition(expr.left);
+    if (left?.kind === "literal") {
+      return {
+        name: expr.right.name,
+        interval: { start: left, end: literalEndpoint(left.value + 1) },
+      };
+    }
+  }
+  if (expr.left.kind === "var") {
+    const right = endpointForI32Condition(expr.right);
+    if (right && (expr.op === "<" || expr.op === "<=")) {
+      const end = expr.op === "<" ? right : incrementEndpoint(right);
+      if (end) {
+        return {
+          name: expr.left.name,
+          interval: { start: literalEndpoint(I32_MIN), end },
+        };
+      }
+    }
+  }
+  if (expr.right.kind === "var") {
+    const left = endpointForI32Condition(expr.left);
+    if (left && (expr.op === "<" || expr.op === "<=")) {
+      const start = expr.op === "<" ? incrementEndpoint(left) : left;
+      if (start) {
+        return {
+          name: expr.right.name,
+          interval: { start, end: literalEndpoint(I32_MAX_EXCLUSIVE) },
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+function endpointForI32Condition(expr: Expr): ReturnType<typeof endpointFromTypeExprText> {
+  if (expr.kind === "literal" && expr.literalKind === "number") {
+    const value = staticIntegerLiteral(expr);
+    return value === undefined ? undefined : literalEndpoint(value);
+  }
+  if (expr.kind === "var") return endpointFromTypeExprText(expr.name);
+  return undefined;
+}
+
+function incrementEndpoint(
+  endpoint: ReturnType<typeof endpointFromTypeExprText>,
+): ReturnType<typeof endpointFromTypeExprText> {
+  if (!endpoint) return undefined;
+  return endpoint.kind === "literal" ? literalEndpoint(endpoint.value + 1) : undefined;
+}
+
+function isTrueLikePattern(pattern: ParamPattern): boolean {
+  return (pattern.kind === "literal" && pattern.value === "true") ||
+    (pattern.kind === "type" && pattern.name === "true");
+}
+
 function bindMatchPatternLocals(
   pattern: ParamPattern,
   valueType: string | undefined,
@@ -9942,7 +10151,15 @@ function bindMatchPatternLocals(
     }
     return;
   }
-  if (pattern.kind !== "constructor" || !step) return;
+  if (pattern.kind !== "constructor") return;
+  const variantSlots = sumVariantSlotTypes(valueType, pattern.name, types);
+  if (variantSlots) {
+    for (let index = 0; index < pattern.args.length; index++) {
+      bindPatternName(pattern.args[index], variantSlots[index] ?? undefined, env, types);
+    }
+    return;
+  }
+  if (!step) return;
   if (pattern.name === "Done") {
     if (pattern.args.length) {
       diagnostics.push({
@@ -9968,6 +10185,26 @@ function bindMatchPatternLocals(
   }
   bindPatternName(pattern.args[0], step.item, env, types);
   bindPatternName(pattern.args[1], step.state, env, types);
+}
+
+function sumVariantSlotTypes(
+  valueType: string | undefined,
+  variantName: string,
+  types: TypeDecl[],
+): string[] | undefined {
+  const resolved = resolveAliasType(valueType, types) ?? valueType?.trim();
+  if (!resolved) return undefined;
+  const decl = findTypeDecl(types, typeNameOf(resolved));
+  if (decl?.normalized?.kind !== "sum") return undefined;
+  const variant = decl.normalized.variants.find((item) => item.name === variantName);
+  if (!variant) return undefined;
+  const args = typeCallArgsForBase(resolved, typeNameOf(resolved));
+  const argValues = args === undefined ? [] : splitTypeArgs(args);
+  const bindings = new Map(decl.params.map((param, index) => [param.name, argValues[index]]));
+  return (variant.shape?.slots ?? []).map((slot) =>
+    resolveAliasType(substituteSignatureTypeArgs(slot.type, bindings), types) ??
+      substituteSignatureTypeArgs(slot.type, bindings)
+  );
 }
 
 function bindPatternName(
@@ -10014,13 +10251,30 @@ function checkDirectIndex(
     return;
   }
   const indexType = expr.index.kind === "var" ? env.get(expr.index.name)?.type : undefined;
-  const proof = indexType?.match(/^Index\((\d+)\)$/);
-  if (proof && Number.parseInt(proof[1], 10) === capacity) return;
-  if (indexType === undefined || indexType === "i32") return;
+  if (indexTypeProvesInlineArrayCapacity(indexType, capacity, types)) return;
+  const resolvedIndexType = resolveAliasType(indexType, types) ?? indexType;
+  if (scalarFactsFromRefinedI32Type(resolvedIndexType)) {
+    diagnostics.push({
+      code: "index.requires_proof",
+      message: `direct inline-array indexing proof must match index(${capacity})`,
+    });
+    return;
+  }
+  if (indexType === undefined || scalarDomainRuntimeType(resolvedIndexType) === "i32") return;
   diagnostics.push({
     code: "index.requires_proof",
     message: `direct inline-array indexing proof must match index(${capacity})`,
   });
+}
+
+function indexTypeProvesInlineArrayCapacity(
+  indexType: string | undefined,
+  capacity: number,
+  types: TypeDecl[],
+): boolean {
+  const resolved = resolveAliasType(indexType, types) ?? indexType;
+  const expected = refinedI32FromRange(literalEndpoint(0), literalEndpoint(capacity));
+  return refinedI32Assignable(expected, resolved) === true;
 }
 
 function inlineArrayCapacity(type: string | undefined, types: TypeDecl[]): number | undefined {

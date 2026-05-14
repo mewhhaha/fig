@@ -156,4 +156,4 @@ Literal = Number | Bool | Char | String | fenced_text | LiteralType ;
 Bool = "true" | "false" ;
 Op = "+" | "-" | "*" | "/" | "%" | "==" | "!=" | CollectionOpen | "<=" | CollectionClose | ">=" | "&&" | "||" | "^^" | "<>" | "<$>" | "<*>" | ">>=" | "zip" | ".." ;
 OpNoCollectionClose = "+" | "-" | "*" | "/" | "%" | "==" | "!=" | CollectionOpen | "<=" | ">=" | "&&" | "||" | "^^" | "<>" | "<$>" | "<*>" | ">>=" | "zip" | ".." ;
-TypeOp = "==" | "!=" | "|" ;
+TypeOp = "==" | "!=" | "|" | ".." ;

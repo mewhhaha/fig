@@ -427,7 +427,7 @@ function lowerTypeExpr(node: Node): TypeExpr {
         current = {
           kind: "type_binary",
           ...spanOnly(expr),
-          op: ops[index].text as "==" | "!=" | "|",
+          op: ops[index].text as "==" | "!=" | "|" | "..",
           left: current,
           right: lowerTypeExpr(calls[index + 1]),
         };

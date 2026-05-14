@@ -179,7 +179,10 @@ export type TypeExpr =
   | ({ kind: "type_shape"; shape: TypeShape } & AstNodeMeta)
   | ({ kind: "type_match"; value: TypeExpr; arms: TypeMatchArm[] } & AstNodeMeta)
   | ({ kind: "type_operator"; descriptor: OperatorDescriptor } & AstNodeMeta)
-  | ({ kind: "type_binary"; op: "==" | "!=" | "|"; left: TypeExpr; right: TypeExpr } & AstNodeMeta)
+  | (
+    & { kind: "type_binary"; op: "==" | "!=" | "|" | ".."; left: TypeExpr; right: TypeExpr }
+    & AstNodeMeta
+  )
   | ({ kind: "type_bool"; value: boolean } & AstNodeMeta)
   | ({ kind: "type_number"; value: string } & AstNodeMeta)
   | ({ kind: "type_char"; value: string } & AstNodeMeta)

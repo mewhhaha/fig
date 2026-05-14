@@ -166,7 +166,7 @@ export default grammar({
     Bool: $ => choice("true", "false"),
     Op: $ => choice("+", "-", "*", "/", "%", "==", "!=", $.CollectionOpen, "<=", $.CollectionClose, ">=", "&&", "||", "^^", "<>", "<$>", "<*>", ">>=", "zip", ".."),
     OpNoCollectionClose: $ => choice("+", "-", "*", "/", "%", "==", "!=", $.CollectionOpen, "<=", ">=", "&&", "||", "^^", "<>", "<$>", "<*>", ">>=", "zip", ".."),
-    TypeOp: $ => choice("==", "!=", "|"),
+    TypeOp: $ => choice("==", "!=", "|", ".."),
     CountRepeat: $ => token(/[0-9]+\*/),
     CollectionOpen: $ => token(/</),
     CollectionClose: $ => token(/>/),

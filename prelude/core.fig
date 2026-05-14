@@ -67,7 +67,18 @@ type fn Tuple3(a: type, b: type, c: type) -> type {
 }
 
 type fn Index(n: count) -> type {
-  i32
+  i32(0..n)
+}
+
+fn i32.try_domain(const domain: type, x: i32) -> Option(domain) {
+  x
+}
+
+fn Index.try(const n: count, x: i32) -> Option(Index(n)) {
+  match 0 <= x {
+    true => match x < n { true => x, false => 0 },
+    false => 0,
+  }
 }
 
 type fn IterStep(state: type, item: type) -> union {

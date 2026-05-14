@@ -20,6 +20,18 @@ import {
   intrinsicWrapperId,
   isIntrinsicWrapper,
 } from "./primitives.ts";
+import {
+  type I32Range,
+  parseRefinedI32Type,
+  type ScalarFacts,
+  scalarFactsAnyI32,
+  scalarFactsAreNonNegative,
+  scalarFactsFromI32Range,
+  scalarFactsFromRefinedI32Type,
+  scalarFactsIntersect,
+  scalarFactsNumericRange,
+  scalarFactsUnsignedBitWidth,
+} from "./refined_scalar.ts";
 import { wgslShaderId } from "./wgsl.ts";
 
 interface BackendModule {
@@ -137,14 +149,8 @@ interface LowerContext {
   fixedArrayTransformerAliases?: Map<string, Expr>;
   nextDataOffset?: number;
   simdDotHelperName?: string;
-  nonNegativeParamsByFunction?: Map<string, Set<string>>;
-  nonNegativeLocals?: Set<string>;
-  i32LocalRanges?: Map<string, I32Range>;
-}
-
-interface I32Range {
-  min: number;
-  max: number;
+  scalarParamFactsByFunction?: Map<string, Map<string, ScalarFacts>>;
+  localScalarFacts?: Map<string, ScalarFacts>;
 }
 
 interface ScratchArrayPlan {
@@ -278,7 +284,7 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
     ...baseCtx,
     functions: new Map([...imports, ...sourceFns, ...functions].map((fn) => [fn.name, fn])),
     signatures,
-    nonNegativeParamsByFunction: inferNonNegativeTailParams(functions),
+    scalarParamFactsByFunction: inferTailParamScalarFacts(functions),
   };
   const fixedArrayPlans = analyzeFixedArrayPlans(functions, ctx);
   ctx.scratchPlansByFunction = fixedArrayPlans.scratch;
@@ -343,7 +349,7 @@ function isMemoryModel(value: string): value is MemoryModel {
   return value === "temporal" || value === "branch-debug" || value === "branch";
 }
 
-function inferNonNegativeTailParams(functions: FnDecl[]): Map<string, Set<string>> {
+function inferTailParamScalarFacts(functions: FnDecl[]): Map<string, Map<string, ScalarFacts>> {
   const byName = new Map(functions.map((fn) => [fn.name, fn]));
   const callsByTarget = new Map<
     string,
@@ -358,7 +364,7 @@ function inferNonNegativeTailParams(functions: FnDecl[]): Map<string, Set<string
     }
   }
 
-  const inferred = new Map<string, Set<string>>();
+  const inferred = new Map<string, Map<string, ScalarFacts>>();
   for (const fn of functions) {
     if (!analyzeTailCalls(fn).hasOnlyTailDirectSelfCalls) continue;
     const externalCalls = (callsByTarget.get(fn.name) ?? []).filter((item) =>
@@ -366,7 +372,7 @@ function inferNonNegativeTailParams(functions: FnDecl[]): Map<string, Set<string
     );
     if (!externalCalls.length) continue;
     const selfCalls = (callsByTarget.get(fn.name) ?? []).filter((item) => item.caller === fn.name);
-    const nonNegative = new Set<string>();
+    const facts = new Map<string, ScalarFacts>();
     for (const [index, param] of fn.params.entries()) {
       if (param.type !== "i32") continue;
       if (
@@ -381,10 +387,10 @@ function inferNonNegativeTailParams(functions: FnDecl[]): Map<string, Set<string
           )
         )
       ) {
-        nonNegative.add(param.name);
+        facts.set(param.name, nonNegativeI32Fact());
       }
     }
-    if (nonNegative.size) inferred.set(fn.name, nonNegative);
+    if (facts.size) inferred.set(fn.name, facts);
   }
   return inferred;
 }
@@ -475,15 +481,14 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
   );
   const paramNames = new Set(params.map((param) => param.name));
   const localNames = new Set(paramNames);
-  const nonNegativeLocals = new Set(ctx.nonNegativeParamsByFunction?.get(fn.name) ?? []);
+  const localScalarFacts = scalarFactsForFunctionParams(fn, ctx);
   const fnCtx: LowerContext = {
     ...ctx,
     tempIndex: 0,
     tempLocals: [],
     currentFn: fn,
     localTypes: new Map(fn.params.map((param) => [param.name, param.type])),
-    nonNegativeLocals,
-    i32LocalRanges: i32RangesForNonNegativeLocals(nonNegativeLocals),
+    localScalarFacts,
     scratchArrays: ctx.scratchPlansByFunction?.get(fn.name),
     packedArrays: ctx.packedPlansByFunction?.get(fn.name),
     localSlotArrays: ctx.localSlotPlansByFunction?.get(fn.name),
@@ -2749,6 +2754,10 @@ function lowerStatement(
   }
   const targets = bindings.map((slot) => slot.name);
   for (const target of targets) locals.add(target);
+  const statementFact = i32FactFromType(stmt.type, ctx.layouts) ?? exprI32Facts(stmt.value, ctx);
+  if (statementFact && bindings.length === 1 && bindings[0]?.type === "i32") {
+    rememberLocalScalarFact(ctx, bindings[0].name, statementFact);
+  }
   const inlined = stmt.value.kind === "call"
     ? lowerPrivateProductCallInline(stmt.value, ctx, locals, {
       deadProductArgs: deadProductArgIndexes(stmt.value, ctx, usedLaterExpr),
@@ -3538,9 +3547,9 @@ function lowerTailLoopExpr(
     const bindings = flattenBinding(expr.name, valueType, ctx.layouts);
     for (const binding of bindings) locals.add(binding.name);
     let bodyCtx = ctx;
-    const range = exprI32Range(expr.value, ctx);
-    if (range && bindings.length === 1 && bindings[0]?.wat === "i32") {
-      bodyCtx = ctxWithI32LocalRange(ctx, bindings[0].name, range);
+    const fact = exprI32Facts(expr.value, ctx);
+    if (fact && bindings.length === 1 && bindings[0]?.wat === "i32") {
+      bodyCtx = ctxWithLocalScalarFact(ctx, bindings[0].name, fact);
     }
     return [
       ...lowerExpr(expr.value, ctx, locals),
@@ -3719,11 +3728,7 @@ function lowerFixedArrayTransformerIntoBacking(
     ctx.localSlotPlansByFunction?.get(callee.name),
     renames,
   );
-  const nonNegativeLocals = new Set(
-    [...(ctx.nonNegativeParamsByFunction?.get(callee.name) ?? [])].map((name) =>
-      renames.get(name) ?? name
-    ),
-  );
+  const localScalarFacts = scalarFactsForFunctionParams(renamed, ctx, callee.name, renames);
   const selfCalls = directCallExprs(callee.body).filter((call) =>
     call.callee.kind === "var" && call.callee.name === callee.name
   );
@@ -3739,15 +3744,18 @@ function lowerFixedArrayTransformerIntoBacking(
         )
       )
     ) {
-      nonNegativeLocals.add(renames.get(param.name) ?? param.name);
+      mergeLocalScalarFact(
+        localScalarFacts,
+        renames.get(param.name) ?? param.name,
+        nonNegativeI32Fact(),
+      );
     }
   });
   const inlineCtx: LowerContext = {
     ...ctx,
     currentFn: renamed,
     localTypes: new Map(renamed.params.map((param) => [param.name, param.type])),
-    nonNegativeLocals,
-    i32LocalRanges: i32RangesForNonNegativeLocals(nonNegativeLocals),
+    localScalarFacts,
     inlineStack: new Set([...(ctx.inlineStack ?? []), callee.name]),
     scratchArrays,
     packedArrays,
@@ -4301,9 +4309,12 @@ function lowerTailStepMatch(
     ? yieldArm.pattern.args[1].name
     : undefined;
   const scoped = new Set(locals);
+  let yieldCtx = ctx;
   if (itemName) {
     scoped.add(itemName);
     ctx.tempLocals.push({ name: itemName, type: "i32" });
+    const fact = indexFactForBoundExpr(n);
+    if (fact) yieldCtx = ctxWithLocalScalarFact(yieldCtx, itemName, fact);
   }
   if (nextName) {
     scoped.add(nextName);
@@ -4331,7 +4342,14 @@ function lowerTailStepMatch(
             { op: "local.set", name: nextName } as Instr,
           ]
           : []),
-        ...lowerTailLoopExpr(yieldArm.value, fn, ctx, scoped, continueDepth + 1, exitDepth + 1),
+        ...lowerTailLoopExpr(
+          yieldArm.value,
+          fn,
+          yieldCtx,
+          scoped,
+          continueDepth + 1,
+          exitDepth + 1,
+        ),
       ],
       elseBody: lowerTailLoopExpr(doneArm.value, fn, ctx, locals, continueDepth + 1, exitDepth + 1),
       branchHint: branchHintForStepArms(yieldArm, doneArm),
@@ -4347,6 +4365,13 @@ function isIndexCursorNextCallee(name: string): boolean {
 function constSpecializedCursorBound(name: string): Expr | undefined {
   const match = name.match(/(?:index_cursor_next|IndexCursor_next)__([0-9]+)/);
   return match ? { kind: "literal", literalKind: "number", value: match[1] } : undefined;
+}
+
+function indexFactForBoundExpr(bound: Expr): ScalarFacts | undefined {
+  const capacity = staticIntegerLiteral(bound);
+  return capacity !== undefined && capacity > 0
+    ? scalarFactsFromI32Range({ min: 0, max: capacity - 1 })
+    : undefined;
 }
 
 function lowerExpr(
@@ -4448,6 +4473,14 @@ function lowerExpr(
       return lowerPipeBind(expr, ctx, locals, expectedType);
     case "match":
       {
+        const refinedTry = lowerRefinedDomainTryMatch(
+          expr.value,
+          expr.arms,
+          ctx,
+          locals,
+          expectedType,
+        );
+        if (refinedTry) return refinedTry;
         const step = lowerStepMatch(expr.value, expr.arms, ctx, locals, expectedType);
         if (step) return step;
         const shared = lowerMatchSharedScalarSubexprs(expr, ctx, locals, expectedType);
@@ -4898,9 +4931,9 @@ function lowerPipeBind(
   const bindings = flattenBinding(expr.name, valueType, ctx.layouts);
   for (const binding of bindings) locals.add(binding.name);
   let bodyCtx = ctx;
-  const range = exprI32Range(expr.value, ctx);
-  if (range && bindings.length === 1 && bindings[0]?.wat === "i32") {
-    bodyCtx = ctxWithI32LocalRange(ctx, bindings[0].name, range);
+  const fact = exprI32Facts(expr.value, ctx);
+  if (fact && bindings.length === 1 && bindings[0]?.wat === "i32") {
+    bodyCtx = ctxWithLocalScalarFact(ctx, bindings[0].name, fact);
   }
   return [
     ...lowerExpr(expr.value, ctx, locals),
@@ -5311,11 +5344,7 @@ function lowerPrivateScalarTailLoopCallInline(
     ctx.localSlotPlansByFunction?.get(callee.name),
     renames,
   );
-  const nonNegativeLocals = new Set(
-    [...(ctx.nonNegativeParamsByFunction?.get(callee.name) ?? [])].map((name) =>
-      renames.get(name) ?? name
-    ),
-  );
+  const localScalarFacts = scalarFactsForFunctionParams(renamed, ctx, callee.name, renames);
   const selfCalls = directCallExprs(callee.body).filter((call) =>
     call.callee.kind === "var" && call.callee.name === callee.name
   );
@@ -5331,15 +5360,18 @@ function lowerPrivateScalarTailLoopCallInline(
         )
       )
     ) {
-      nonNegativeLocals.add(renames.get(param.name) ?? param.name);
+      mergeLocalScalarFact(
+        localScalarFacts,
+        renames.get(param.name) ?? param.name,
+        nonNegativeI32Fact(),
+      );
     }
   });
   const inlineCtx: LowerContext = {
     ...ctx,
     currentFn: renamed,
     localTypes: new Map(renamed.params.map((param) => [param.name, param.type])),
-    nonNegativeLocals,
-    i32LocalRanges: i32RangesForNonNegativeLocals(nonNegativeLocals),
+    localScalarFacts,
     inlineStack: new Set([...(ctx.inlineStack ?? []), callee.name]),
     scratchArrays,
     packedArrays,
@@ -8117,6 +8149,132 @@ function packedProjection(
   return undefined;
 }
 
+function lowerRefinedDomainTryMatch(
+  value: Expr,
+  arms: { pattern: ParamPattern; value: Expr }[],
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] | undefined {
+  if (value.kind !== "call" || value.callee.kind !== "var") return undefined;
+  if (!isRefinedDomainTryCallee(value.callee.name)) return undefined;
+  const checked = value.args.at(-1);
+  if (!checked) return undefined;
+  const callee = ctx.functions.get(value.callee.name);
+  const payloadType = optionPayloadType(callee?.returnType);
+  const resolvedPayload = resolveAlias(payloadType, ctx.layouts) ?? payloadType;
+  const payloadFact = scalarFactsFromRefinedI32Type(resolvedPayload);
+  if (!payloadFact) return undefined;
+  const someArm = arms.find((arm) =>
+    arm.pattern.kind === "constructor" && arm.pattern.name === "Some"
+  );
+  const noneArm =
+    arms.find((arm) =>
+      (arm.pattern.kind === "constructor" || arm.pattern.kind === "binding") &&
+      arm.pattern.name === "None"
+    ) ?? arms.find((arm) => isCatchAllPattern(arm.pattern));
+  if (!someArm || !noneArm) return undefined;
+
+  const checkedName = `__domain_tmp${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: checkedName, type: "i32" });
+  const checkedVar: Expr = { kind: "var", name: checkedName };
+  const scoped = new Set(locals);
+  const bindingName = someArm.pattern.kind === "constructor" &&
+      someArm.pattern.args[0]?.kind === "binding"
+    ? someArm.pattern.args[0].name
+    : undefined;
+  let someCtx = ctx;
+  if (bindingName) {
+    scoped.add(bindingName);
+    ctx.tempLocals.push({ name: bindingName, type: "i32" });
+    if (payloadFact.range) someCtx = ctxWithLocalScalarFact(ctx, bindingName, payloadFact);
+  }
+  const membershipTest = refinedI32MembershipTest(
+    checkedVar,
+    payloadFact.domain,
+    ctx,
+    new Set([...locals, checkedName]),
+  );
+  if (!membershipTest) return undefined;
+
+  return [
+    ...lowerExpr(checked, ctx, locals, "i32"),
+    { op: "local.set", name: checkedName },
+    ...membershipTest,
+    {
+      op: "if",
+      results: flattenType(expectedType, ctx.layouts).map((slot) => slot.wat),
+      thenBody: [
+        ...(bindingName
+          ? [
+            { op: "local.get", name: checkedName } as Instr,
+            { op: "local.set", name: bindingName } as Instr,
+          ]
+          : []),
+        ...lowerExpr(someArm.value, someCtx, scoped, expectedType),
+      ],
+      elseBody: lowerExpr(noneArm.value, ctx, locals, expectedType),
+      branchHint: branchHintForTestedArm(someArm, arms.filter((arm) => arm !== someArm)),
+    },
+  ];
+}
+
+function isRefinedDomainTryCallee(name: string): boolean {
+  return name.endsWith("Index.try") || name.includes("Index_try__") ||
+    name.endsWith("i32.try_domain") || name.includes("i32_try_domain__");
+}
+
+function optionPayloadType(type: string | undefined): string | undefined {
+  const args = type ? typeCallArgs(type, "Option") : undefined;
+  return args === undefined ? undefined : splitTypeArgs(args)[0]?.trim();
+}
+
+function refinedI32MembershipTest(
+  expr: Expr,
+  domain: NonNullable<ReturnType<typeof parseRefinedI32Type>>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (
+    !domain.intervals.length ||
+    domain.intervals.some((interval) =>
+      interval.start.kind !== "literal" || interval.end.kind !== "literal"
+    )
+  ) return undefined;
+  const intervals = domain.intervals;
+  return intervals
+    .map((interval) => {
+      const start = interval.start.kind === "literal" ? interval.start.value : I32_MIN;
+      const endExclusive = interval.end.kind === "literal" ? interval.end.value : I32_MAX + 1;
+      return refinedI32IntervalMembershipTest(expr, start, endExclusive - 1, ctx, locals);
+    })
+    .reduce(
+      (body, test) =>
+        body.length ? [...body, ...test, { op: "binary", wasm: "i32.or" } as Instr] : test,
+      [] as Instr[],
+    );
+}
+
+function refinedI32IntervalMembershipTest(
+  expr: Expr,
+  min: number,
+  max: number,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const lower = min <= I32_MIN ? [{ op: "const", type: "i32", value: 1 } as Instr] : [
+    ...lowerExpr(expr, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: min } as Instr,
+    { op: "binary", wasm: "i32.ge_s" } as Instr,
+  ];
+  const upper = max >= I32_MAX ? [{ op: "const", type: "i32", value: 1 } as Instr] : [
+    ...lowerExpr(expr, ctx, locals, "i32"),
+    { op: "const", type: "i32", value: max } as Instr,
+    { op: "binary", wasm: "i32.le_s" } as Instr,
+  ];
+  return [...lower, ...upper, { op: "binary", wasm: "i32.and" }];
+}
+
 function lowerMatchArms(
   value: Expr,
   arms: { pattern: ParamPattern; value: Expr }[],
@@ -8161,43 +8319,96 @@ function narrowedCtxForPattern(
   ctx: LowerContext,
 ): LowerContext {
   if (!isTrueLikePattern(pattern)) return ctx;
-  const narrowed = trueConditionI32Range(value, ctx);
-  return narrowed ? ctxWithI32LocalRange(ctx, narrowed.name, narrowed.range) : ctx;
+  const narrowed = trueConditionI32Fact(value, ctx);
+  return narrowed ? ctxWithLocalScalarFact(ctx, narrowed.name, narrowed.fact) : ctx;
 }
 
-function trueConditionI32Range(
+function trueConditionI32Fact(
   value: Expr,
   ctx: LowerContext,
-): { name: string; range: I32Range } | undefined {
-  if (value.kind !== "binary" || value.left.kind !== "var") return undefined;
-  const right = staticIntegerLiteral(value.right);
-  if (right === undefined) return undefined;
-  const current = exprI32Range(value.left, ctx) ?? { min: I32_MIN, max: I32_MAX };
-  if (value.op === "<") {
-    return {
-      name: value.left.name,
-      range: intersectI32Ranges(current, { min: I32_MIN, max: right - 1 }),
-    };
+): { name: string; fact: ScalarFacts } | undefined {
+  if (value.kind !== "binary") return undefined;
+  if (value.left.kind === "var") {
+    const right = staticIntegerLiteral(value.right);
+    if (right === undefined) return undefined;
+    const current = exprI32Facts(value.left, ctx) ?? scalarFactsAnyI32();
+    if (value.op === "==") {
+      const fact = intersectI32FactWithRange(current, { min: right, max: right });
+      if (!fact) return undefined;
+      return {
+        name: value.left.name,
+        fact,
+      };
+    }
+    if (value.op === "<") {
+      const fact = intersectI32FactWithRange(current, { min: I32_MIN, max: right - 1 });
+      if (!fact) return undefined;
+      return {
+        name: value.left.name,
+        fact,
+      };
+    }
+    if (value.op === "<=") {
+      const fact = intersectI32FactWithRange(current, { min: I32_MIN, max: right });
+      if (!fact) return undefined;
+      return {
+        name: value.left.name,
+        fact,
+      };
+    }
   }
-  if (value.op === "<=") {
-    return {
-      name: value.left.name,
-      range: intersectI32Ranges(current, { min: I32_MIN, max: right }),
-    };
+  if (value.right.kind === "var") {
+    const left = staticIntegerLiteral(value.left);
+    if (left === undefined) return undefined;
+    const current = exprI32Facts(value.right, ctx) ?? scalarFactsAnyI32();
+    if (value.op === "==") {
+      const fact = intersectI32FactWithRange(current, { min: left, max: left });
+      if (!fact) return undefined;
+      return {
+        name: value.right.name,
+        fact,
+      };
+    }
+    if (value.op === "<") {
+      const fact = intersectI32FactWithRange(current, { min: left + 1, max: I32_MAX });
+      if (!fact) return undefined;
+      return {
+        name: value.right.name,
+        fact,
+      };
+    }
+    if (value.op === "<=") {
+      const fact = intersectI32FactWithRange(current, { min: left, max: I32_MAX });
+      if (!fact) return undefined;
+      return {
+        name: value.right.name,
+        fact,
+      };
+    }
   }
   return undefined;
 }
 
-function ctxWithI32LocalRange(ctx: LowerContext, name: string, range: I32Range): LowerContext {
-  const i32LocalRanges = new Map(ctx.i32LocalRanges);
-  i32LocalRanges.set(name, range);
-  const nonNegativeLocals = new Set(ctx.nonNegativeLocals);
-  if (range.min >= 0) nonNegativeLocals.add(name);
-  return { ...ctx, i32LocalRanges, nonNegativeLocals };
+function ctxWithLocalScalarFact(
+  ctx: LowerContext,
+  name: string,
+  fact: ScalarFacts,
+): LowerContext {
+  const localScalarFacts = new Map(ctx.localScalarFacts);
+  mergeLocalScalarFact(localScalarFacts, name, fact);
+  return { ...ctx, localScalarFacts };
 }
 
-function intersectI32Ranges(left: I32Range, right: I32Range): I32Range {
-  return { min: Math.max(left.min, right.min), max: Math.min(left.max, right.max) };
+function rememberLocalScalarFact(ctx: LowerContext, name: string, fact: ScalarFacts) {
+  ctx.localScalarFacts ??= new Map();
+  mergeLocalScalarFact(ctx.localScalarFacts, name, fact);
+}
+
+function intersectI32FactWithRange(
+  fact: ScalarFacts,
+  range: I32Range,
+): ScalarFacts | undefined {
+  return scalarFactsIntersect(fact, scalarFactsFromI32Range(range));
 }
 
 function lowerScalarBooleanMatchSelect(
@@ -8311,13 +8522,8 @@ function lowerMatchSharedScalarSubexprs(
     if (!slot || slots.length !== 1) return [];
     locals.add(name);
     ctx.tempLocals.push({ name, type: slot.wat });
-    const range = slot.wat === "i32" ? exprI32Range(candidate, ctx) : undefined;
-    if (range && range.min >= 0) {
-      if (!ctx.nonNegativeLocals) ctx.nonNegativeLocals = new Set();
-      ctx.nonNegativeLocals.add(name);
-      if (!ctx.i32LocalRanges) ctx.i32LocalRanges = new Map();
-      ctx.i32LocalRanges.set(name, range);
-    }
+    const fact = slot.wat === "i32" ? exprI32Facts(candidate, ctx) : undefined;
+    if (fact) rememberLocalScalarFact(ctx, name, fact);
     replacements.set(exprReuseKey(candidate)!, { kind: "var", name });
     return [
       ...lowerExpr(candidate, ctx, locals, slot.type),
@@ -8545,9 +8751,12 @@ function lowerStepMatch(
   const scoped = new Set(locals);
   const itemName = item?.kind === "binding" && yieldUsesItem ? item.name : undefined;
   const nextName = next?.kind === "binding" && yieldUsesNext ? next.name : undefined;
+  let yieldCtx = ctx;
   if (itemName) {
     scoped.add(itemName);
     ctx.tempLocals.push({ name: itemName, type: "i32" });
+    const fact = indexFactForBoundExpr(n);
+    if (fact) yieldCtx = ctxWithLocalScalarFact(yieldCtx, itemName, fact);
   }
   if (nextName) {
     scoped.add(nextName);
@@ -8575,7 +8784,7 @@ function lowerStepMatch(
             { op: "local.set", name: nextName } as Instr,
           ]
           : []),
-        ...lowerExpr(yieldArm.value, ctx, scoped, expectedType),
+        ...lowerExpr(yieldArm.value, yieldCtx, scoped, expectedType),
       ],
       elseBody: lowerExpr(doneArm.value, ctx, locals, expectedType),
       branchHint: branchHintForStepArms(yieldArm, doneArm),
@@ -9609,28 +9818,66 @@ function signedI32Const(value: number): number {
 }
 
 function exprIsKnownNonNegative(expr: Expr, ctx: LowerContext): boolean {
-  const range = exprI32Range(expr, ctx);
-  return range !== undefined && range.min >= 0;
+  return scalarFactsAreNonNegative(exprI32Facts(expr, ctx));
 }
 
-function i32RangesForNonNegativeLocals(locals: Set<string>): Map<string, I32Range> {
-  return new Map([...locals].map((name) => [name, { min: 0, max: I32_MAX }]));
+function nonNegativeI32Fact(): ScalarFacts {
+  return scalarFactsFromI32Range({ min: 0, max: I32_MAX });
+}
+
+function scalarFactsForFunctionParams(
+  fn: FnDecl,
+  ctx: Pick<LowerContext, "layouts" | "scalarParamFactsByFunction" | "localScalarFacts">,
+  sourceName = fn.name,
+  renames = new Map<string, string>(),
+): Map<string, ScalarFacts> {
+  const facts = new Map(ctx.localScalarFacts);
+  for (const [name, fact] of ctx.scalarParamFactsByFunction?.get(sourceName) ?? []) {
+    mergeLocalScalarFact(facts, renames.get(name) ?? name, fact);
+  }
+  for (const param of fn.params) {
+    const binding = flattenBinding(param.name, param.type, ctx.layouts);
+    if (binding.length !== 1 || binding[0]?.wat !== "i32") continue;
+    const fact = i32FactFromType(param.type, ctx.layouts);
+    if (fact) mergeLocalScalarFact(facts, binding[0].name, fact);
+  }
+  return facts;
+}
+
+function i32FactFromType(type: string | undefined, layouts: LayoutEnv): ScalarFacts | undefined {
+  const resolved = resolveAlias(type, layouts) ?? type;
+  return scalarFactsFromRefinedI32Type(resolved);
+}
+
+function mergeLocalScalarFact(
+  facts: Map<string, ScalarFacts>,
+  name: string,
+  fact: ScalarFacts,
+) {
+  const existing = facts.get(name);
+  const merged = existing ? scalarFactsIntersect(existing, fact) : fact;
+  if (merged) facts.set(name, merged);
 }
 
 function exprI32Range(
   expr: Expr,
-  ctx?: Pick<LowerContext, "nonNegativeLocals" | "i32LocalRanges">,
+  ctx?: Pick<LowerContext, "localScalarFacts">,
 ): I32Range | undefined {
+  return scalarFactsNumericRange(exprI32Facts(expr, ctx));
+}
+
+function exprI32Facts(
+  expr: Expr,
+  ctx?: Pick<LowerContext, "localScalarFacts">,
+): ScalarFacts | undefined {
   const literal = staticIntegerLiteral(expr);
   if (literal !== undefined) {
-    return literal >= I32_MIN && literal <= I32_MAX ? { min: literal, max: literal } : undefined;
+    return literal >= I32_MIN && literal <= I32_MAX
+      ? scalarFactsFromI32Range({ min: literal, max: literal })
+      : undefined;
   }
   if (expr.kind === "var") {
-    const range = ctx?.i32LocalRanges?.get(expr.name);
-    if (range) return range;
-  }
-  if (expr.kind === "var" && ctx?.nonNegativeLocals?.has(expr.name)) {
-    return { min: 0, max: I32_MAX };
+    return ctx?.localScalarFacts?.get(expr.name);
   }
   if (expr.kind === "binary" && expr.op === "+") {
     const left = exprI32Range(expr.left, ctx);
@@ -9638,7 +9885,7 @@ function exprI32Range(
     if (!left || !right) return undefined;
     const min = left.min + right.min;
     const max = left.max + right.max;
-    return min >= I32_MIN && max <= I32_MAX ? { min, max } : undefined;
+    return min >= I32_MIN && max <= I32_MAX ? scalarFactsFromI32Range({ min, max }) : undefined;
   }
   if (expr.kind === "binary" && expr.op === "-") {
     const left = exprI32Range(expr.left, ctx);
@@ -9646,7 +9893,7 @@ function exprI32Range(
     if (!left || !right) return undefined;
     const min = left.min - right.max;
     const max = left.max - right.min;
-    return min >= I32_MIN && max <= I32_MAX ? { min, max } : undefined;
+    return min >= I32_MIN && max <= I32_MAX ? scalarFactsFromI32Range({ min, max }) : undefined;
   }
   if (expr.kind === "binary" && expr.op === "*") {
     const left = exprI32Range(expr.left, ctx);
@@ -9660,14 +9907,16 @@ function exprI32Range(
     ];
     const min = Math.min(...products);
     const max = Math.max(...products);
-    return min >= I32_MIN && max <= I32_MAX ? { min, max } : undefined;
+    return min >= I32_MIN && max <= I32_MAX ? scalarFactsFromI32Range({ min, max }) : undefined;
   }
   if (expr.kind === "binary" && (expr.op === "/" || expr.op === "%")) {
     const left = exprI32Range(expr.left, ctx);
     const divisor = staticIntegerLiteral(expr.right);
     if (!left || divisor === undefined || divisor <= 0 || left.min < 0) return undefined;
-    if (expr.op === "/") return { min: 0, max: Math.floor(left.max / divisor) };
-    return { min: 0, max: divisor - 1 };
+    if (expr.op === "/") {
+      return scalarFactsFromI32Range({ min: 0, max: Math.floor(left.max / divisor) });
+    }
+    return scalarFactsFromI32Range({ min: 0, max: divisor - 1 });
   }
   return undefined;
 }
@@ -10206,6 +10455,7 @@ function isLane4I32(type: string | undefined, layouts: LayoutEnv): boolean {
 
 function watType(type: string | Param | undefined): ValueType {
   const source = typeof type === "string" || type === undefined ? type : type.type;
+  if (parseRefinedI32Type(source)) return "i32";
   if (literalTypeMembers(source)) return "i32";
   if (source === "i64" || source === "u64" || (unsignedBitWidth(source ?? "") ?? 0) > 32) {
     return "i64";
@@ -10364,6 +10614,7 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
   if (staticShape) return staticShape;
   const resolved = resolveAlias(type, layouts);
   if (!resolved) return [{ suffix: "", type: "i32", wat: "i32" }];
+  if (parseRefinedI32Type(resolved)) return [{ suffix: "", type: resolved, wat: "i32" }];
   if (isPrimitiveType(resolved)) return [{ suffix: "", type: resolved, wat: watType(resolved) }];
   const inlineArrayArgs = typeCallArgs(resolved, "InlineArray");
   if (inlineArrayArgs) {
@@ -10787,11 +11038,14 @@ function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
 }
 
 function isPrimitiveType(type: string): boolean {
+  if (parseRefinedI32Type(type)) return true;
   return ["i32", "u32", "i64", "u64", "f32", "f64", "bool"].includes(type) ||
     unsignedBitWidth(type) !== undefined;
 }
 
 function unsignedBitWidth(type: string): number | undefined {
+  const refined = scalarFactsUnsignedBitWidth(scalarFactsFromRefinedI32Type(type));
+  if (refined !== undefined) return refined;
   const match = type.match(/^u([1-9][0-9]*)$/);
   if (!match) return undefined;
   const width = Number.parseInt(match[1], 10);

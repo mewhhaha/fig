@@ -19,6 +19,7 @@ for (const file of bundle.files) {
   if (file.path === "queries/highlights.scm") {
     content = content
       .replace("(TypeAtom (LowerIdent) @type)", "(TypeAtom (LowerIdent) @type.parameter)")
+      .replace('"." @punctuation.delimiter\n', '"." @punctuation.delimiter\n".." @operator\n')
       .replace("(TypeAtom (PascalIdent) @type.parameter)\n", "")
       .replace("(TypePrimary (LowerIdent) @type)\n", "")
       .replace("(TypePrimary (PascalIdent) @type.parameter)\n", "")

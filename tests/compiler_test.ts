@@ -3296,6 +3296,7 @@ Deno.test("checks bounded inline array indexing", async () => {
       let InlineArray = {n*a};
       struct(InlineArray)
     }
+    type fn Index(n: count) -> type { i32(0..n) }
     type fn Lane4I32() -> type { InlineArray(4, i32) }
     type fn Lane8I32() -> type { InlineArray(8, i32) }
     type fn Lane8Alias() -> type { Lane8I32 }
@@ -3313,11 +3314,76 @@ Deno.test("checks bounded inline array indexing", async () => {
   );
   await checkSource(`${header} fn ok(xs: Lane4I32, i: Index(4)) -> i32 { xs[i] }`);
   await checkSource(`${header} fn ok(xs: Lane8Alias, i: Index(8)) -> i32 { xs[i] }`);
+  await checkSource(`${header} fn subset(xs: Lane8Alias, i: Index(4)) -> i32 { xs[i] }`);
   await checkSource(`${header} fn checked(xs: Lane4I32, i: i32) -> Option(i32) { get(xs, i) }`);
   await checkSource(`${header} fn runtime(xs: Lane4I32, i: i32) -> i32 { xs[i] }`);
   await assertThrowsCompile(
-    `${header} fn Bad(xs: Lane8Alias, i: Index(4)) -> i32 { xs[i] }`,
+    `${header} fn Bad(xs: Lane8Alias, i: Index(9)) -> i32 { xs[i] }`,
     "index.requires_proof",
+  );
+});
+
+Deno.test("checks refined i32 scalar domains", async () => {
+  await checkSource(`fn lit() -> i32(1 | 2 | 3) { 2 }`);
+  await checkSource(`fn range_lit() -> i32(1 | 2..10 | 14) { 9 }`);
+  await checkSource(`fn widen(x: i32(0..4)) -> i32 { x }`);
+  await checkSource(`fn subset(x: i32(0..4)) -> i32(0..10) { x }`);
+  await assertThrowsCompile(`fn bad(x: i32) -> i32(0..4) { x }`, "type.literal_mismatch");
+  await assertThrowsCompile(`fn bad(x: i32(5..8)) -> i32(0..4) { x }`, "type.literal_mismatch");
+  await assertThrowsCompile(`fn bad() -> i32(4..4) { 4 }`, "type.scalar_domain_empty");
+  await assertThrowsCompile(`fn bad() -> i32(10..4) { 4 }`, "type.scalar_domain_empty");
+  await assertThrowsCompile(
+    `fn bad(const n: count) -> i32(n) { 0 }`,
+    "type.scalar_domain_endpoint",
+  );
+  await assertThrowsCompile(`fn bad() -> i32("x") { 0 }`, "type.scalar_domain_endpoint");
+  await assertThrowsCompile(`fn bad() -> i64(0..4) { 0 }`, "type.scalar_domain_carrier");
+});
+
+Deno.test("narrows refined i32 domains from boolean control flow", async () => {
+  await checkSource(`
+    fn bounded(x: i32) -> i32(0..16) {
+      if 0 <= x {
+        if x < 16 { x } else { 0 }
+      } else {
+        0
+      }
+    }
+  `);
+  await assertThrowsCompile(
+    `fn bad(x: i32) -> i32(0..16) { if x < 16 { x } else { 0 } }`,
+    "type.literal_mismatch",
+  );
+});
+
+Deno.test("core Index is a refined i32 domain proof", async () => {
+  await checkSource(
+    `
+      const core = @import("prelude.core");
+      type fn InlineArray(n: count, a: type) {
+        let InlineArray = {n*a};
+        struct(InlineArray)
+      }
+      pub fn main(raw: i32, xs: InlineArray(16, i32)) -> i32 {
+        match core.Index.try(16, raw) {
+          Some(i) => xs[i],
+          None => 0,
+        }
+      }
+    `,
+    { resolveModule: resolveProjectModule },
+  );
+  await checkSource(
+    `
+      const core = @import("prelude.core");
+      fn narrow(raw: i32) -> i32(0..4) {
+        match core.i32.try_domain(i32(0..4), raw) {
+          Some(i) => i,
+          None => 0,
+        }
+      }
+    `,
+    { resolveModule: resolveProjectModule },
   );
 });
 
@@ -3350,6 +3416,13 @@ Deno.test("supports arbitrary unsigned integer widths with storage-lane packing"
   `);
   assertStringIncludes(packedNibbles, `(param $p$a$b i32)`);
   assertStringIncludes(packedNibbles, `(result i32)`);
+
+  const packedRefinedNibbles = await watFromSource(`
+    type fn Pair() { let Pair = {a: i32(0..16), b: i32(0..16)}; struct(Pair) }
+    pub fn main(p: Pair) -> Pair { p }
+  `);
+  assertStringIncludes(packedRefinedNibbles, `(param $p$a$b i32)`);
+  assertStringIncludes(packedRefinedNibbles, `(result i32)`);
 
   const separateByteLanes = await watFromSource(`
     type fn Pair() { let Pair = {a: u7, b: u7}; struct(Pair) }

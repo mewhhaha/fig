@@ -369,6 +369,61 @@ Deno.test("backend lowers small-range divisibility checks through bit masks", as
   assertEquals((instance.exports.main as CallableFunction)(), 391);
 });
 
+Deno.test("backend uses refined i32 parameter domains for div/rem lowering", async () => {
+  const source = `
+    pub fn main(i: i32(0..64)) -> i32 {
+      (i / 16) + (i % 16)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.shr_u");
+  assertStringIncludes(wat, "i32.and");
+  assert(!wat.includes("i32.div_s"));
+  assert(!wat.includes("i32.rem_s"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(31), 16);
+});
+
+Deno.test("backend lowers Index.try refined-domain matches as checked bounds", async () => {
+  const source = `
+    const core = @import("prelude.core");
+    type fn InlineArray(n: count, a: type) {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    pub fn main(raw: i32, xs: InlineArray(4, i32)) -> i32 {
+      match core.Index.try(4, raw) {
+        Some(i) => xs[i],
+        None => 0,
+      }
+    }
+    pub fn generic(raw: i32) -> i32 {
+      match core.i32.try_domain(i32(0..4), raw) {
+        Some(i) => i + 1,
+        None => 0,
+      }
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule });
+  assertStringIncludes(wat, "local.set $i");
+  assertStringIncludes(wat, "i32.ge_s");
+  assertStringIncludes(wat, "i32.le_s");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(2, 10, 20, 30, 40), 30);
+  assertEquals(main(-1, 10, 20, 30, 40), 0);
+  assertEquals(main(4, 10, 20, 30, 40), 0);
+  const generic = instance.exports.generic as CallableFunction;
+  assertEquals(generic(2), 3);
+  assertEquals(generic(4), 0);
+});
+
 Deno.test("backend lowers nonnegative odd divisibility checks through modular inverses", async () => {
   const source = `
     fn score_loop(i: i32, total: i32) -> i32 {
@@ -1805,7 +1860,7 @@ Deno.test("index cursor Yield wildcard payload skips unused item local", async (
 Deno.test("inline array builder primitives lower without runtime calls", async () => {
   const wat = await watFromSource(
     `
-    type fn Index(n: count) -> type { i32 }
+    type fn Index(n: count) -> type { i32(0..n) }
     type fn InlineArray(n: count, a: type) -> type {
       let InlineArray = {n*a};
       struct(InlineArray)
@@ -2151,7 +2206,7 @@ Deno.test("opcode mode rejects direct self recursion outside tail position", asy
       struct(InlineArray)
     }
     type fn Lane4I32() -> type { InlineArray(4, i32) }
-    type fn Index(n: count) -> type { i32 }
+    type fn Index(n: count) -> type { i32(0..n) }
     fn dynamic_index_target(n: i32, i: Index(4)) -> Lane4I32 {
       match n { 0 => [0, 0, 0, 0], _ => [dynamic_index_target(n - 1, i)[i], 0, 0, 0] }
     }
