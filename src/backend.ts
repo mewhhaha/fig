@@ -10749,6 +10749,7 @@ function emitImportWat(item: BackendImport): string {
 
 function emitFunctionWat(fn: BackendFunction): string {
   const lines: string[] = [];
+  const localAliases = watLocalAliases(fn.locals);
   const exportPart = fn.exportName ? ` (export "${fn.exportName}")` : "";
   const signature = [
     `(func $${watName(fn.name)}${exportPart}`,
@@ -10756,29 +10757,64 @@ function emitFunctionWat(fn: BackendFunction): string {
     ...fn.results.map((result) => `(result ${result})`),
   ].join(" ");
   lines.push(`  ${signature}`);
-  for (const local of fn.locals) {
-    lines.push(`    (local $${watName(local.name)} ${local.type})`);
-  }
-  lines.push(...emitInstrsWat(fn.body, 4));
+  lines.push(...emitLocalDeclsWat(fn.locals, localAliases));
+  lines.push(...emitInstrsWat(fn.body, 4, localAliases));
   lines.push("  )");
   return lines.join("\n");
 }
 
-function emitInstrsWat(instrs: Instr[], indent: number): string[] {
-  return instrs.flatMap((instr) => emitInstrWat(instr, indent));
+function watLocalAliases(locals: BackendFunction["locals"]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const local of locals) {
+    if (!/^(__inl_array_Iter|__slot_tmp)/.test(local.name)) continue;
+    aliases.set(local.name, `l${aliases.size}`);
+  }
+  return aliases;
 }
 
-function emitInstrWat(instr: Instr, indent: number): string[] {
+function emitLocalDeclsWat(
+  locals: BackendFunction["locals"],
+  aliases: ReadonlyMap<string, string>,
+): string[] {
+  const groups: { type: ValueType; names: string[] }[] = [];
+  for (const local of locals) {
+    const group = groups.at(-1);
+    if (group?.type === local.type) {
+      group.names.push(local.name);
+    } else {
+      groups.push({ type: local.type, names: [local.name] });
+    }
+  }
+  return groups.map((group) =>
+    `    (local ${
+      group.names.map((name) => `$${watLocalName(name, aliases)}`).join(" ")
+    } ${group.type})`
+  );
+}
+
+function emitInstrsWat(
+  instrs: Instr[],
+  indent: number,
+  localAliases: ReadonlyMap<string, string> = new Map(),
+): string[] {
+  return instrs.flatMap((instr) => emitInstrWat(instr, indent, localAliases));
+}
+
+function emitInstrWat(
+  instr: Instr,
+  indent: number,
+  localAliases: ReadonlyMap<string, string>,
+): string[] {
   const prefix = spaces(indent);
   switch (instr.op) {
     case "const":
       return [`${prefix}${instr.type}.const ${instr.value}`];
     case "local.get":
-      return [`${prefix}local.get $${watName(instr.name)}`];
+      return [`${prefix}local.get $${watLocalName(instr.name, localAliases)}`];
     case "local.set":
-      return [`${prefix}local.set $${watName(instr.name)}`];
+      return [`${prefix}local.set $${watLocalName(instr.name, localAliases)}`];
     case "local.tee":
-      return [`${prefix}local.tee $${watName(instr.name)}`];
+      return [`${prefix}local.tee $${watLocalName(instr.name, localAliases)}`];
     case "call":
       return [`${prefix}call $${watName(instr.name)}`];
     case "return_call":
@@ -10822,21 +10858,21 @@ function emitInstrWat(instr: Instr, indent: number): string[] {
         `${prefix}if${branchHintWat(instr.branchHint)}${
           instr.results.map((result) => ` (result ${result})`).join("")
         }`,
-        ...emitInstrsWat(instr.thenBody, indent + 2),
+        ...emitInstrsWat(instr.thenBody, indent + 2, localAliases),
         `${prefix}else`,
-        ...emitInstrsWat(instr.elseBody, indent + 2),
+        ...emitInstrsWat(instr.elseBody, indent + 2, localAliases),
         `${prefix}end`,
       ];
     case "block":
       return [
         `${prefix}block${(instr.results ?? []).map((result) => ` (result ${result})`).join("")}`,
-        ...emitInstrsWat(instr.body, indent + 2),
+        ...emitInstrsWat(instr.body, indent + 2, localAliases),
         `${prefix}end`,
       ];
     case "loop":
       return [
         `${prefix}loop${(instr.results ?? []).map((result) => ` (result ${result})`).join("")}`,
-        ...emitInstrsWat(instr.body, indent + 2),
+        ...emitInstrsWat(instr.body, indent + 2, localAliases),
         `${prefix}end`,
       ];
     case "br":
@@ -12709,6 +12745,10 @@ function baseName(name: string): string {
 
 function watName(name: string): string {
   return name.replaceAll(/[^A-Za-z0-9_.$]/g, "_");
+}
+
+function watLocalName(name: string, aliases: ReadonlyMap<string, string>): string {
+  return aliases.get(name) ?? watName(name);
 }
 
 function spaces(count: number): string {

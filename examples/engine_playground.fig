@@ -1,84 +1,714 @@
-const geometry = @import("prelude.geometry2d");
+# High-level refactor goal
 
-const tick_millis: fn() -> i32 !{time} = @capability("tick_millis");
-const input_axis_x: fn() -> i32 !{event} = @capability("input_axis_x");
-const input_pressed: fn() -> i32 !{event} = @capability("input_pressed");
+Refactor Fig into a **phase-oriented compiler architecture** where each phase has a small responsibility, explicit inputs/outputs, testable summaries, and no hidden global rewrites.
 
-type fn Transform2d() -> type {
-  let Transform2d = {x: i32, y: i32, z: i32};
-  struct(Transform2d)
+The project already has the right concepts: `compileArtifactsFromSource`, import pruning, optimization profiles, `OptimizationPlan`, recurrence summaries, backend layout decisions, and benchmark phase timing.
+
+The problem is mostly organization: important decisions are still spread across `check.ts`, `optimize.ts`, `backend.ts`, and `mod.ts`. The checker still runs many whole-program phases in sequence, including repeated member resolution and specialization passes. 
+
+The refactor goal should be:
+
+```txt
+Small phase modules
+Explicit IR/fact boundaries
+No hidden whole-program mutation
+Structural optimization rules
+Stable testable plans
+Readable maintenance surface
+```
+
+---
+
+# Proposed project structure
+
+```txt
+src/
+  api/
+    mod.ts
+    compile.ts
+    explain.ts
+    options.ts
+
+  front/
+    parser.ts
+    lower_syntax.ts
+    ast_meta.ts
+    format.ts
+    tokenize.ts
+    spans.ts
+
+  ast/
+    surface_ast.ts
+    core_ast.ts
+    visitors.ts
+    clone.ts
+    names.ts
+
+  module/
+    imports.ts
+    qualify.ts
+    prune.ts
+    graph.ts
+    summaries.ts
+
+  types/
+    type_ast.ts
+    parse_type.ts
+    type_env.ts
+    type_eval.ts
+    type_match.ts
+    type_subst.ts
+    type_contracts.ts
+    refined_scalar.ts
+    literal_types.ts
+    effects.ts
+
+  check/
+    check_program.ts
+    check_fn.ts
+    check_expr.ts
+    check_pattern.ts
+    check_collections.ts
+    check_constructors.ts
+    check_effects.ts
+    diagnostics.ts
+
+  specialize/
+    infer_type_args.ts
+    const_params.ts
+    static_eval.ts
+    attached_members.ts
+    operators.ts
+    collectors.ts
+    cache.ts
+
+  recurrence/
+    analyze.ts
+    classify.ts
+    finite_unfold.ts
+    clause_dispatch.ts
+    tail_group_lower.ts
+
+  facts/
+    abstract_values.ts
+    call_graph.ts
+    effect_facts.ts
+    layout_facts.ts
+    domain_facts.ts
+    cost.ts
+
+  opt/
+    profiles.ts
+    plan.ts
+    rules.ts
+    apply.ts
+    inline.ts
+    local_cleanup.ts
+    dce.ts
+
+  layout/
+    flatten.ts
+    fixed_array_plan.ts
+    packed.ts
+    scratch.ts
+    local_slots.ts
+    products.ts
+
+  backend/
+    lower_module.ts
+    lower_fn.ts
+    lower_expr.ts
+    lower_tail_loop.ts
+    lower_match.ts
+    lower_arrays.ts
+    lower_branch_heap.ts
+    instr.ts
+    cleanup.ts
+
+  wasm/
+    wat.ts
+    binary.ts
+    sections.ts
+    names.ts
+    branch_hints.ts
+
+  plugins/
+    registry.ts
+    builtins.ts
+    declarations.ts
+    intrinsics.ts
+
+  runtime/
+    branch.ts
+    temporal.ts
+    memory.ts
+
+  testing/
+    wat_shape.ts
+    plan_assert.ts
+    fixtures.ts
+```
+
+This is a large target structure. It should be introduced gradually, by extracting files from the existing modules rather than rewriting the compiler at once.
+
+---
+
+# Key phase boundaries
+
+## 1. API layer
+
+Current `mod.ts` already mixes parsing, import resolution, checking, artifact compilation, optimization explanation, and exports. It now supports `compileArtifactsFromSource()` and `explainOptimization()`, which is good. 
+
+Move those into:
+
+```txt
+api/compile.ts
+api/explain.ts
+api/options.ts
+```
+
+`src/mod.ts` should mostly re-export public API.
+
+Target:
+
+```ts
+parseSource(...)
+checkSource(...)
+compileArtifactsFromSource(...)
+explainOptimization(...)
+```
+
+should be thin wrappers over phase modules.
+
+---
+
+## 2. Module/import layer
+
+Current import handling qualifies and merges imported declarations, and now has conservative `pruneImports`.
+
+Move this into:
+
+```txt
+module/imports.ts
+module/qualify.ts
+module/prune.ts
+module/graph.ts
+```
+
+Main goal:
+
+```txt
+import graph resolution
+qualification
+conservative pruning
+module summaries
+```
+
+should be separate from API and checker.
+
+Long-term, this becomes the place where you can stop fully merging imported source into one giant program.
+
+---
+
+## 3. Type system layer
+
+Right now type strings still flow through much of the compiler, but refined scalar domains are already strong and central. `refined_scalar.ts` now supports canonical domain operations and interval merging.
+
+Create:
+
+```txt
+types/refined_scalar.ts
+types/literal_types.ts
+types/type_eval.ts
+types/type_subst.ts
+types/effects.ts
+```
+
+The first goal is not full `TypeId` conversion. The first goal is to make type-related functions stop living inside the checker/backend.
+
+Medium-term target:
+
+```ts
+type TypeId = number;
+type DomainId = number;
+```
+
+but only after extraction stabilizes.
+
+---
+
+## 4. Checker layer
+
+`checkProgramInternal` currently performs many phase-like operations in one pipeline: lower do-expressions, group clauses, evaluate types, evaluate consts, resolve members, run specialization passes, lower operators/collectors/constructors, and check functions. 
+
+Split it into:
+
+```txt
+check/check_program.ts
+check/check_fn.ts
+check/check_expr.ts
+check/check_pattern.ts
+check/check_collections.ts
+check/check_constructors.ts
+check/check_effects.ts
+```
+
+Then `check_program.ts` should read like:
+
+```ts
+export function checkProgram(program, options) {
+  const ctx = createCheckContext(program, options);
+
+  runPrecheckNormalizers(ctx);
+  evaluateTypes(ctx);
+  evaluateConsts(ctx);
+  specializeProgram(ctx);
+  lowerSurfaceSugar(ctx);
+  checkDeclarations(ctx);
+
+  return buildCheckResult(ctx);
 }
+```
 
-type fn Velocity2d() -> type {
-  let Velocity2d = {x: i32, y: i32};
-  struct(Velocity2d)
-}
+The checker should orchestrate. It should not contain all details.
 
-type fn Sprite2d() -> type {
-  let Sprite2d = {w: i32, h: i32, color: i32};
-  struct(Sprite2d)
-}
+---
 
-type fn MovementEvents() -> type {
-  let MovementEvents = {dt_ms: i32, axis_x: i32, pressed: i32};
-  struct(MovementEvents)
-}
+## 5. Specialization layer
 
-fn move_transform(transform: Transform2d, velocity: Velocity2d, events: MovementEvents) -> Transform2d {
-  Transform2d {
-    x: transform.x + velocity.x * events.dt_ms / 16,
-    y: transform.y + velocity.y * events.dt_ms / 16,
-    z: transform.z,
-  }
-}
+Specialization is one of the biggest maintenance risks because it creates generated functions, rewrites calls, and affects compile-time scaling. The current pipeline runs inferred and const-param specialization multiple times. 
 
-fn render_box(transform: Transform2d, sprite: Sprite2d) -> geometry.Geometry2dBatch3I32 {
-  geometry.emit_rect2d_batch3(
-    transform.x,
-    transform.y,
-    sprite.w,
-    sprite.h,
-    transform.z,
-    sprite.color
-  )
-}
+Move to:
 
-fn render_three(
-  first: geometry.Geometry2dBatch3I32,
-  second: geometry.Geometry2dBatch3I32,
-  third: geometry.Geometry2dBatch3I32
-) -> geometry.Geometry2dBatch3I32 {
-  let acc0 = geometry.empty_geometry2d_batch3();
-  let acc1 = geometry.append_geometry2d_batch3(acc0, first);
-  let acc2 = geometry.append_geometry2d_batch3(acc1, second);
-  let acc3 = geometry.append_geometry2d_batch3(acc2, third);
-  {vertices: acc3.vertices, vertex_count: 12}
-}
+```txt
+specialize/infer_type_args.ts
+specialize/const_params.ts
+specialize/attached_members.ts
+specialize/operators.ts
+specialize/collectors.ts
+specialize/cache.ts
+```
 
-fn run_frame() -> geometry.Geometry2dBatch3I32 !{time, event} {
-  let events: MovementEvents = MovementEvents {
-    dt_ms: tick_millis(),
-    axis_x: input_axis_x(),
-    pressed: input_pressed(),
-  };
-  let speed = 4 + events.pressed;
-  let velocity0 = Velocity2d {x: events.axis_x * speed, y: 0};
-  let velocity1 = Velocity2d {x: events.axis_x * speed, y: 0};
-  let transform0 = move_transform(Transform2d {x: 12, y: 8, z: 1}, velocity0, events);
-  let transform1 = move_transform(Transform2d {x: 24, y: 8, z: 1}, velocity1, events);
-  let transform2 = Transform2d {x: 40, y: 8, z: 1};
-  render_three(
-    render_box(transform0, Sprite2d {w: 16, h: 16, color: 1}),
-    render_box(transform1, Sprite2d {w: 16, h: 16, color: 2}),
-    render_box(transform2, Sprite2d {w: 16, h: 16, color: 3})
-  )
-}
+Primary goals:
 
-pub fn main() -> geometry.Geometry2dBatch3I32 !{time, event} {
-  run_frame()
-}
+```txt
+one specialization context
+explicit cache stats
+worklist instead of repeated full-program scans
+generated function ownership metadata
+```
 
-pub fn playground_probe() -> i32 !{time, event} {
-  let output = run_frame();
-  output.vertex_count
+Every generated function should carry:
+
+```ts
+generatedBy: "const_param" | "inferred_type" | "clause" | "collector" | ...
+sourceFunction: string
+specializationKey: string
+```
+
+This will make debugging and pruning much easier.
+
+---
+
+## 6. Recurrence layer
+
+The repo now documents recurrence analysis as a compiler feature. Recurrence summaries classify recursive functions as finite static, tail-linear, structural, or general. 
+
+Move recurrence-specific code out of `optimize.ts`:
+
+```txt
+recurrence/analyze.ts
+recurrence/classify.ts
+recurrence/finite_unfold.ts
+recurrence/clause_dispatch.ts
+recurrence/tail_group_lower.ts
+```
+
+This phase should own:
+
+```txt
+domain-refined recursive clauses
+finite static unfolding
+large finite recursion -> loop-compatible lowering
+tail-recursive group normalization
+```
+
+This keeps recursion-first language design from being scattered across checker, optimizer, and backend.
+
+---
+
+## 7. Facts layer
+
+The optimization system should become fact-driven.
+
+Create:
+
+```txt
+facts/abstract_values.ts
+facts/call_graph.ts
+facts/effect_facts.ts
+facts/layout_facts.ts
+facts/domain_facts.ts
+facts/cost.ts
+```
+
+These modules should not rewrite the program. They only compute facts.
+
+Example:
+
+```ts
+collectFunctionFacts(program): Map<FnId, FunctionFacts>
+collectRecurrenceFacts(program): Map<FnId, Recurrence>
+collectLayoutFacts(program): Map<FnId, LayoutFacts>
+collectCallGraph(program): CallGraph
+```
+
+Then optimizer and backend consume facts.
+
+---
+
+## 8. Optimization layer
+
+`optimize.ts` now contains profiles, plans, summaries, recurrence handling, abstract folding, inlining, local cleanup, and rule IDs.
+
+Split into:
+
+```txt
+opt/profiles.ts
+opt/plan.ts
+opt/rules.ts
+opt/apply.ts
+opt/inline.ts
+opt/local_cleanup.ts
+opt/dce.ts
+```
+
+The plan should become the heart of the optimizer:
+
+```txt
+facts -> plan -> apply high-level actions -> local cleanup
+```
+
+Avoid letting each pass rediscover the same decisions.
+
+---
+
+## 9. Layout layer
+
+The backend currently owns much of the layout planning. It now exposes `summarizeBackendLayoutDecisions()`, which is good, but that means layout planning is still backend-coupled. 
+
+Move planning to:
+
+```txt
+layout/flatten.ts
+layout/fixed_array_plan.ts
+layout/packed.ts
+layout/scratch.ts
+layout/local_slots.ts
+layout/products.ts
+```
+
+Backend lowering should consume a `LayoutPlan`.
+
+Target:
+
+```ts
+const layoutPlan = planLayouts(program, facts, profile);
+const backend = lowerProgram(program, layoutPlan, options);
+```
+
+This makes layout decisions testable before WAT generation.
+
+---
+
+## 10. Backend and Wasm split
+
+`backend.ts` currently handles backend planning, lowering, cleanup, WAT, Wasm, memory models, branch heap, SIMD, and layout decisions. 
+
+Split into:
+
+```txt
+backend/lower_module.ts
+backend/lower_fn.ts
+backend/lower_expr.ts
+backend/lower_tail_loop.ts
+backend/lower_match.ts
+backend/lower_arrays.ts
+backend/lower_branch_heap.ts
+backend/instr.ts
+backend/cleanup.ts
+
+wasm/wat.ts
+wasm/binary.ts
+wasm/sections.ts
+wasm/names.ts
+wasm/branch_hints.ts
+```
+
+Backend should output a backend IR/module.
+
+Wasm should only encode/render.
+
+---
+
+# Main architectural rule
+
+Every phase should obey this:
+
+```txt
+Input data + facts + profile -> output data + diagnostics + trace
+```
+
+Avoid:
+
+```txt
+implicit global mutation
+hidden generated declarations
+backend-only knowledge
+name-based prelude special cases
+```
+
+The docs already say optimization eligibility should be structural, not based on `prelude.*` names. 
+
+---
+
+# Migration plan
+
+## Milestone 1: Extract without behavior changes
+
+Goal: reduce file size and improve navigation without changing semantics.
+
+Extract from `mod.ts`:
+
+```txt
+module/imports.ts
+module/qualify.ts
+module/prune.ts
+api/compile.ts
+api/explain.ts
+```
+
+Acceptance:
+
+```txt
+all tests pass
+compileArtifactsFromSource unchanged
+explainOptimization unchanged
+pruneImports unchanged
+```
+
+---
+
+## Milestone 2: Extract optimization plan modules
+
+Move from `optimize.ts`:
+
+```txt
+opt/profiles.ts
+opt/plan.ts
+opt/rules.ts
+facts/abstract_values.ts
+recurrence/analyze.ts
+```
+
+Acceptance:
+
+```txt
+summarizeOptimizationPlan output unchanged
+summarizeRecurrences output unchanged
+benchmark WAT shape unchanged
+```
+
+---
+
+## Milestone 3: Extract specialization modules
+
+Move specialization and generated-function logic out of `check.ts`.
+
+Target files:
+
+```txt
+specialize/infer_type_args.ts
+specialize/const_params.ts
+specialize/cache.ts
+specialize/attached_members.ts
+```
+
+Acceptance:
+
+```txt
+same generated functions
+same diagnostics
+specialization cache counters available
+bench_const_params still reproduces current behavior
+```
+
+This milestone is where compile-time scaling work becomes much easier.
+
+---
+
+## Milestone 4: Extract backend layout planning
+
+Move layout planning from backend into `layout/`.
+
+Acceptance:
+
+```txt
+summarizeBackendLayoutDecisions becomes summarizeLayoutPlan
+backend consumes LayoutPlan
+WAT/Wasm unchanged
+layout plan tests pass
+```
+
+---
+
+## Milestone 5: Split backend lowering and Wasm encoding
+
+Move WAT/Wasm-specific code out of backend lowering.
+
+Acceptance:
+
+```txt
+emitWat unchanged
+emitWasm unchanged
+branch hint section unchanged
+name section behavior unchanged
+```
+
+---
+
+## Milestone 6: Introduce stable phase tracing
+
+Every phase should optionally return:
+
+```ts
+interface PhaseTrace {
+  phase: string;
+  ms: number;
+  inputCounts: Record<string, number>;
+  outputCounts: Record<string, number>;
+  decisions?: OptimizationDecision[];
 }
+```
+
+Acceptance:
+
+```txt
+compileArtifactsFromSource can report parse/import/check/opt/layout/backend/wasm subphases
+benchmarks can show where compile time went
+```
+
+---
+
+# Recommended final structure of tests
+
+```txt
+tests/
+  parser/
+  checker/
+  type_functions/
+  refined_domains/
+  specialization/
+  recurrence/
+  optimization_plan/
+  layout/
+  backend/
+  wasm/
+  integration/
+  benchmarks/
+```
+
+Important new tests:
+
+```txt
+optimization_plan/prelude_equivalence_test.ts
+optimization_plan/rule_decision_test.ts
+specialization/scaling_test.ts
+module/prune_imports_test.ts
+layout/layout_plan_test.ts
+recurrence/domain_recursion_test.ts
+```
+
+For every major optimization, test both:
+
+```txt
+plan decision
+final WAT shape
+```
+
+Example:
+
+```txt
+Plan: recurrence.lower.tail_loop
+WAT: contains loop, no recursive call
+```
+
+---
+
+# Code quality rules
+
+## 1. No new giant phase files
+
+Any file over roughly:
+
+```txt
+1000 lines
+```
+
+should be split unless it is generated code or a flat data table.
+
+## 2. No optimizer rule without a rule ID
+
+Every optimization should have:
+
+```txt
+rule id
+structural matcher
+reason string
+plan decision if high-level
+test
+```
+
+## 3. No name-based prelude optimizations
+
+Allowed:
+
+```txt
+structural fixed-array update
+structural tail recursion
+structural product projection
+structural refined-domain branch
+```
+
+Not allowed:
+
+```txt
+if name === "prelude.array_static.RangeIter.fold"
+```
+
+## 4. Generated declarations must carry provenance
+
+Generated declarations should record:
+
+```ts
+generatedBy
+sourceName
+specializationKey
+```
+
+That will make debugging, pruning, and plan explanations much easier.
+
+## 5. Prefer summaries over rescans
+
+If a phase needs:
+
+```txt
+call graph
+effect facts
+recurrence facts
+layout facts
+```
+
+it should consume the summary from `facts/`, not rescan the entire AST independently.
+
+

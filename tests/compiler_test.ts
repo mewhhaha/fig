@@ -3662,6 +3662,52 @@ Deno.test("optimization plan lowers large refined finite recursion structurally"
   );
 });
 
+Deno.test("optimization plan recurrence and inline actions match release WAT shape", async () => {
+  const source = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn small(i: i32(4), acc: i32) -> i32 { acc }
+    fn small(i: i32(0..4), acc: i32) -> i32 { small(i + 1, acc + i) }
+    fn sum_go(i: i32(1000), acc: i32) -> i32 { acc }
+    fn sum_go(i: i32(0..1000), acc: i32) -> i32 { sum_go(i + 1, acc + i) }
+    pub fn main() -> i32 { inc(1) + small(0, 0) + sum_go(0, 0) }
+  `;
+  const plan = await explainOptimization(source, { optMode: "release" });
+  const hasDecision = (target: string, action: string) =>
+    plan.decisions.some((decision) => decision.target === target && decision.action === action);
+
+  assert(hasDecision("inc", "call.inline.private_scalar"));
+  assert(hasDecision("small", "recurrence.unfold.finite_static"));
+  assert(hasDecision("sum_go", "recurrence.lower.tail_loop"));
+
+  const { wat } = await compileArtifactsFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "loop");
+  assert(!wat.includes("call $inc"));
+  assert(!wat.includes("call $small"));
+  assert(!wat.includes("call $sum_go"));
+});
+
+Deno.test("optimization plan domain branch action matches release WAT shape", async () => {
+  const source = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn always(i: i32(0..4)) -> i32 {
+      match i < 4 { true => inc(i), false => 0 }
+    }
+    pub fn main(i: i32(0..4)) -> i32 { always(i) }
+  `;
+  const plan = await explainOptimization(source, { optMode: "release" });
+  assert(
+    plan.decisions.some((decision) =>
+      decision.target === "always" && decision.action === "domain.compare.always_true"
+    ),
+  );
+
+  const { wat } = await compileArtifactsFromSource(source, { optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(!main.includes("if"));
+  assert(!main.includes("i32.const 0"));
+  assert(!main.includes("call $inc"));
+});
+
 Deno.test("explainOptimization reports backend structural fixed-array layout decisions", async () => {
   const source = `
     const layout = @import("prelude.layout");
@@ -3682,6 +3728,70 @@ Deno.test("explainOptimization reports backend structural fixed-array layout dec
       decision.target === "read.xs" && decision.action === "array.layout_packed"
     ),
   );
+});
+
+Deno.test("explainOptimization reports packed local-slot and scratch fixed-array layouts", async () => {
+  const packedSource = `
+    const layout = @import("prelude.layout");
+    fn read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
+      xs[index]
+    }
+    fn bump_read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
+      read(layout.InlineArray.set(4, u3, xs, index, 7), index)
+    }
+    pub fn main(index: i32) -> i32 {
+      bump_read(<1, 2, 3, 4>, index)
+    }
+  `;
+  const localSlotSource = `
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    fn loop(i: i32, xs: InlineArray(4, i32)) -> InlineArray(4, i32) {
+      match i < 4 {
+        true => loop(i + 1, [...xs, [i]: i]),
+        false => xs,
+      }
+    }
+    pub fn main() -> i32 {
+      let out = loop(0, <0, 0, 0, 0>);
+      out[0]
+    }
+  `;
+  const scratchSource = `
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    fn loop(i: i32, xs: InlineArray(32, i32)) -> InlineArray(32, i32) {
+      match i < 32 {
+        true => loop(i + 1, [...xs, [i]: i]),
+        false => xs,
+      }
+    }
+    pub fn main(i: i32) -> i32 {
+      let out = loop(0, <0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>);
+      out[i]
+    }
+  `;
+
+  const packed = await explainOptimization(packedSource, { resolveModule: resolveProjectModule });
+  const localSlot = await explainOptimization(localSlotSource, { optMode: "release" });
+  const scratch = await explainOptimization(scratchSource, { optMode: "release" });
+
+  assert(packed.decisions.some((decision) => decision.action === "array.layout_packed"));
+  assert(localSlot.decisions.some((decision) => decision.action === "array.layout_local_slots"));
+  assert(scratch.decisions.some((decision) => decision.action === "array.layout_scratch"));
+
+  const { wat: localWat } = await compileArtifactsFromSource(localSlotSource, {
+    optMode: "release",
+  });
+  const { wat: scratchWat } = await compileArtifactsFromSource(scratchSource, {
+    optMode: "release",
+  });
+  assert(!localWat.includes("fig_buffers"));
+  assertStringIncludes(scratchWat, "(memory $fig_buffers");
 });
 
 Deno.test("prelude and user tail folds get the same structural optimization decision", async () => {

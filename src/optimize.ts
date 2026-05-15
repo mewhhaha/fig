@@ -795,6 +795,24 @@ function chooseRecurrenceAction(
       reason: "recurrence has effectful clauses",
     };
   }
+  if (allTail && preferBackendInlineArrayLoopLowering(recurrence, functions)) {
+    return {
+      kind: "keep_recursive",
+      recurrence: recurrence.fn,
+      reason: "generated inline-array builder loop is handled by backend structural lowering",
+    };
+  }
+  if (
+    recurrence.kind === "finite_static" &&
+    allTail &&
+    preferLoopLoweringForGeneratedPipeline(recurrence, functions)
+  ) {
+    return {
+      kind: "lower_tail_loop",
+      recurrence: recurrence.fn,
+      reason: "generated iterator pipeline recurrence is smaller as a loop",
+    };
+  }
   if (
     recurrence.kind === "finite_static" &&
     cardinality !== undefined &&
@@ -827,6 +845,26 @@ function chooseRecurrenceAction(
     recurrence: recurrence.fn,
     reason: "not finite-small and not tail-linear",
   };
+}
+
+function preferBackendInlineArrayLoopLowering(
+  recurrence: Recurrence,
+  functions: Map<string, FnDecl>,
+): boolean {
+  const dispatcher = functions.get(recurrence.fn);
+  if (!dispatcher?.generated) return false;
+  const names = [recurrence.fn, ...recurrence.clauses.map((clause) => clause.fn)];
+  return names.some((name) => /(?:^|[._])InlineArray[._]/.test(name));
+}
+
+function preferLoopLoweringForGeneratedPipeline(
+  recurrence: Recurrence,
+  functions: Map<string, FnDecl>,
+): boolean {
+  const dispatcher = functions.get(recurrence.fn);
+  if (!dispatcher?.generated) return false;
+  const names = [recurrence.fn, ...recurrence.clauses.map((clause) => clause.fn)];
+  return names.some((name) => /(?:^|[._])(?:Iter|CompactIter)[._]/.test(name));
 }
 
 function addDomainFoldDecisions(
@@ -1074,7 +1112,7 @@ function lowerTailRecurrenceClauseGroups(program: Program, config: OptimizerConf
     const clauses = recurrence.clauses.map((clause) => functions.get(clause.fn));
     if (
       clauses.some((clause) =>
-        !clause?.generated || !clause.name.startsWith(`${recurrence.fn}__clause_`) ||
+        !clause?.generated || recurrenceBaseName(clause.name) !== recurrence.fn ||
         clause.effects.length
       )
     ) continue;
@@ -3638,6 +3676,9 @@ function exprCallsFunction(expr: Expr | BlockExpr | undefined, name: string): bo
 }
 
 function recurrenceBaseName(name: string): string {
+  if (/(?:^|[._])(?:Iter|CompactIter)[._]/.test(name)) {
+    return name.replace(/__clause_[0-9]+(?=__|$)/, "");
+  }
   return name.replace(/__clause_[0-9]+$/, "");
 }
 

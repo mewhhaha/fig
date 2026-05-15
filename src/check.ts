@@ -66,10 +66,36 @@ import { type ShaderManifestEntry, shaderManifestEntry, wgslShaderId } from "./w
 export interface CheckResult {
   program: Program;
   shaderManifest: ShaderManifestEntry[];
+  trace?: CheckTrace;
 }
 
 export interface AnalysisCheckResult extends CheckResult {
   diagnostics: Diagnostic[];
+}
+
+export interface CheckTrace {
+  phases: CheckPhaseTrace[];
+}
+
+export interface CheckPhaseTrace {
+  name: string;
+  ms: number;
+  functionCount: number;
+  generatedFunctionCount: number;
+  callExpressionCount: number;
+  diagnosticCount: number;
+  specialization?: SpecializationTrace;
+}
+
+export interface SpecializationTrace {
+  visitedCalls: number;
+  generatedSpecializations: number;
+  cacheHits: number;
+  cacheMisses: number;
+}
+
+export interface CheckProgramOptions extends CompilerPluginOptions {
+  trace?: boolean;
 }
 
 function diagnosticAt(
@@ -100,24 +126,46 @@ function exprDiagnosticSpan(expr: Expr | undefined): Span | undefined {
   return { ...childSpans[0], start, end };
 }
 
-export function checkProgram(program: Program, options: CompilerPluginOptions = {}): CheckResult {
+export function checkProgram(program: Program, options: CheckProgramOptions = {}): CheckResult {
   const result = checkProgramInternal(program, { recoverTypes: false, ...options });
   if (result.diagnostics.length) throw new CompileError(result.diagnostics);
-  return { program: result.program, shaderManifest: result.shaderManifest };
+  return { program: result.program, shaderManifest: result.shaderManifest, trace: result.trace };
 }
 
 export function checkProgramForAnalysis(
   program: Program,
-  options: CompilerPluginOptions = {},
+  options: CheckProgramOptions = {},
 ): AnalysisCheckResult {
   return checkProgramInternal(program, { recoverTypes: true, ...options });
 }
 
 function checkProgramInternal(
   program: Program,
-  options: { recoverTypes: boolean } & CompilerPluginOptions,
+  options: { recoverTypes: boolean } & CheckProgramOptions,
 ): AnalysisCheckResult {
   const diagnostics: Diagnostic[] = [];
+  const trace: CheckTrace | undefined = options.trace ? { phases: [] } : undefined;
+  const recordPhase = <T>(
+    name: string,
+    run: () => T,
+    specialization?: SpecializationTrace,
+  ): T => {
+    if (!trace) return run();
+    const start = performance.now();
+    try {
+      return run();
+    } finally {
+      trace.phases.push({
+        name,
+        ms: performance.now() - start,
+        functionCount: countProgramFunctions(program),
+        generatedFunctionCount: countProgramFunctions(program, true),
+        callExpressionCount: countProgramCallExpressions(program),
+        diagnosticCount: diagnostics.length,
+        specialization,
+      });
+    }
+  };
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   diagnostics.push(...pluginRegistry.diagnostics);
   const shaderManifest = new Map<number, ShaderManifestEntry>();
@@ -127,103 +175,150 @@ function checkProgramInternal(
     return entry;
   };
   const capabilities = new Map(program.imports.map((item) => [item.name, item.effects]));
-  lowerDoExpressions(program, diagnostics);
-  checkBorrowTypeRestrictions(program, diagnostics);
-  groupFunctionClauses(program, diagnostics);
-  checkBranchHints(program, diagnostics, pluginRegistry);
-  const typeDecls = mergeTypeFragments(program, diagnostics);
-  checkTypeFunctionCasing(typeDecls, program, diagnostics);
+  recordPhase("lowerDoExpressions", () => lowerDoExpressions(program, diagnostics));
+  recordPhase("checkBorrowTypeRestrictions", () => checkBorrowTypeRestrictions(program, diagnostics));
+  recordPhase("groupFunctionClauses", () => groupFunctionClauses(program, diagnostics));
+  recordPhase("checkBranchHints", () => checkBranchHints(program, diagnostics, pluginRegistry));
+  const typeDecls = recordPhase("mergeTypeFragments", () => mergeTypeFragments(program, diagnostics));
+  recordPhase("checkTypeFunctionCasing", () =>
+    checkTypeFunctionCasing(typeDecls, program, diagnostics)
+  );
   let fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
   let functions = new Set(fnDecls.map((decl) => decl.name));
-  checkPrimitiveDecls(fnDecls, diagnostics, pluginRegistry);
-  evaluateTypeDecls(typeDecls, diagnostics);
-  attachQualifiedTypeMembers(typeDecls, fnDecls, diagnostics);
-  const constValues = evaluateConstDecls(
-    program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
-    typeDecls,
-    fnDecls,
-    capabilities,
-    addShader,
-    diagnostics,
-    pluginRegistry,
+  recordPhase("checkPrimitiveDecls", () => checkPrimitiveDecls(fnDecls, diagnostics, pluginRegistry));
+  recordPhase("evaluateTypeDecls", () => evaluateTypeDecls(typeDecls, diagnostics));
+  recordPhase("attachQualifiedTypeMembers", () =>
+    attachQualifiedTypeMembers(typeDecls, fnDecls, diagnostics)
   );
-  resolveAttachedMemberCalls(program, typeDecls);
-  specializeInferredTypeCalls(
-    program,
-    new Map(fnDecls.map((decl) => [decl.name, decl])),
-    constValues,
-    typeDecls,
-    diagnostics,
+  const constValues = recordPhase("evaluateConstDecls", () =>
+    evaluateConstDecls(
+      program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
+      typeDecls,
+      fnDecls,
+      capabilities,
+      addShader,
+      diagnostics,
+      pluginRegistry,
+    )
   );
-  fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
-  resolveAttachedMemberCalls(program, typeDecls);
-  specializeConstParamCalls(
-    program,
-    new Map(fnDecls.map((decl) => [decl.name, decl])),
-    constValues,
-    typeDecls,
-    addShader,
-    diagnostics,
-    true,
-  );
-  resolveAttachedMemberCalls(program, typeDecls);
-  fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
-  specializeInferredTypeCalls(
-    program,
-    new Map(fnDecls.map((decl) => [decl.name, decl])),
-    constValues,
-    typeDecls,
-    diagnostics,
-    true,
+  recordPhase("resolveAttachedMemberCalls #1", () => resolveAttachedMemberCalls(program, typeDecls));
+  const inferredStats1 = createSpecializationTrace();
+  recordPhase(
+    "specializeInferredTypeCalls #1",
+    () =>
+      specializeInferredTypeCalls(
+        program,
+        new Map(fnDecls.map((decl) => [decl.name, decl])),
+        constValues,
+        typeDecls,
+        diagnostics,
+        false,
+        inferredStats1,
+      ),
+    inferredStats1,
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
-  resolveAttachedMemberCalls(program, typeDecls);
-  specializeConstParamCalls(
-    program,
-    new Map(fnDecls.map((decl) => [decl.name, decl])),
-    constValues,
-    typeDecls,
-    addShader,
-    diagnostics,
-    false,
+  recordPhase("resolveAttachedMemberCalls #2", () => resolveAttachedMemberCalls(program, typeDecls));
+  const constStats1 = createSpecializationTrace();
+  recordPhase(
+    "specializeConstParamCalls #1",
+    () =>
+      specializeConstParamCalls(
+        program,
+        new Map(fnDecls.map((decl) => [decl.name, decl])),
+        constValues,
+        typeDecls,
+        addShader,
+        diagnostics,
+        true,
+        constStats1,
+      ),
+    constStats1,
+  );
+  recordPhase("resolveAttachedMemberCalls #3", () => resolveAttachedMemberCalls(program, typeDecls));
+  fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+  const inferredStats2 = createSpecializationTrace();
+  recordPhase(
+    "specializeInferredTypeCalls #2",
+    () =>
+      specializeInferredTypeCalls(
+        program,
+        new Map(fnDecls.map((decl) => [decl.name, decl])),
+        constValues,
+        typeDecls,
+        diagnostics,
+        true,
+        inferredStats2,
+      ),
+    inferredStats2,
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
-  resolveAttachedMemberCalls(program, typeDecls);
+  recordPhase("resolveAttachedMemberCalls #4", () => resolveAttachedMemberCalls(program, typeDecls));
+  const constStats2 = createSpecializationTrace();
+  recordPhase(
+    "specializeConstParamCalls #2",
+    () =>
+      specializeConstParamCalls(
+        program,
+        new Map(fnDecls.map((decl) => [decl.name, decl])),
+        constValues,
+        typeDecls,
+        addShader,
+        diagnostics,
+        false,
+        constStats2,
+      ),
+    constStats2,
+  );
+  fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+  recordPhase("resolveAttachedMemberCalls #5", () => resolveAttachedMemberCalls(program, typeDecls));
   functions = new Set(fnDecls.map((decl) => decl.name));
-  checkConstDictionaries(
-    program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
-    typeDecls,
-    fnDecls,
-    capabilities,
-    functions,
-    diagnostics,
+  recordPhase("checkConstDictionaries", () =>
+    checkConstDictionaries(
+      program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
+      typeDecls,
+      fnDecls,
+      capabilities,
+      functions,
+      diagnostics,
+    )
   );
-  checkTypeContracts(
-    program,
-    typeDecls,
-    fnDecls,
-    capabilities,
-    constValues,
-    diagnostics,
-    pluginRegistry,
+  recordPhase("checkTypeContracts", () =>
+    checkTypeContracts(
+      program,
+      typeDecls,
+      fnDecls,
+      capabilities,
+      constValues,
+      diagnostics,
+      pluginRegistry,
+    )
   );
-  lowerResolvedOperators(program, typeDecls, fnDecls, diagnostics);
-  lowerCollectorLiterals(program, typeDecls, fnDecls, diagnostics);
-  lowerProductConstructors(program, typeDecls, diagnostics);
+  recordPhase("lowerResolvedOperators", () =>
+    lowerResolvedOperators(program, typeDecls, fnDecls, diagnostics)
+  );
+  recordPhase("lowerCollectorLiterals", () =>
+    lowerCollectorLiterals(program, typeDecls, fnDecls, diagnostics)
+  );
+  recordPhase("lowerProductConstructors", () =>
+    lowerProductConstructors(program, typeDecls, diagnostics)
+  );
 
-  for (const decl of program.declarations) {
-    if (decl.kind === "fn") {
-      if (decl.public && !decl.returnType) {
-        diagnostics.push({
-          code: "type.public_signature",
-          message: `public function ${decl.name} requires an explicit return type`,
-        });
-      }
-      if (!decl.generated && !decl.primitiveId) {
-        checkFn(decl, capabilities, diagnostics, typeDecls, fnDecls, options);
+  recordPhase("checkFn loop", () => {
+    for (const decl of program.declarations) {
+      if (decl.kind === "fn") {
+        if (decl.public && !decl.returnType) {
+          diagnostics.push({
+            code: "type.public_signature",
+            message: `public function ${decl.name} requires an explicit return type`,
+          });
+        }
+        if (!decl.generated && !decl.primitiveId) {
+          checkFn(decl, capabilities, diagnostics, typeDecls, fnDecls, options);
+        }
       }
     }
-  }
+  });
   for (let index = diagnostics.length - 1; index >= 0; index--) {
     const diagnostic = diagnostics[index];
     if (
@@ -269,7 +364,32 @@ function checkProgramInternal(
     program,
     diagnostics,
     shaderManifest: [...shaderManifest.values()].sort((a, b) => a.id - b.id),
+    trace,
   };
+}
+
+function createSpecializationTrace(): SpecializationTrace {
+  return { visitedCalls: 0, generatedSpecializations: 0, cacheHits: 0, cacheMisses: 0 };
+}
+
+function countProgramFunctions(program: Program, generatedOnly = false): number {
+  return program.declarations.filter((decl) =>
+    decl.kind === "fn" && (!generatedOnly || decl.generated)
+  ).length;
+}
+
+function countProgramCallExpressions(program: Program): number {
+  let total = 0;
+  const visit = (expr: Expr | undefined) => {
+    if (!expr) return;
+    if (expr.kind === "call") total++;
+    for (const child of exprChildValues(expr)) visit(child);
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") visit(decl.body);
+    else if (decl.kind === "const" || decl.kind === "let") visit(decl.value);
+  }
+  return total;
 }
 
 function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]) {
@@ -1496,7 +1616,7 @@ function checkCallClauseDomainCoverage(
   diagnostics: Diagnostic[],
   types: TypeDecl[],
   functions: FnDecl[],
-  options: { recoverTypes: boolean },
+  options: RuntimeCheckOptions,
 ): void {
   const clauses = functions.filter((fn) =>
     fn.generated && fn.name.startsWith(`${calleeName}__clause_`)
@@ -3166,6 +3286,7 @@ function specializeInferredTypeCalls(
   types: TypeDecl[],
   diagnostics: Diagnostic[],
   includeGenerated = false,
+  stats?: SpecializationTrace,
 ) {
   const context = {
     functions,
@@ -3179,6 +3300,7 @@ function specializeInferredTypeCalls(
     ),
     cache: new Map<string, FnDecl>(),
     usedNames: new Set(program.declarations.map((decl) => "name" in decl ? decl.name : "")),
+    stats,
   };
   const queue = program.declarations.filter((decl): decl is FnDecl =>
     decl.kind === "fn" && (includeGenerated || !decl.generated)
@@ -3213,6 +3335,7 @@ function specializeInferredBlock(
     typeConstructors: Map<string, TypeDecl>;
     cache: Map<string, FnDecl>;
     usedNames: Set<string>;
+    stats?: SpecializationTrace;
     diagnosticSpan?: Span;
   },
   env = new Map<string, string>(),
@@ -3255,6 +3378,7 @@ function specializeInferredExpr(
     typeConstructors: Map<string, TypeDecl>;
     cache: Map<string, FnDecl>;
     usedNames: Set<string>;
+    stats?: SpecializationTrace;
   },
   env = new Map<string, string>(),
 ): Expr {
@@ -3268,6 +3392,7 @@ function specializeInferredExpr(
     case "const_fn":
       return { ...expr, span: expr.span, body: specializeInferredExpr(expr.body, context, env) };
     case "call": {
+      context.stats && (context.stats.visitedCalls += 1);
       const callee = specializeInferredExpr(expr.callee, context, env);
       const args = expr.args.map((arg) => specializeInferredExpr(arg, context, env));
       const fn = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
@@ -3385,6 +3510,7 @@ function specializeInferredCall(
     typeConstructors: Map<string, TypeDecl>;
     cache: Map<string, FnDecl>;
     usedNames: Set<string>;
+    stats?: SpecializationTrace;
     diagnosticSpan?: Span;
   },
   env = new Map<string, string>(),
@@ -3466,6 +3592,11 @@ function specializeInferredCall(
       staticArgNames.join("\0")
     }`;
     let specialized = context.cache.get(key);
+    if (specialized) {
+      context.stats && (context.stats.cacheHits += 1);
+    } else {
+      context.stats && (context.stats.cacheMisses += 1);
+    }
     if (!specialized) {
       const name = allocateSpecializationName(
         fn.name,
@@ -3503,6 +3634,7 @@ function specializeInferredCall(
         !exprCallsFunction(specialized.body, specialized.name);
       context.cache.set(key, specialized);
       context.functions.set(name, specialized);
+      context.stats && (context.stats.generatedSpecializations += 1);
     }
     return {
       kind: "call",
@@ -4164,6 +4296,7 @@ function specializeConstParamCalls(
   addShader: (source: string) => ShaderManifestEntry,
   diagnostics: Diagnostic[],
   emitDiagnostics = true,
+  stats?: SpecializationTrace,
 ) {
   const context: ConstSpecializationContext = {
     functions,
@@ -4175,6 +4308,7 @@ function specializeConstParamCalls(
     cache: new Map(),
     constFnCaptures: new Map(),
     usedNames: new Set(program.declarations.map((decl) => "name" in decl ? decl.name : "")),
+    stats,
   };
   for (const decl of program.declarations) {
     if (decl.kind === "fn" && !decl.params.some((param) => param.const)) {
@@ -4241,6 +4375,7 @@ function specializeExpr(
       case "const_fn":
         return expr;
       case "call": {
+        context.stats && (context.stats.visitedCalls += 1);
         const callee = specializeExpr(expr.callee, context, env);
         const args = expr.args.map((arg) => specializeExpr(arg, context, env));
         const direct = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
@@ -4347,6 +4482,7 @@ interface ConstSpecializationContext {
   cache: Map<string, FnDecl>;
   constFnCaptures: Map<string, Param[]>;
   usedNames: Set<string>;
+  stats?: SpecializationTrace;
   diagnosticSpan?: Span;
   runtimeEnv?: Map<string, string>;
 }
@@ -4427,6 +4563,11 @@ function specializeConstParamCall(
       [...inferredTypes].map(([name, type]) => `${name}=${type}`).join("\0")
     }`;
     let specialized = context.cache.get(key);
+    if (specialized) {
+      context.stats && (context.stats.cacheHits += 1);
+    } else {
+      context.stats && (context.stats.cacheMisses += 1);
+    }
     if (!specialized) {
       const specializedName = allocateSpecializationName(fn.name, constArgNames, context.usedNames);
       specialized = {
@@ -4474,6 +4615,7 @@ function specializeConstParamCall(
       }
       specialized.generatedInlineable = isInlineableGeneratedSpecializationSource(fn) &&
         !exprCallsFunction(specialized.body, specialized.name);
+      context.stats && (context.stats.generatedSpecializations += 1);
     }
     return {
       kind: "call",
@@ -4487,8 +4629,9 @@ function specializeConstParamCall(
 
 function isInlineableGeneratedSpecializationSource(fn: FnDecl): boolean {
   const owner = fn.memberOf?.owner;
-  return owner === "iter" || owner === "compact_iter" || owner === "query" ||
-    owner?.endsWith(".query") === true;
+  const terminalOwner = owner ? terminalName(owner).toLowerCase() : undefined;
+  return terminalOwner === "iter" || terminalOwner === "compactiter" ||
+    terminalOwner === "compact_iter" || terminalOwner === "query";
 }
 
 function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
@@ -9323,13 +9466,19 @@ interface OwnershipBinding {
   type?: string;
 }
 
+interface RuntimeCheckOptions {
+  recoverTypes: boolean;
+  bindingTypeCache?: WeakMap<Expr, string | null>;
+  i32FactsCache?: WeakMap<Expr, ReturnType<typeof scalarFactsFromI32Range> | null>;
+}
+
 function checkFn(
   fn: FnDecl,
   capabilities: Map<string, string[]>,
   diagnostics: Diagnostic[],
   types: TypeDecl[],
   functions: FnDecl[],
-  options: { recoverTypes: boolean },
+  options: RuntimeCheckOptions,
 ) {
   checkRuntimeScalarDomainSymbols(fn, diagnostics);
   if (
@@ -9340,6 +9489,11 @@ function checkFn(
   for (const param of fn.params) {
     env.set(param.name, { moved: false, type: param.type });
   }
+  const runtimeOptions = {
+    ...options,
+    bindingTypeCache: new WeakMap<Expr, string | null>(),
+    i32FactsCache: new WeakMap<Expr, ReturnType<typeof scalarFactsFromI32Range> | null>(),
+  };
   checkBlock(
     fn.body,
     env,
@@ -9349,7 +9503,7 @@ function checkFn(
     fn.returnType,
     types,
     functions,
-    options,
+    runtimeOptions,
   );
 }
 
@@ -9467,7 +9621,7 @@ function checkStatement(
   diagnostics: Diagnostic[],
   types: TypeDecl[],
   functions: FnDecl[],
-  options: { recoverTypes: boolean },
+  options: RuntimeCheckOptions,
 ) {
   if (stmt.kind === "let") {
     checkExpr(
@@ -9481,7 +9635,7 @@ function checkStatement(
       functions,
       options,
     );
-    stmt.type ??= exprBindingType(stmt.value, env, types, functions, options.recoverTypes);
+    stmt.type ??= exprBindingType(stmt.value, env, types, functions, options);
     env.set(stmt.name, { moved: false, type: stmt.type });
     return;
   }
@@ -9617,7 +9771,7 @@ function checkExpr(
   expectedType?: string,
   types: TypeDecl[] = [],
   functions: FnDecl[] = [],
-  options: { recoverTypes: boolean } = { recoverTypes: false },
+  options: RuntimeCheckOptions = { recoverTypes: false },
 ) {
   switch (expr.kind) {
     case "const_fn":
@@ -9695,7 +9849,7 @@ function checkExpr(
           functions,
           options,
         );
-        const actual = exprBindingType(arg, env, types, functions, options.recoverTypes);
+        const actual = exprBindingType(arg, env, types, functions, options);
         if (
           expected && actual &&
           !runtimeValueTypeAssignable(expected, actual)
@@ -9758,7 +9912,7 @@ function checkExpr(
           functions,
           options,
         );
-        const leftType = exprBindingType(expr.left, env, types, functions, options.recoverTypes);
+        const leftType = exprBindingType(expr.left, env, types, functions, options);
         checkExpr(
           expr.right,
           env,
@@ -9795,7 +9949,7 @@ function checkExpr(
         );
       }
       if (expectedType) {
-        const actual = exprBindingType(expr, env, types, functions, options.recoverTypes);
+        const actual = exprBindingType(expr, env, types, functions, options);
         if (actual && !runtimeValueTypeAssignable(expectedType, actual)) {
           diagnostics.push(diagnosticAt(
             "type.literal_mismatch",
@@ -9824,7 +9978,7 @@ function checkExpr(
       const scoped = new Map(env);
       scoped.set(expr.name, {
         moved: false,
-        type: exprBindingType(expr.value, env, types, functions, options.recoverTypes),
+        type: exprBindingType(expr.value, env, types, functions, options),
       });
       checkExpr(
         expr.body,
@@ -9856,7 +10010,7 @@ function checkExpr(
         env,
         types,
         functions,
-        options.recoverTypes,
+        options,
       );
       checkRuntimeMatchCoverage(expr, matchValueType, diagnostics, types);
       for (const arm of expr.arms) {
@@ -10069,47 +10223,57 @@ function exprBindingType(
   env: Map<string, OwnershipBinding>,
   types: TypeDecl[],
   functions: FnDecl[],
-  recoverTypes = false,
+  options: boolean | RuntimeCheckOptions = false,
 ): string | undefined {
-  if (expr.kind === "var") return projectedBindingType(expr.name, env, types);
+  const recoverTypes = typeof options === "boolean" ? options : options.recoverTypes;
+  const cache = typeof options === "boolean" ? undefined : options.bindingTypeCache;
+  const cached = cache?.get(expr);
+  if (cached !== undefined) return cached ?? undefined;
+  const finish = (type: string | undefined) => {
+    cache?.set(expr, type ?? null);
+    return type;
+  };
+  if (expr.kind === "var") return finish(projectedBindingType(expr.name, env, types));
   if (expr.kind === "binary") {
-    if (["==", "!=", "<", "<=", ">", ">="].includes(expr.op)) return "bool";
-    const facts = exprI32Facts(expr, env, types, functions, recoverTypes);
-    if (facts) return renderRefinedI32Domain(facts.domain);
+    if (["==", "!=", "<", "<=", ">", ">="].includes(expr.op)) return finish("bool");
+    const facts = exprI32Facts(expr, env, types, functions, options);
+    if (facts) return finish(renderRefinedI32Domain(facts.domain));
     if (arithmeticBinaryOp(expr.op)) {
       const left = scalarDomainRuntimeType(
-        exprBindingType(expr.left, env, types, functions, recoverTypes),
+        exprBindingType(expr.left, env, types, functions, options),
       );
       const right = scalarDomainRuntimeType(
-        exprBindingType(expr.right, env, types, functions, recoverTypes),
+        exprBindingType(expr.right, env, types, functions, options),
       );
-      if (left === "i32" && right === "i32") return "i32";
+      if (left === "i32" && right === "i32") return finish("i32");
     }
   }
   if (expr.kind === "call") {
     const callee = expr.callee;
-    if (callee.kind === "var") return functions.find((fn) => fn.name === callee.name)?.returnType;
+    if (callee.kind === "var") {
+      return finish(functions.find((fn) => fn.name === callee.name)?.returnType);
+    }
   }
   if (expr.kind === "product_constructor") {
     const type = types.find((item) =>
       item.normalized?.kind === "product" && item.normalized.constructor === expr.constructor
     );
-    return type?.name;
+    return finish(type?.name);
   }
   if (expr.kind === "pipe_bind") {
-    return exprBindingType(expr.body, env, types, functions, recoverTypes);
+    return finish(exprBindingType(expr.body, env, types, functions, options));
   }
   if (expr.kind === "match") {
     const armTypes = expr.arms.map((arm) =>
-      exprBindingType(arm.value, env, types, functions, recoverTypes)
+      exprBindingType(arm.value, env, types, functions, options)
     );
     const first = armTypes[0];
-    if (first && armTypes.every((type) => type === first)) return first;
+    if (first && armTypes.every((type) => type === first)) return finish(first);
   }
-  if (expr.kind === "range") return "range_i32";
-  if (expr.kind === "literal") return expr.inferredType;
-  if (recoverTypes) return recoveredExprType(expr, env, types, functions);
-  return undefined;
+  if (expr.kind === "range") return finish("range_i32");
+  if (expr.kind === "literal") return finish(expr.inferredType);
+  if (recoverTypes) return finish(recoveredExprType(expr, env, types, functions));
+  return finish(undefined);
 }
 
 function arithmeticBinaryOp(op: string): boolean {
@@ -10121,28 +10285,36 @@ function exprI32Facts(
   env: Map<string, OwnershipBinding>,
   types: TypeDecl[],
   functions: FnDecl[],
-  recoverTypes: boolean,
+  options: boolean | RuntimeCheckOptions,
 ): ReturnType<typeof scalarFactsFromI32Range> | undefined {
+  const recoverTypes = typeof options === "boolean" ? options : options.recoverTypes;
+  const cache = typeof options === "boolean" ? undefined : options.i32FactsCache;
+  const cached = cache?.get(expr);
+  if (cached !== undefined) return cached ?? undefined;
+  const finish = (facts: ReturnType<typeof scalarFactsFromI32Range> | undefined) => {
+    cache?.set(expr, facts ?? null);
+    return facts;
+  };
   const literal = staticIntegerLiteral(expr);
   if (literal !== undefined) {
-    return literal >= I32_MIN && literal <= I32_MAX
+    return finish(literal >= I32_MIN && literal <= I32_MAX
       ? scalarFactsFromI32Range({ min: literal, max: literal })
-      : undefined;
+      : undefined);
   }
   if (expr.kind === "var") {
     const type = resolveAliasType(projectedBindingType(expr.name, env, types), types) ??
       projectedBindingType(expr.name, env, types);
-    return scalarFactsFromRefinedI32Type(type);
+    return finish(scalarFactsFromRefinedI32Type(type));
   }
-  if (expr.kind !== "binary") return undefined;
-  const left = exprI32Range(expr.left, env, types, functions, recoverTypes);
-  const right = exprI32Range(expr.right, env, types, functions, recoverTypes);
-  if (!left || !right) return undefined;
+  if (expr.kind !== "binary") return finish(undefined);
+  const left = exprI32Range(expr.left, env, types, functions, options);
+  const right = exprI32Range(expr.right, env, types, functions, options);
+  if (!left || !right) return finish(undefined);
   if (expr.op === "+") {
-    return i32FactsFromRangeBounds(left.min + right.min, left.max + right.max);
+    return finish(i32FactsFromRangeBounds(left.min + right.min, left.max + right.max));
   }
   if (expr.op === "-") {
-    return i32FactsFromRangeBounds(left.min - right.max, left.max - right.min);
+    return finish(i32FactsFromRangeBounds(left.min - right.max, left.max - right.min));
   }
   if (expr.op === "*") {
     const products = [
@@ -10151,17 +10323,17 @@ function exprI32Facts(
       left.max * right.min,
       left.max * right.max,
     ];
-    return i32FactsFromRangeBounds(Math.min(...products), Math.max(...products));
+    return finish(i32FactsFromRangeBounds(Math.min(...products), Math.max(...products)));
   }
   const divisor = staticIntegerLiteral(expr.right);
-  if (divisor === undefined || divisor <= 0 || left.min < 0) return undefined;
+  if (divisor === undefined || divisor <= 0 || left.min < 0) return finish(undefined);
   if (expr.op === "/") {
-    return scalarFactsFromI32Range({ min: 0, max: Math.floor(left.max / divisor) });
+    return finish(scalarFactsFromI32Range({ min: 0, max: Math.floor(left.max / divisor) }));
   }
   if (expr.op === "%") {
-    return scalarFactsFromI32Range({ min: 0, max: divisor - 1 });
+    return finish(scalarFactsFromI32Range({ min: 0, max: divisor - 1 }));
   }
-  return undefined;
+  return finish(undefined);
 }
 
 function exprI32Range(
@@ -10169,9 +10341,9 @@ function exprI32Range(
   env: Map<string, OwnershipBinding>,
   types: TypeDecl[],
   functions: FnDecl[],
-  recoverTypes: boolean,
+  options: boolean | RuntimeCheckOptions,
 ): { min: number; max: number } | undefined {
-  return exprI32Facts(expr, env, types, functions, recoverTypes)?.range;
+  return exprI32Facts(expr, env, types, functions, options)?.range;
 }
 
 function i32FactsFromRangeBounds(
@@ -10225,7 +10397,7 @@ function checkInlineArraySpreadLiteral(
   expectedType: string | undefined,
   types: TypeDecl[],
   functions: FnDecl[],
-  options: { recoverTypes: boolean },
+  options: RuntimeCheckOptions,
 ) {
   const hasOverrides = expr.slots.some((slot) => slot.index);
   if (hasOverrides) {
@@ -10278,7 +10450,7 @@ function checkInlineArraySpreadLiteral(
         options,
       );
       const actual = inlineArrayLikeTypeArgs(
-        exprBindingType(slot.value, env, types, functions, options.recoverTypes),
+        exprBindingType(slot.value, env, types, functions, options),
         types,
       );
       if (!actual || actual.kind !== "inline_array_list") {
@@ -10331,7 +10503,7 @@ function checkFixedCollectionUpdateLiteral(
     | undefined,
   types: TypeDecl[],
   functions: FnDecl[],
-  options: { recoverTypes: boolean },
+  options: RuntimeCheckOptions,
 ) {
   if (!expected || expected.kind !== "inline_array") {
     diagnostics.push(diagnosticAt(
@@ -10380,7 +10552,7 @@ function checkFixedCollectionUpdateLiteral(
         options,
       );
       const actual = inlineArrayLikeTypeArgs(
-        exprBindingType(slot.value, env, types, functions, options.recoverTypes),
+        exprBindingType(slot.value, env, types, functions, options),
         types,
       );
       if (!actual || actual.kind !== "inline_array") {
@@ -10434,7 +10606,7 @@ function checkFixedCollectionUpdateLiteral(
       options,
     );
     const actualValueType =
-      exprBindingType(slot.value, env, types, functions, options.recoverTypes) ??
+      exprBindingType(slot.value, env, types, functions, options) ??
         literalRuntimeType(slot.value);
     if (itemType && actualValueType && !typeMatches(itemType, actualValueType)) {
       diagnostics.push(diagnosticAt(
@@ -10609,7 +10781,7 @@ function checkBlock(
   expectedType?: string,
   types: TypeDecl[] = [],
   functions: FnDecl[] = [],
-  options: { recoverTypes: boolean } = { recoverTypes: false },
+  options: RuntimeCheckOptions = { recoverTypes: false },
 ) {
   const ordered = orderBlockStatements(block.statements, diagnostics);
   for (const stmt of ordered) {
@@ -11031,7 +11203,7 @@ function checkDirectIndex(
   types: TypeDecl[],
   functions: FnDecl[],
   diagnostics: Diagnostic[],
-  options: { recoverTypes: boolean },
+  options: RuntimeCheckOptions,
 ) {
   if (expr.target.kind !== "var") return;
   const targetType = stripBorrowType(env.get(expr.target.name)?.type);
@@ -11047,7 +11219,7 @@ function checkDirectIndex(
     }
     return;
   }
-  const indexType = exprBindingType(expr.index, env, types, functions, options.recoverTypes);
+  const indexType = exprBindingType(expr.index, env, types, functions, options);
   if (indexTypeProvesInlineArrayCapacity(indexType, capacity, types)) return;
   const resolvedIndexType = resolveAliasType(indexType, types) ?? indexType;
   if (scalarFactsFromRefinedI32Type(resolvedIndexType)) {

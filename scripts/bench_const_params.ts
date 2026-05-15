@@ -1,5 +1,5 @@
 import type { Expr, Program } from "../src/core_ast.ts";
-import { checkSource, optimizeProgram } from "../src/mod.ts";
+import { type CheckTrace, checkSource, optimizeProgram } from "../src/mod.ts";
 
 const sizes = stringArg("--sizes")
   ?.split(",")
@@ -14,9 +14,12 @@ for (const size of sizes) {
     await checkSource(source);
     const samples = [];
     let program: Program | undefined;
+    let trace: CheckTrace | undefined;
     for (let i = 0; i < iterations; i++) {
       const start = performance.now();
-      program = (await checkSource(source)).program;
+      const checked = await checkSource(source, { trace: true });
+      program = checked.program;
+      trace = checked.trace;
       samples.push(performance.now() - start);
     }
     const counts = countCalls(program!);
@@ -37,6 +40,8 @@ for (const size of sizes) {
       optimized_direct_calls: optimizedCounts.get("map_box") ?? 0,
       optimized_runtime_dict_calls: optimizedCounts.get("dict.map") ?? 0,
       optimized_wrapper_calls: optimizedCounts.get("mapped__box_functor") ?? 0,
+      slowest_check_phase: slowestPhase(trace),
+      specialization: specializationSummary(trace),
     });
   }
   console.table(rows);
@@ -128,6 +133,22 @@ function countGeneratedDirectCalls(program: Program): number {
     total += counts.get("map_box") ?? 0;
   }
   return total;
+}
+
+function slowestPhase(trace: CheckTrace | undefined): string {
+  const phase = trace?.phases.toSorted((left, right) => right.ms - left.ms)[0];
+  return phase ? `${phase.name}:${phase.ms.toFixed(3)}ms` : "";
+}
+
+function specializationSummary(trace: CheckTrace | undefined): string {
+  if (!trace) return "";
+  const parts = trace.phases
+    .filter((phase) => phase.specialization)
+    .map((phase) => {
+      const stats = phase.specialization!;
+      return `${phase.name}=v${stats.visitedCalls}/g${stats.generatedSpecializations}/h${stats.cacheHits}/m${stats.cacheMisses}`;
+    });
+  return parts.join(" ");
 }
 
 function avg(values: number[]): number {

@@ -1,5 +1,5 @@
 import { parse } from "./parser.ts";
-import { checkProgram, checkProgramForAnalysis } from "./check.ts";
+import { checkProgram, checkProgramForAnalysis, type CheckTrace } from "./check.ts";
 import {
   type BackendOptions,
   emitWasm,
@@ -42,6 +42,7 @@ export interface ModuleSource {
 export interface CheckSourceOptions extends CompilerPluginOptions {
   sourceId?: string;
   pruneImports?: boolean;
+  trace?: boolean;
   resolveModule?: (
     moduleName: string,
   ) => string | ModuleSource | undefined | Promise<string | ModuleSource | undefined>;
@@ -62,6 +63,7 @@ export interface CompileArtifactsResult {
   wasm: Uint8Array<ArrayBuffer>;
   checked: ReturnType<typeof checkProgram>;
   timings: CompileArtifactTimings;
+  trace?: CheckTrace;
 }
 
 export async function checkSource(source: string, options: CheckSourceOptions = {}) {
@@ -145,6 +147,7 @@ export async function compileArtifactsFromSource(
     wasm,
     checked,
     timings: { parseMs, importMs, checkMs, watMs, wasmMs },
+    trace: checked.trace,
   };
 }
 
@@ -207,6 +210,11 @@ export {
   summarizeRecurrences,
 } from "./optimize.ts";
 export { CompileError, formatDiagnostic } from "./diagnostics.ts";
+export {
+  type CheckPhaseTrace,
+  type CheckProgramOptions,
+  type CheckTrace,
+} from "./check.ts";
 export {
   COMPILER_PLUGIN_API_VERSION,
   type CompilerAnnotationBuiltin,
