@@ -1,6 +1,16 @@
 import { parse } from "./parser.ts";
 import { checkProgram, checkProgramForAnalysis } from "./check.ts";
-import { type BackendOptions, emitWasm, emitWat } from "./backend.ts";
+import {
+  type BackendOptions,
+  emitWasm,
+  emitWat,
+  summarizeBackendLayoutDecisions,
+} from "./backend.ts";
+import {
+  type OptimizationPlan,
+  type OptimizeOptions,
+  summarizeOptimizationPlan,
+} from "./optimize.ts";
 import type {
   ConstDecl,
   Declaration,
@@ -31,6 +41,7 @@ export interface ModuleSource {
 
 export interface CheckSourceOptions extends CompilerPluginOptions {
   sourceId?: string;
+  pruneImports?: boolean;
   resolveModule?: (
     moduleName: string,
   ) => string | ModuleSource | undefined | Promise<string | ModuleSource | undefined>;
@@ -38,11 +49,29 @@ export interface CheckSourceOptions extends CompilerPluginOptions {
 
 export interface CompileSourceOptions extends CheckSourceOptions, BackendOptions {}
 
+export interface CompileArtifactTimings {
+  parseMs: number;
+  importMs: number;
+  checkMs: number;
+  watMs: number;
+  wasmMs: number;
+}
+
+export interface CompileArtifactsResult {
+  wat: string;
+  wasm: Uint8Array<ArrayBuffer>;
+  checked: ReturnType<typeof checkProgram>;
+  timings: CompileArtifactTimings;
+}
+
 export async function checkSource(source: string, options: CheckSourceOptions = {}) {
   const program = await parse(source, { sourceId: options.sourceId });
   if (!options.resolveModule) return checkProgram(program, options);
   return checkProgram(
-    await resolveSourceImports(program, { resolveModule: options.resolveModule }),
+    await resolveSourceImports(program, {
+      resolveModule: options.resolveModule,
+      pruneImports: options.pruneImports,
+    }),
     options,
   );
 }
@@ -58,7 +87,10 @@ export async function checkParsedSourceForAnalysis(
 ) {
   if (!options.resolveModule) return checkProgramForAnalysis(program, options);
   return checkProgramForAnalysis(
-    await resolveSourceImports(program, { resolveModule: options.resolveModule }),
+    await resolveSourceImports(program, {
+      resolveModule: options.resolveModule,
+      pruneImports: options.pruneImports,
+    }),
     options,
   );
 }
@@ -77,16 +109,100 @@ export async function wasmFromSource(
   return emitWasm((await checkSource(source, options)).program, options);
 }
 
+export async function compileArtifactsFromSource(
+  source: string,
+  options: CompileSourceOptions = {},
+): Promise<CompileArtifactsResult> {
+  const parseStart = performance.now();
+  const parsed = await parse(source, { sourceId: options.sourceId });
+  const parseMs = performance.now() - parseStart;
+
+  let program = parsed;
+  let importMs = 0;
+  if (options.resolveModule) {
+    const importStart = performance.now();
+    program = await resolveSourceImports(parsed, {
+      resolveModule: options.resolveModule,
+      pruneImports: options.pruneImports,
+    });
+    importMs = performance.now() - importStart;
+  }
+
+  const checkStart = performance.now();
+  const checked = checkProgram(program, options);
+  const checkMs = performance.now() - checkStart;
+
+  const watStart = performance.now();
+  const wat = emitWat(checked.program, options);
+  const watMs = performance.now() - watStart;
+
+  const wasmStart = performance.now();
+  const wasm = emitWasm(checked.program, options);
+  const wasmMs = performance.now() - wasmStart;
+
+  return {
+    wat,
+    wasm,
+    checked,
+    timings: { parseMs, importMs, checkMs, watMs, wasmMs },
+  };
+}
+
+export async function explainOptimization(
+  source: string,
+  options: CompileSourceOptions & OptimizeOptions = {},
+): Promise<OptimizationPlan> {
+  const checked = await checkSource(source, options);
+  const plan = summarizeOptimizationPlan(checked.program, options);
+  for (const decision of summarizeBackendLayoutDecisions(checked.program, options)) {
+    plan.decisions.push(decision);
+    const fnName = typeof decision.evidence?.function === "string"
+      ? decision.evidence.function
+      : undefined;
+    const target = typeof decision.evidence?.target === "string"
+      ? decision.evidence.target
+      : decision.target;
+    const layout = decision.evidence?.layout;
+    if (
+      fnName &&
+      (layout === "packed" || layout === "scratch" || layout === "local_slots")
+    ) {
+      plan.functions.get(fnName)?.actions.push({
+        kind: "choose_layout",
+        target,
+        layout,
+        reason: decision.reason,
+      });
+    }
+  }
+  return plan;
+}
+
 export { parse } from "./parser.ts";
 export { formatSource, isFormatted } from "./format.ts";
 export { tokenize } from "./tokenize.ts";
 export {
   type AbstractFunctionFacts,
   type AbstractValue,
+  type FunctionFacts,
+  type FunctionPlan,
+  type LayoutCandidate,
+  OPTIMIZATION_RULES,
+  type OptimizationDecision,
+  type OptimizationPlan,
+  type OptimizationRule,
+  type OptimizationRuleId,
+  OPTIMIZE_PROFILES,
+  type OptimizeProfile,
+  type OptimizeProfileName,
   optimizeProgram,
   type OptMode,
+  type PlannedAction,
   type Recurrence,
+  type RewriteRule,
+  type RewriteRuleId,
   summarizeAbstractValues,
+  summarizeOptimizationPlan,
   summarizeProgram,
   summarizeRecurrences,
 } from "./optimize.ts";
@@ -109,7 +225,12 @@ export {
 
 async function resolveSourceImports(
   root: Program,
-  options: Required<Pick<CheckSourceOptions, "resolveModule">>,
+  options:
+    & Required<Pick<CheckSourceOptions, "resolveModule">>
+    & Pick<
+      CheckSourceOptions,
+      "pruneImports"
+    >,
 ): Promise<Program> {
   const diagnostics: Diagnostic[] = [];
   const visiting: string[] = [];
@@ -204,6 +325,7 @@ async function resolveSourceImports(
       destructuredImports,
       program,
       diagnostics,
+      { pruneImports: options.pruneImports === true },
     );
   }
 
@@ -218,6 +340,7 @@ function mergePrograms(
   destructuredImports: { alias: string; sourceImport: SourceImport; program: Program }[],
   program: Program,
   diagnostics: Diagnostic[],
+  options: { pruneImports: boolean },
 ): Program {
   const importedDecls = imports.flatMap((item) => item.declarations);
   const aliasedDecls = aliasedImports.flatMap(({ alias, program }) =>
@@ -252,6 +375,12 @@ function mergePrograms(
     declarations.push(decl);
   }
   declarations.push(...program.declarations);
+  const slicedDeclarations = options.pruneImports
+    ? pruneUnusedImportedDeclarations(
+      declarations,
+      new Set(program.declarations.map(declarationName)),
+    )
+    : declarations;
   return hideAstMetadata({
     moduleName: program.moduleName,
     imports: [
@@ -261,8 +390,249 @@ function mergePrograms(
       ...program.imports,
     ],
     sourceImports: [],
-    declarations,
+    declarations: slicedDeclarations,
   });
+}
+
+function pruneUnusedImportedDeclarations(
+  declarations: Declaration[],
+  localNames: Set<string>,
+): Declaration[] {
+  const byName = new Map<string, Declaration[]>();
+  for (const decl of declarations) {
+    const group = byName.get(decl.name) ?? [];
+    group.push(decl);
+    byName.set(decl.name, group);
+  }
+  const ownerByName = new Map<string, string>();
+  for (const decl of declarations) {
+    for (const name of collectDeclarationNames(decl)) ownerByName.set(name, decl.name);
+  }
+  const declarationNames = new Set(declarations.flatMap(collectDeclarationNames));
+  const keep = new Set<string>(localNames);
+  const work = [...localNames];
+  while (work.length) {
+    const name = work.pop()!;
+    for (const decl of byName.get(name) ?? []) {
+      for (const ref of referencedDeclarationNames(decl, declarationNames)) {
+        const owner = ownerByName.get(ref) ?? ref;
+        const ownerWasKept = keep.has(owner);
+        keep.add(ref);
+        if (ownerWasKept) continue;
+        keep.add(owner);
+        work.push(owner);
+      }
+    }
+    for (const clause of byName.get(name) ?? []) {
+      if (keep.has(clause.name)) continue;
+      keep.add(clause.name);
+      work.push(clause.name);
+    }
+  }
+  return declarations.filter((decl) => localNames.has(decl.name) || keep.has(decl.name));
+}
+
+function referencedDeclarationNames(decl: Declaration, names: Set<string>): Set<string> {
+  const refs = new Set<string>();
+  const add = (name: string | undefined) => {
+    if (!name || name.startsWith("@")) return;
+    const match = longestReferencedName(name, names);
+    if (match) refs.add(match);
+  };
+  const addTypeSource = (source: string | undefined) => {
+    if (!source) return;
+    for (const name of names) {
+      if (typeSourceReferencesName(source, name)) refs.add(name);
+    }
+  };
+  const visitPattern = (pattern: ParamPattern | undefined) => {
+    if (!pattern) return;
+    if (pattern.kind === "constructor" || pattern.kind === "type") add(pattern.name);
+    if (pattern.kind === "constructor" || pattern.kind === "tuple") {
+      const items = pattern.kind === "constructor" ? pattern.args : pattern.items;
+      for (const item of items) visitPattern(item);
+    }
+  };
+  const visitExpr = (expr: Expr | undefined) => {
+    if (!expr) return;
+    switch (expr.kind) {
+      case "do":
+        add(expr.strategy.name);
+        visitTypeExpr(expr.strategy.effect);
+        for (const stmt of expr.statements) {
+          if (stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let") {
+            visitExpr(stmt.value);
+          } else visitTypeExpr(stmt.value);
+        }
+        visitExpr(expr.expr);
+        return;
+      case "var":
+        add(expr.name);
+        return;
+      case "call":
+        visitExpr(expr.callee);
+        expr.args.forEach(visitExpr);
+        return;
+      case "const_fn":
+        visitExpr(expr.body);
+        return;
+      case "index":
+        visitExpr(expr.target);
+        visitExpr(expr.index);
+        return;
+      case "binary":
+        visitExpr(expr.left);
+        visitExpr(expr.right);
+        return;
+      case "pipe_bind":
+        visitExpr(expr.value);
+        visitExpr(expr.body);
+        return;
+      case "match":
+        visitExpr(expr.value);
+        for (const arm of expr.arms) {
+          visitPattern(arm.pattern);
+          visitExpr(arm.value);
+        }
+        return;
+      case "shape":
+      case "product_constructor":
+        if (expr.kind === "product_constructor") add(expr.constructor);
+        for (const slot of expr.slots) {
+          visitExpr(slot.index);
+          visitExpr(slot.value);
+          if (slot.repeat) visitTypeCountExpr(slot.repeat);
+        }
+        return;
+      case "static_for_slots":
+        visitStaticForSource(expr.source);
+        visitExpr(expr.value);
+        return;
+      case "field":
+        visitExpr(expr.value);
+        visitExpr(expr.key);
+        return;
+      case "range":
+        visitExpr(expr.start);
+        visitExpr(expr.end);
+        return;
+      case "block":
+        for (const stmt of expr.statements) {
+          if (stmt.kind === "proof_const") {
+            visitTypeExpr(stmt.value);
+          } else {
+            if (stmt.kind === "let") addTypeSource(stmt.type);
+            visitExpr(stmt.value);
+          }
+        }
+        visitExpr(expr.expr);
+        return;
+      case "literal":
+      case "placeholder":
+        return;
+    }
+  };
+  const visitTypeExpr = (expr: TypeExpr | undefined) => {
+    if (!expr) return;
+    switch (expr.kind) {
+      case "type_ref":
+      case "type_static_ref":
+        add(expr.name);
+        return;
+      case "type_call":
+        visitTypeExpr(expr.callee);
+        expr.args.forEach(visitTypeExpr);
+        return;
+      case "type_fn":
+        addTypeSource(expr.source);
+        return;
+      case "type_shape":
+        visitTypeShape(expr.shape);
+        return;
+      case "type_match":
+        visitTypeExpr(expr.value);
+        for (const arm of expr.arms) {
+          if (arm.pattern.kind === "type") add(arm.pattern.name);
+          visitTypeExpr(arm.value);
+        }
+        return;
+      case "type_operator":
+        add(expr.descriptor.target);
+        return;
+      case "type_binary":
+        visitTypeExpr(expr.left);
+        visitTypeExpr(expr.right);
+        return;
+      case "type_bool":
+      case "type_number":
+      case "type_char":
+      case "type_string":
+      case "type_literal":
+        return;
+    }
+  };
+  const visitTypeShape = (shape: TypeShape) => {
+    for (const slot of shape.slots) {
+      visitTypeExpr(slot.type);
+      if (slot.repeat) visitTypeCountExpr(slot.repeat);
+    }
+    for (const member of shape.members ?? []) {
+      addTypeSource(member.type);
+      add(member.target);
+      if (member.inlineFn) visitDecl(member.inlineFn);
+    }
+  };
+  const visitTypeCountExpr = (expr: TypeCountExpr) => {
+    if (expr.kind === "count_ref") add(expr.name);
+    if (expr.kind === "count_mul") {
+      visitTypeCountExpr(expr.left);
+      visitTypeCountExpr(expr.right);
+    }
+  };
+  const visitStaticForSource = (source: StaticForSource) => {
+    if (source.kind === "range") {
+      visitExpr(source.start);
+      visitExpr(source.end);
+    } else visitExpr(source.shape);
+  };
+  const visitTypeBlock = (block: TypeBlock) => {
+    for (const stmt of block.statements) visitTypeExpr(stmt.value);
+    visitTypeExpr(block.expr);
+  };
+  const visitDecl = (item: Declaration) => {
+    if (item.kind === "fn") {
+      add(item.memberOf?.owner);
+      for (const param of item.params) {
+        addTypeSource(param.type);
+        visitPattern(param.pattern);
+      }
+      addTypeSource(item.returnType);
+      visitExpr(item.body);
+      return;
+    }
+    if (item.kind === "type") {
+      visitTypeBlock(item.body);
+      for (const clause of item.clauses ?? []) visitDecl(clause);
+      return;
+    }
+    addTypeSource(item.type);
+    visitExpr(item.value);
+  };
+  visitDecl(decl);
+  return refs;
+}
+
+function longestReferencedName(name: string, names: Set<string>): string | undefined {
+  let best: string | undefined;
+  for (const candidate of names) {
+    if (name !== candidate && !name.startsWith(`${candidate}.`)) continue;
+    if (!best || candidate.length > best.length) best = candidate;
+  }
+  return best;
+}
+
+function typeSourceReferencesName(source: string, name: string): boolean {
+  return new RegExp(`(?<![A-Za-z0-9_.])${escapeRegExp(name)}(?![A-Za-z0-9_])`).test(source);
 }
 
 function importedDeclarationsCanShareName(left: Declaration, right: Declaration): boolean {

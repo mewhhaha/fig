@@ -1,11 +1,14 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import {
   checkSource,
+  compileArtifactsFromSource,
   COMPILER_PLUGIN_API_VERSION,
   createCompilerPluginRegistry,
+  explainOptimization,
   optimizeProgram,
   parse,
   summarizeAbstractValues,
+  summarizeOptimizationPlan,
   summarizeProgram,
   summarizeRecurrences,
   tokenize,
@@ -2006,6 +2009,89 @@ Deno.test("namespace source imports preserve same-name recursive function clause
   assertEquals((instance.exports.main as () => number)(), 6);
 });
 
+Deno.test("pruneImports keeps reachable imported declarations and drops unused imported work", async () => {
+  const modules = new Map([
+    [
+      "prelude.small",
+      `
+        type fn Box() -> type {
+          let Box = {value: i32};
+          struct(Box)
+        }
+        fn helper(x: i32) -> i32 { x + 1 }
+        pub fn used(x: i32) -> Box { Box {value: helper(x)} }
+        fn unused_bad(x: i32) -> i32 { missing_helper(x) }
+      `,
+    ],
+  ]);
+  const resolveModule = (specifier: string) => modules.get(specifier);
+
+  const unpruned = await checkSource(
+    `
+      const lib = @import("prelude.small");
+      pub fn main() -> i32 {
+        let out = lib.used(1);
+        out.value
+      }
+    `,
+    { resolveModule },
+  );
+  assert(unpruned.program.declarations.some((decl) => decl.name === "lib.unused_bad"));
+
+  const checked = await checkSource(
+    `
+      const lib = @import("prelude.small");
+      pub fn main() -> i32 {
+        let out = lib.used(1);
+        out.value
+      }
+    `,
+    { resolveModule, pruneImports: true },
+  );
+  const names = checked.program.declarations.map((decl) => decl.name);
+  assert(names.includes("lib.Box"));
+  assert(names.includes("lib.helper"));
+  assert(names.includes("lib.used"));
+  assert(!names.includes("lib.unused_bad"));
+});
+
+Deno.test("pruneImports keeps array_static range fold dependencies", async () => {
+  const source = `
+    const array = @import("prelude.array_static");
+    fn add(acc: i32, x: i32) -> i32 { acc + x }
+    pub fn main(seed: i32) -> i32 {
+      array.RangeIter.fold(array.RangeI32.Iter(seed - seed .. 1000), 0, add)
+    }
+  `;
+  const checked = await checkSource(source, { resolveModule: resolveProjectModule });
+  const pruned = await checkSource(source, {
+    resolveModule: resolveProjectModule,
+    pruneImports: true,
+  });
+
+  assert(
+    pruned.program.declarations.length < checked.program.declarations.length,
+    `${pruned.program.declarations.length} !< ${checked.program.declarations.length}`,
+  );
+  const names = pruned.program.declarations.map((decl) => decl.name);
+  assert(names.includes("array.RangeI32"));
+  assert(names.includes("array.RangeIter"));
+  assert(names.includes("array.RangeI32.Iter"));
+  assert(names.includes("array.RangeIter.fold"));
+  assert(names.includes("array.RangeIter.fold_loop"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(source, {
+        resolveModule: resolveProjectModule,
+        pruneImports: true,
+        optMode: "release",
+      }),
+    ),
+  );
+  assertEquals((instance.exports.main as (seed: number) => number)(0), 499500);
+});
+
 Deno.test("merge source import alias is ordinary namespace alias", async () => {
   const modules = new Map([
     [
@@ -3531,6 +3617,126 @@ Deno.test("optimizer folds matches proven by abstract refined-domain facts", asy
   });
 });
 
+Deno.test("optimization plan records structural inline recurrence and domain decisions", async () => {
+  const checked = await checkSource(`
+    const clock: fn() -> i32 !{time} = @capability("clock");
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn tick() -> i32 !{time} { clock() }
+    fn small(i: i32(4), acc: i32) -> i32 { acc }
+    fn small(i: i32(0..4), acc: i32) -> i32 { small(i + 1, acc + i) }
+    fn always(i: i32(0..4)) -> i32 {
+      match i < 4 { true => inc(i), false => 0 }
+    }
+    pub fn main(i: i32(0..4)) -> i32 { always(i) + small(0, 0) }
+  `);
+
+  const plan = summarizeOptimizationPlan(checked.program, { optMode: "release" });
+  const hasDecision = (target: string, action: string) =>
+    plan.decisions.some((decision) => decision.target === target && decision.action === action);
+
+  assertEquals(plan.profile, "release_balanced");
+  assert(hasDecision("inc", "call.inline.private_scalar"));
+  assert(hasDecision("tick", "call.inline.skip_effectful"));
+  assert(hasDecision("small", "recurrence.unfold.finite_static"));
+  assert(hasDecision("always", "domain.compare.always_true"));
+});
+
+Deno.test("optimization plan lowers large refined finite recursion structurally", async () => {
+  const checked = await checkSource(`
+    fn sum_go(i: i32(1000), acc: i32) -> i32 {
+      acc
+    }
+    fn sum_go(i: i32(0..1000), acc: i32) -> i32 {
+      sum_go(i + 1, acc + i)
+    }
+    pub fn main() -> i32 {
+      sum_go(0, 0)
+    }
+  `);
+
+  const plan = summarizeOptimizationPlan(checked.program, { optMode: "release" });
+  assert(
+    plan.decisions.some((decision) =>
+      decision.target === "sum_go" && decision.action === "recurrence.lower.tail_loop"
+    ),
+  );
+});
+
+Deno.test("explainOptimization reports backend structural fixed-array layout decisions", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    fn read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
+      xs[index]
+    }
+    fn bump_read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
+      read(layout.InlineArray.set(4, u3, xs, index, 7), index)
+    }
+    pub fn main(index: i32) -> i32 {
+      bump_read(<1, 2, 3, 4>, index)
+    }
+  `;
+
+  const plan = await explainOptimization(source, { resolveModule: resolveProjectModule });
+  assert(
+    plan.decisions.some((decision) =>
+      decision.target === "read.xs" && decision.action === "array.layout_packed"
+    ),
+  );
+});
+
+Deno.test("prelude and user tail folds get the same structural optimization decision", async () => {
+  const preludeSource = `
+    const range = @import("prelude.range");
+    fn add(acc: i32, x: i32) -> i32 { acc + x }
+    pub fn main(seed: i32) -> i32 {
+      range.RangeIter.fold(range.RangeI32.Iter(seed - seed .. 1000), 0, add)
+    }
+  `;
+  const userSource = `
+    fn add(acc: i32, x: i32) -> i32 { acc + x }
+    fn my_fold_loop(i: i32, end: i32, acc: i32) -> i32 {
+      match i < end {
+        true => my_fold_loop(i + 1, end, add(acc, i)),
+        false => acc,
+      }
+    }
+    pub fn main(seed: i32) -> i32 {
+      my_fold_loop(seed - seed, 1000, 0)
+    }
+  `;
+
+  const preludeChecked = await checkSource(preludeSource, {
+    resolveModule: resolveProjectModule,
+    pruneImports: true,
+  });
+  const userChecked = await checkSource(userSource);
+  const preludePlan = summarizeOptimizationPlan(preludeChecked.program, { optMode: "release" });
+  const userPlan = summarizeOptimizationPlan(userChecked.program, { optMode: "release" });
+
+  assert(
+    preludePlan.decisions.some((decision) =>
+      decision.target.endsWith("RangeIter.fold_loop") &&
+      decision.action === "recurrence.lower.tail_loop"
+    ),
+  );
+  assert(
+    userPlan.decisions.some((decision) =>
+      decision.target === "my_fold_loop" && decision.action === "recurrence.lower.tail_loop"
+    ),
+  );
+
+  const preludeWat = await watFromSource(preludeSource, {
+    resolveModule: resolveProjectModule,
+    pruneImports: true,
+    optMode: "release",
+  });
+  const userWat = await watFromSource(userSource, { optMode: "release" });
+  assertStringIncludes(preludeWat, "loop");
+  assertStringIncludes(userWat, "loop");
+  assert(!preludeWat.includes("call $range.RangeIter.fold_loop"));
+  assert(!userWat.includes("call $my_fold_loop"));
+});
+
 Deno.test("optimizer extracts cheapest local equality candidates", async () => {
   const checked = await checkSource(`
     fn tautology(x: i32) -> i32 {
@@ -3858,6 +4064,21 @@ Deno.test("emits deterministic WAT and valid wasm32", async () => {
 )`,
   );
   const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as () => number)(), 42);
+});
+
+Deno.test("compileArtifactsFromSource emits WAT and Wasm from one checked source", async () => {
+  const artifact = await compileArtifactsFromSource(`pub fn main() -> i32 { 40 + 2 }`, {
+    optMode: "release",
+  });
+  assertStringIncludes(artifact.wat, "i32.const 42");
+  assert(artifact.wasm.byteLength > 0);
+  assert(artifact.timings.parseMs >= 0);
+  assert(artifact.timings.checkMs >= 0);
+  assert(artifact.timings.watMs >= 0);
+  assert(artifact.timings.wasmMs >= 0);
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
   assertEquals((instance.exports.main as () => number)(), 42);
 });
 

@@ -1,30 +1,94 @@
 # Benchmarks
 
-These numbers compare Fig compiled to Wasm against equivalent Rust kernels. They are machine-local
-measurements from the current working tree and should be used mainly for regression tracking.
+These numbers are machine-local measurements from the current working tree and should be used mainly
+for regression tracking. The latest local run records Fig/Wasm size, runtime, and compilation phase
+time; the saved Rust comparison below compares Fig compiled to Wasm against equivalent native Rust
+kernels.
 
 Fig is compiled with `optMode: "release"` and `memoryModel: "branch"`. The benchmark harness only
 reports the internal-loop shape: Deno instantiates the Fig Wasm module and calls exported
-`bench(iterations)` once, while the measured loop runs inside Wasm. The comparison table includes
-Fig internal-loop rows and native Rust rows.
+`bench(iterations)` once, while the measured loop runs inside Wasm. The local benchmark harnesses
+also enable conservative imported-declaration pruning with `pruneImports: true`. The comparison
+table includes Fig internal-loop rows and native Rust rows.
 
 ## Environment
 
-- Date: 2026-05-14
+- Date: 2026-05-15
 - OS: Linux 7.0.5-1-cachyos x86_64
 - Deno: 2.7.14, V8 14.7.173.20-rusty, TypeScript 5.9.2
 - Rust: rustc 1.96.0-nightly (3645249d7 2026-03-16)
 
-## Command
+## Latest Local Size/Perf/Compile Run
+
+Run:
+
+```bash
+deno run --allow-read scripts/bench_memory_model.ts 100000
+deno run --allow-read scripts/bench_const_params.ts --sizes=10,100,500,1000 --iterations=25
+deno run --allow-read scripts/bench_const_params.ts --sizes=200 --iterations=3
+deno run --allow-read scripts/bench_tail_recursion.ts
+deno run --allow-read scripts/bench_matmul_simd.ts 100000
+```
+
+The memory-model benchmark completed and passed all size/shape gates. Compile phase columns come
+from one parsed/imported/checked program; WAT and Wasm are then emitted from that checked program.
+Selected rows:
+
+| Scenario                   |  Calls |  ns/call | Parse ms | Import ms | Check ms | WAT ms | Wasm ms | Total ms | WAT bytes | Wasm bytes | Loops | Recursive calls | SIMD ops |
+| -------------------------- | -----: | -------: | -------: | --------: | -------: | -----: | ------: | -------: | --------: | ---------: | ----: | --------------: | -------: |
+| `scalar_reuse_nway`        | 100000 |     33.4 |    2.761 |     0.441 |    3.921 |  5.875 |   1.090 |   14.087 |       151 |         44 |     0 |               0 |        0 |
+| `tail_product_loop_1k`     |   5000 |    296.1 |    1.062 |     0.153 |    0.998 |  6.093 |   2.007 |   10.312 |      1349 |        109 |     1 |               0 |        0 |
+| `inline_array_builder_map` |  25000 |     17.5 |    0.898 |    71.387 |    6.334 |  9.962 |   6.035 |   94.616 |       183 |         47 |     0 |               0 |        0 |
+| `compact_filter_collect`   |  50000 |     80.1 |    0.894 |   621.400 |    5.626 | 89.345 |  75.890 |  793.155 |    118326 |       4573 |     0 |               0 |        0 |
+| `fixed_collection_update`  |  25000 |     14.2 |    0.454 |    62.031 |    2.444 |  3.745 |   4.641 |   73.315 |        91 |         38 |     0 |               0 |        0 |
+| `path_grid_score_16`       |  12500 |    195.5 |    0.801 |     0.123 |    0.453 |  2.439 |   2.156 |    5.973 |      1275 |        113 |     1 |               0 |        0 |
+| `range_fold_1k`            |   5000 |    267.0 |    0.364 |     3.253 |    0.924 |  3.800 |   2.680 |   11.020 |       581 |         87 |     1 |               0 |        0 |
+| `fannkuch_redux_7`         |    100 | 116534.9 |   11.190 |    70.480 |    3.908 | 33.565 |  18.463 |  137.605 |     22881 |       1146 |     5 |               0 |        0 |
+| `mat4_dot1`                | 100000 |     18.6 |    0.743 |     0.064 |    0.370 |  1.483 |   1.444 |    4.104 |       853 |        145 |     0 |               0 |       14 |
+| `mat4_full`                | 100000 |     95.6 |    4.632 |     0.151 |    1.172 | 13.714 |  11.391 |   31.060 |      3933 |        426 |     0 |               0 |       38 |
+
+Focused compile-time scaling from `bench_const_params`:
+
+| Calls | Direct avg ms | Runtime-dict avg ms | Const-param avg ms |
+| ----: | ------------: | ------------------: | -----------------: |
+|    10 |         2.021 |               1.629 |              1.670 |
+|   100 |       137.282 |             142.766 |            143.506 |
+|   200 |       997.574 |            1012.835 |           1028.437 |
+
+The 500/1000-call compile benchmark did not finish within the 180s timeout, even with 3 samples.
+This is the clearest scaling pressure from the current run.
+
+Tail-recursion benchmark medians:
+
+| Scenario   | Variant                    | Median ms | p95 ms | Large-n overflow | `return_call` |
+| ---------- | -------------------------- | --------: | -----: | ---------------- | ------------: |
+| `sum`      | default tail recursive     |     0.138 |  0.162 | false            |         false |
+| `sum`      | opcode return-call         |     6.486 |  8.985 | false            |          true |
+| `sum`      | default non-tail recursive |     0.221 |  0.452 | true             |         false |
+| `pipeline` | default tail recursive     |     0.264 |  0.357 | false            |         false |
+| `pipeline` | opcode return-call         |    15.848 | 24.225 | false            |          true |
+| `pipeline` | default non-tail recursive |     0.273 |  0.391 | false            |         false |
+| `stress`   | default tail recursive     |     0.104 |  0.169 | false            |         false |
+| `stress`   | opcode return-call         |    35.892 | 41.036 | false            |          true |
+| `stress`   | default non-tail recursive |     0.225 |  0.331 | true             |         false |
+
+SIMD matmul at 100000 iterations:
+
+| Scalar ms | SIMD ms | Speedup | SIMD mul ops | SIMD shuffle ops |          Checksum |
+| --------: | ------: | ------: | -----------: | ---------------: | ----------------: |
+|     6.867 |   6.493 |  1.058x |           16 |               32 | `9000000/9000000` |
+
+## Rust Comparison Command
 
 ```bash
 deno run --allow-read --allow-write --allow-run scripts/bench_memory_model_compare.ts 20000000
 ```
 
-Current status: the release-gated command above completes. The suite includes branchy scalar
-systems-style kernels such as collision checks, path-grid scoring, and a small CPU grid raycaster.
-The latest saved 20M-iteration run has 16 of 17 rows at or under 1.2x native Rust. The remaining
-over-target row is `fannkuch_redux_7`.
+Current status: the release-gated command above did not complete on the 2026-05-15 local rerun. It
+stopped before timing rows because `compact_filter_collect` exceeded the comparison harness WAT-size
+gate: expected `<= 30000B`, got `120331B`. The saved 2026-05-14 20M-iteration comparison remains
+below for historical tracking; that run had 16 of 17 rows at or under 1.2x native Rust. The
+remaining over-target row was `fannkuch_redux_7`.
 
 The Rust comparison is compiled by the benchmark harness with:
 
@@ -32,12 +96,12 @@ The Rust comparison is compiled by the benchmark harness with:
 rustc -C opt-level=3 -C target-cpu=native
 ```
 
-## Results
+## Saved Rust Comparison Results
 
-Timed rows from the latest run:
+Timed rows from the saved 2026-05-14 run:
 
-| Scenario                         | Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes | Checksum  |
-| -------------------------------- | ----: | ----------: | -----------: | -------: | -------------------: | -------------: | --------: |
+| Scenario                         |    Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes |    Checksum |
+| -------------------------------- | -------: | ----------: | -----------: | -------: | -------------------: | -------------: | ----------: |
 | `scalar_reuse_nway`              | 20000000 |         0.8 |          0.7 |     1.14 |               25.105 |            103 | -1323389440 |
 | `product_shadow_update`          | 20000000 |         0.8 |          1.9 |     0.42 |               11.233 |            103 |  1805788928 |
 | `tail_product_loop_1k`           |  1000000 |       257.6 |        397.5 |     0.65 |               12.533 |            191 | -2011173632 |
@@ -68,10 +132,10 @@ Current findings:
 
 | Check                             | Result |
 | --------------------------------- | -----: |
-| WAT bytes                         |  22694 |
-| Wasm bytes                        |   1138 |
-| Wasm bytes without hints          |   1138 |
-| Wasm code-section payload         |   1055 |
+| WAT bytes                         |  22881 |
+| Wasm bytes                        |   1146 |
+| Wasm bytes without hints          |   1146 |
+| Wasm code-section payload         |   1063 |
 | Remaining `dec` calls             |      0 |
 | Remaining `step_*` calls          |      0 |
 | Remaining `flip_count_loop` calls |      0 |
@@ -81,9 +145,9 @@ The release path is already doing several important things correctly: `search` l
 do not survive as calls, packed `u3` fixed arrays are used, and `fig_buffers` is absent.
 
 The remaining perf pressure appears to be executable-code shape, not plugin dispatch overhead. The
-analyzer reports a 1055 byte code-section payload inside the 1138 byte kernel module, with no
-branch-hint custom section in this sample. Narrow unsigned scalars inline predictably, product-state helpers
-are fused into the `search` loop, packed swaps now use a direct bitfield XOR update, and
+analyzer reports a 1063 byte code-section payload inside the 1146 byte kernel module, with no
+branch-hint custom section in this sample. Narrow unsigned scalars inline predictably, product-state
+helpers are fused into the `search` loop, packed swaps now use a direct bitfield XOR update, and
 non-packable recursive fixed arrays can stay in local slots instead of scratch memory. Dead product
 arguments can now alias private inlined product calls when the caller no longer observes the
 original product, deadness propagates through simple inlined forwarding branches, locals are ordered
@@ -144,23 +208,24 @@ marked inlineable, and scalar call inlining aliases one-use pure scalar argument
 variable arguments.
 
 `fannkuch_redux_7` now has no remaining private helper calls inside `search`. The hot WAT is close
-but still not fully optimal: `search` still materializes
-intermediate products (`prepared`, `scored`, and `next`) and unpacks the packed count field at
-branch exits instead of carrying the packed backing all the way into every tail-loop target/result
-path. A prototype lexical product-field alias fold reduced size further but was backed out because
-inlined tail-loop lowering mutates callee parameter locals; preserving correctness there needs alias
-invalidation or destination-aware branch result lowering.
+but still not fully optimal: `search` still materializes intermediate products (`prepared`,
+`scored`, and `next`) and unpacks the packed count field at branch exits instead of carrying the
+packed backing all the way into every tail-loop target/result path. A prototype lexical
+product-field alias fold reduced size further but was backed out because inlined tail-loop lowering
+mutates callee parameter locals; preserving correctness there needs alias invalidation or
+destination-aware branch result lowering.
 
 Recent local comparison reruns on this final tree produced `fannkuch_redux_7` internal timings of
 `103679.3`, `108065.6`, `105224.6`, `108650.2`, `120498.2`, `103818.7`, `106591.3`, `192031.7`,
 `118779.1`, `102704.3`, `131926.0`, `115562.5`, `114405.9`, `109495.8`, `123779.4`, `112639.3`,
 `122702.9`, `105304.4`, `138790.7`, `116102.8`, `109109.7`, `116669.0`, `109179.6`, `134063.8`,
-`123520.5`, `117591.1`, `116034.2`, `115433.0`, `118172.1`, and `123184.8 ns/call`, against Rust timings of `107435.2`, `97123.5`, `99007.7`, `107722.6`,
-`114291.5`, `96560.8`, `98842.2`, `105409.1`, `87820.7`, `84673.4`, `89164.0`, `112099.6`,
-`89493.6`, `91065.3`, `90703.0`, `95209.4`, `96173.4`, `100131.4`, `86586.3`, `102757.3`, `86336.5`,
-`98276.7`, `93203.3`, `105906.5`, `97941.8`, `94640.8`, `94971.9`, `90468.7`, `93377.0`, and `92675.7 ns/call`. The latest
-saved full run above is about `1.22x` Rust runtime, and the best historical Fig result remains
-faster than Rust.
+`123520.5`, `117591.1`, `116034.2`, `115433.0`, `118172.1`, and `123184.8 ns/call`, against Rust
+timings of `107435.2`, `97123.5`, `99007.7`, `107722.6`, `114291.5`, `96560.8`, `98842.2`,
+`105409.1`, `87820.7`, `84673.4`, `89164.0`, `112099.6`, `89493.6`, `91065.3`, `90703.0`, `95209.4`,
+`96173.4`, `100131.4`, `86586.3`, `102757.3`, `86336.5`, `98276.7`, `93203.3`, `105906.5`,
+`97941.8`, `94640.8`, `94971.9`, `90468.7`, `93377.0`, and `92675.7 ns/call`. The latest saved full
+run above is about `1.22x` Rust runtime, and the best historical Fig result remains faster than
+Rust.
 
 ## Notes
 

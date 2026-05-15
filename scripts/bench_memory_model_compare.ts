@@ -1,4 +1,4 @@
-import { wasmFromSource, watFromSource } from "../src/mod.ts";
+import { compileArtifactsFromSource } from "../src/mod.ts";
 
 interface FigScenario {
   name: ScenarioName;
@@ -75,6 +75,9 @@ interface Row {
   ns_per_call?: string;
   compile_wat_ms?: string;
   compile_wasm_ms?: string;
+  compile_parse_ms?: string;
+  compile_import_ms?: string;
+  compile_check_ms?: string;
   compile_total_ms?: string;
   wat_bytes?: number;
   wasm_bytes?: number;
@@ -121,6 +124,7 @@ const compileOptions = {
   resolveModule,
   memoryModel: "branch" as const,
   optMode: "release" as const,
+  pruneImports: true,
 };
 
 const scalarFlatShape: ShapeExpectation = {
@@ -501,10 +505,10 @@ const figScenarios: FigScenario[] = [
       },
     },
     source: `
-      const array = @import("prelude.array_static");
+      const range = @import("prelude.range");
       fn add(acc: i32, x: i32) -> i32 { acc + x }
       pub fn main(seed: i32) -> i32 {
-        array.RangeIter.fold(array.RangeI32.Iter(seed - seed .. 1000), 0, add)
+        range.RangeIter.fold(range.RangeI32.Iter(seed - seed .. 1000), 0, add)
       }
     `,
   },
@@ -642,6 +646,9 @@ function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
     "ns_per_call",
     "compile_wat_ms",
     "compile_wasm_ms",
+    "compile_parse_ms",
+    "compile_import_ms",
+    "compile_check_ms",
     "compile_total_ms",
     "wat_bytes",
     "wasm_bytes",
@@ -672,12 +679,9 @@ function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
 
 async function benchFig(scenario: FigScenario, calls: number): Promise<Row> {
   const source = withInternalBench(scenario.source);
-  const watStart = performance.now();
-  const wat = await watFromSource(source, compileOptions);
-  const compileWatMs = performance.now() - watStart;
-  const wasmStart = performance.now();
-  const wasm = await wasmFromSource(source, compileOptions);
-  const compileWasmMs = performance.now() - wasmStart;
+  const artifact = await compileArtifactsFromSource(source, compileOptions);
+  const wat = artifact.wat;
+  const wasm = artifact.wasm;
   const exports = new WebAssembly.Instance(new WebAssembly.Module(wasm)).exports;
   const bench = exports.bench as CallableFunction;
   const shape = scopedWatShape(wat);
@@ -695,7 +699,13 @@ async function benchFig(scenario: FigScenario, calls: number): Promise<Row> {
     wat.length,
     wasm.byteLength,
     shape.module,
-    { compileWatMs, compileWasmMs },
+    {
+      compileParseMs: artifact.timings.parseMs,
+      compileImportMs: artifact.timings.importMs,
+      compileCheckMs: artifact.timings.checkMs,
+      compileWatMs: artifact.timings.watMs,
+      compileWasmMs: artifact.timings.wasmMs,
+    },
   );
 }
 
@@ -752,7 +762,13 @@ function row(
   watBytes?: number,
   wasmBytes?: number,
   shape?: WatShape,
-  compile?: { compileWatMs: number; compileWasmMs: number },
+  compile?: {
+    compileParseMs: number;
+    compileImportMs: number;
+    compileCheckMs: number;
+    compileWatMs: number;
+    compileWasmMs: number;
+  },
 ): Row {
   return {
     runtime,
@@ -772,9 +788,15 @@ function row(
     ...(wasmBytes !== undefined ? { wasm_bytes: wasmBytes } : {}),
     ...(compile
       ? {
+        compile_parse_ms: compile.compileParseMs.toFixed(3),
+        compile_import_ms: compile.compileImportMs.toFixed(3),
+        compile_check_ms: compile.compileCheckMs.toFixed(3),
         compile_wat_ms: compile.compileWatMs.toFixed(3),
         compile_wasm_ms: compile.compileWasmMs.toFixed(3),
-        compile_total_ms: (compile.compileWatMs + compile.compileWasmMs).toFixed(3),
+        compile_total_ms: (
+          compile.compileParseMs + compile.compileImportMs + compile.compileCheckMs +
+          compile.compileWatMs + compile.compileWasmMs
+        ).toFixed(3),
       }
       : {}),
     ...(shape

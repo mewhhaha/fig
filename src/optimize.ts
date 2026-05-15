@@ -18,23 +18,155 @@ import {
   scalarFactsFromI32Range,
 } from "./refined_scalar.ts";
 
-const INLINE_COST_BUDGET = 18;
-const PRODUCT_INLINE_COST_BUDGET = 12;
-const OPTIMIZE_PASSES = 4;
-const LOCAL_EQUALITY_CANDIDATE_LIMIT = 64;
-
 export type OptMode = "debug" | "release";
+
+export type OptimizeProfileName =
+  | "debug"
+  | "release_size"
+  | "release_speed"
+  | "release_balanced";
+
+export interface OptimizeProfile {
+  name: OptimizeProfileName;
+  inline: {
+    scalarBudget: number;
+    productBudget: number;
+    generatedMultiplier: number;
+    allowPublicWrapperInlining: boolean;
+  };
+  recurrence: {
+    unfoldMaxCardinality: number;
+    unfoldMaxAstGrowth: number;
+    loopLowerMinCardinality: number;
+    allowNonTailFiniteUnfold: boolean;
+  };
+  layout: {
+    inlineArrayFlatMaxSlots: number;
+    packedBitMaxWidth: number;
+    scratchMinSlots: number;
+    preferPackedWhenDynamic: boolean;
+  };
+  abstract: {
+    maxPasses: number;
+    maxLocalEqualityCandidates: number;
+  };
+}
 
 export interface OptimizeOptions {
   optMode?: OptMode;
+  profile?: OptimizeProfileName | OptimizeProfile;
 }
 
 interface OptimizerConfig {
+  profile: OptimizeProfile;
   scalarInlineBudget: number;
   productInlineBudget: number;
   passes: number;
   rewriteUnusedPrivateParams: boolean;
 }
+
+export const OPTIMIZE_PROFILES: Record<OptimizeProfileName, OptimizeProfile> = {
+  debug: {
+    name: "debug",
+    inline: {
+      scalarBudget: 0,
+      productBudget: 0,
+      generatedMultiplier: 1,
+      allowPublicWrapperInlining: false,
+    },
+    recurrence: {
+      unfoldMaxCardinality: 0,
+      unfoldMaxAstGrowth: 0,
+      loopLowerMinCardinality: Number.POSITIVE_INFINITY,
+      allowNonTailFiniteUnfold: false,
+    },
+    layout: {
+      inlineArrayFlatMaxSlots: 4,
+      packedBitMaxWidth: 0,
+      scratchMinSlots: Number.POSITIVE_INFINITY,
+      preferPackedWhenDynamic: false,
+    },
+    abstract: {
+      maxPasses: 0,
+      maxLocalEqualityCandidates: 0,
+    },
+  },
+  release_size: {
+    name: "release_size",
+    inline: {
+      scalarBudget: 14,
+      productBudget: 8,
+      generatedMultiplier: 2,
+      allowPublicWrapperInlining: false,
+    },
+    recurrence: {
+      unfoldMaxCardinality: 10,
+      unfoldMaxAstGrowth: 120,
+      loopLowerMinCardinality: 11,
+      allowNonTailFiniteUnfold: true,
+    },
+    layout: {
+      inlineArrayFlatMaxSlots: 4,
+      packedBitMaxWidth: 64,
+      scratchMinSlots: 8,
+      preferPackedWhenDynamic: true,
+    },
+    abstract: {
+      maxPasses: 3,
+      maxLocalEqualityCandidates: 48,
+    },
+  },
+  release_speed: {
+    name: "release_speed",
+    inline: {
+      scalarBudget: 28,
+      productBudget: 18,
+      generatedMultiplier: 2,
+      allowPublicWrapperInlining: false,
+    },
+    recurrence: {
+      unfoldMaxCardinality: 28,
+      unfoldMaxAstGrowth: 240,
+      loopLowerMinCardinality: 29,
+      allowNonTailFiniteUnfold: true,
+    },
+    layout: {
+      inlineArrayFlatMaxSlots: 8,
+      packedBitMaxWidth: 64,
+      scratchMinSlots: 6,
+      preferPackedWhenDynamic: true,
+    },
+    abstract: {
+      maxPasses: 5,
+      maxLocalEqualityCandidates: 96,
+    },
+  },
+  release_balanced: {
+    name: "release_balanced",
+    inline: {
+      scalarBudget: 18,
+      productBudget: 12,
+      generatedMultiplier: 2,
+      allowPublicWrapperInlining: false,
+    },
+    recurrence: {
+      unfoldMaxCardinality: 18,
+      unfoldMaxAstGrowth: 180,
+      loopLowerMinCardinality: 19,
+      allowNonTailFiniteUnfold: true,
+    },
+    layout: {
+      inlineArrayFlatMaxSlots: 6,
+      packedBitMaxWidth: 64,
+      scratchMinSlots: 8,
+      preferPackedWhenDynamic: true,
+    },
+    abstract: {
+      maxPasses: 4,
+      maxLocalEqualityCandidates: 64,
+    },
+  },
+};
 
 export interface FunctionSummary {
   name: string;
@@ -102,6 +234,142 @@ export interface Recurrence {
   kind: RecurrenceKind;
 }
 
+export type RewriteRuleId =
+  | "const.binary.i32"
+  | "domain.compare.always_true"
+  | "domain.compare.always_false"
+  | "match.constant_scrutinee"
+  | "call.inline.private_scalar"
+  | "call.inline.private_product"
+  | "call.inline.generated_const_fn"
+  | "call.inline.skip_public"
+  | "call.inline.skip_effectful"
+  | "call.inline.skip_recursive"
+  | "call.inline.skip_budget"
+  | "recurrence.unfold.finite_static"
+  | "recurrence.lower.tail_loop"
+  | "recurrence.keep_recursive"
+  | "array.project.used_slots"
+  | "array.pack.narrow_unsigned"
+  | "array.layout_packed"
+  | "array.layout_flat"
+  | "array.layout_scratch"
+  | "array.layout_local_slots"
+  | "product.project.known_slot"
+  | "effect.preserve.unused_call_drop";
+
+export interface RewriteRule {
+  id: RewriteRuleId;
+  reason: string;
+}
+
+export type OptimizationRuleId = RewriteRuleId;
+
+export interface OptimizationRule {
+  id: OptimizationRuleId;
+  phase: "facts" | "plan" | "rewrite" | "lower";
+  structuralMatcher: string;
+}
+
+export const OPTIMIZATION_RULES: readonly OptimizationRule[] = [
+  {
+    id: "recurrence.lower.tail_loop",
+    phase: "plan",
+    structuralMatcher: "pure direct self-tail recurrence",
+  },
+  {
+    id: "recurrence.unfold.finite_static",
+    phase: "plan",
+    structuralMatcher: "finite monotone refined-i32 recurrence within profile budget",
+  },
+  {
+    id: "domain.compare.always_true",
+    phase: "plan",
+    structuralMatcher: "comparison truth implied by abstract/domain facts",
+  },
+  {
+    id: "product.project.known_slot",
+    phase: "rewrite",
+    structuralMatcher: "effect-safe known product projected by slot",
+  },
+  {
+    id: "array.project.used_slots",
+    phase: "rewrite",
+    structuralMatcher: "fixed-size array update/project with known slot use",
+  },
+  {
+    id: "array.layout_packed",
+    phase: "plan",
+    structuralMatcher: "narrow fixed array fits packed scalar storage under profile",
+  },
+  {
+    id: "call.inline.private_scalar",
+    phase: "plan",
+    structuralMatcher: "private pure scalar helper within inline budget",
+  },
+] as const;
+
+export interface LayoutCandidate {
+  target: string;
+  layout: "flat" | "packed" | "scratch" | "local_slots";
+  reason: string;
+}
+
+export interface FunctionFacts {
+  typeFacts: Map<string, string>;
+  domainFacts: Map<string, RefinedI32Domain>;
+  constFacts: Map<string, Expr>;
+  effectClass: "pure" | "read_only" | "state" | "volatile" | "host";
+  recurrence?: Recurrence;
+  callCount: number;
+  astCost: number;
+  estimatedWasmCost: number;
+  layoutCandidates: Map<string, LayoutCandidate[]>;
+}
+
+export interface RepresentationPlan {
+  candidates: Map<string, LayoutCandidate[]>;
+}
+
+export interface OptimizationPlan {
+  profile: OptimizeProfileName;
+  functions: Map<string, FunctionPlan>;
+  decisions: OptimizationDecision[];
+}
+
+export interface FunctionPlan {
+  name: string;
+  summary: FunctionSummary;
+  facts: FunctionFacts;
+  recurrence?: Recurrence;
+  representation?: RepresentationPlan;
+  actions: PlannedAction[];
+}
+
+export type PlannedAction =
+  | { kind: "inline"; target: string; reason: string; rule: RewriteRuleId }
+  | { kind: "unfold_recurrence"; recurrence: string; cardinality: number; reason: string }
+  | { kind: "lower_tail_loop"; recurrence: string; reason: string }
+  | { kind: "keep_recursive"; recurrence: string; reason: string }
+  | { kind: "fold_domain_branch"; reason: string; rule: RewriteRuleId }
+  | {
+    kind: "choose_layout";
+    target: string;
+    layout: "flat" | "packed" | "scratch" | "local_slots";
+    reason: string;
+  }
+  | { kind: "drop_unreachable"; name: string; reason: string };
+
+export interface OptimizationDecision {
+  pass: string;
+  target: string;
+  action: RewriteRuleId | PlannedAction["kind"];
+  reason: string;
+  evidence?: Record<string, unknown>;
+  beforeCost?: number;
+  afterCost?: number;
+}
+
 export type AbstractValue =
   | { kind: "unreachable" }
   | { kind: "unknown" }
@@ -122,7 +390,7 @@ export interface AbstractFunctionFacts {
 }
 
 export function optimizeProgram(program: Program, options: OptimizeOptions = {}): Program {
-  const config = optimizerConfig(options.optMode ?? "debug");
+  const config = optimizerConfig(options);
   const optimized = structuredClone(program) as Program;
   const expandedBeforeInline = config.rewriteUnusedPrivateParams &&
     expandFiniteStaticRecurrences(optimized, config);
@@ -130,6 +398,9 @@ export function optimizeProgram(program: Program, options: OptimizeOptions = {})
   if (config.rewriteUnusedPrivateParams && expandFiniteStaticRecurrences(optimized, config)) {
     runOptimizePasses(optimized, config);
   } else if (expandedBeforeInline) {
+    runOptimizePasses(optimized, config);
+  }
+  if (config.rewriteUnusedPrivateParams && lowerTailRecurrenceClauseGroups(optimized, config)) {
     runOptimizePasses(optimized, config);
   }
   if (config.rewriteUnusedPrivateParams) rewriteUnusedPrivateParams(optimized);
@@ -141,29 +412,32 @@ function runOptimizePasses(program: Program, config: OptimizerConfig): void {
     const functions = functionMap(program);
     const forwarding = forwardingWrappers(functions);
     const summaries = functionSummaries(program, functions);
-    const inlineable = inlineableFunctions(functions, summaries, config);
+    const plan = buildOptimizationPlan(program, config.profile, { functions, summaries });
+    const inlineable = inlineableFunctions(functions, plan);
     program.declarations = program.declarations.map((decl) =>
-      optimizeDecl(decl, forwarding, inlineable, functions)
+      optimizeDecl(decl, forwarding, inlineable, functions, config)
     );
     foldAbstractFactsInProgram(program);
   }
 }
 
-function optimizerConfig(optMode: OptMode): OptimizerConfig {
-  if (optMode === "debug") {
-    return {
-      scalarInlineBudget: 0,
-      productInlineBudget: 0,
-      passes: 0,
-      rewriteUnusedPrivateParams: false,
-    };
-  }
+function optimizerConfig(options: OptimizeOptions): OptimizerConfig {
+  const profile = resolveOptimizeProfile(options);
   return {
-    scalarInlineBudget: INLINE_COST_BUDGET,
-    productInlineBudget: PRODUCT_INLINE_COST_BUDGET,
-    passes: OPTIMIZE_PASSES,
-    rewriteUnusedPrivateParams: true,
+    profile,
+    scalarInlineBudget: profile.inline.scalarBudget,
+    productInlineBudget: profile.inline.productBudget,
+    passes: profile.abstract.maxPasses,
+    rewriteUnusedPrivateParams: profile.name !== "debug",
   };
+}
+
+function resolveOptimizeProfile(options: OptimizeOptions = {}): OptimizeProfile {
+  if (typeof options.profile === "string") return OPTIMIZE_PROFILES[options.profile];
+  if (options.profile) return options.profile;
+  return options.optMode === "release"
+    ? OPTIMIZE_PROFILES.release_balanced
+    : OPTIMIZE_PROFILES.debug;
 }
 
 function functionMap(program: Program): Map<string, FnDecl> {
@@ -191,9 +465,16 @@ export function summarizeProgram(
   program: Program,
   options: OptimizeOptions = {},
 ): Map<string, FunctionSummary> {
-  const _config = optimizerConfig(options.optMode ?? "debug");
   const functions = functionMap(program);
   return functionSummaries(program, functions, summarizeRecurrences(program));
+}
+
+export function summarizeOptimizationPlan(
+  program: Program,
+  options: OptimizeOptions = {},
+): OptimizationPlan {
+  const profile = resolveOptimizeProfile(options);
+  return buildOptimizationPlan(program, profile);
 }
 
 export function summarizeRecurrences(program: Program): Map<string, Recurrence> {
@@ -259,15 +540,409 @@ export function summarizeAbstractValues(program: Program): Map<string, AbstractF
   return result;
 }
 
+function buildOptimizationPlan(
+  program: Program,
+  profile: OptimizeProfile,
+  precomputed: {
+    functions?: Map<string, FnDecl>;
+    summaries?: Map<string, FunctionSummary>;
+    recurrences?: Map<string, Recurrence>;
+  } = {},
+): OptimizationPlan {
+  const functions = precomputed.functions ?? functionMap(program);
+  const recurrences = precomputed.recurrences ?? summarizeRecurrences(program);
+  const summaries = precomputed.summaries ?? functionSummaries(program, functions, recurrences);
+  const recurrenceIndex = recurrenceSummariesByFunction(recurrences);
+  const plans = new Map<string, FunctionPlan>();
+  const decisions: OptimizationDecision[] = [];
+
+  for (const [name, summary] of summaries) {
+    const fn = functions.get(name);
+    const recurrence = recurrenceIndex.get(name);
+    const facts = collectFunctionFacts(fn, summary, recurrence, profile);
+    plans.set(name, {
+      name,
+      summary,
+      facts,
+      ...(recurrence ? { recurrence } : {}),
+      representation: { candidates: facts.layoutCandidates },
+      actions: [],
+    });
+  }
+
+  const addAction = (
+    target: string,
+    action: PlannedAction,
+    decision: Omit<OptimizationDecision, "target">,
+  ) => {
+    const plan = plans.get(target);
+    if (plan) plan.actions.push(action);
+    decisions.push({ target, ...decision });
+  };
+
+  for (const [name, summary] of summaries) {
+    const fn = functions.get(name);
+    if (!fn) continue;
+    const inline = chooseInlineAction(fn, summary, profile);
+    if (inline.action.kind === "inline") {
+      addAction(name, inline.action, {
+        pass: "plan.inline",
+        action: inline.action.rule,
+        reason: inline.action.reason,
+        evidence: inline.evidence,
+        beforeCost: summary.astCost,
+      });
+    } else {
+      decisions.push({
+        pass: "plan.inline",
+        target: name,
+        action: inline.rule,
+        reason: inline.reason,
+        evidence: inline.evidence,
+        beforeCost: summary.astCost,
+      });
+    }
+  }
+
+  for (const recurrence of recurrences.values()) {
+    const action = chooseRecurrenceAction(recurrence, functions, profile);
+    const rule: RewriteRuleId = action.kind === "unfold_recurrence"
+      ? "recurrence.unfold.finite_static"
+      : action.kind === "lower_tail_loop"
+      ? "recurrence.lower.tail_loop"
+      : "recurrence.keep_recursive";
+    addAction(recurrence.fn, action, {
+      pass: "plan.recurrence",
+      action: rule,
+      reason: action.reason,
+      evidence: {
+        kind: recurrence.kind,
+        cardinality: recurrence.measure?.cardinality,
+        allTailCalls: recurrence.recursiveCalls.every((call) => call.tail),
+        unfoldMaxCardinality: profile.recurrence.unfoldMaxCardinality,
+        loopLowerMinCardinality: profile.recurrence.loopLowerMinCardinality,
+      },
+    });
+  }
+
+  addDomainFoldDecisions(program, plans, decisions);
+
+  return {
+    profile: profile.name,
+    functions: plans,
+    decisions,
+  };
+}
+
+function collectFunctionFacts(
+  fn: FnDecl | undefined,
+  summary: FunctionSummary,
+  recurrence: Recurrence | undefined,
+  profile: OptimizeProfile,
+): FunctionFacts {
+  const typeFacts = new Map<string, string>();
+  const domainFacts = new Map<string, RefinedI32Domain>();
+  const layoutCandidates = new Map<string, LayoutCandidate[]>();
+  for (const param of fn?.params ?? []) {
+    typeFacts.set(param.name, param.type);
+    const domain = parseRefinedI32Type(param.type);
+    if (domain) domainFacts.set(param.name, domain);
+    const candidates = layoutCandidatesForType(param.name, param.type, profile);
+    if (candidates.length) layoutCandidates.set(param.name, candidates);
+  }
+  return {
+    typeFacts,
+    domainFacts,
+    constFacts: new Map(),
+    effectClass: summary.effectClass,
+    ...(recurrence ? { recurrence } : {}),
+    callCount: summary.callCount,
+    astCost: summary.astCost,
+    estimatedWasmCost: summary.wasmCostEstimate,
+    layoutCandidates,
+  };
+}
+
+function layoutCandidatesForType(
+  target: string,
+  type: string | undefined,
+  profile: OptimizeProfile,
+): LayoutCandidate[] {
+  const inline = type?.match(/InlineArray(?:List|Builder)?\((\d+),\s*([^)]+)\)/);
+  if (!inline) return [];
+  const slots = Number.parseInt(inline[1] ?? "0", 10);
+  const itemType = inline[2]?.trim();
+  const bitWidth = unsignedBitWidth(itemType);
+  const candidates: LayoutCandidate[] = [];
+  if (
+    Number.isFinite(slots) && slots > 0 &&
+    slots <= profile.layout.inlineArrayFlatMaxSlots
+  ) {
+    candidates.push({
+      target,
+      layout: "flat",
+      reason: `inline array has ${slots} slots within flat local budget`,
+    });
+  }
+  if (bitWidth !== undefined && slots * bitWidth <= profile.layout.packedBitMaxWidth) {
+    candidates.push({
+      target,
+      layout: "packed",
+      reason: `narrow unsigned ${itemType} array fits in ${slots * bitWidth} bits`,
+    });
+  }
+  if (
+    Number.isFinite(slots) && slots >= profile.layout.scratchMinSlots
+  ) {
+    candidates.push({
+      target,
+      layout: "scratch",
+      reason: `array has ${slots} slots and may need dynamic indexed storage`,
+    });
+  }
+  return candidates;
+}
+
+function chooseInlineAction(
+  fn: FnDecl,
+  summary: FunctionSummary,
+  profile: OptimizeProfile,
+): {
+  action: PlannedAction | { kind: "skip"; reason: string };
+  rule: RewriteRuleId;
+  reason: string;
+  evidence: Record<string, unknown>;
+} {
+  const budget = inlineBudgetForProfile(fn, summary, profile);
+  const evidence = {
+    astCost: summary.astCost,
+    budget,
+    returnClass: summary.returnClass,
+    effectClass: summary.effectClass,
+    recursiveKind: summary.recursiveKind,
+    generatedInlineable: fn.generatedInlineable === true,
+  };
+  if (summary.isPrimitive) {
+    return {
+      action: { kind: "skip", reason: "primitive functions are lowered directly" },
+      rule: "call.inline.skip_public",
+      reason: "primitive functions are lowered directly",
+      evidence,
+    };
+  }
+  if (summary.isPublic && !profile.inline.allowPublicWrapperInlining) {
+    return {
+      action: { kind: "skip", reason: "public function inlining is disabled by profile" },
+      rule: "call.inline.skip_public",
+      reason: "public function inlining is disabled by profile",
+      evidence,
+    };
+  }
+  if (!summary.isPure) {
+    return {
+      action: { kind: "skip", reason: `effect class is ${summary.effectClass}` },
+      rule: "call.inline.skip_effectful",
+      reason: `effect class is ${summary.effectClass}`,
+      evidence,
+    };
+  }
+  if (summary.recursiveKind !== "none") {
+    return {
+      action: { kind: "skip", reason: `recursive kind is ${summary.recursiveKind}` },
+      rule: "call.inline.skip_recursive",
+      reason: `recursive kind is ${summary.recursiveKind}`,
+      evidence,
+    };
+  }
+  if (summary.astCost > budget) {
+    return {
+      action: { kind: "skip", reason: `astCost ${summary.astCost} exceeds budget ${budget}` },
+      rule: "call.inline.skip_budget",
+      reason: `astCost ${summary.astCost} exceeds budget ${budget}`,
+      evidence,
+    };
+  }
+  const rule: RewriteRuleId = fn.generatedInlineable
+    ? "call.inline.generated_const_fn"
+    : summary.returnClass === "scalar"
+    ? "call.inline.private_scalar"
+    : "call.inline.private_product";
+  const reason = summary.returnClass === "scalar"
+    ? `private pure scalar helper; astCost=${summary.astCost} <= scalarBudget=${budget}`
+    : `private pure product helper; astCost=${summary.astCost} <= productBudget=${budget}`;
+  return {
+    action: { kind: "inline", target: fn.name, reason, rule },
+    rule,
+    reason,
+    evidence,
+  };
+}
+
+function chooseRecurrenceAction(
+  recurrence: Recurrence,
+  functions: Map<string, FnDecl>,
+  profile: OptimizeProfile,
+): PlannedAction {
+  const cardinality = recurrence.measure?.cardinality;
+  const allTail = recurrence.recursiveCalls.every((call) => call.tail);
+  const clausesArePure = recurrence.clauses.every((clause) =>
+    functions.get(clause.fn)?.effects.length === 0
+  );
+  if (!clausesArePure) {
+    return {
+      kind: "keep_recursive",
+      recurrence: recurrence.fn,
+      reason: "recurrence has effectful clauses",
+    };
+  }
+  if (
+    recurrence.kind === "finite_static" &&
+    cardinality !== undefined &&
+    cardinality <= profile.recurrence.unfoldMaxCardinality &&
+    (allTail || profile.recurrence.allowNonTailFiniteUnfold)
+  ) {
+    return {
+      kind: "unfold_recurrence",
+      recurrence: recurrence.fn,
+      cardinality,
+      reason:
+        `finite_static cardinality ${cardinality} <= unfoldMaxCardinality ${profile.recurrence.unfoldMaxCardinality}`,
+    };
+  }
+  if (
+    (recurrence.kind === "finite_static" || recurrence.kind === "tail_linear") &&
+    allTail &&
+    (cardinality === undefined || cardinality >= profile.recurrence.loopLowerMinCardinality)
+  ) {
+    return {
+      kind: "lower_tail_loop",
+      recurrence: recurrence.fn,
+      reason: recurrence.kind === "finite_static"
+        ? `finite_static cardinality ${cardinality} >= loopLowerMinCardinality ${profile.recurrence.loopLowerMinCardinality}`
+        : "direct self-tail recursion",
+    };
+  }
+  return {
+    kind: "keep_recursive",
+    recurrence: recurrence.fn,
+    reason: "not finite-small and not tail-linear",
+  };
+}
+
+function addDomainFoldDecisions(
+  program: Program,
+  plans: Map<string, FunctionPlan>,
+  decisions: OptimizationDecision[],
+): void {
+  for (const fn of program.declarations) {
+    if (fn.kind !== "fn") continue;
+    const folds = foldableDomainBranchReasons(
+      fn.body,
+      new Map(
+        fn.params.map((param) => [param.name, abstractValueFromType(param.type)]),
+      ),
+    );
+    if (!folds.length) continue;
+    const plan = plans.get(fn.name);
+    for (const reason of folds) {
+      const action: PlannedAction = {
+        kind: "fold_domain_branch",
+        reason,
+        rule: "domain.compare.always_true",
+      };
+      plan?.actions.push(action);
+      decisions.push({
+        pass: "plan.abstract",
+        target: fn.name,
+        action: "domain.compare.always_true",
+        reason,
+      });
+    }
+  }
+}
+
+function foldableDomainBranchReasons(
+  block: BlockExpr,
+  env: Map<string, AbstractValue>,
+): string[] {
+  const reasons: string[] = [];
+  const visitExpr = (expr: Expr, scoped: Map<string, AbstractValue>) => {
+    if (expr.kind === "match") {
+      const value = abstractExpr(expr.value, scoped);
+      if (value.kind === "constant" && value.literalKind === "bool") {
+        reasons.push(`match scrutinee is always ${value.value}`);
+      }
+      visitExpr(expr.value, scoped);
+      for (const arm of expr.arms) visitExpr(arm.value, scoped);
+      return;
+    }
+    if (expr.kind === "block") {
+      reasons.push(...foldableDomainBranchReasons(expr, new Map(scoped)));
+      return;
+    }
+    for (const child of exprChildrenForPlanning(expr)) visitExpr(child, scoped);
+  };
+  for (const stmt of block.statements) {
+    if (stmt.kind === "proof_const") continue;
+    const value = abstractExpr(stmt.value, env);
+    visitExpr(stmt.value, env);
+    if (stmt.kind === "let") env.set(stmt.name, value);
+    else for (const name of stmt.names) env.set(name, { kind: "unknown" });
+  }
+  if (block.expr) visitExpr(block.expr, env);
+  return reasons;
+}
+
+function exprChildrenForPlanning(expr: Expr): Expr[] {
+  switch (expr.kind) {
+    case "call":
+      return [expr.callee, ...expr.args];
+    case "const_fn":
+      return [expr.body];
+    case "index":
+      return [expr.target, expr.index];
+    case "binary":
+      return [expr.left, expr.right];
+    case "pipe_bind":
+      return [expr.value, expr.body];
+    case "shape":
+    case "product_constructor":
+      return expr.slots.flatMap((slot) => slot.index ? [slot.index, slot.value] : [slot.value]);
+    case "static_for_slots":
+      return [
+        ...(expr.source.kind === "range" ? [expr.source.start, expr.source.end] : [
+          expr.source.shape,
+        ]),
+        expr.value,
+      ];
+    case "field":
+      return [expr.value, expr.key];
+    case "range":
+      return [expr.start, expr.end];
+    case "match":
+      return [expr.value, ...expr.arms.map((arm) => arm.value)];
+    case "block":
+    case "do":
+    case "literal":
+    case "var":
+    case "placeholder":
+      return [];
+  }
+}
+
 function expandFiniteStaticRecurrences(program: Program, config: OptimizerConfig): boolean {
   const functions = functionMap(program);
-  const recurrences = [...summarizeRecurrences(program).values()]
-    .filter((recurrence) =>
-      recurrence.kind === "finite_static" &&
-      (recurrence.measure?.cardinality ?? Number.POSITIVE_INFINITY) <=
-        Math.max(config.scalarInlineBudget, config.productInlineBudget, 1) &&
-      recurrence.clauses.every((clause) => functions.get(clause.fn)?.effects.length === 0)
-    );
+  const plan = buildOptimizationPlan(program, config.profile, { functions });
+  const recurrences = [...plan.functions.values()]
+    .flatMap((item) =>
+      item.actions.filter((
+        action,
+      ): action is Extract<PlannedAction, { kind: "unfold_recurrence" }> =>
+        action.kind === "unfold_recurrence"
+      )
+    )
+    .map((action) => plan.functions.get(action.recurrence)?.recurrence)
+    .filter((recurrence): recurrence is Recurrence => Boolean(recurrence));
   if (!recurrences.length) return false;
 
   const byTarget = new Map<string, Recurrence>();
@@ -383,6 +1058,187 @@ function expandFiniteStaticRecurrences(program: Program, config: OptimizerConfig
     return decl;
   });
   return changed;
+}
+
+function lowerTailRecurrenceClauseGroups(program: Program, config: OptimizerConfig): boolean {
+  const functions = functionMap(program);
+  const plan = buildOptimizationPlan(program, config.profile, { functions });
+  const replacements = new Map<string, FnDecl>();
+  const remove = new Set<string>();
+  for (const fnPlan of plan.functions.values()) {
+    if (!fnPlan.actions.some((action) => action.kind === "lower_tail_loop")) continue;
+    const recurrence = fnPlan.recurrence;
+    if (!recurrence) continue;
+    const dispatcher = functions.get(recurrence.fn);
+    if (!dispatcher?.generated || dispatcher.primitiveId || dispatcher.effects.length) continue;
+    const clauses = recurrence.clauses.map((clause) => functions.get(clause.fn));
+    if (
+      clauses.some((clause) =>
+        !clause?.generated || !clause.name.startsWith(`${recurrence.fn}__clause_`) ||
+        clause.effects.length
+      )
+    ) continue;
+
+    const clauseMap = new Map(clauses.map((clause) => [clause!.name, clause!]));
+    const body = inlineGeneratedClauseCalls(dispatcher.body, clauseMap);
+    if (!exprCallsFunction(body, recurrence.fn)) continue;
+    replacements.set(recurrence.fn, {
+      ...dispatcher,
+      body,
+      generatedInlineable: true,
+    });
+    for (const clause of clauses) remove.add(clause!.name);
+  }
+  if (!replacements.size) return false;
+  program.declarations = program.declarations.flatMap((decl): Declaration[] => {
+    if (decl.kind !== "fn") return [decl];
+    const replacement = replacements.get(decl.name);
+    if (replacement) return [replacement];
+    return remove.has(decl.name) ? [] : [decl];
+  });
+  return true;
+}
+
+function inlineGeneratedClauseCalls(
+  block: BlockExpr,
+  clauses: Map<string, FnDecl>,
+): BlockExpr {
+  return {
+    ...block,
+    statements: block.statements.map((stmt): Statement =>
+      stmt.kind === "proof_const"
+        ? stmt
+        : { ...stmt, value: inlineGeneratedClauseExpr(stmt.value, clauses) }
+    ),
+    expr: block.expr ? inlineGeneratedClauseExpr(block.expr, clauses) : undefined,
+  };
+}
+
+function inlineGeneratedClauseExpr(expr: Expr, clauses: Map<string, FnDecl>): Expr {
+  switch (expr.kind) {
+    case "call": {
+      const callee = inlineGeneratedClauseExpr(expr.callee, clauses);
+      const args = expr.args.map((arg) => inlineGeneratedClauseExpr(arg, clauses));
+      const clause = callee.kind === "var" ? clauses.get(callee.name) : undefined;
+      return clause ? inlineGeneratedClauseBody(clause, args) : { ...expr, callee, args };
+    }
+    case "do":
+      return expr;
+    case "const_fn":
+      return { ...expr, body: inlineGeneratedClauseExpr(expr.body, clauses) };
+    case "index":
+      return {
+        ...expr,
+        target: inlineGeneratedClauseExpr(expr.target, clauses),
+        index: inlineGeneratedClauseExpr(expr.index, clauses),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: inlineGeneratedClauseExpr(expr.left, clauses),
+        right: inlineGeneratedClauseExpr(expr.right, clauses),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: inlineGeneratedClauseExpr(expr.value, clauses),
+        body: inlineGeneratedClauseExpr(expr.body, clauses),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: inlineGeneratedClauseExpr(expr.value, clauses),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: inlineGeneratedClauseExpr(arm.value, clauses),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          index: slot.index ? inlineGeneratedClauseExpr(slot.index, clauses) : undefined,
+          value: inlineGeneratedClauseExpr(slot.value, clauses),
+        })),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: inlineGeneratedClauseStaticForSource(expr.source, clauses),
+        value: inlineGeneratedClauseExpr(expr.value, clauses),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: inlineGeneratedClauseExpr(expr.value, clauses),
+        key: inlineGeneratedClauseExpr(expr.key, clauses),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: inlineGeneratedClauseExpr(expr.start, clauses),
+        end: inlineGeneratedClauseExpr(expr.end, clauses),
+      };
+    case "block":
+      return inlineGeneratedClauseCalls(expr, clauses);
+    case "literal":
+    case "var":
+    case "placeholder":
+      return expr;
+  }
+}
+
+function inlineGeneratedClauseStaticForSource(
+  source: StaticForSource,
+  clauses: Map<string, FnDecl>,
+): StaticForSource {
+  return source.kind === "range"
+    ? {
+      ...source,
+      start: inlineGeneratedClauseExpr(source.start, clauses),
+      end: inlineGeneratedClauseExpr(source.end, clauses),
+    }
+    : { ...source, shape: inlineGeneratedClauseExpr(source.shape, clauses) };
+}
+
+function inlineGeneratedClauseBody(fn: FnDecl, args: Expr[]): Expr {
+  const statements: Statement[] = [];
+  let body = alphaRenameInlineBlock(structuredClone(fn.body) as FnDecl["body"], fn.name);
+  fn.params.forEach((param, index) => {
+    const arg = args[index];
+    if (!arg) return;
+    const domain = parseRefinedI32Type(param.type);
+    if (domain) {
+      const alias = inlineBindingName(fn.name, `${param.name}_domain`);
+      statements.push({
+        kind: "let",
+        name: alias,
+        type: param.type,
+        value: arg,
+      });
+      body = substituteVar(body, param.name, { kind: "var", name: alias }) as FnDecl["body"];
+      return;
+    }
+    if (arg.kind === "var" || arg.kind === "literal") {
+      body = substituteVar(body, param.name, arg) as FnDecl["body"];
+      return;
+    }
+    const name = inlineBindingName(fn.name, param.name);
+    statements.push({
+      kind: "let",
+      name,
+      type: param.type,
+      value: arg,
+    });
+    body = substituteVar(body, param.name, { kind: "var", name }) as FnDecl["body"];
+  });
+  return {
+    kind: "block",
+    statements: [...statements, ...body.statements],
+    expr: body.expr,
+  };
 }
 
 function expandFiniteStaticRecurrenceCall(
@@ -1141,17 +1997,19 @@ function optimizeDecl(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): Declaration {
   if (decl.kind === "fn") {
     return {
       ...decl,
       body: optimizeBlock(decl.body, forwarding, inlineable, functions, {
         allowMultiValueResult: true,
+        config,
       }),
     };
   }
   if (decl.kind === "let" || decl.kind === "const") {
-    return { ...decl, value: optimizeExpr(decl.value, forwarding, inlineable, functions) };
+    return { ...decl, value: optimizeExpr(decl.value, forwarding, inlineable, functions, config) };
   }
   return decl;
 }
@@ -1161,17 +2019,18 @@ function optimizeBlock(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
-  options: { allowMultiValueResult?: boolean } = {},
+  options: { allowMultiValueResult?: boolean; config: OptimizerConfig },
 ): BlockExpr {
+  const { config } = options;
   const expr = block.expr
-    ? optimizeExpr(block.expr, forwarding, inlineable, functions, {
+    ? optimizeExpr(block.expr, forwarding, inlineable, functions, config, {
       allowMultiValueResult: options.allowMultiValueResult,
     })
     : undefined;
   const optimized: BlockExpr = {
     ...block,
     statements: block.statements.map((stmt) =>
-      optimizeStatement(stmt, forwarding, inlineable, functions)
+      optimizeStatement(stmt, forwarding, inlineable, functions, config)
     ),
     expr: options.allowMultiValueResult && expr
       ? inlineCallExpr(expr, inlineable, { allowMultiValue: true }) ?? expr
@@ -1183,12 +2042,14 @@ function optimizeBlock(
     forwarding,
     inlineable,
     functions,
+    config,
   );
   const staticProjectionFolded = foldStaticProjectionLets(
     fixedUpdateFolded,
     forwarding,
     inlineable,
     functions,
+    config,
   );
   return removeUnusedPureLets(
     inlineSingleUsePureLets(staticProjectionFolded, functions),
@@ -1201,6 +2062,7 @@ function foldFixedUpdateIndexLets(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): BlockExpr {
   if (!block.expr || block.expr.kind !== "shape") return block;
   if (
@@ -1209,7 +2071,7 @@ function foldFixedUpdateIndexLets(
     return block;
   }
 
-  const pureLets = pureLetValues(block, forwarding, inlineable, functions);
+  const pureLets = pureLetValues(block, forwarding, inlineable, functions, config);
   if (!pureLets.size) return block;
 
   const replacements = new Map<string, Expr>();
@@ -1222,7 +2084,7 @@ function foldFixedUpdateIndexLets(
       candidate = substituteVar(candidate, name, value);
       contributors.add(name);
     }
-    const optimized = optimizeExpr(candidate, forwarding, inlineable, functions);
+    const optimized = optimizeExpr(candidate, forwarding, inlineable, functions, config);
     if (!isIntegerLiteral(optimized)) continue;
     for (const name of contributors) replacements.set(name, optimized);
   }
@@ -1235,6 +2097,7 @@ function pureLetValues(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): Map<string, Expr> {
   const values = new Map<string, Expr>();
   for (const stmt of block.statements) {
@@ -1243,7 +2106,7 @@ function pureLetValues(
     for (const [name, replacement] of values) {
       if (usedNames(value).has(name)) value = substituteVar(value, name, replacement);
     }
-    value = optimizeExpr(value, forwarding, inlineable, functions);
+    value = optimizeExpr(value, forwarding, inlineable, functions, config);
     if (stmt.kind === "let" && !hasRuntimeEffect(value, functions)) {
       values.set(stmt.name, value);
       continue;
@@ -1349,16 +2212,18 @@ function foldStaticProjectionLets(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
   initialActive: Map<string, Expr> = new Map(),
 ): BlockExpr {
   const active = new Map(initialActive);
   const statements = block.statements.map((stmt) => {
     if (stmt.kind === "proof_const") return stmt;
     const value = optimizeExpr(
-      rewriteStaticProjections(stmt.value, active, forwarding, inlineable, functions),
+      rewriteStaticProjections(stmt.value, active, forwarding, inlineable, functions, config),
       forwarding,
       inlineable,
       functions,
+      config,
     );
     const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
     for (const name of bindings) active.delete(name);
@@ -1373,10 +2238,11 @@ function foldStaticProjectionLets(
     statements,
     expr: block.expr
       ? optimizeExpr(
-        rewriteStaticProjections(block.expr, active, forwarding, inlineable, functions),
+        rewriteStaticProjections(block.expr, active, forwarding, inlineable, functions, config),
         forwarding,
         inlineable,
         functions,
+        config,
       )
       : undefined,
   };
@@ -1398,6 +2264,7 @@ function rewriteStaticProjections(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): Expr {
   switch (expr.kind) {
     case "index": {
@@ -1407,6 +2274,7 @@ function rewriteStaticProjections(
         forwarding,
         inlineable,
         functions,
+        config,
       );
       const index = rewriteStaticProjections(
         expr.index,
@@ -1414,6 +2282,7 @@ function rewriteStaticProjections(
         forwarding,
         inlineable,
         functions,
+        config,
       );
       const literalIndex = staticIntegerLiteral(index);
       if (target.kind === "var" && literalIndex !== undefined) {
@@ -1429,6 +2298,7 @@ function rewriteStaticProjections(
             forwarding,
             inlineable,
             functions,
+            config,
           );
         }
       }
@@ -1441,8 +2311,16 @@ function rewriteStaticProjections(
         forwarding,
         inlineable,
         functions,
+        config,
       );
-      const key = rewriteStaticProjections(expr.key, active, forwarding, inlineable, functions);
+      const key = rewriteStaticProjections(
+        expr.key,
+        active,
+        forwarding,
+        inlineable,
+        functions,
+        config,
+      );
       const label = literalFieldLabel(key);
       if (value.kind === "var" && label) {
         const source = active.get(value.name);
@@ -1457,6 +2335,7 @@ function rewriteStaticProjections(
             forwarding,
             inlineable,
             functions,
+            config,
           );
         }
       }
@@ -1465,15 +2344,36 @@ function rewriteStaticProjections(
     case "binary":
       return {
         ...expr,
-        left: rewriteStaticProjections(expr.left, active, forwarding, inlineable, functions),
-        right: rewriteStaticProjections(expr.right, active, forwarding, inlineable, functions),
+        left: rewriteStaticProjections(
+          expr.left,
+          active,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
+        right: rewriteStaticProjections(
+          expr.right,
+          active,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
       };
     case "call":
       return {
         ...expr,
-        callee: rewriteStaticProjections(expr.callee, active, forwarding, inlineable, functions),
+        callee: rewriteStaticProjections(
+          expr.callee,
+          active,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
         args: expr.args.map((arg) =>
-          rewriteStaticProjections(arg, active, forwarding, inlineable, functions)
+          rewriteStaticProjections(arg, active, forwarding, inlineable, functions, config)
         ),
       };
     case "pipe_bind": {
@@ -1483,19 +2383,34 @@ function rewriteStaticProjections(
         forwarding,
         inlineable,
         functions,
+        config,
       );
       const scoped = new Map(active);
       scoped.delete(expr.name);
       return {
         ...expr,
         value,
-        body: rewriteStaticProjections(expr.body, scoped, forwarding, inlineable, functions),
+        body: rewriteStaticProjections(
+          expr.body,
+          scoped,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
       };
     }
     case "match":
       return {
         ...expr,
-        value: rewriteStaticProjections(expr.value, active, forwarding, inlineable, functions),
+        value: rewriteStaticProjections(
+          expr.value,
+          active,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
         arms: expr.arms.map((arm) => {
           const scoped = new Map(active);
           for (const name of patternBindingNames(arm.pattern)) scoped.delete(name);
@@ -1507,6 +2422,7 @@ function rewriteStaticProjections(
               forwarding,
               inlineable,
               functions,
+              config,
             ),
           };
         }),
@@ -1518,9 +2434,23 @@ function rewriteStaticProjections(
         slots: expr.slots.map((slot) => ({
           ...slot,
           index: slot.index
-            ? rewriteStaticProjections(slot.index, active, forwarding, inlineable, functions)
+            ? rewriteStaticProjections(
+              slot.index,
+              active,
+              forwarding,
+              inlineable,
+              functions,
+              config,
+            )
             : undefined,
-          value: rewriteStaticProjections(slot.value, active, forwarding, inlineable, functions),
+          value: rewriteStaticProjections(
+            slot.value,
+            active,
+            forwarding,
+            inlineable,
+            functions,
+            config,
+          ),
         })),
       };
     case "static_for_slots": {
@@ -1535,15 +2465,30 @@ function rewriteStaticProjections(
           forwarding,
           inlineable,
           functions,
+          config,
         ),
-        value: rewriteStaticProjections(expr.value, scoped, forwarding, inlineable, functions),
+        value: rewriteStaticProjections(
+          expr.value,
+          scoped,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
       };
     }
     case "range":
       return {
         ...expr,
-        start: rewriteStaticProjections(expr.start, active, forwarding, inlineable, functions),
-        end: rewriteStaticProjections(expr.end, active, forwarding, inlineable, functions),
+        start: rewriteStaticProjections(
+          expr.start,
+          active,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
+        end: rewriteStaticProjections(expr.end, active, forwarding, inlineable, functions, config),
       };
     case "block":
       return foldStaticProjectionLets(
@@ -1551,12 +2496,20 @@ function rewriteStaticProjections(
         forwarding,
         inlineable,
         functions,
+        config,
         active,
       );
     case "const_fn":
       return {
         ...expr,
-        body: rewriteStaticProjections(expr.body, active, forwarding, inlineable, functions),
+        body: rewriteStaticProjections(
+          expr.body,
+          active,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
       };
     case "var": {
       const [base, field] = expr.name.split(".", 2);
@@ -1573,6 +2526,7 @@ function rewriteStaticProjections(
             forwarding,
             inlineable,
             functions,
+            config,
           );
         }
       }
@@ -1592,10 +2546,11 @@ function rewriteProjectionReplacement(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): Expr {
   const scoped = new Map(active);
   scoped.delete(sourceName);
-  return rewriteStaticProjections(replacement, scoped, forwarding, inlineable, functions);
+  return rewriteStaticProjections(replacement, scoped, forwarding, inlineable, functions, config);
 }
 
 function rewriteStaticForProjectionSource(
@@ -1604,17 +2559,32 @@ function rewriteStaticForProjectionSource(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): StaticForSource {
   if (source.kind === "range") {
     return {
       ...source,
-      start: rewriteStaticProjections(source.start, active, forwarding, inlineable, functions),
-      end: rewriteStaticProjections(source.end, active, forwarding, inlineable, functions),
+      start: rewriteStaticProjections(
+        source.start,
+        active,
+        forwarding,
+        inlineable,
+        functions,
+        config,
+      ),
+      end: rewriteStaticProjections(source.end, active, forwarding, inlineable, functions, config),
     };
   }
   return {
     ...source,
-    shape: rewriteStaticProjections(source.shape, active, forwarding, inlineable, functions),
+    shape: rewriteStaticProjections(
+      source.shape,
+      active,
+      forwarding,
+      inlineable,
+      functions,
+      config,
+    ),
   };
 }
 
@@ -1623,9 +2593,10 @@ function optimizeStatement(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): Statement {
   if (stmt.kind === "let" || stmt.kind === "destructure_let") {
-    const value = optimizeExpr(stmt.value, forwarding, inlineable, functions);
+    const value = optimizeExpr(stmt.value, forwarding, inlineable, functions, config);
     const inlined = stmt.kind === "destructure_let" ||
         isFixedUpdateInlineCall(value, inlineable) ||
         isMultiValueInlineLetCall(value, inlineable, functions)
@@ -1633,7 +2604,7 @@ function optimizeStatement(
       : undefined;
     return {
       ...stmt,
-      value: inlined ? optimizeExpr(inlined, forwarding, inlineable, functions) : value,
+      value: inlined ? optimizeExpr(inlined, forwarding, inlineable, functions, config) : value,
     };
   }
   return stmt;
@@ -1669,18 +2640,21 @@ function optimizeExpr(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
   options: { allowMultiValueResult?: boolean } = {},
 ): Expr {
   switch (expr.kind) {
     case "do":
       return expr;
     case "const_fn":
-      return { ...expr, body: optimizeExpr(expr.body, forwarding, inlineable, functions) };
+      return { ...expr, body: optimizeExpr(expr.body, forwarding, inlineable, functions, config) };
     case "call": {
-      const callee = optimizeExpr(expr.callee, forwarding, inlineable, functions);
-      const args = expr.args.map((arg) => optimizeExpr(arg, forwarding, inlineable, functions));
+      const callee = optimizeExpr(expr.callee, forwarding, inlineable, functions, config);
+      const args = expr.args.map((arg) =>
+        optimizeExpr(arg, forwarding, inlineable, functions, config)
+      );
       if (args.length === 0 && callee.kind !== "var") {
-        return optimizeExpr(callee, forwarding, inlineable, functions, options);
+        return optimizeExpr(callee, forwarding, inlineable, functions, config, options);
       }
       const staticValue = optimizeStaticShapeCall(callee, args);
       if (staticValue) return staticValue;
@@ -1691,54 +2665,63 @@ function optimizeExpr(
         const inlined = inlineCall(callee.name, args, inlineable, {
           allowMultiValue: (options.allowMultiValueResult ?? false) && !fixedUpdateShape,
         });
-        if (inlined) return optimizeExpr(inlined, forwarding, inlineable, functions, options);
+        if (inlined) {
+          return optimizeExpr(inlined, forwarding, inlineable, functions, config, options);
+        }
       }
       return { ...expr, callee, args };
     }
     case "index":
       return {
         ...expr,
-        target: optimizeExpr(expr.target, forwarding, inlineable, functions),
-        index: optimizeExpr(expr.index, forwarding, inlineable, functions),
+        target: optimizeExpr(expr.target, forwarding, inlineable, functions, config),
+        index: optimizeExpr(expr.index, forwarding, inlineable, functions, config),
       };
     case "binary":
-      return optimizeBinary({
-        ...expr,
-        left: optimizeExpr(expr.left, forwarding, inlineable, functions),
-        right: optimizeExpr(expr.right, forwarding, inlineable, functions),
-      }, functions);
+      return optimizeBinary(
+        {
+          ...expr,
+          left: optimizeExpr(expr.left, forwarding, inlineable, functions, config),
+          right: optimizeExpr(expr.right, forwarding, inlineable, functions, config),
+        },
+        functions,
+        config,
+      );
     case "pipe_bind": {
-      const value = optimizeExpr(expr.value, forwarding, inlineable, functions);
+      const value = optimizeExpr(expr.value, forwarding, inlineable, functions, config);
       if (expr.name === "$") {
         return optimizeExpr(
           substituteVar(expr.body, expr.name, value),
           forwarding,
           inlineable,
           functions,
+          config,
         );
       }
       return {
         ...expr,
         value,
-        body: optimizeExpr(expr.body, forwarding, inlineable, functions, {
+        body: optimizeExpr(expr.body, forwarding, inlineable, functions, config, {
           allowMultiValueResult: options.allowMultiValueResult,
         }),
       };
     }
     case "match": {
-      const value = optimizeExpr(expr.value, forwarding, inlineable, functions);
+      const value = optimizeExpr(expr.value, forwarding, inlineable, functions, config);
       if (value.kind === "literal" && value.literalKind === "bool") {
         const selected = expr.arms.find((arm) =>
           arm.pattern.kind === "literal" && arm.pattern.value === value.value
         );
-        if (selected) return optimizeExpr(selected.value, forwarding, inlineable, functions);
+        if (selected) {
+          return optimizeExpr(selected.value, forwarding, inlineable, functions, config);
+        }
       }
       return {
         ...expr,
         value,
         arms: expr.arms.map((arm) => ({
           ...arm,
-          value: optimizeExpr(arm.value, forwarding, inlineable, functions, {
+          value: optimizeExpr(arm.value, forwarding, inlineable, functions, config, {
             allowMultiValueResult: options.allowMultiValueResult,
           }),
         })),
@@ -1750,9 +2733,9 @@ function optimizeExpr(
         slots: expr.slots.map((slot) => ({
           ...slot,
           index: slot.index
-            ? optimizeExpr(slot.index, forwarding, inlineable, functions)
+            ? optimizeExpr(slot.index, forwarding, inlineable, functions, config)
             : undefined,
-          value: optimizeExpr(slot.value, forwarding, inlineable, functions),
+          value: optimizeExpr(slot.value, forwarding, inlineable, functions, config),
         })),
       };
     case "product_constructor":
@@ -1760,30 +2743,31 @@ function optimizeExpr(
         ...expr,
         slots: expr.slots.map((slot) => ({
           ...slot,
-          value: optimizeExpr(slot.value, forwarding, inlineable, functions),
+          value: optimizeExpr(slot.value, forwarding, inlineable, functions, config),
         })),
       };
     case "static_for_slots":
       return {
         ...expr,
-        source: optimizeStaticForSource(expr.source, forwarding, inlineable, functions),
-        value: optimizeExpr(expr.value, forwarding, inlineable, functions),
+        source: optimizeStaticForSource(expr.source, forwarding, inlineable, functions, config),
+        value: optimizeExpr(expr.value, forwarding, inlineable, functions, config),
       };
     case "range":
       return {
         ...expr,
-        start: optimizeExpr(expr.start, forwarding, inlineable, functions),
-        end: optimizeExpr(expr.end, forwarding, inlineable, functions),
+        start: optimizeExpr(expr.start, forwarding, inlineable, functions, config),
+        end: optimizeExpr(expr.end, forwarding, inlineable, functions, config),
       };
     case "field":
       return {
         ...expr,
-        value: optimizeExpr(expr.value, forwarding, inlineable, functions),
-        key: optimizeExpr(expr.key, forwarding, inlineable, functions),
+        value: optimizeExpr(expr.value, forwarding, inlineable, functions, config),
+        key: optimizeExpr(expr.key, forwarding, inlineable, functions, config),
       };
     case "block": {
       const block = optimizeBlock(expr, forwarding, inlineable, functions, {
         allowMultiValueResult: options.allowMultiValueResult,
+        config,
       });
       return block.statements.length === 0 && block.expr ? block.expr : block;
     }
@@ -2093,6 +3077,7 @@ function optimizeStaticShapeCall(callee: Expr, args: Expr[]): Expr | undefined {
 function optimizeBinary(
   expr: Extract<Expr, { kind: "binary" }>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): Expr {
   const literal = foldIntegerLiteralBinary(expr);
   if (literal) return literal;
@@ -2124,21 +3109,25 @@ function optimizeBinary(
   }
   if (expr.op === "==" && isBoolLiteral(expr.right, true)) return expr.left;
   if (expr.op === "==" && isBoolLiteral(expr.left, true)) return expr.right;
-  return extractLocalEqualityExpr(expr, functions);
+  return extractLocalEqualityExpr(expr, functions, config);
 }
 
-function extractLocalEqualityExpr(expr: Expr, functions: Map<string, FnDecl>): Expr {
+function extractLocalEqualityExpr(
+  expr: Expr,
+  functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
+): Expr {
   if (!localEqualityEligible(expr, functions)) return expr;
   const seen = new Map<string, Expr>();
   const queue: Expr[] = [expr];
-  while (queue.length && seen.size < LOCAL_EQUALITY_CANDIDATE_LIMIT) {
+  while (queue.length && seen.size < config.profile.abstract.maxLocalEqualityCandidates) {
     const current = queue.shift()!;
     const key = stableExprKey(current);
     if (seen.has(key)) continue;
     seen.set(key, current);
     for (const next of localEqualityRewrites(current, functions)) {
       if (!seen.has(stableExprKey(next))) queue.push(next);
-      if (seen.size + queue.length >= LOCAL_EQUALITY_CANDIDATE_LIMIT) break;
+      if (seen.size + queue.length >= config.profile.abstract.maxLocalEqualityCandidates) break;
     }
   }
   return [...seen.values()].toSorted(compareLocalEqualityCandidates)[0] ?? expr;
@@ -2505,22 +3494,15 @@ function splitTopLevel(source: string): string[] {
 
 function inlineableFunctions(
   functions: Map<string, FnDecl>,
-  summaries: Map<string, FunctionSummary>,
-  config: OptimizerConfig,
+  plan: OptimizationPlan,
 ): Map<string, FnDecl> {
   const result = new Map<string, FnDecl>();
-  for (const fn of functions.values()) {
-    const summary = summaries.get(fn.name);
-    if (!summary || !isInlineableFunction(summary)) continue;
-    if (summary.recursiveKind !== "none") continue;
-    if (summary.astCost > inlineBudget(fn, summary, config)) continue;
-    result.set(fn.name, fn);
+  for (const fnPlan of plan.functions.values()) {
+    if (!fnPlan.actions.some((action) => action.kind === "inline")) continue;
+    const fn = functions.get(fnPlan.name);
+    if (fn) result.set(fn.name, fn);
   }
   return result;
-}
-
-function isInlineableFunction(summary: FunctionSummary): boolean {
-  return !summary.isPublic && !summary.isPrimitive && summary.isPure;
 }
 
 function isScalarRuntimeReturn(type: string | undefined): boolean {
@@ -2536,13 +3518,15 @@ function unsignedBitWidth(type: string | undefined): number | undefined {
   return width >= 1 && width <= 64 ? width : undefined;
 }
 
-function inlineBudget(
+function inlineBudgetForProfile(
   fn: FnDecl,
   summary: FunctionSummary,
-  config: OptimizerConfig,
+  profile: OptimizeProfile,
 ): number {
-  if (summary.returnClass !== "scalar") return config.productInlineBudget;
-  return fn.generatedInlineable ? config.scalarInlineBudget * 2 : config.scalarInlineBudget;
+  if (summary.returnClass !== "scalar") return profile.inline.productBudget;
+  return fn.generatedInlineable
+    ? profile.inline.scalarBudget * profile.inline.generatedMultiplier
+    : profile.inline.scalarBudget;
 }
 
 function functionCost(fn: FnDecl): number {
@@ -3430,14 +4414,15 @@ function optimizeStaticForSource(
   forwarding: Map<string, string>,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
 ): StaticForSource {
   return source.kind === "range"
     ? {
       ...source,
-      start: optimizeExpr(source.start, forwarding, inlineable, functions),
-      end: optimizeExpr(source.end, forwarding, inlineable, functions),
+      start: optimizeExpr(source.start, forwarding, inlineable, functions, config),
+      end: optimizeExpr(source.end, forwarding, inlineable, functions, config),
     }
-    : { ...source, shape: optimizeExpr(source.shape, forwarding, inlineable, functions) };
+    : { ...source, shape: optimizeExpr(source.shape, forwarding, inlineable, functions, config) };
 }
 
 function removeUnusedPureLets(block: BlockExpr, functions: Map<string, FnDecl>): BlockExpr {

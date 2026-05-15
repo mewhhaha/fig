@@ -180,6 +180,29 @@ Deno.test("function clause branch hints lower to dispatcher branch metadata", as
   assertEquals(matchHints.flatMap((fn) => fn.hints.map((hint) => hint.hint)), [1]);
 });
 
+Deno.test("large refined recursive function clauses lower to a loop", async () => {
+  const source = `
+    fn sum_go(i: i32(1000), acc: i32) -> i32 {
+      acc
+    }
+    fn sum_go(i: i32(0..1000), acc: i32) -> i32 {
+      sum_go(i + 1, acc + i)
+    }
+    pub fn main() -> i32 {
+      sum_go(0, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "loop");
+  assert(!wat.includes("call $sum_go"));
+  assert(!wat.includes("call $sum_go__clause_"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 499500);
+});
+
 Deno.test("backend folds scalar literal arithmetic", async () => {
   const wat = await watFromSource(`pub fn main() -> i32 { 40 + 2 }`, { optMode: "release" });
   assertStringIncludes(wat, "i32.const 42");

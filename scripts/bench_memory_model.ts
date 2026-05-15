@@ -1,4 +1,4 @@
-import { wasmFromSource, watFromSource } from "../src/mod.ts";
+import { compileArtifactsFromSource } from "../src/mod.ts";
 
 interface Scenario {
   name: string;
@@ -60,6 +60,7 @@ const compileOptions = {
   resolveModule,
   memoryModel: "branch" as const,
   optMode: "release" as const,
+  pruneImports: true,
 };
 
 const simdDot1Source = `
@@ -412,10 +413,10 @@ const scenarios: Scenario[] = [
     },
     notes: "Range fold lowers to a Wasm loop over scalar state.",
     source: `
-      const array = @import("prelude.array_static");
+      const range = @import("prelude.range");
       fn add(acc: i32, x: i32) -> i32 { acc + x }
       pub fn main(seed: i32) -> i32 {
-        array.RangeIter.fold(array.RangeI32.Iter(seed - seed .. 1000), 0, add)
+        range.RangeIter.fold(range.RangeI32.Iter(seed - seed .. 1000), 0, add)
       }
     `,
   },
@@ -482,15 +483,20 @@ const rows = [];
 for (const scenario of scenarios) {
   let wat: string;
   let wasm: Uint8Array<ArrayBuffer>;
+  let compileParseMs = 0;
+  let compileImportMs = 0;
+  let compileCheckMs = 0;
   let compileWatMs = 0;
   let compileWasmMs = 0;
   try {
-    const watStart = performance.now();
-    wat = await watFromSource(scenario.source, compileOptions);
-    compileWatMs = performance.now() - watStart;
-    const wasmStart = performance.now();
-    wasm = await wasmFromSource(scenario.source, compileOptions);
-    compileWasmMs = performance.now() - wasmStart;
+    const artifact = await compileArtifactsFromSource(scenario.source, compileOptions);
+    wat = artifact.wat;
+    wasm = artifact.wasm;
+    compileParseMs = artifact.timings.parseMs;
+    compileImportMs = artifact.timings.importMs;
+    compileCheckMs = artifact.timings.checkMs;
+    compileWatMs = artifact.timings.watMs;
+    compileWasmMs = artifact.timings.wasmMs;
   } catch (error) {
     throw new Error(`failed to compile benchmark scenario ${scenario.name}: ${String(error)}`);
   }
@@ -512,9 +518,14 @@ for (const scenario of scenarios) {
     elapsed_ms: timed.elapsedMs.toFixed(3),
     calls_per_ms: (calls / timed.elapsedMs).toFixed(3),
     ns_per_call: ((timed.elapsedMs * 1_000_000) / calls).toFixed(1),
+    compile_parse_ms: compileParseMs.toFixed(3),
+    compile_import_ms: compileImportMs.toFixed(3),
+    compile_check_ms: compileCheckMs.toFixed(3),
     compile_wat_ms: compileWatMs.toFixed(3),
     compile_wasm_ms: compileWasmMs.toFixed(3),
-    compile_total_ms: (compileWatMs + compileWasmMs).toFixed(3),
+    compile_total_ms: (
+      compileParseMs + compileImportMs + compileCheckMs + compileWatMs + compileWasmMs
+    ).toFixed(3),
     wat_bytes: wat.length,
     wasm_bytes: wasm.byteLength,
     main_locals: count(mainWat, /\(local \$/g),

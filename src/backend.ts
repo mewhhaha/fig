@@ -12,7 +12,14 @@ import type {
   TypeDecl,
 } from "./core_ast.ts";
 import { CompileError } from "./diagnostics.ts";
-import { optimizeProgram, type OptMode } from "./optimize.ts";
+import {
+  type OptimizationDecision,
+  type OptimizeProfile,
+  type OptimizeProfileName,
+  optimizeProgram,
+  type OptMode,
+  type RewriteRuleId,
+} from "./optimize.ts";
 import { isCatchAllPattern, patternBindingNames } from "./patterns.ts";
 import {
   intrinsicCallId,
@@ -206,6 +213,7 @@ export interface BackendOptions extends CompilerPluginOptions {
   tailCallMode?: TailCallMode;
   memoryModel?: MemoryModel;
   optMode?: OptMode;
+  profile?: OptimizeProfileName | OptimizeProfile;
   branchHints?: boolean;
 }
 
@@ -241,6 +249,148 @@ export function emitWasm(
   });
 }
 
+export function summarizeBackendLayoutDecisions(
+  program: Program,
+  options: BackendOptions = {},
+): OptimizationDecision[] {
+  const plan = backendFixedArrayPlanning(program, options);
+  const decisions: OptimizationDecision[] = [];
+  for (const [fnName, plans] of plan.packed) {
+    for (const item of plans.values()) {
+      decisions.push(layoutDecision(fnName, item.name, "array.layout_packed", {
+        layout: "packed",
+        reason:
+          `InlineArray(${item.capacity}, ${item.itemType}) fits packed ${item.packedType}; total width ${
+            item.capacity * item.bitWidth
+          } bits`,
+        evidence: {
+          function: fnName,
+          target: item.name,
+          capacity: item.capacity,
+          itemType: item.itemType,
+          bitWidth: item.bitWidth,
+          packedType: item.packedType,
+        },
+      }));
+    }
+  }
+  for (const [fnName, plans] of plan.localSlots) {
+    for (const item of plans.values()) {
+      decisions.push(layoutDecision(fnName, item.name, "array.layout_local_slots", {
+        layout: "local_slots",
+        reason: `InlineArray(${item.capacity}, ${item.itemType}) stays in local slots`,
+        evidence: {
+          function: fnName,
+          target: item.name,
+          capacity: item.capacity,
+          itemType: item.itemType,
+        },
+      }));
+    }
+  }
+  for (const [fnName, plans] of plan.scratch) {
+    for (const item of plans.values()) {
+      decisions.push(layoutDecision(fnName, item.name, "array.layout_scratch", {
+        layout: "scratch",
+        reason:
+          `InlineArray(${item.capacity}, ${item.itemType}) uses scratch storage for dynamic access`,
+        evidence: {
+          function: fnName,
+          target: item.name,
+          capacity: item.capacity,
+          itemType: item.itemType,
+          valueType: item.valueType,
+          byteSize: item.byteSize,
+        },
+      }));
+    }
+  }
+  return decisions;
+}
+
+function backendFixedArrayPlanning(
+  program: Program,
+  options: BackendOptions,
+): ReturnType<typeof analyzeFixedArrayPlans> {
+  const memoryModel = options.memoryModel ?? "branch";
+  if (!isMemoryModel(memoryModel)) {
+    throw new CompileError([{
+      code: "backend.memory_model",
+      message: `unknown memory model ${memoryModel}`,
+    }]);
+  }
+  const optMode = options.optMode ?? "debug";
+  const pluginRegistry = createCompilerPluginRegistry(options.plugins);
+  if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
+  const optimized = optimizeProgram(program, { optMode, profile: options.profile });
+  const layouts = createLayoutEnv(optimized);
+  const imports = optimized.imports.map((item) => importAsFn(item));
+  const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
+    decl.kind === "fn" && !decl.primitiveId && !isIntrinsicWrapper(decl, pluginRegistry) &&
+    !decl.params.some((param) => param.const) &&
+    Boolean(decl.returnType)
+  );
+  const sourceFns = optimized.declarations.filter((decl): decl is FnDecl =>
+    decl.kind === "fn" && Boolean(decl.returnType)
+  );
+  const returnProjectionPlans = privateReturnProjectionPlans(runtimeFns, layouts);
+  const projectedRuntimeFns = runtimeFns.map((fn) => {
+    const plan = returnProjectionPlans.get(fn.name);
+    return plan ? { ...fn, returnType: plan.type } : fn;
+  });
+  const baseCtx: LowerContext = {
+    layouts,
+    functions: new Map([...imports, ...sourceFns, ...projectedRuntimeFns].map((fn) => [
+      fn.name,
+      fn,
+    ])),
+    signatures: new Map([...imports, ...projectedRuntimeFns].map((fn) => [fn.name, fn])),
+    intrinsicIdsByName: intrinsicIdsByFunctionName(optimized.declarations, pluginRegistry),
+    pluginRegistry,
+    returnProjectionPlans,
+    tempIndex: 0,
+    tempLocals: [],
+    tailCallMode: options.tailCallMode,
+    memoryModel,
+    optMode,
+    inlineStack: new Set(),
+    fixedArrayTransformerAliases: new Map(),
+    nextDataOffset: 1024,
+  };
+  const reachableProjectedFns = removeUnreachablePrivateFunctions(projectedRuntimeFns);
+  const functions = addOptimizedExportClones(
+    reachableProjectedFns,
+    (fn) => scratchWorthyFixedArrayTargets(fn.body, baseCtx).size > 0,
+  );
+  const signatures = new Map([...imports, ...functions].map((fn) => [fn.name, fn]));
+  const ctx: LowerContext = {
+    ...baseCtx,
+    functions: new Map([...imports, ...sourceFns, ...functions].map((fn) => [fn.name, fn])),
+    signatures,
+    scalarParamFactsByFunction: inferTailParamScalarFacts(functions),
+  };
+  return analyzeFixedArrayPlans(functions, ctx);
+}
+
+function layoutDecision(
+  fnName: string,
+  targetName: string,
+  action: RewriteRuleId,
+  input: {
+    layout: "packed" | "scratch" | "local_slots";
+    reason: string;
+    evidence: Record<string, unknown>;
+  },
+): OptimizationDecision {
+  return {
+    pass: "lower.layout",
+    target: `${fnName}.${targetName}`,
+    action,
+    reason: input.reason,
+    evidence: { ...input.evidence, layout: input.layout },
+  };
+}
+
 function lowerBackendModule(program: Program, options: BackendOptions = {}): BackendModule {
   const memoryModel = options.memoryModel ?? "branch";
   if (!isMemoryModel(memoryModel)) {
@@ -252,7 +402,7 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
   const optMode = options.optMode ?? "debug";
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
-  const optimized = optimizeProgram(program, { optMode });
+  const optimized = optimizeProgram(program, { optMode, profile: options.profile });
   const layouts = createLayoutEnv(optimized);
   const imports = optimized.imports.map((item) => importAsFn(item));
   const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
@@ -1536,11 +1686,10 @@ function inlineArrayLoopWrapperCall(fn: FnDecl): Extract<Expr, { kind: "call" }>
   if (fn.body.statements.length !== 0) return undefined;
   const expr = fn.body.expr;
   if (!expr || expr.kind !== "call" || expr.callee.kind !== "var") return undefined;
-  return isInlineArrayLoopName(expr.callee.name) ? expr : undefined;
+  return expr;
 }
 
 function inlineArrayLoopPlan(fn: FnDecl, ctx: LowerContext): InlineArrayLoopPlan | undefined {
-  if (!isInlineArrayLoopName(fn.name)) return undefined;
   const [capacity, itemType] = inlineArrayLikeTypeArgs(fn.returnType, ctx.layouts) ?? [];
   if (!capacity || !Number.isFinite(capacity) || !itemType) return undefined;
   const expr = fn.body.expr;
@@ -1563,7 +1712,7 @@ function inlineArrayLoopPlan(fn: FnDecl, ctx: LowerContext): InlineArrayLoopPlan
   }
   const push = recursive.args.find((arg): arg is Extract<Expr, { kind: "call" }> =>
     arg.kind === "call" && arg.callee.kind === "var" &&
-    isInlineArrayBuilderPushName(arg.callee.name)
+    isInlineArrayBuilderPushCall(arg, capacity, itemType, ctx)
   );
   if (!push || push.args.length < 3) return undefined;
   const index = push.args.at(-2);
@@ -1572,13 +1721,22 @@ function inlineArrayLoopPlan(fn: FnDecl, ctx: LowerContext): InlineArrayLoopPlan
   return { capacity, itemType, indexName: index.name, value, aliases };
 }
 
-function isInlineArrayLoopName(name: string): boolean {
-  return /(?:^|_)InlineArray_(?:tabulate|tabulate_with|fill|map|imap|imap_with_state|set|update)_loop(?:__|$)/
-    .test(name);
-}
-
-function isInlineArrayBuilderPushName(name: string): boolean {
-  return name.includes("InlineArrayBuilder_push") || name.includes("InlineArrayBuilder.push");
+function isInlineArrayBuilderPushCall(
+  expr: Extract<Expr, { kind: "call" }>,
+  capacity: number,
+  itemType: string,
+  ctx: LowerContext,
+): boolean {
+  if (expr.callee.kind !== "var") return false;
+  const callee = ctx.functions.get(expr.callee.name);
+  const result = inlineArrayLikeTypeArgs(callee?.returnType, ctx.layouts);
+  return Boolean(
+    callee &&
+      result &&
+      result[0] === capacity &&
+      result[1] === itemType &&
+      expr.args.length >= 3,
+  );
 }
 
 function staticIndexExpr(value: number): Expr {
@@ -6065,7 +6223,7 @@ function lowerPrivateProductCallInline(
   if (!ctx.currentFn) return undefined;
   const callee = ctx.functions.get(expr.callee.name);
   if (!callee || callee.public || callee.name === ctx.currentFn?.name) return undefined;
-  if (callee.name.includes("InlineArray")) return undefined;
+  if (isFixedArrayProtocolHelper(callee, ctx)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
   if (flattenType(callee.returnType, ctx.layouts).length <= 1) return undefined;
@@ -6273,6 +6431,26 @@ function lowerPrivateProductCallInline(
     ...packedPrologue,
     ...(forwarded ?? body),
   ];
+}
+
+function isFixedArrayProtocolHelper(
+  fn: FnDecl,
+  ctx: LowerContext,
+  seen = new Set<string>(),
+): boolean {
+  if (seen.has(fn.name)) return false;
+  seen.add(fn.name);
+  if (inlineArrayLoopPlan(fn, ctx)) return true;
+  if (
+    fn.body.expr &&
+    (fixedArrayUpdateCall(fn.body.expr, ctx) || fixedArraySwapCall(fn.body.expr, ctx))
+  ) {
+    return true;
+  }
+  const wrapperCall = inlineArrayLoopWrapperCall(fn);
+  if (!wrapperCall || wrapperCall.callee.kind !== "var") return false;
+  const callee = ctx.functions.get(wrapperCall.callee.name);
+  return callee ? isFixedArrayProtocolHelper(callee, ctx, seen) : false;
 }
 
 function registerInlinedPackedArrayPlan(ctx: LowerContext, plan: PackedArrayPlan) {
