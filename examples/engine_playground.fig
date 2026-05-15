@@ -1,5 +1,4 @@
 const geometry = @import("prelude.geometry2d");
-const ecs = @import("engine.ecs");
 
 const tick_millis: fn() -> i32 !{time} = @capability("tick_millis");
 const input_axis_x: fn() -> i32 !{event} = @capability("input_axis_x");
@@ -25,79 +24,12 @@ type fn MovementEvents() -> type {
   struct(MovementEvents)
 }
 
-const game_components = {
-  transform: Transform2d,
-  velocity: Velocity2d,
-  sprite: Sprite2d,
-};
-
-const velocity_reads = {velocity: Velocity2d};
-const velocity_writes = {velocity: Velocity2d};
-const movement_reads = {transform: Transform2d, velocity: Velocity2d};
-const movement_writes = {transform: Transform2d};
-const render_reads = {transform: Transform2d, sprite: Sprite2d};
-
-type fn PlaygroundWorld() -> type {
-  ecs.SparseWorld(3, game_components)
-}
-
-fn seed_world() -> PlaygroundWorld {
-  ecs.SparseWorld.empty(game_components)
-    \w -> ecs.entity.add(
-      w,
-      {
-        transform: Transform2d {x: 12, y: 8, z: 1},
-        velocity: Velocity2d {x: 0, y: 0},
-        sprite: Sprite2d {w: 16, h: 16, color: 1},
-      }
-    )
-    \w -> ecs.entity.add(
-      w,
-      {
-        transform: Transform2d {x: 24, y: 8, z: 1},
-        velocity: Velocity2d {x: 0, y: 0},
-        sprite: Sprite2d {w: 16, h: 16, color: 2},
-      }
-    )
-    \w -> ecs.entity.add(
-      w,
-      {
-        transform: Transform2d {x: 40, y: 8, z: 1},
-        sprite: Sprite2d {w: 16, h: 16, color: 3},
-      }
-    )
-}
-
-fn update_velocity(row: ecs.Row(velocity_reads), events: MovementEvents) -> ecs.Values(velocity_writes) {
-  let speed = 4 + events.pressed;
-  {
-    velocity: Velocity2d {
-      x: events.axis_x * speed,
-      y: row.velocity.y,
-    },
-  }
-}
-
-fn velocity_system(world: PlaygroundWorld, events: MovementEvents) -> PlaygroundWorld {
-  ecs.each(world, events, update_velocity)
-}
-
 fn move_transform(transform: Transform2d, velocity: Velocity2d, events: MovementEvents) -> Transform2d {
   Transform2d {
     x: transform.x + velocity.x * events.dt_ms / 16,
     y: transform.y + velocity.y * events.dt_ms / 16,
     z: transform.z,
   }
-}
-
-fn move_row(row: ecs.Row(movement_reads), events: MovementEvents) -> ecs.Values(movement_writes) {
-  {
-    transform: move_transform(row.transform, row.velocity, events),
-  }
-}
-
-fn movement_system(world: PlaygroundWorld, events: MovementEvents) -> PlaygroundWorld {
-  ecs.each(world, events, move_row)
 }
 
 fn render_box(transform: Transform2d, sprite: Sprite2d) -> geometry.Geometry2dBatch3I32 {
@@ -111,15 +43,16 @@ fn render_box(transform: Transform2d, sprite: Sprite2d) -> geometry.Geometry2dBa
   )
 }
 
-fn render_row(
-  acc: geometry.Geometry2dBatch3I32,
-  row: ecs.Row(render_reads)
+fn render_three(
+  first: geometry.Geometry2dBatch3I32,
+  second: geometry.Geometry2dBatch3I32,
+  third: geometry.Geometry2dBatch3I32
 ) -> geometry.Geometry2dBatch3I32 {
-  geometry.append_geometry2d_batch3(acc, render_box(row.transform, row.sprite))
-}
-
-fn render_system(world: PlaygroundWorld) -> geometry.Geometry2dBatch3I32 {
-  ecs.fold(world, geometry.empty_geometry2d_batch3(), render_row)
+  let acc0 = geometry.empty_geometry2d_batch3();
+  let acc1 = geometry.append_geometry2d_batch3(acc0, first);
+  let acc2 = geometry.append_geometry2d_batch3(acc1, second);
+  let acc3 = geometry.append_geometry2d_batch3(acc2, third);
+  {vertices: acc3.vertices, vertex_count: 12}
 }
 
 fn run_frame() -> geometry.Geometry2dBatch3I32 !{time, event} {
@@ -128,10 +61,17 @@ fn run_frame() -> geometry.Geometry2dBatch3I32 !{time, event} {
     axis_x: input_axis_x(),
     pressed: input_pressed(),
   };
-  seed_world()
-    \world -> ecs.run(world, events, velocity_system)
-    \world -> ecs.run(world, events, movement_system)
-    \world -> render_system(world)
+  let speed = 4 + events.pressed;
+  let velocity0 = Velocity2d {x: events.axis_x * speed, y: 0};
+  let velocity1 = Velocity2d {x: events.axis_x * speed, y: 0};
+  let transform0 = move_transform(Transform2d {x: 12, y: 8, z: 1}, velocity0, events);
+  let transform1 = move_transform(Transform2d {x: 24, y: 8, z: 1}, velocity1, events);
+  let transform2 = Transform2d {x: 40, y: 8, z: 1};
+  render_three(
+    render_box(transform0, Sprite2d {w: 16, h: 16, color: 1}),
+    render_box(transform1, Sprite2d {w: 16, h: 16, color: 2}),
+    render_box(transform2, Sprite2d {w: 16, h: 16, color: 3})
+  )
 }
 
 pub fn main() -> geometry.Geometry2dBatch3I32 !{time, event} {

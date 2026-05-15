@@ -21,6 +21,10 @@ truth: use `grammar.ebnf`, `src/check.ts`, `src/primitives.ts`, and the tested f
 8. [Examples](EXAMPLES.md) pairs tested good and bad examples with the reason each bad pattern
    fails.
 
+For the longer-term type-system and optimizer direction around refined `i32(...)` domains,
+recursion analysis, and type-directed partial evaluation, see
+[Refinement and Recursion Design Direction](design-refinement-recursion.md).
+
 ## Compact Tour
 
 ```fig

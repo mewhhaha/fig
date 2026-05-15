@@ -21,16 +21,20 @@ import {
   isIntrinsicWrapper,
 } from "./primitives.ts";
 import {
-  createCompilerPluginRegistry,
   type CompilerPluginOptions,
   type CompilerPluginRegistry,
+  createCompilerPluginRegistry,
 } from "./plugins.ts";
 import {
   type I32Range,
   parseRefinedI32Type,
+  refinedI32DomainDifference,
   type ScalarFacts,
   scalarFactsAnyI32,
   scalarFactsAreNonNegative,
+  scalarFactsContainsFacts,
+  scalarFactsContainsLiteral,
+  scalarFactsFromDomain,
   scalarFactsFromI32Range,
   scalarFactsFromRefinedI32Type,
   scalarFactsIntersect,
@@ -1753,7 +1757,10 @@ function cleanupInstrs(
       continue;
     }
     const previous = cleaned[cleaned.length - 1];
-    if (previous?.op === "local.get" && instr.op === "local.set" && previous.name !== instr.name) {
+    if (
+      allowDeadLocalRoundtrip &&
+      previous?.op === "local.get" && instr.op === "local.set" && previous.name !== instr.name
+    ) {
       const source = resolveAlias(previous.name);
       if (canAliasLocalCopyInStraightLine(instrs.slice(index + 1), source, instr.name)) {
         cleaned.pop();
@@ -1872,6 +1879,7 @@ function cleanupInstrs(
         continue;
       }
     }
+    if (foldConstSelectSuffix(cleaned)) continue;
     if (foldNestedIntegerMaskSuffix(cleaned)) continue;
     if (foldRepeatedLocalComputationSuffix(cleaned)) continue;
     if (foldRepeatedLocalComputationSetSuffix(cleaned)) continue;
@@ -1918,6 +1926,22 @@ function foldNestedIntegerMaskSuffix(instrs: Instr[]): boolean {
   const foldedMask = foldConstInstrBinary(maskLeft, maskRight, current.wasm);
   if (!foldedMask) return false;
   instrs.splice(instrs.length - 4, 4, foldedMask, current);
+  return true;
+}
+
+function foldConstSelectSuffix(instrs: Instr[]): boolean {
+  if (instrs.length < 4) return false;
+  const current = instrs[instrs.length - 1];
+  const condition = instrs[instrs.length - 2];
+  const elseValue = instrs[instrs.length - 3];
+  const thenValue = instrs[instrs.length - 4];
+  if (
+    current?.op !== "select" ||
+    condition?.op !== "const" ||
+    elseValue?.op !== "const" ||
+    thenValue?.op !== "const"
+  ) return false;
+  instrs.splice(instrs.length - 4, 4, condition.value === 0 ? elseValue : thenValue);
   return true;
 }
 
@@ -2119,7 +2143,11 @@ function flattenStraightLineLoopGuard(
   if (elseBranch?.op !== "br" || thenBranch?.op !== "br") return undefined;
   if (elseBranch.depth < 1 || thenBranch.depth < 1) return undefined;
   const thenPrefix = instr.thenBody.slice(0, -1);
-  if (thenPrefix.some((item) => instrHasBranch(item) || item.op === "if" || item.op === "block" || item.op === "loop")) {
+  if (
+    thenPrefix.some((item) =>
+      instrHasBranch(item) || item.op === "if" || item.op === "block" || item.op === "loop"
+    )
+  ) {
     return undefined;
   }
   const condition = splitStackProducerSuffix(cleaned, 1);
@@ -3707,7 +3735,9 @@ function invariantLocalNamesForSimpleTailLoop(
       selfCalls.every((call) => tailLoopArgIsIdentity(runtimeCallArgs(call, fn)[index], param, ctx))
     ) {
       names.add(param.name);
-      for (const binding of flattenBinding(param.name, param.type, ctx.layouts)) names.add(binding.name);
+      for (const binding of flattenBinding(param.name, param.type, ctx.layouts)) {
+        names.add(binding.name);
+      }
     }
   }
   return names;
@@ -3859,7 +3889,9 @@ function replaceExprByHoistKey(
   if (replacement) return replacement;
   switch (expr.kind) {
     case "do":
-      return expr.expr ? { ...expr, expr: replaceExprByHoistKey(expr.expr, replacements, invariantNames, ctx) } : expr;
+      return expr.expr
+        ? { ...expr, expr: replaceExprByHoistKey(expr.expr, replacements, invariantNames, ctx) }
+        : expr;
     case "const_fn":
       return { ...expr, body: replaceExprByHoistKey(expr.body, replacements, invariantNames, ctx) };
     case "call":
@@ -3911,7 +3943,10 @@ function replaceExprByHoistKey(
         end: replaceExprByHoistKey(expr.end, replacements, invariantNames, ctx),
       };
     case "static_for_slots":
-      return { ...expr, value: replaceExprByHoistKey(expr.value, replacements, invariantNames, ctx) };
+      return {
+        ...expr,
+        value: replaceExprByHoistKey(expr.value, replacements, invariantNames, ctx),
+      };
     case "field":
       return {
         ...expr,
@@ -4073,7 +4108,9 @@ function lowerOrderedTailParamUpdateStores(
 ): Instr[] | undefined {
   if (activeUpdates.length < 2) return undefined;
   if (activeUpdates.some(({ stmt }) => stmt.value.kind === "call")) return undefined;
-  if (activeUpdates.some(({ stmt }) => hasRuntimeEffect(stmt.value, ctx.functions))) return undefined;
+  if (activeUpdates.some(({ stmt }) => hasRuntimeEffect(stmt.value, ctx.functions))) {
+    return undefined;
+  }
   const ordered = dependencyOrderedTailUpdates(
     activeUpdates.map(({ stmt, index }) => ({ expr: stmt.value, stmt, index })),
     fn,
@@ -4231,10 +4268,12 @@ function lowerTailLoopExpr(
       return param && tailLoopArgIsIdentity(arg, param, ctx) ? [] : [{ arg, index }];
     });
     const cse = tailCallArgCommonSubexprs(activeArgs.map(({ arg }) => arg), ctx, locals);
-    const loweredArgs = cse ? activeArgs.map(({ arg, index }) => ({
-      arg: replaceExprByReuseKey(arg, cse.replacements),
-      index,
-    })) : activeArgs;
+    const loweredArgs = cse
+      ? activeArgs.map(({ arg, index }) => ({
+        arg: replaceExprByReuseKey(arg, cse.replacements),
+        index,
+      }))
+      : activeArgs;
     const flatParams = activeArgs.flatMap(({ index }) => {
       const param = fn.params[index];
       return param ? flattenBinding(param.name, param.type, ctx.layouts) : [];
@@ -4465,13 +4504,19 @@ function replaceExprByReuseKey(expr: Expr, replacements: Map<string, Expr>): Exp
       return {
         ...expr,
         value: replaceExprByReuseKey(expr.value, replacements),
-        arms: expr.arms.map((arm) => ({ ...arm, value: replaceExprByReuseKey(arm.value, replacements) })),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: replaceExprByReuseKey(arm.value, replacements),
+        })),
       };
     case "shape":
     case "product_constructor":
       return {
         ...expr,
-        slots: expr.slots.map((slot) => ({ ...slot, value: replaceExprByReuseKey(slot.value, replacements) })),
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          value: replaceExprByReuseKey(slot.value, replacements),
+        })),
       };
     case "range":
       return {
@@ -4536,6 +4581,21 @@ function lowerTransientFixedArrayTailCall(
     );
     return [
       ...transformed,
+      ...runtimeArgs.slice(1).flatMap((arg, index) =>
+        lowerExpr(arg, ctx, locals, callee?.params[index + 1]?.type)
+      ),
+      ...remainingParams.toReversed().map((param): Instr => ({
+        op: "local.set",
+        name: param.name,
+      })),
+      { op: "br", depth: continueDepth },
+    ];
+  }
+  if (firstArg.kind === "var" && sameStorageName(firstArg.name, firstParam.name)) {
+    const remainingParams = fn.params.slice(1).flatMap((param) =>
+      flattenBinding(param.name, param.type, ctx.layouts)
+    );
+    return [
       ...runtimeArgs.slice(1).flatMap((arg, index) =>
         lowerExpr(arg, ctx, locals, callee?.params[index + 1]?.type)
       ),
@@ -5395,7 +5455,7 @@ function lowerExpr(
     case "do":
       throw new Error("backend cannot lower do expression before desugaring");
     case "literal":
-      return lowerLiteral(expr, expectedType);
+      return lowerLiteral(expr, ctx, expectedType);
     case "var": {
       const deferred = ctx.fixedArrayTransformerAliases?.get(expr.name);
       if (deferred) return lowerExpr(deferred, ctx, locals, expectedType);
@@ -5443,7 +5503,7 @@ function lowerExpr(
         throw new Error(`backend missing runtime callable value: ${expr.callee.name}`);
       }
       const argOffset = Math.max(0, expr.args.length - callee.params.length);
-      return [
+      const loweredCall: Instr[] = [
         ...expr.args.flatMap((arg, index) =>
           index < argOffset
             ? []
@@ -5451,11 +5511,21 @@ function lowerExpr(
         ),
         { op: "call", name: expr.callee.name },
       ];
+      const projected = lowerProjectedCallResult(
+        loweredCall,
+        callee.returnType,
+        expectedType,
+        ctx,
+        locals,
+      );
+      return projected ?? loweredCall;
     }
     case "index":
       return lowerIndex(expr, ctx, locals, expectedType);
     case "binary":
       {
+        const factComparison = lowerI32FactComparison(expr, ctx);
+        if (factComparison) return factComparison;
         const dot = lowerDot4I32(expr, ctx, locals);
         if (dot) return dot;
         const parity = lowerParityRemainderComparison(expr, ctx, locals);
@@ -5916,6 +5986,16 @@ function lowerFlattenedSlotViaTemps(
   ctx: LowerContext,
   locals: Set<string>,
 ): Instr[] {
+  return lowerFlattenedSlotsViaTemps(body, slots, [slotIndex], ctx, locals);
+}
+
+function lowerFlattenedSlotsViaTemps(
+  body: Instr[],
+  slots: LayoutSlot[],
+  slotIndexes: number[],
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
   const temps = slots.map((slot) => {
     const name = `__slot_tmp${ctx.tempIndex++}`;
     ctx.tempLocals.push({ name, type: slot.wat });
@@ -5925,8 +6005,30 @@ function lowerFlattenedSlotViaTemps(
   return [
     ...body,
     ...temps.toReversed().map((name): Instr => ({ op: "local.set", name })),
-    { op: "local.get", name: temps[slotIndex] ?? temps[0] ?? "__slot_tmp_missing" },
+    ...slotIndexes.map((slotIndex): Instr => ({
+      op: "local.get",
+      name: temps[slotIndex] ?? temps[0] ?? "__slot_tmp_missing",
+    })),
   ];
+}
+
+function lowerProjectedCallResult(
+  body: Instr[],
+  actualType: string | undefined,
+  expectedType: string | undefined,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (!actualType || !expectedType || actualType === expectedType) return undefined;
+  const actualSlots = flattenType(actualType, ctx.layouts);
+  const expectedSlots = flattenType(expectedType, ctx.layouts);
+  if (!expectedSlots.length || actualSlots.length <= expectedSlots.length) return undefined;
+  const indexes = expectedSlots.map((expected) => {
+    if (!expected.suffix) return undefined;
+    return actualSlots.findIndex((actual) => actual.suffix === expected.suffix);
+  });
+  if (indexes.some((index) => index === undefined || index < 0)) return undefined;
+  return lowerFlattenedSlotsViaTemps(body, actualSlots, indexes as number[], ctx, locals);
 }
 
 function lowerPipeBind(
@@ -6321,7 +6423,10 @@ function lowerPrivateScalarTailLoopCallInline(
     const fieldValues = productArgFieldValues(arg, fields);
     if (!fieldValues) continue;
     for (const [field, value] of fieldValues) {
-      if (hasRuntimeEffect(value, ctx.functions) || countFieldAccessUses(callee.body, param.name, field) > 1) {
+      if (
+        hasRuntimeEffect(value, ctx.functions) ||
+        countFieldAccessUses(callee.body, param.name, field) > 1
+      ) {
         continue;
       }
       productFieldSubstitutions.set(`${param.name}.${field}`, value);
@@ -6517,8 +6622,7 @@ function lowerPrivateScalarCallInline(
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
   if (hasSelfCall(callee.body, callee.name)) return undefined;
   const cost = backendInlineBlockCost(callee.body);
-  const canInlineTailLoopPredicate =
-    callee.returnType === "bool" &&
+  const canInlineTailLoopPredicate = callee.returnType === "bool" &&
     !callee.generated &&
     analyzeTailCalls(ctx.currentFn).hasOnlyTailDirectSelfCalls &&
     cost <= 32;
@@ -6993,7 +7097,20 @@ function foldBinary(op: string, a: number, b: number): number | boolean | undefi
   }
 }
 
-function lowerLiteral(expr: Extract<Expr, { kind: "literal" }>, expectedType?: string): Instr[] {
+function lowerLiteral(
+  expr: Extract<Expr, { kind: "literal" }>,
+  ctx: LowerContext,
+  expectedType?: string,
+): Instr[] {
+  if (expectedType && (expr.literalKind === "number" || expr.literalKind === "bool")) {
+    const flattened = flattenType(expectedType, ctx.layouts);
+    if (flattened.length > 1) {
+      const value = expr.literalKind === "bool"
+        ? expr.value === "true" ? 1 : 0
+        : Number.parseInt(expr.value, 10);
+      return flattened.map((slot) => ({ op: "const", type: slot.wat, value }));
+    }
+  }
   if (literalTypeMembers(expr.inferredType) || literalTypeMembers(expectedType)) {
     return [{ op: "const", type: "i32", value: literalExprRuntimeValue(expr) ?? 0 }];
   }
@@ -7727,10 +7844,10 @@ function lowerPackedArrayUpdateStore(
       ...lowerPackedArrayValueToItem(
         plan,
         maskValue(
-        [
-          { op: "local.get", name: packedArrayLocalName(plan.name) },
-          { op: "local.get", name: shiftName },
-          { op: "binary", wasm: `${plan.packedType}.shr_u` },
+          [
+            { op: "local.get", name: packedArrayLocalName(plan.name) },
+            { op: "local.get", name: shiftName },
+            { op: "binary", wasm: `${plan.packedType}.shr_u` },
           ],
           plan.packedType,
           plan.bitWidth,
@@ -9393,9 +9510,12 @@ function lowerMatchArms(
     const ignored = hasRuntimeEffect(value, ctx.functions)
       ? lowerIgnoredExpr(value, ctx, locals)
       : [];
+    const armCtx = isCatchAllPattern(arm.pattern)
+      ? ctx
+      : narrowedCtxForPattern(value, arm.pattern, ctx);
     return [
       ...ignored,
-      ...lowerExpr(arm.value, ctx, locals, expectedType),
+      ...lowerExpr(arm.value, armCtx, locals, expectedType),
     ];
   }
   const accumulator = lowerBooleanScalarAccumulator(value, arm, rest, ctx, locals, expectedType);
@@ -9439,7 +9559,9 @@ function lowerBooleanScalarAccumulator(
   ) return undefined;
   const resultType = expectedType ?? exprTypeWithLocals(arm.value, ctx);
   const slot = flattenType(resultType, ctx.layouts)[0];
-  if (!slot || slot.wat !== "i32" || flattenType(resultType, ctx.layouts).length !== 1) return undefined;
+  if (!slot || slot.wat !== "i32" || flattenType(resultType, ctx.layouts).length !== 1) {
+    return undefined;
+  }
 
   const armDelta = scalarAccumulatorDelta(fallback.value, arm.value);
   const fallbackDelta = scalarAccumulatorDelta(arm.value, fallback.value);
@@ -9528,74 +9650,96 @@ function narrowedCtxForPattern(
   pattern: ParamPattern,
   ctx: LowerContext,
 ): LowerContext {
-  if (!isTrueLikePattern(pattern)) return ctx;
-  const narrowed = trueConditionI32Fact(value, ctx);
+  const truth = boolPatternValue(pattern);
+  if (truth === undefined) return ctx;
+  const narrowed = conditionI32Fact(value, ctx, truth);
   return narrowed ? ctxWithLocalScalarFact(ctx, narrowed.name, narrowed.fact) : ctx;
 }
 
-function trueConditionI32Fact(
+function conditionI32Fact(
   value: Expr,
   ctx: LowerContext,
+  truth: boolean,
 ): { name: string; fact: ScalarFacts } | undefined {
   if (value.kind !== "binary") return undefined;
   if (value.left.kind === "var") {
     const right = staticIntegerLiteral(value.right);
     if (right === undefined) return undefined;
     const current = exprI32Facts(value.left, ctx) ?? scalarFactsAnyI32();
-    if (value.op === "==") {
-      const fact = intersectI32FactWithRange(current, { min: right, max: right });
-      if (!fact) return undefined;
-      return {
-        name: value.left.name,
-        fact,
-      };
-    }
-    if (value.op === "<") {
-      const fact = intersectI32FactWithRange(current, { min: I32_MIN, max: right - 1 });
-      if (!fact) return undefined;
-      return {
-        name: value.left.name,
-        fact,
-      };
-    }
-    if (value.op === "<=") {
-      const fact = intersectI32FactWithRange(current, { min: I32_MIN, max: right });
-      if (!fact) return undefined;
-      return {
-        name: value.left.name,
-        fact,
-      };
-    }
+    const fact = leftVarConditionFact(current, value.op, right, truth);
+    if (fact) return { name: value.left.name, fact };
   }
   if (value.right.kind === "var") {
     const left = staticIntegerLiteral(value.left);
     if (left === undefined) return undefined;
     const current = exprI32Facts(value.right, ctx) ?? scalarFactsAnyI32();
-    if (value.op === "==") {
-      const fact = intersectI32FactWithRange(current, { min: left, max: left });
-      if (!fact) return undefined;
-      return {
-        name: value.right.name,
-        fact,
-      };
-    }
-    if (value.op === "<") {
-      const fact = intersectI32FactWithRange(current, { min: left + 1, max: I32_MAX });
-      if (!fact) return undefined;
-      return {
-        name: value.right.name,
-        fact,
-      };
-    }
-    if (value.op === "<=") {
-      const fact = intersectI32FactWithRange(current, { min: left, max: I32_MAX });
-      if (!fact) return undefined;
-      return {
-        name: value.right.name,
-        fact,
-      };
-    }
+    const fact = rightVarConditionFact(current, value.op, left, truth);
+    if (fact) return { name: value.right.name, fact };
   }
+  return undefined;
+}
+
+function leftVarConditionFact(
+  current: ScalarFacts,
+  op: string,
+  right: number,
+  truth: boolean,
+): ScalarFacts | undefined {
+  if (op === "==") return equalityConditionFact(current, right, truth);
+  if (op === "<") return comparisonConditionFact(current, { min: I32_MIN, max: right - 1 }, truth);
+  if (op === "<=") return comparisonConditionFact(current, { min: I32_MIN, max: right }, truth);
+  if (op === ">") return comparisonConditionFact(current, { min: right + 1, max: I32_MAX }, truth);
+  if (op === ">=") return comparisonConditionFact(current, { min: right, max: I32_MAX }, truth);
+  return undefined;
+}
+
+function rightVarConditionFact(
+  current: ScalarFacts,
+  op: string,
+  left: number,
+  truth: boolean,
+): ScalarFacts | undefined {
+  if (op === "==") return equalityConditionFact(current, left, truth);
+  if (op === "<") return comparisonConditionFact(current, { min: left + 1, max: I32_MAX }, truth);
+  if (op === "<=") return comparisonConditionFact(current, { min: left, max: I32_MAX }, truth);
+  if (op === ">") return comparisonConditionFact(current, { min: I32_MIN, max: left - 1 }, truth);
+  if (op === ">=") return comparisonConditionFact(current, { min: I32_MIN, max: left }, truth);
+  return undefined;
+}
+
+function equalityConditionFact(
+  current: ScalarFacts,
+  value: number,
+  truth: boolean,
+): ScalarFacts | undefined {
+  const singleton = scalarFactsFromI32Range({ min: value, max: value });
+  if (truth) return scalarFactsIntersect(current, singleton);
+  const domain = refinedI32DomainDifference(current.domain, singleton.domain);
+  return domain?.intervals.length ? scalarFactsFromDomain(domain) : undefined;
+}
+
+function comparisonConditionFact(
+  current: ScalarFacts,
+  trueRange: I32Range,
+  truth: boolean,
+): ScalarFacts | undefined {
+  const range = truth ? trueRange : complementEdgeRange(trueRange);
+  return range ? intersectI32FactWithRange(current, range) : undefined;
+}
+
+function complementEdgeRange(range: I32Range): I32Range | undefined {
+  if (range.min <= I32_MIN) {
+    return range.max < I32_MAX ? { min: range.max + 1, max: I32_MAX } : undefined;
+  }
+  if (range.max >= I32_MAX) {
+    return range.min > I32_MIN ? { min: I32_MIN, max: range.min - 1 } : undefined;
+  }
+  return undefined;
+}
+
+function boolPatternValue(pattern: ParamPattern): boolean | undefined {
+  if (isTrueLikePattern(pattern)) return true;
+  if (isFalseLikePattern(pattern)) return false;
   return undefined;
 }
 
@@ -10922,6 +11066,79 @@ function lowerPowerOfTwoMultiply(
       { op: "binary", wasm: "i32.shl" },
     ];
   }
+  return undefined;
+}
+
+function lowerI32FactComparison(
+  expr: Extract<Expr, { kind: "binary" }>,
+  ctx: LowerContext,
+): Instr[] | undefined {
+  const leftFacts = exprI32Facts(expr.left, ctx);
+  const rightLiteral = staticIntegerLiteral(expr.right);
+  if (leftFacts && rightLiteral !== undefined) {
+    const folded = compareFactsWithLiteral(leftFacts, expr.op, rightLiteral);
+    if (folded !== undefined) return [{ op: "const", type: "i32", value: folded ? 1 : 0 }];
+  }
+  const rightFacts = exprI32Facts(expr.right, ctx);
+  const leftLiteral = staticIntegerLiteral(expr.left);
+  if (rightFacts && leftLiteral !== undefined) {
+    const folded = compareLiteralWithFacts(leftLiteral, expr.op, rightFacts);
+    if (folded !== undefined) return [{ op: "const", type: "i32", value: folded ? 1 : 0 }];
+  }
+  return undefined;
+}
+
+function compareFactsWithLiteral(
+  facts: ScalarFacts,
+  op: string,
+  literal: number,
+): boolean | undefined {
+  const range = scalarFactsNumericRange(facts);
+  if (op === "==") {
+    if (scalarFactsContainsFacts(scalarFactsFromI32Range({ min: literal, max: literal }), facts)) {
+      return true;
+    }
+    return scalarFactsContainsLiteral(facts, literal) ? undefined : false;
+  }
+  if (op === "!=") {
+    const equal = compareFactsWithLiteral(facts, "==", literal);
+    return equal === undefined ? undefined : !equal;
+  }
+  if (!range) return undefined;
+  if (op === "<") {
+    if (range.max < literal) return true;
+    if (range.min >= literal) return false;
+  }
+  if (op === "<=") {
+    if (range.max <= literal) return true;
+    if (range.min > literal) return false;
+  }
+  if (op === ">") {
+    if (range.min > literal) return true;
+    if (range.max <= literal) return false;
+  }
+  if (op === ">=") {
+    if (range.min >= literal) return true;
+    if (range.max < literal) return false;
+  }
+  return undefined;
+}
+
+function compareLiteralWithFacts(
+  literal: number,
+  op: string,
+  facts: ScalarFacts,
+): boolean | undefined {
+  const swapped = swapComparisonOp(op);
+  return swapped ? compareFactsWithLiteral(facts, swapped, literal) : undefined;
+}
+
+function swapComparisonOp(op: string): string | undefined {
+  if (op === "<") return ">";
+  if (op === "<=") return ">=";
+  if (op === ">") return "<";
+  if (op === ">=") return "<=";
+  if (op === "==" || op === "!=") return op;
   return undefined;
 }
 

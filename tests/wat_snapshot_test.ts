@@ -46,15 +46,13 @@ Deno.test("golden WAT for multi-arm match", async () => {
     ),
     `(module
   (func $main (export "main") (result i32)
-    (local $__inl_classify_x i32)
     i32.const 1
-    local.tee $__inl_classify_x
     i32.const 0
     i32.eq
     if (result i32)
       i32.const 0
     else
-      local.get $__inl_classify_x
+      i32.const 1
       i32.const 1
       i32.eq
       if (result i32)
@@ -80,16 +78,12 @@ Deno.test("golden WAT for literal function clauses", async () => {
     ),
     `(module
   (func $main (export "main") (result i32)
-    (local $__inl_something_n___pattern_734601027 i32)
+    i32.const 10
     i32.const 2
-    local.tee $__inl_something_n___pattern_734601027
+    i32.const 2
     i32.const 1
     i32.eq
-    if (result i32)
-      i32.const 10
-    else
-      local.get $__inl_something_n___pattern_734601027
-    end
+    select
   )
 )`,
   );

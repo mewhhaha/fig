@@ -1,4 +1,10 @@
-import { assert, assertEquals, assertMatch, assertRejects, assertStringIncludes } from "jsr:@std/assert@1";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertRejects,
+  assertStringIncludes,
+} from "jsr:@std/assert@1";
 import { wasmFromSource, watFromSource } from "../src/mod.ts";
 
 const resolveModule = async (moduleName: string) => {
@@ -387,6 +393,43 @@ Deno.test("backend uses refined i32 parameter domains for div/rem lowering", asy
   assertEquals((instance.exports.main as CallableFunction)(31), 16);
 });
 
+Deno.test("backend uses false-branch scalar facts from refined comparisons", async () => {
+  const source = `
+    pub fn main(i: i32) -> i32 {
+      if i < 0 { 0 } else { i / 4 }
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "i32.shr_u");
+  assert(!wat.includes("i32.shr_s"));
+  assert(!wat.includes("i32.div_s"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(-4), 0);
+  assertEquals(main(7), 1);
+});
+
+Deno.test("backend folds comparisons proven by refined i32 domains", async () => {
+  const source = `
+    pub fn main(i: i32(0..4), j: i32(4..8)) -> i32 {
+      let a = if i < 4 { 10 } else { 1 };
+      let b = if j < 4 { 1 } else { 20 };
+      a + b
+    }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  assert(!wat.includes("i32.lt_s"));
+  assertStringIncludes(wat, "i32.const 30");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(3, 4), 30);
+});
+
 Deno.test("backend lowers Index.try refined-domain matches as checked bounds", async () => {
   const source = `
     const core = @import("prelude.core");
@@ -408,7 +451,7 @@ Deno.test("backend lowers Index.try refined-domain matches as checked bounds", a
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
-  assertStringIncludes(wat, "local.set $i");
+  assertStringIncludes(wat, "local.tee $__domain_tmp0");
   assertStringIncludes(wat, "i32.ge_s");
   assertStringIncludes(wat, "i32.le_s");
 
@@ -584,6 +627,27 @@ Deno.test("optimizer simplifies numeric identities without dropping effects", as
   const cancelAddMain = cancelAdd.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(cancelAddMain, "i32.const 1");
   assert(!cancelAddMain.includes("local.get $seed"));
+
+  const cancelSubtract = await watFromSource(
+    `
+    pub fn main(seed: i32) -> i32 { (seed - 7) + 7 }
+  `,
+    { optMode: "release" },
+  );
+  const cancelSubtractMain = cancelSubtract.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(cancelSubtractMain, "local.get $seed");
+  assert(!cancelSubtractMain.includes("i32.sub"));
+  assert(!cancelSubtractMain.includes("i32.add"));
+
+  const cancelNegated = await watFromSource(
+    `
+    pub fn main(seed: i32) -> i32 { (1 - seed) + seed }
+  `,
+    { optMode: "release" },
+  );
+  const cancelNegatedMain = cancelNegated.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(cancelNegatedMain, "i32.const 1");
+  assert(!cancelNegatedMain.includes("local.get $seed"));
 
   const effectful = await watFromSource(
     `
@@ -1691,6 +1755,42 @@ Deno.test("tail-recursive product update defers let-bound fixed-array update int
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 120);
+});
+
+Deno.test("backed product tail loop updates scalar parameters when product stays in place", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    type fn Counts() -> type { layout.InlineArray(4, u3) }
+    type fn State() -> type {
+      let State = {count: Counts, r: i32, index: i32};
+      struct(State)
+    }
+    fn step_continue(state: State, r: i32) -> State {
+      let old = state.count[r];
+      let count = layout.InlineArray.update(4, u3, state.count, r, dec);
+      if old > 1 {
+        State { count: count, r: r, index: state.index + 1 }
+      } else {
+        step_active(State { count: count, r: r + 1, index: state.index }, r + 1)
+      }
+    }
+    fn step_active(state: State, r: i32) -> State {
+      if r == 4 { state } else { step_continue(state, r) }
+    }
+    fn dec(x: u3) -> u3 { x - 1 }
+    pub fn main() -> i32 {
+      let result = step_active(State { count: <1, 1, 3, 0>, r: 1, index: 1 }, 1);
+      result.r * 100000 + result.index * 1000 + result.count[1] * 100 + result.count[2] * 10
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  assertStringIncludes(wat, "loop");
+  assert(!wat.includes("call $step_continue"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 202020);
 });
 
 Deno.test("tail-recursive fixed-array transformer stays backed across caller loop", async () => {

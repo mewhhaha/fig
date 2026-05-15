@@ -30,7 +30,11 @@ import type {
 import { fail, type Span } from "./diagnostics.ts";
 import { hideAstMetadata, stripAstMetadata } from "./ast_meta.ts";
 import { patternBindingNames } from "./patterns.ts";
-import { annotationBranchHint, defaultCompilerPluginRegistry, staticBuiltinName } from "./plugins.ts";
+import {
+  annotationBranchHint,
+  defaultCompilerPluginRegistry,
+  staticBuiltinName,
+} from "./plugins.ts";
 import type { SyntaxNodeLike } from "../generated/baba-workbench/ast/types.ts";
 import { projectNode } from "../generated/baba-workbench/ast/visitor.ts";
 
@@ -1207,8 +1211,6 @@ function bindDollarPlaceholders(expr: Expr): Expr {
         source: bindDollarStaticForSource(expr.source),
         value: bindDollarPlaceholders(expr.value),
       };
-    case "static_for_slots":
-      return { ...expr, value: bindDollarPlaceholders(expr.value) };
     case "field":
       return {
         ...expr,
@@ -1427,25 +1429,6 @@ function lowerShapeValue(node: Node): Expr {
 }
 
 function lowerShapeValueItems(node: Node): Extract<Expr, { kind: "shape" }>["slots"] {
-  const staticFor = optional(node, "StaticForSlot");
-  if (staticFor) {
-    const binderNodes = named(first(staticFor, "StaticForBinders")).filter(isIdentifier);
-    const binders = binderNodes.map((item) => item.text);
-    return [{
-      ...spanOnly(staticFor),
-      value: {
-        kind: "static_for_slots",
-        ...spanOnly(staticFor),
-        iterator: binders[0] ?? "Key",
-        ...(docText(binderNodes[0]) ? { iteratorDoc: docText(binderNodes[0]) } : {}),
-        valueIterator: binders[1],
-        ...(docText(binderNodes[1]) ? { valueIteratorDoc: docText(binderNodes[1]) } : {}),
-        source: lowerStaticForSource(first(staticFor, "StaticForSource")),
-        labeled: true,
-        value: lowerExpr(first(staticFor, "Expr")),
-      },
-    }, ...lowerShapeValueTail(node)];
-  }
   const spread = named(node).find(is("SpreadSlot"));
   if (spread) {
     return [{
@@ -1633,14 +1616,6 @@ function listTupleItems(node: Node, type: "Expr" | "TypeExpr" | "Pattern"): Node
     }
   }
   return found;
-}
-
-function lowerStaticForSource(node: Node): StaticForSource {
-  const lowered = lowerExpr(first(node, "Expr"));
-  if (lowered.kind === "range") {
-    return { kind: "range", ...spanOnly(node), start: lowered.start, end: lowered.end };
-  }
-  return { kind: "shape", ...spanOnly(node), shape: lowered };
 }
 
 function lowerLiteral(node: Node): Expr {

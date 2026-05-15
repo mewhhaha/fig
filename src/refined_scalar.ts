@@ -84,12 +84,8 @@ export function scalarFactsIntersect(
   left: ScalarFacts,
   right: ScalarFacts,
 ): ScalarFacts | undefined {
-  const intervals = left.domain.intervals.flatMap((leftInterval) =>
-    right.domain.intervals
-      .map((rightInterval) => intersectIntervals(leftInterval, rightInterval))
-      .filter((interval): interval is DomainInterval => interval !== undefined)
-  );
-  return intervals.length ? scalarFactsFromDomain({ carrier: "i32", intervals }) : undefined;
+  const domain = refinedI32DomainIntersection(left.domain, right.domain);
+  return domain.intervals.length ? scalarFactsFromDomain(domain) : undefined;
 }
 
 export function scalarFactsIntersectInterval(
@@ -197,6 +193,95 @@ export function intersectRefinedI32Type(
   return facts ? renderRefinedI32Domain(facts.domain) : undefined;
 }
 
+export function refinedI32DomainUnion(
+  left: RefinedI32Domain,
+  right: RefinedI32Domain,
+): RefinedI32Domain {
+  return { carrier: "i32", intervals: normalizeIntervals([...left.intervals, ...right.intervals]) };
+}
+
+export function refinedI32DomainIntersection(
+  left: RefinedI32Domain,
+  right: RefinedI32Domain,
+): RefinedI32Domain {
+  return {
+    carrier: "i32",
+    intervals: normalizeIntervals(
+      left.intervals.flatMap((leftInterval) =>
+        right.intervals
+          .map((rightInterval) => intersectIntervals(leftInterval, rightInterval))
+          .filter((interval): interval is DomainInterval => interval !== undefined)
+      ),
+    ),
+  };
+}
+
+export function refinedI32DomainDifference(
+  left: RefinedI32Domain,
+  right: RefinedI32Domain,
+): RefinedI32Domain | undefined {
+  let remaining = normalizeIntervals(left.intervals);
+  for (const removed of normalizeIntervals(right.intervals)) {
+    const next: DomainInterval[] = [];
+    for (const interval of remaining) {
+      const pieces = subtractInterval(interval, removed);
+      if (!pieces) return undefined;
+      next.push(...pieces);
+    }
+    remaining = normalizeIntervals(next);
+  }
+  return { carrier: "i32", intervals: remaining };
+}
+
+export function unionDomain(
+  left: RefinedI32Domain,
+  right: RefinedI32Domain,
+): RefinedI32Domain {
+  return refinedI32DomainUnion(left, right);
+}
+
+export function intersectDomain(
+  left: RefinedI32Domain,
+  right: RefinedI32Domain,
+): RefinedI32Domain {
+  return refinedI32DomainIntersection(left, right);
+}
+
+export function subtractDomain(
+  left: RefinedI32Domain,
+  right: RefinedI32Domain,
+): RefinedI32Domain | undefined {
+  return refinedI32DomainDifference(left, right);
+}
+
+export function domainContains(expected: RefinedI32Domain, actual: RefinedI32Domain): boolean {
+  return domainContainsDomain(expected, actual);
+}
+
+export function domainIsEmpty(domain: RefinedI32Domain): boolean {
+  return normalizeIntervals(domain.intervals).length === 0;
+}
+
+export function canonicalDomainKey(domain: RefinedI32Domain): string {
+  return renderRefinedI32Domain({
+    carrier: "i32",
+    intervals: normalizeIntervals(domain.intervals),
+  });
+}
+
+export function cardinality(domain: RefinedI32Domain): number | undefined {
+  let total = 0;
+  for (const interval of normalizeIntervals(domain.intervals)) {
+    if (interval.start.kind !== "literal" || interval.end.kind !== "literal") return undefined;
+    total += Math.max(0, interval.end.value - interval.start.value);
+  }
+  return total;
+}
+
+export function renderRefinedI32Domain(domain: RefinedI32Domain): string {
+  return `i32(${domain.intervals.map(renderInterval).join(" | ")})`;
+}
+
 function parseScalarDomainType(
   type: string | undefined,
 ): { carrier: string; domain: RefinedI32Domain; diagnostic?: RefinedScalarDiagnostic } | undefined {
@@ -247,7 +332,7 @@ function parseScalarDomainType(
   };
 }
 
-function scalarFactsFromDomain(domain: RefinedI32Domain): ScalarFacts {
+export function scalarFactsFromDomain(domain: RefinedI32Domain): ScalarFacts {
   const normalized = {
     carrier: "i32" as const,
     intervals: normalizeIntervals(domain.intervals),
@@ -310,26 +395,35 @@ function parseEndpoint(source: string): DomainEndpoint | undefined {
 function normalizeIntervals(intervals: DomainInterval[]): DomainInterval[] {
   const byKey = new Map<string, DomainInterval>();
   for (const interval of intervals) byKey.set(renderInterval(interval), interval);
-  return [...byKey.values()].toSorted(compareIntervals);
+  const sorted = [...byKey.values()]
+    .filter((interval) => !isEmptyLiteralInterval(interval))
+    .toSorted(compareIntervals);
+  const result: DomainInterval[] = [];
+  for (const interval of sorted) {
+    const previous = result.at(-1);
+    if (!previous) {
+      result.push({ ...interval });
+      continue;
+    }
+    const merged = mergeIntervals(previous, interval);
+    if (merged) {
+      result[result.length - 1] = merged;
+    } else {
+      result.push({ ...interval });
+    }
+  }
+  return result;
 }
 
 function compareIntervals(left: DomainInterval, right: DomainInterval): number {
-  const leftStart = endpointSortKey(left.start);
-  const rightStart = endpointSortKey(right.start);
-  if (leftStart !== rightStart) return leftStart < rightStart ? -1 : 1;
-  const leftEnd = endpointSortKey(left.end);
-  const rightEnd = endpointSortKey(right.end);
-  return leftEnd === rightEnd ? 0 : leftEnd < rightEnd ? -1 : 1;
+  return endpointCompare(left.start, right.start) || endpointCompare(left.end, right.end);
 }
 
-function endpointSortKey(endpoint: DomainEndpoint): string {
-  return endpoint.kind === "literal"
-    ? `0:${String(endpoint.value).padStart(12, "0")}`
-    : `1:${endpoint.name}`;
-}
-
-function renderRefinedI32Domain(domain: RefinedI32Domain): string {
-  return `i32(${domain.intervals.map(renderInterval).join(" | ")})`;
+function endpointCompare(left: DomainEndpoint, right: DomainEndpoint): number {
+  if (left.kind === "literal" && right.kind === "literal") return left.value - right.value;
+  if (left.kind === "literal") return -1;
+  if (right.kind === "literal") return 1;
+  return left.name.localeCompare(right.name);
 }
 
 function renderInterval(interval: DomainInterval): string {
@@ -342,7 +436,7 @@ function renderInterval(interval: DomainInterval): string {
 }
 
 function renderEndpoint(endpoint: DomainEndpoint): string {
-  return endpoint.kind === "literal" ? endpoint.source : endpoint.name;
+  return endpoint.kind === "literal" ? String(endpoint.value) : endpoint.name;
 }
 
 function domainContainsLiteral(domain: RefinedI32Domain, value: number): boolean {
@@ -359,6 +453,39 @@ function domainContainsDomain(expected: RefinedI32Domain, actual: RefinedI32Doma
       endpointLeq(actualInterval.end, expectedInterval.end)
     )
   );
+}
+
+function isEmptyLiteralInterval(interval: DomainInterval): boolean {
+  return interval.start.kind === "literal" && interval.end.kind === "literal" &&
+    interval.start.value >= interval.end.value;
+}
+
+function mergeIntervals(left: DomainInterval, right: DomainInterval): DomainInterval | undefined {
+  if (!endpointLeq(right.start, left.end)) return undefined;
+  const end = endpointMax(left.end, right.end);
+  return end ? { start: left.start, end } : undefined;
+}
+
+function subtractInterval(
+  interval: DomainInterval,
+  removed: DomainInterval,
+): DomainInterval[] | undefined {
+  const overlap = intersectIntervals(interval, removed);
+  if (!overlap) return [interval];
+  if (!endpointsComparable(interval.start, overlap.start)) return undefined;
+  if (!endpointsComparable(overlap.end, interval.end)) return undefined;
+  const pieces: DomainInterval[] = [];
+  if (endpointLt(interval.start, overlap.start)) {
+    pieces.push({ start: interval.start, end: overlap.start });
+  }
+  if (endpointLt(overlap.end, interval.end)) {
+    pieces.push({ start: overlap.end, end: interval.end });
+  }
+  return pieces;
+}
+
+function endpointsComparable(left: DomainEndpoint, right: DomainEndpoint): boolean {
+  return endpointLeq(left, right) || endpointLeq(right, left);
 }
 
 function intersectIntervals(

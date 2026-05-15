@@ -118,7 +118,8 @@ fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }
 ```
 
 Repeated functions with the same name are ordered clauses. Clauses must keep compatible visibility,
-arity, return type, effect row, and parameter types. The first matching clause wins.
+arity, return type, effect row, and runtime parameter representation. Refined `i32(...)` domains may
+vary by clause because they all lower to runtime `i32`. The first matching clause wins.
 
 ```fig
 fn score(true: bool, true: bool) -> i32 { 3 }
@@ -134,6 +135,13 @@ fn h(1: i32) -> i32 { 10 }
 fn ignore(_: i32) -> i32 { 0 }
 fn variant(Some(value): Option(i32)) -> i32 { value }
 fn tuple([left, right]: Pair) -> i32 { left + right }
+```
+
+Refined scalar domains can be used for recursive and overloaded clause selection:
+
+```fig
+fn go(i: i32(4), acc: i32) -> i32 { acc }
+fn go(i: i32(0..4), acc: i32) -> i32 { go(i + 1, acc + i) }
 ```
 
 `const` parameters are compile-time parameters. They specialize at call sites and are erased from
@@ -207,8 +215,9 @@ Fenced text literals use triple backticks and are useful for shader source.
 
 ## Rejected Syntax
 
-`static for` statement blocks are not supported. Use tail-recursive helpers or the supported
-record/product static slot syntax where a compile-time shape expands fields.
+`static for` statement blocks and record/product `for` slots are not supported as surface loop
+syntax. Use recursive helpers over refined domains for fixed repetition, and use `type fn` helpers
+with const shapes for record/type-shape metaprogramming.
 
 Array-comprehension-style literals such as `[for i in 0 .. 3: expr]` are rejected. Use tuple/list
-literals, inline-array helpers, or record/product static slots instead.
+literals, inline-array helpers, or recursive builders instead.

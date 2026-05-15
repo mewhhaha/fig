@@ -47,9 +47,26 @@ members, shape transforms, and selected WGSL metadata.
 Compile-time expressions are intentionally smaller than runtime expressions. Unsupported static
 forms report focused diagnostics.
 
-Static slots in records and product constructors evaluate a compile-time shape and generate one
-field per key. Static `for` statement blocks and array-comprehension-style `[for ...]` literals are
-rejected.
+Source-level static `for` forms are rejected, including statement blocks, record/product static
+slots, and array-comprehension-style `[for ...]` literals. Fixed repetition is expressed with
+recursive functions over refined domains, leaving unrolling or loop lowering to the compiler.
+
+## Recurrence Analysis
+
+The compiler records recursive functions as recurrence summaries before backend lowering. A
+recurrence summary groups generated function clauses, records refined `i32(...)` parameter domains,
+tracks direct recursive call sites, and classifies the shape as finite static, tail-linear,
+structural, or general.
+
+Domain-refined clauses such as `i32(4)` and `i32(0..4)` share the same runtime `i32` representation,
+so dispatch remains ordinary value dispatch while the optimizer still has finite domain evidence.
+Finite static classification, including tiny non-tail cases, requires a measured refined-domain
+parameter whose recursive argument progresses monotonically, remains covered by the clause domains,
+and has a non-recursive exit domain. Tail recursion without that proof remains tail-linear. In
+release mode, small proven finite-static recurrences with constant measured arguments may be
+expanded before the normal optimizer folds the result. Proven direct self-tail recursion may lower
+to a Wasm loop or tail-call opcode; broader unrolling, branch-folding, and SIMD decisions should
+consume the recurrence summary rather than reconstructing recursion from cloned source bodies.
 
 ## Lowering Policy
 

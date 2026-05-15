@@ -41,9 +41,7 @@
 "_" @keyword
 "do" @keyword
 "else" @keyword
-"for" @keyword
 "if" @keyword
-"in" @keyword
 "zip" @keyword
 "!" @operator
 "%" @operator

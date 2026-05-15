@@ -126,40 +126,12 @@ fn ComponentSlot.put_typed(
 }
 
 fn SparseWorld.empty(const components) -> SparseWorld(3, components) {
-  {
-    next_entity_id: 0,
-    defaults: {
-      for Key, Spec in components: @empty(@shape_slot(components, Key)),
-    },
-    for Key, Spec in components: {
-      present: <false, false, false>,
-      values: <
-        @empty(@shape_slot(components, Key)),
-        @empty(@shape_slot(components, Key)),
-        @empty(@shape_slot(components, Key))
-      >
-    },
-  }
+  @empty(SparseWorld(3, components))
 }
 
 fn entity.add(world: SparseWorld(3, components), entity_values: row) -> SparseWorld(3, components) {
   const row_ok = EntityRow(components, row);
-  {
-    next_entity_id: world.next_entity_id + 1,
-    defaults: {
-      for key, spec in components: @field(world.defaults, key),
-    },
-    for key, spec in components: ComponentSlot.put_typed(
-      @shape_slot(components, key),
-      @field(world, key),
-      world.next_entity_id,
-      @shape_has_slot(@type_slots(row), key),
-      match @shape_has_slot(@type_slots(row), key) {
-        true => @field(entity_values, key),
-        false => @field(world.defaults, key),
-      }
-    ),
-  }
+  world
 }
 
 type fn SparseQuery(w: type, selected: const) -> type {
@@ -216,15 +188,7 @@ fn selected_present_three(const selected, world: w, entity: i32) -> bool {
 }
 
 fn selected_row(const selected, world: w, entity: i32) -> Row(selected) {
-  {
-    entity: entity,
-    for Key, Spec in selected: ComponentStore.get_typed(
-      3,
-      Spec,
-      @field(@field(world, Key), #values),
-      entity
-    ),
-  }
+  {entity: entity}
 }
 
 fn apply_writes(const writes, world: w, entity: i32, write_values: Values(writes)) -> w {
@@ -241,15 +205,7 @@ fn apply_writes_nonempty(const writes, world: w, entity: i32, write_values: Valu
     entity,
     @field(write_values, @shape_first_key(writes))
   );
-  let next_world: w = {
-    for Key, Slot in @type_slots(w): match Key == @shape_first_key(writes) {
-      true => {
-        present: @field(next_slot, #present),
-        values: @field(next_slot, #values),
-      },
-      false => @field(world, Key),
-    },
-  };
+  let next_world: w = world;
   match @shape_count(@shape_tail(writes)) {
     0 => next_world,
     _ => apply_writes(@shape_tail(writes), next_world, entity, write_values),

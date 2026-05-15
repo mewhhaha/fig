@@ -134,16 +134,8 @@ Player {
 }
 ```
 
-Static slots generate fields from a compile-time shape:
-
-```fig
-const fields = {x: true, y: true};
-let record = {for Key, Spec in (fields): 1};
-let point = Point {for Key, Spec in (fields): 1};
-```
-
-The generated key is used as the slot label. Static slots are supported in records and product
-constructors.
+Source-level static slot generation is not part of the expression language. Write explicit record or
+product slots, or express fixed repetition through recursive function clauses over refined domains.
 
 ## Tuples and Collections
 

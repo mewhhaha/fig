@@ -9,10 +9,19 @@ import type {
   StaticForSource,
 } from "./core_ast.ts";
 import { patternBindingNames, patternBindsName } from "./patterns.ts";
+import {
+  I32_MAX,
+  I32_MIN,
+  parseRefinedI32Type,
+  type RefinedI32Domain,
+  renderRefinedI32Domain,
+  scalarFactsFromI32Range,
+} from "./refined_scalar.ts";
 
 const INLINE_COST_BUDGET = 18;
 const PRODUCT_INLINE_COST_BUDGET = 12;
 const OPTIMIZE_PASSES = 4;
+const LOCAL_EQUALITY_CANDIDATE_LIMIT = 64;
 
 export type OptMode = "debug" | "release";
 
@@ -37,7 +46,12 @@ export interface FunctionSummary {
   recursiveKind: "none" | "self_tail" | "self_non_tail" | "mutual";
   astCost: number;
   wasmCostEstimate: number;
+  runtimeInstructionEstimate: number;
+  maxRecursionUnfoldingCardinality?: number;
   callCount: number;
+  effectClass: "pure" | "read_only" | "state" | "volatile" | "host";
+  allocationBehavior: "none" | "flat" | "heap" | "buffer" | "closure" | "unknown";
+  stackBehavior: "none" | "tail_call" | "recursive_stack" | "mutual_or_unknown";
   returnClass:
     | "scalar"
     | "flat_product"
@@ -56,20 +70,83 @@ export interface FunctionSummary {
   heapWriteCountEstimate: number;
 }
 
+export type RecurrenceKind = "finite_static" | "tail_linear" | "structural" | "general_recursive";
+
+export interface DomainMeasure {
+  kind: "domain";
+  param: string;
+  cardinality: number;
+  direction?: "increasing" | "decreasing";
+  terminates: boolean;
+}
+
+export interface RecursiveCall {
+  clause: string;
+  target: string;
+  tail: boolean;
+  args: Expr[];
+}
+
+export interface RecurrenceClause {
+  fn: string;
+  paramDomains: (RefinedI32Domain | undefined)[];
+  body: BlockExpr;
+}
+
+export interface Recurrence {
+  fn: string;
+  params: string[];
+  clauses: RecurrenceClause[];
+  recursiveCalls: RecursiveCall[];
+  measure?: DomainMeasure;
+  kind: RecurrenceKind;
+}
+
+export type AbstractValue =
+  | { kind: "unreachable" }
+  | { kind: "unknown" }
+  | {
+    kind: "constant";
+    literalKind: "number" | "bool" | "string" | "char" | "literalType";
+    value: string;
+  }
+  | { kind: "i32_domain"; type: string; domain: RefinedI32Domain }
+  | { kind: "bool_domain"; values: boolean[] }
+  | { kind: "product"; slots: { label?: string; value: AbstractValue }[] };
+
+export interface AbstractFunctionFacts {
+  name: string;
+  params: Map<string, AbstractValue>;
+  locals: Map<string, AbstractValue>;
+  returnValue: AbstractValue;
+}
+
 export function optimizeProgram(program: Program, options: OptimizeOptions = {}): Program {
   const config = optimizerConfig(options.optMode ?? "debug");
   const optimized = structuredClone(program) as Program;
-  for (let pass = 0; pass < config.passes; pass++) {
-    const functions = functionMap(optimized);
-    const forwarding = forwardingWrappers(functions);
-    const summaries = functionSummaries(optimized, functions);
-    const inlineable = inlineableFunctions(functions, summaries, config);
-    optimized.declarations = optimized.declarations.map((decl) =>
-      optimizeDecl(decl, forwarding, inlineable, functions)
-    );
+  const expandedBeforeInline = config.rewriteUnusedPrivateParams &&
+    expandFiniteStaticRecurrences(optimized, config);
+  runOptimizePasses(optimized, config);
+  if (config.rewriteUnusedPrivateParams && expandFiniteStaticRecurrences(optimized, config)) {
+    runOptimizePasses(optimized, config);
+  } else if (expandedBeforeInline) {
+    runOptimizePasses(optimized, config);
   }
   if (config.rewriteUnusedPrivateParams) rewriteUnusedPrivateParams(optimized);
   return optimized;
+}
+
+function runOptimizePasses(program: Program, config: OptimizerConfig): void {
+  for (let pass = 0; pass < config.passes; pass++) {
+    const functions = functionMap(program);
+    const forwarding = forwardingWrappers(functions);
+    const summaries = functionSummaries(program, functions);
+    const inlineable = inlineableFunctions(functions, summaries, config);
+    program.declarations = program.declarations.map((decl) =>
+      optimizeDecl(decl, forwarding, inlineable, functions)
+    );
+    foldAbstractFactsInProgram(program);
+  }
 }
 
 function optimizerConfig(optMode: OptMode): OptimizerConfig {
@@ -116,19 +193,761 @@ export function summarizeProgram(
 ): Map<string, FunctionSummary> {
   const _config = optimizerConfig(options.optMode ?? "debug");
   const functions = functionMap(program);
-  return functionSummaries(program, functions);
+  return functionSummaries(program, functions, summarizeRecurrences(program));
+}
+
+export function summarizeRecurrences(program: Program): Map<string, Recurrence> {
+  const declarations = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+  const byBase = new Map<string, FnDecl[]>();
+  for (const fn of declarations) {
+    if (fn.primitiveId) continue;
+    const base = recurrenceBaseName(fn.name);
+    const callsBase = exprCallsFunction(fn.body, base);
+    if (base === fn.name && !callsBase) continue;
+    const group = byBase.get(base) ?? [];
+    group.push(fn);
+    byBase.set(base, group);
+  }
+  const recurrences = new Map<string, Recurrence>();
+  for (const [base, clauses] of byBase) {
+    const targets = new Set([base, ...clauses.map((fn) => fn.name)]);
+    const recursiveCalls = clauses.flatMap((clause) =>
+      recursiveCallDetails(clause.body, targets, clause.name, true)
+    );
+    if (!recursiveCalls.length) continue;
+    const signature = clauses.find((fn) => fn.name === base) ?? clauses[0]!;
+    const hasGeneratedClauses = clauses.some((fn) => fn.name !== base);
+    const recurrenceClauses = clauses
+      .filter((fn) => !(hasGeneratedClauses && fn.name === base))
+      .map((fn): RecurrenceClause => ({
+        fn: fn.name,
+        paramDomains: fn.params.map((param) => parseRefinedI32Type(param.type)),
+        body: fn.body,
+      }));
+    const measure = recurrenceDomainMeasure(
+      signature.params,
+      recurrenceClauses,
+      recursiveCalls,
+    );
+    recurrences.set(base, {
+      fn: base,
+      params: signature.params.map((param) => param.name),
+      clauses: recurrenceClauses,
+      recursiveCalls,
+      ...(measure ? { measure } : {}),
+      kind: classifyRecurrence(recursiveCalls, recurrenceClauses, measure),
+    });
+  }
+  return recurrences;
+}
+
+export function summarizeAbstractValues(program: Program): Map<string, AbstractFunctionFacts> {
+  const result = new Map<string, AbstractFunctionFacts>();
+  for (const fn of program.declarations) {
+    if (fn.kind !== "fn") continue;
+    const params = new Map(
+      fn.params.map((param) => [param.name, abstractValueFromType(param.type)]),
+    );
+    const block = abstractBlock(fn.body, params);
+    result.set(fn.name, {
+      name: fn.name,
+      params,
+      locals: block.locals,
+      returnValue: block.value,
+    });
+  }
+  return result;
+}
+
+function expandFiniteStaticRecurrences(program: Program, config: OptimizerConfig): boolean {
+  const functions = functionMap(program);
+  const recurrences = [...summarizeRecurrences(program).values()]
+    .filter((recurrence) =>
+      recurrence.kind === "finite_static" &&
+      (recurrence.measure?.cardinality ?? Number.POSITIVE_INFINITY) <=
+        Math.max(config.scalarInlineBudget, config.productInlineBudget, 1) &&
+      recurrence.clauses.every((clause) => functions.get(clause.fn)?.effects.length === 0)
+    );
+  if (!recurrences.length) return false;
+
+  const byTarget = new Map<string, Recurrence>();
+  for (const recurrence of recurrences) {
+    byTarget.set(recurrence.fn, recurrence);
+    for (const clause of recurrence.clauses) byTarget.set(clause.fn, recurrence);
+  }
+
+  let changed = false;
+  const rewriteBlock = (block: BlockExpr, depths: Map<string, number>): BlockExpr => ({
+    ...block,
+    statements: block.statements.map((stmt) =>
+      stmt.kind === "proof_const" ? stmt : { ...stmt, value: rewriteExpr(stmt.value, depths) }
+    ),
+    expr: block.expr ? rewriteExpr(block.expr, depths) : undefined,
+  });
+  const rewriteExpr = (expr: Expr, depths: Map<string, number>): Expr => {
+    switch (expr.kind) {
+      case "do":
+        return {
+          ...expr,
+          statements: expr.statements.map((stmt) =>
+            stmt.kind === "proof_const" ? stmt : { ...stmt, value: rewriteExpr(stmt.value, depths) }
+          ),
+          expr: expr.expr ? rewriteExpr(expr.expr, depths) : undefined,
+        };
+      case "const_fn":
+        return { ...expr, body: rewriteExpr(expr.body, depths) };
+      case "call": {
+        const callee = rewriteExpr(expr.callee, depths);
+        const args = expr.args.map((arg) => rewriteExpr(arg, depths));
+        if (callee.kind !== "var") return { ...expr, callee, args };
+        const recurrence = byTarget.get(callee.name);
+        if (!recurrence?.measure) return { ...expr, callee, args };
+        const depth = depths.get(recurrence.fn) ?? 0;
+        if (depth > recurrence.measure.cardinality + 1) return { ...expr, callee, args };
+        const expanded = expandFiniteStaticRecurrenceCall(
+          recurrence,
+          functions,
+          args,
+          depth,
+        );
+        if (!expanded) return { ...expr, callee, args };
+        changed = true;
+        return rewriteExpr(expanded, new Map(depths).set(recurrence.fn, depth + 1));
+      }
+      case "index":
+        return {
+          ...expr,
+          target: rewriteExpr(expr.target, depths),
+          index: rewriteExpr(expr.index, depths),
+        };
+      case "binary":
+        return {
+          ...expr,
+          left: rewriteExpr(expr.left, depths),
+          right: rewriteExpr(expr.right, depths),
+        };
+      case "pipe_bind":
+        return {
+          ...expr,
+          value: rewriteExpr(expr.value, depths),
+          body: rewriteExpr(expr.body, depths),
+        };
+      case "match":
+        return {
+          ...expr,
+          value: rewriteExpr(expr.value, depths),
+          arms: expr.arms.map((arm) => ({ ...arm, value: rewriteExpr(arm.value, depths) })),
+        };
+      case "shape":
+      case "product_constructor":
+        return {
+          ...expr,
+          slots: expr.slots.map((slot) => ({
+            ...slot,
+            index: slot.index ? rewriteExpr(slot.index, depths) : undefined,
+            value: rewriteExpr(slot.value, depths),
+          })),
+        };
+      case "static_for_slots":
+        return {
+          ...expr,
+          source: rewriteFiniteStaticRecurrenceSource(expr.source, depths, rewriteExpr),
+          value: rewriteExpr(expr.value, depths),
+        };
+      case "field":
+        return {
+          ...expr,
+          value: rewriteExpr(expr.value, depths),
+          key: rewriteExpr(expr.key, depths),
+        };
+      case "range":
+        return {
+          ...expr,
+          start: rewriteExpr(expr.start, depths),
+          end: rewriteExpr(expr.end, depths),
+        };
+      case "block":
+        return rewriteBlock(expr, depths);
+      case "literal":
+      case "var":
+      case "placeholder":
+        return expr;
+    }
+  };
+
+  program.declarations = program.declarations.map((decl) => {
+    if (decl.kind === "fn") return { ...decl, body: rewriteBlock(decl.body, new Map()) };
+    if (decl.kind === "let" || decl.kind === "const") {
+      return { ...decl, value: rewriteExpr(decl.value, new Map()) };
+    }
+    return decl;
+  });
+  return changed;
+}
+
+function expandFiniteStaticRecurrenceCall(
+  recurrence: Recurrence,
+  functions: Map<string, FnDecl>,
+  args: Expr[],
+  depth: number,
+): Expr | undefined {
+  const measure = recurrence.measure;
+  if (!measure || depth > measure.cardinality + 1) return undefined;
+  const measureIndex = recurrence.params.indexOf(measure.param);
+  if (measureIndex < 0) return undefined;
+  const value = evaluateIntegerExpr(args[measureIndex]);
+  if (value === undefined) return undefined;
+  const clause = recurrence.clauses.find((item) =>
+    domainContainsInteger(item.paramDomains[measureIndex], value)
+  );
+  const fn = clause ? functions.get(clause.fn) : undefined;
+  if (!fn || fn.params.length !== args.length) return undefined;
+  return inlineRecurrenceClause(fn, args, measureIndex, value);
+}
+
+function inlineRecurrenceClause(
+  fn: FnDecl,
+  args: Expr[],
+  measureIndex: number,
+  measureValue: number,
+): Expr {
+  const statements: Statement[] = [];
+  let body = alphaRenameInlineBlock(structuredClone(fn.body) as FnDecl["body"], fn.name);
+  fn.params.forEach((param, index) => {
+    const arg = args[index];
+    if (index === measureIndex) {
+      body = substituteVar(body, param.name, integerLiteral(measureValue)) as FnDecl["body"];
+      return;
+    }
+    if (!arg || arg.kind === "var") {
+      if (arg) body = substituteVar(body, param.name, arg) as FnDecl["body"];
+      return;
+    }
+    if (arg.kind === "literal") {
+      body = substituteVar(body, param.name, arg) as FnDecl["body"];
+      return;
+    }
+    const paramName = inlineBindingName(fn.name, param.name);
+    statements.push({
+      kind: "let",
+      name: paramName,
+      type: param.type,
+      value: arg,
+    });
+    body = substituteVar(body, param.name, { kind: "var", name: paramName }) as FnDecl["body"];
+  });
+  return {
+    kind: "block",
+    statements: [...statements, ...body.statements],
+    expr: body.expr,
+  };
+}
+
+function rewriteFiniteStaticRecurrenceSource(
+  source: StaticForSource,
+  depths: Map<string, number>,
+  rewrite: (expr: Expr, depths: Map<string, number>) => Expr,
+): StaticForSource {
+  return source.kind === "range"
+    ? {
+      ...source,
+      start: rewrite(source.start, depths),
+      end: rewrite(source.end, depths),
+    }
+    : { ...source, shape: rewrite(source.shape, depths) };
+}
+
+function domainContainsInteger(domain: RefinedI32Domain | undefined, value: number): boolean {
+  return literalIntervals(domain).some((interval) =>
+    interval.start <= value && value < interval.end
+  );
+}
+
+function evaluateIntegerExpr(expr: Expr | undefined): number | undefined {
+  if (!expr) return undefined;
+  if (expr.kind === "literal" && expr.literalKind === "number") {
+    const value = Number(expr.value);
+    return Number.isSafeInteger(value) ? value : undefined;
+  }
+  if (expr.kind !== "binary") return undefined;
+  const left = evaluateIntegerExpr(expr.left);
+  const right = evaluateIntegerExpr(expr.right);
+  if (left === undefined || right === undefined) return undefined;
+  switch (expr.op) {
+    case "+":
+      return left + right;
+    case "-":
+      return left - right;
+    case "*":
+      return left * right;
+    default:
+      return undefined;
+  }
+}
+
+function integerLiteral(value: number): Expr {
+  return { kind: "literal", literalKind: "number", value: String(value) };
+}
+
+function abstractBlock(
+  block: BlockExpr,
+  initialEnv: Map<string, AbstractValue>,
+): { locals: Map<string, AbstractValue>; value: AbstractValue } {
+  const env = new Map(initialEnv);
+  const locals = new Map<string, AbstractValue>();
+  for (const stmt of block.statements) {
+    if (stmt.kind === "proof_const") continue;
+    const value = abstractExpr(stmt.value, env);
+    if (stmt.kind === "let") {
+      env.set(stmt.name, value);
+      locals.set(stmt.name, value);
+    } else {
+      for (const name of stmt.names) {
+        env.set(name, { kind: "unknown" });
+        locals.set(name, { kind: "unknown" });
+      }
+    }
+  }
+  return { locals, value: block.expr ? abstractExpr(block.expr, env) : { kind: "unknown" } };
+}
+
+function abstractExpr(expr: Expr, env: Map<string, AbstractValue>): AbstractValue {
+  switch (expr.kind) {
+    case "literal":
+      if (
+        expr.literalKind === "number" || expr.literalKind === "bool" ||
+        expr.literalKind === "string" || expr.literalKind === "char" ||
+        expr.literalKind === "literalType"
+      ) {
+        return { kind: "constant", literalKind: expr.literalKind, value: expr.value };
+      }
+      return { kind: "unknown" };
+    case "var":
+      return abstractVar(expr.name, env);
+    case "binary":
+      return abstractBinary(expr, env);
+    case "match":
+      return abstractMatch(expr, env);
+    case "shape":
+      return {
+        kind: "product",
+        slots: expr.slots.map((slot) => ({
+          label: slot.label,
+          value: abstractExpr(slot.value, env),
+        })),
+      };
+    case "product_constructor":
+      return {
+        kind: "product",
+        slots: expr.slots.map((slot) => ({
+          label: slot.label,
+          value: abstractExpr(slot.value, env),
+        })),
+      };
+    case "field": {
+      const value = abstractExpr(expr.value, env);
+      const label = literalFieldLabel(expr.key);
+      if (value.kind === "product" && label) {
+        return value.slots.find((slot) => slot.label === label)?.value ?? { kind: "unknown" };
+      }
+      return { kind: "unknown" };
+    }
+    case "block":
+      return abstractBlock(expr, new Map(env)).value;
+    case "pipe_bind": {
+      const scoped = new Map(env);
+      scoped.set(expr.name, abstractExpr(expr.value, env));
+      return abstractExpr(expr.body, scoped);
+    }
+    case "index":
+    case "call":
+    case "do":
+    case "const_fn":
+    case "static_for_slots":
+    case "range":
+    case "placeholder":
+      return { kind: "unknown" };
+  }
+}
+
+function abstractVar(name: string, env: Map<string, AbstractValue>): AbstractValue {
+  const [base, ...fields] = name.split(".");
+  let value = env.get(base ?? name) ?? { kind: "unknown" };
+  for (const field of fields) {
+    value = value.kind === "product"
+      ? value.slots.find((slot) => slot.label === field)?.value ?? { kind: "unknown" }
+      : { kind: "unknown" };
+  }
+  return value;
+}
+
+function abstractBinary(
+  expr: Extract<Expr, { kind: "binary" }>,
+  env: Map<string, AbstractValue>,
+): AbstractValue {
+  const left = abstractExpr(expr.left, env);
+  const right = abstractExpr(expr.right, env);
+  const folded = abstractFoldConstants(expr.op, left, right);
+  if (folded) return folded;
+  if (["==", "!=", "<", "<=", ">", ">="].includes(expr.op)) {
+    const bool = abstractCompareDomains(expr.op, left, right);
+    return bool ?? { kind: "bool_domain", values: [false, true] };
+  }
+  const range = abstractI32RangeForBinary(expr.op, left, right);
+  return range ? abstractI32Range(range.min, range.max) : { kind: "unknown" };
+}
+
+function abstractFoldConstants(
+  op: string,
+  left: AbstractValue,
+  right: AbstractValue,
+): AbstractValue | undefined {
+  if (left.kind !== "constant" || right.kind !== "constant") return undefined;
+  if (left.literalKind === "number" && right.literalKind === "number") {
+    const folded = foldIntegerLiteralBinary({
+      kind: "binary",
+      op,
+      left: { kind: "literal", literalKind: "number", value: left.value },
+      right: { kind: "literal", literalKind: "number", value: right.value },
+    });
+    return folded?.kind === "literal" &&
+        (folded.literalKind === "number" || folded.literalKind === "bool")
+      ? { kind: "constant", literalKind: folded.literalKind, value: folded.value }
+      : undefined;
+  }
+  if (left.literalKind === "bool" && right.literalKind === "bool") {
+    if (op === "==") {
+      return { kind: "constant", literalKind: "bool", value: String(left.value === right.value) };
+    }
+    if (op === "!=") {
+      return { kind: "constant", literalKind: "bool", value: String(left.value !== right.value) };
+    }
+  }
+  return undefined;
+}
+
+function abstractCompareDomains(
+  op: string,
+  left: AbstractValue,
+  right: AbstractValue,
+): AbstractValue | undefined {
+  const leftRange = abstractI32Range(left);
+  const rightRange = abstractI32Range(right);
+  if (!leftRange || !rightRange) return undefined;
+  const value = rangeComparisonTruth(op, leftRange, rightRange);
+  return value === undefined
+    ? { kind: "bool_domain", values: [false, true] }
+    : { kind: "constant", literalKind: "bool", value: String(value) };
+}
+
+function rangeComparisonTruth(
+  op: string,
+  left: { min: number; max: number },
+  right: { min: number; max: number },
+): boolean | undefined {
+  if (op === "<") {
+    if (left.max < right.min) return true;
+    if (left.min >= right.max) return false;
+  }
+  if (op === "<=") {
+    if (left.max <= right.min) return true;
+    if (left.min > right.max) return false;
+  }
+  if (op === ">") return rangeComparisonTruth("<", right, left);
+  if (op === ">=") return rangeComparisonTruth("<=", right, left);
+  if (op === "==") {
+    if (left.min === left.max && right.min === right.max && left.min === right.min) return true;
+    if (left.max < right.min || right.max < left.min) return false;
+  }
+  if (op === "!=") {
+    const equal = rangeComparisonTruth("==", left, right);
+    return equal === undefined ? undefined : !equal;
+  }
+  return undefined;
+}
+
+function abstractI32RangeForBinary(
+  op: string,
+  left: AbstractValue,
+  right: AbstractValue,
+): { min: number; max: number } | undefined {
+  const leftRange = abstractI32Range(left);
+  const rightRange = abstractI32Range(right);
+  if (!leftRange || !rightRange) return undefined;
+  if (op === "+") {
+    return checkedI32Range(leftRange.min + rightRange.min, leftRange.max + rightRange.max);
+  }
+  if (op === "-") {
+    return checkedI32Range(leftRange.min - rightRange.max, leftRange.max - rightRange.min);
+  }
+  if (op === "*") {
+    const values = [
+      leftRange.min * rightRange.min,
+      leftRange.min * rightRange.max,
+      leftRange.max * rightRange.min,
+      leftRange.max * rightRange.max,
+    ];
+    return checkedI32Range(Math.min(...values), Math.max(...values));
+  }
+  const rightConst = abstractNumberConstant(right);
+  if (rightConst === undefined || rightConst <= 0 || leftRange.min < 0) return undefined;
+  if (op === "/") return checkedI32Range(0, Math.floor(leftRange.max / rightConst));
+  if (op === "%") return checkedI32Range(0, rightConst - 1);
+  return undefined;
+}
+
+function abstractMatch(
+  expr: Extract<Expr, { kind: "match" }>,
+  env: Map<string, AbstractValue>,
+): AbstractValue {
+  const value = abstractExpr(expr.value, env);
+  if (value.kind === "constant") {
+    const selected = expr.arms.find((arm) => abstractPatternMatches(arm.pattern, value));
+    return selected ? abstractExpr(selected.value, env) : { kind: "unreachable" };
+  }
+  if (value.kind === "bool_domain" && value.values.length === 1) {
+    const constant: AbstractValue = {
+      kind: "constant",
+      literalKind: "bool",
+      value: String(value.values[0]),
+    };
+    const selected = expr.arms.find((arm) => abstractPatternMatches(arm.pattern, constant));
+    return selected ? abstractExpr(selected.value, env) : { kind: "unreachable" };
+  }
+  return { kind: "unknown" };
+}
+
+function abstractPatternMatches(
+  pattern: ParamPattern,
+  value: Extract<AbstractValue, { kind: "constant" }>,
+): boolean {
+  if (pattern.kind === "binding" || pattern.kind === "wildcard") return true;
+  if (pattern.kind === "literal") return pattern.value === value.value;
+  if (pattern.kind === "type") return pattern.name === value.value;
+  return false;
+}
+
+function abstractValueFromType(type: string): AbstractValue {
+  const domain = parseRefinedI32Type(type);
+  if (domain) return { kind: "i32_domain", type: renderRefinedI32Domain(domain), domain };
+  if (type === "i32") {
+    return abstractI32Range(I32_MIN, I32_MAX);
+  }
+  if (type === "bool") return { kind: "bool_domain", values: [false, true] };
+  return { kind: "unknown" };
+}
+
+function abstractI32Range(value: AbstractValue): { min: number; max: number } | undefined;
+function abstractI32Range(min: number, max: number): AbstractValue;
+function abstractI32Range(
+  valueOrMin: AbstractValue | number,
+  max?: number,
+): { min: number; max: number } | AbstractValue | undefined {
+  if (typeof valueOrMin === "number") {
+    const facts = scalarFactsFromI32Range({ min: valueOrMin, max: max ?? valueOrMin });
+    return { kind: "i32_domain", type: renderRefinedI32Domain(facts.domain), domain: facts.domain };
+  }
+  const value = valueOrMin;
+  if (value.kind === "constant" && value.literalKind === "number") {
+    const literal = Number.parseInt(value.value, 10);
+    return Number.isSafeInteger(literal) ? { min: literal, max: literal } : undefined;
+  }
+  if (value.kind !== "i32_domain") return undefined;
+  let min = Number.POSITIVE_INFINITY;
+  let rangeMax = Number.NEGATIVE_INFINITY;
+  for (const interval of value.domain.intervals) {
+    if (interval.start.kind !== "literal" || interval.end.kind !== "literal") return undefined;
+    min = Math.min(min, interval.start.value);
+    rangeMax = Math.max(rangeMax, interval.end.value - 1);
+  }
+  return Number.isFinite(min) && Number.isFinite(rangeMax) ? { min, max: rangeMax } : undefined;
+}
+
+function checkedI32Range(min: number, max: number): { min: number; max: number } | undefined {
+  return Number.isInteger(min) && Number.isInteger(max) && min >= I32_MIN && max <= I32_MAX
+    ? { min, max }
+    : undefined;
+}
+
+function abstractNumberConstant(value: AbstractValue): number | undefined {
+  if (value.kind !== "constant" || value.literalKind !== "number") return undefined;
+  const parsed = Number.parseInt(value.value, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function foldAbstractFactsInProgram(program: Program): void {
+  program.declarations = program.declarations.map((decl): Declaration => {
+    if (decl.kind === "fn") {
+      const env = new Map(
+        decl.params.map((param) => [param.name, abstractValueFromType(param.type)]),
+      );
+      return { ...decl, body: foldAbstractFactsInBlock(decl.body, env) };
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      return { ...decl, value: foldAbstractFactsInExpr(decl.value, new Map()) };
+    }
+    return decl;
+  });
+}
+
+function foldAbstractFactsInBlock(
+  block: BlockExpr,
+  env: Map<string, AbstractValue>,
+): BlockExpr {
+  const scoped = new Map(env);
+  const statements = block.statements.map((stmt): Statement => {
+    if (stmt.kind === "proof_const") return stmt;
+    const value = foldAbstractFactsInExpr(stmt.value, scoped);
+    if (stmt.kind === "let") {
+      scoped.set(stmt.name, abstractExpr(value, scoped));
+      return { ...stmt, value };
+    }
+    for (const name of stmt.names) scoped.set(name, { kind: "unknown" });
+    return { ...stmt, value };
+  });
+  return {
+    ...block,
+    statements,
+    expr: block.expr ? foldAbstractFactsInExpr(block.expr, scoped) : undefined,
+  };
+}
+
+function foldAbstractFactsInExpr(expr: Expr, env: Map<string, AbstractValue>): Expr {
+  switch (expr.kind) {
+    case "binary": {
+      const folded = {
+        ...expr,
+        left: foldAbstractFactsInExpr(expr.left, env),
+        right: foldAbstractFactsInExpr(expr.right, env),
+      };
+      return abstractConstantExpr(abstractExpr(folded, env)) ?? folded;
+    }
+    case "match": {
+      const value = foldAbstractFactsInExpr(expr.value, env);
+      const valueFact = abstractExpr(value, env);
+      const constant = valueFact.kind === "constant"
+        ? valueFact
+        : valueFact.kind === "bool_domain" && valueFact.values.length === 1
+        ? {
+          kind: "constant" as const,
+          literalKind: "bool" as const,
+          value: String(valueFact.values[0]),
+        }
+        : undefined;
+      if (constant) {
+        const selected = expr.arms.find((arm) => abstractPatternMatches(arm.pattern, constant));
+        if (selected) return foldAbstractFactsInExpr(selected.value, env);
+      }
+      return {
+        ...expr,
+        value,
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: foldAbstractFactsInExpr(arm.value, env),
+        })),
+      };
+    }
+    case "block":
+      return foldAbstractFactsInBlock(expr, new Map(env));
+    case "pipe_bind": {
+      const value = foldAbstractFactsInExpr(expr.value, env);
+      const scoped = new Map(env);
+      scoped.set(expr.name, abstractExpr(value, env));
+      return { ...expr, value, body: foldAbstractFactsInExpr(expr.body, scoped) };
+    }
+    case "shape":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          index: slot.index ? foldAbstractFactsInExpr(slot.index, env) : undefined,
+          value: foldAbstractFactsInExpr(slot.value, env),
+        })),
+      };
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          value: foldAbstractFactsInExpr(slot.value, env),
+        })),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: foldAbstractFactsInExpr(expr.value, env),
+        key: foldAbstractFactsInExpr(expr.key, env),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: foldAbstractFactsInExpr(expr.target, env),
+        index: foldAbstractFactsInExpr(expr.index, env),
+      };
+    case "call":
+      return {
+        ...expr,
+        callee: foldAbstractFactsInExpr(expr.callee, env),
+        args: expr.args.map((arg) => foldAbstractFactsInExpr(arg, env)),
+      };
+    case "const_fn":
+      return { ...expr, body: foldAbstractFactsInExpr(expr.body, new Map()) };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: foldAbstractFactsInStaticForSource(expr.source, env),
+        value: foldAbstractFactsInExpr(expr.value, env),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: foldAbstractFactsInExpr(expr.start, env),
+        end: foldAbstractFactsInExpr(expr.end, env),
+      };
+    case "do":
+      return expr;
+    case "literal":
+    case "var":
+    case "placeholder":
+      return abstractConstantExpr(abstractExpr(expr, env)) ?? expr;
+  }
+}
+
+function foldAbstractFactsInStaticForSource(
+  source: StaticForSource,
+  env: Map<string, AbstractValue>,
+): StaticForSource {
+  return source.kind === "range"
+    ? {
+      ...source,
+      start: foldAbstractFactsInExpr(source.start, env),
+      end: foldAbstractFactsInExpr(source.end, env),
+    }
+    : { ...source, shape: foldAbstractFactsInExpr(source.shape, env) };
+}
+
+function abstractConstantExpr(value: AbstractValue): Expr | undefined {
+  return value.kind === "constant"
+    ? { kind: "literal", literalKind: value.literalKind, value: value.value }
+    : undefined;
 }
 
 function functionSummaries(
   program: Program,
   functions: Map<string, FnDecl>,
+  recurrences?: Map<string, Recurrence>,
 ): Map<string, FunctionSummary> {
   const callCounts = programCallCounts(program);
+  const recurrenceIndex = recurrences ? recurrenceSummariesByFunction(recurrences) : new Map();
   const summaries = new Map<string, FunctionSummary>();
   for (const fn of functions.values()) {
     const imported = fn.primitiveId === "capability" && fn.body.statements.length === 0 &&
       !program.declarations.includes(fn);
     const astCost = functionCost(fn);
+    const recursiveKind = directSelfRecursiveKind(fn);
+    const returnKind = returnClass(fn.returnType);
+    const hostCall = exprHasHostCall(fn.body, functions);
+    const recurrence = recurrenceIndex.get(fn.name);
     summaries.set(fn.name, {
       name: fn.name,
       isPublic: fn.public,
@@ -136,22 +955,90 @@ function functionSummaries(
       isImported: imported,
       isPure: fn.effects.length === 0,
       effects: [...fn.effects],
-      recursiveKind: exprCallsFunction(fn.body, fn.name) ? "self_non_tail" : "none",
+      recursiveKind,
       astCost,
       wasmCostEstimate: astCost,
+      runtimeInstructionEstimate: astCost,
+      ...(recurrence?.measure
+        ? { maxRecursionUnfoldingCardinality: recurrence.measure.cardinality }
+        : {}),
       callCount: callCounts.get(fn.name) ?? 0,
-      returnClass: returnClass(fn.returnType),
+      effectClass: effectClass(fn, imported, hostCall),
+      allocationBehavior: allocationBehavior(returnKind),
+      stackBehavior: stackBehavior(recursiveKind),
+      returnClass: returnKind,
       paramEffects: inferParamEffects(fn, functions),
       hasMatch: exprHasKind(fn.body, "match"),
       hasLoopShape: exprCallsFunction(fn.body, fn.name),
       hasBranchIntrinsic: exprHasBranchIntrinsic(fn.body),
-      hasHostCall: exprHasHostCall(fn.body, functions),
+      hasHostCall: hostCall,
       hasConstFunctionParam: fn.params.some((param) => param.const && param.type.startsWith("fn")),
       slotCountEstimate: slotCountEstimate(fn.returnType),
       heapWriteCountEstimate: 0,
     });
   }
   return summaries;
+}
+
+function recurrenceSummariesByFunction(
+  recurrences: Map<string, Recurrence>,
+): Map<string, Recurrence> {
+  const byFunction = new Map<string, Recurrence>();
+  for (const recurrence of recurrences.values()) {
+    byFunction.set(recurrence.fn, recurrence);
+    for (const clause of recurrence.clauses) byFunction.set(clause.fn, recurrence);
+  }
+  return byFunction;
+}
+
+function effectClass(
+  fn: FnDecl,
+  imported: boolean,
+  hostCall: boolean,
+): FunctionSummary["effectClass"] {
+  if (fn.effects.length === 0) return "pure";
+  if (imported || fn.primitiveId === "capability" || hostCall) return "host";
+  if (fn.effects.every((effect) => READ_ONLY_EFFECTS.has(effect))) return "read_only";
+  if (fn.effects.some((effect) => VOLATILE_EFFECTS.has(effect))) return "volatile";
+  return "state";
+}
+
+const READ_ONLY_EFFECTS = new Set(["read", "readonly", "read_only", "read-only"]);
+const VOLATILE_EFFECTS = new Set(["time", "entropy", "random", "io"]);
+
+function allocationBehavior(
+  returnKind: FunctionSummary["returnClass"],
+): FunctionSummary["allocationBehavior"] {
+  switch (returnKind) {
+    case "scalar":
+      return "none";
+    case "flat_product":
+    case "inline_array":
+      return "flat";
+    case "heap_handle":
+      return "heap";
+    case "buffer_handle":
+      return "buffer";
+    case "closure":
+      return "closure";
+    case "multi":
+      return "unknown";
+  }
+}
+
+function stackBehavior(
+  recursiveKind: FunctionSummary["recursiveKind"],
+): FunctionSummary["stackBehavior"] {
+  switch (recursiveKind) {
+    case "none":
+      return "none";
+    case "self_tail":
+      return "tail_call";
+    case "self_non_tail":
+      return "recursive_stack";
+    case "mutual":
+      return "mutual_or_unknown";
+  }
 }
 
 function programCallCounts(program: Program): Map<string, number> {
@@ -535,8 +1422,9 @@ function rewriteStaticProjections(
           ? source.slots[literalIndex]?.value
           : undefined;
         if (replacement) {
-          return rewriteStaticProjections(
+          return rewriteProjectionReplacement(
             replacement,
+            target.name,
             active,
             forwarding,
             inlineable,
@@ -562,8 +1450,9 @@ function rewriteStaticProjections(
           ? source.slots.find((slot) => slot.label === label)?.value
           : undefined;
         if (replacement) {
-          return rewriteStaticProjections(
+          return rewriteProjectionReplacement(
             replacement,
+            value.name,
             active,
             forwarding,
             inlineable,
@@ -677,8 +1566,9 @@ function rewriteStaticProjections(
           ? source.slots.find((slot) => slot.label === field)?.value
           : undefined;
         if (replacement) {
-          return rewriteStaticProjections(
+          return rewriteProjectionReplacement(
             replacement,
+            base,
             active,
             forwarding,
             inlineable,
@@ -693,6 +1583,19 @@ function rewriteStaticProjections(
     case "placeholder":
       return expr;
   }
+}
+
+function rewriteProjectionReplacement(
+  replacement: Expr,
+  sourceName: string,
+  active: Map<string, Expr>,
+  forwarding: Map<string, string>,
+  inlineable: Map<string, FnDecl>,
+  functions: Map<string, FnDecl>,
+): Expr {
+  const scoped = new Map(active);
+  scoped.delete(sourceName);
+  return rewriteStaticProjections(replacement, scoped, forwarding, inlineable, functions);
 }
 
 function rewriteStaticForProjectionSource(
@@ -1221,7 +2124,134 @@ function optimizeBinary(
   }
   if (expr.op === "==" && isBoolLiteral(expr.right, true)) return expr.left;
   if (expr.op === "==" && isBoolLiteral(expr.left, true)) return expr.right;
-  return expr;
+  return extractLocalEqualityExpr(expr, functions);
+}
+
+function extractLocalEqualityExpr(expr: Expr, functions: Map<string, FnDecl>): Expr {
+  if (!localEqualityEligible(expr, functions)) return expr;
+  const seen = new Map<string, Expr>();
+  const queue: Expr[] = [expr];
+  while (queue.length && seen.size < LOCAL_EQUALITY_CANDIDATE_LIMIT) {
+    const current = queue.shift()!;
+    const key = stableExprKey(current);
+    if (seen.has(key)) continue;
+    seen.set(key, current);
+    for (const next of localEqualityRewrites(current, functions)) {
+      if (!seen.has(stableExprKey(next))) queue.push(next);
+      if (seen.size + queue.length >= LOCAL_EQUALITY_CANDIDATE_LIMIT) break;
+    }
+  }
+  return [...seen.values()].toSorted(compareLocalEqualityCandidates)[0] ?? expr;
+}
+
+function localEqualityEligible(expr: Expr, functions: Map<string, FnDecl>): boolean {
+  return !hasRuntimeEffect(expr, functions) && localEqualityNodeCount(expr) <= 12;
+}
+
+function localEqualityNodeCount(expr: Expr): number {
+  switch (expr.kind) {
+    case "binary":
+      return 1 + localEqualityNodeCount(expr.left) + localEqualityNodeCount(expr.right);
+    case "literal":
+    case "var":
+      return 1;
+    default:
+      return 100;
+  }
+}
+
+function compareLocalEqualityCandidates(left: Expr, right: Expr): number {
+  return exprCost(left) - exprCost(right) ||
+    stableExprKey(left).localeCompare(stableExprKey(right));
+}
+
+function localEqualityRewrites(expr: Expr, functions: Map<string, FnDecl>): Expr[] {
+  if (expr.kind !== "binary") return [];
+  const rewrites: Expr[] = [];
+  const affine = affinePureTerm(expr, functions);
+  if (affine) {
+    const candidate = buildAffineTerm(affine.term, affine.scale, affine.offset);
+    if (candidate) rewrites.push(candidate);
+  }
+  if (samePureExpr(expr.left, expr.right, functions)) {
+    if (expr.op === "==") rewrites.push(boolLiteral(true));
+    if (expr.op === "!=" || expr.op === "<" || expr.op === ">") rewrites.push(boolLiteral(false));
+    if (expr.op === "<=" || expr.op === ">=") rewrites.push(boolLiteral(true));
+    if (expr.op === "+") {
+      rewrites.push({
+        kind: "binary",
+        op: "*",
+        left: expr.left,
+        right: { kind: "literal", literalKind: "number", value: "2" },
+      });
+    }
+  }
+  if (isCommutativeOp(expr.op) && stableExprKey(expr.right) < stableExprKey(expr.left)) {
+    rewrites.push({ ...expr, left: expr.right, right: expr.left });
+  }
+  if (
+    (expr.op === "+" || expr.op === "*") && expr.left.kind === "binary" && expr.left.op === expr.op
+  ) {
+    rewrites.push({
+      ...expr,
+      left: expr.left.left,
+      right: { kind: "binary", op: expr.op, left: expr.left.right, right: expr.right },
+    });
+  }
+  if (
+    (expr.op === "+" || expr.op === "*") && expr.right.kind === "binary" &&
+    expr.right.op === expr.op
+  ) {
+    rewrites.push({
+      ...expr,
+      left: { kind: "binary", op: expr.op, left: expr.left, right: expr.right.left },
+      right: expr.right.right,
+    });
+  }
+  const factored = factorCommonProduct(expr, functions);
+  if (factored) rewrites.push(factored);
+  return rewrites.filter((candidate) => localEqualityEligible(candidate, functions));
+}
+
+function isCommutativeOp(op: string): boolean {
+  return op === "+" || op === "*" || op === "==" || op === "!=";
+}
+
+function factorCommonProduct(
+  expr: Extract<Expr, { kind: "binary" }>,
+  functions: Map<string, FnDecl>,
+): Expr | undefined {
+  if (expr.op !== "+") return undefined;
+  const left = productFactors(expr.left);
+  const right = productFactors(expr.right);
+  if (!left || !right) return undefined;
+  const candidates: [Expr, Expr, Expr][] = [
+    [left.left, left.right, right.left],
+    [left.left, left.right, right.right],
+    [left.right, left.left, right.left],
+    [left.right, left.left, right.right],
+  ];
+  for (const [common, leftRest, rightFactor] of candidates) {
+    if (!samePureExpr(common, rightFactor, functions)) continue;
+    const rightRest = samePureExpr(rightFactor, right.left, functions) ? right.right : right.left;
+    if (
+      hasRuntimeEffect(common, functions) || hasRuntimeEffect(leftRest, functions) ||
+      hasRuntimeEffect(rightRest, functions)
+    ) return undefined;
+    return {
+      kind: "binary",
+      op: "*",
+      left: common,
+      right: { kind: "binary", op: "+", left: leftRest, right: rightRest },
+    };
+  }
+  return undefined;
+}
+
+function productFactors(expr: Expr): { left: Expr; right: Expr } | undefined {
+  return expr.kind === "binary" && expr.op === "*"
+    ? { left: expr.left, right: expr.right }
+    : undefined;
 }
 
 function combineRepeatedAdd(
@@ -1255,6 +2285,21 @@ function affinePureTerm(
     const rightTerm = affinePureTerm(expr.right, functions);
     if (rightTerm && leftLiteral !== undefined) {
       return { ...rightTerm, offset: rightTerm.offset + leftLiteral };
+    }
+  }
+  if (!hasRuntimeEffect(expr, functions) && expr.kind === "binary" && expr.op === "-") {
+    const right = staticIntegerLiteral(expr.right);
+    const left = affinePureTerm(expr.left, functions);
+    if (left && right !== undefined) return { ...left, offset: left.offset - right };
+    const leftLiteral = staticIntegerLiteral(expr.left);
+    const rightTerm = affinePureTerm(expr.right, functions);
+    if (rightTerm && leftLiteral !== undefined) {
+      return {
+        key: rightTerm.key,
+        term: rightTerm.term,
+        scale: -rightTerm.scale,
+        offset: leftLiteral - rightTerm.offset,
+      };
     }
   }
   const scaled = scaledPureTerm(expr, functions);
@@ -1605,6 +2650,380 @@ function exprCallsFunction(expr: Expr | BlockExpr | undefined, name: string): bo
     case "var":
     case "placeholder":
       return false;
+  }
+}
+
+function recurrenceBaseName(name: string): string {
+  return name.replace(/__clause_[0-9]+$/, "");
+}
+
+function recurrenceDomainMeasure(
+  params: FnDecl["params"],
+  clauses: RecurrenceClause[],
+  calls: RecursiveCall[],
+): DomainMeasure | undefined {
+  for (const [index, param] of params.entries()) {
+    const cardinalities = clauses
+      .map((clause) => clause.paramDomains[index])
+      .filter((domain): domain is RefinedI32Domain => Boolean(domain))
+      .map(domainCardinality)
+      .filter((cardinality): cardinality is number => cardinality !== undefined);
+    if (!cardinalities.length) continue;
+    const proof = proveDomainMeasure(param.name, index, clauses, calls);
+    return {
+      kind: "domain",
+      param: param.name,
+      cardinality: cardinalities.reduce((sum, value) => sum + value, 0),
+      ...proof,
+    };
+  }
+  return undefined;
+}
+
+function domainCardinality(domain: RefinedI32Domain): number | undefined {
+  let total = 0;
+  for (const interval of domain.intervals) {
+    if (interval.start.kind !== "literal" || interval.end.kind !== "literal") {
+      return undefined;
+    }
+    total += Math.max(0, interval.end.value - interval.start.value);
+  }
+  return total;
+}
+
+function proveDomainMeasure(
+  param: string,
+  paramIndex: number,
+  clauses: RecurrenceClause[],
+  calls: RecursiveCall[],
+): Pick<DomainMeasure, "direction" | "terminates"> {
+  const allIntervals = normalizeLiteralIntervals(
+    clauses.flatMap((clause) => literalIntervals(clause.paramDomains[paramIndex])),
+  );
+  if (!allIntervals.length) return { terminates: false };
+
+  const recursiveClauseNames = new Set(calls.map((call) => call.clause));
+  const recursiveIntervals = normalizeLiteralIntervals(
+    clauses
+      .filter((clause) => recursiveClauseNames.has(clause.fn))
+      .flatMap((clause) => literalIntervals(clause.paramDomains[paramIndex])),
+  );
+  const baseIntervals = normalizeLiteralIntervals(
+    clauses
+      .filter((clause) => !recursiveClauseNames.has(clause.fn))
+      .flatMap((clause) => literalIntervals(clause.paramDomains[paramIndex])),
+  );
+  if (!recursiveIntervals.length || !baseIntervals.length) return { terminates: false };
+
+  const clausesByName = new Map(clauses.map((clause) => [clause.fn, clause]));
+  const directions = new Set<"increasing" | "decreasing">();
+  for (const call of calls) {
+    const clause = clausesByName.get(call.clause);
+    const sourceIntervals = literalIntervals(clause?.paramDomains[paramIndex]);
+    const delta = affineDelta(call.args[paramIndex], param);
+    if (!sourceIntervals.length || delta === undefined || delta === 0) {
+      return { terminates: false };
+    }
+    directions.add(delta > 0 ? "increasing" : "decreasing");
+    const targetIntervals = normalizeLiteralIntervals(
+      sourceIntervals.map((interval) => ({
+        start: interval.start + delta,
+        end: interval.end + delta,
+      })),
+    );
+    if (!literalIntervalsContain(allIntervals, targetIntervals)) {
+      return { terminates: false };
+    }
+  }
+  if (directions.size !== 1) return { terminates: false };
+
+  const direction = [...directions][0]!;
+  const recursiveRange = intervalRange(recursiveIntervals);
+  const allRange = intervalRange(allIntervals);
+  const exitsRecursiveDomain = direction === "increasing"
+    ? recursiveRange.max < allRange.max
+    : recursiveRange.min > allRange.min;
+  return { direction, terminates: exitsRecursiveDomain };
+}
+
+interface LiteralInterval {
+  start: number;
+  end: number;
+}
+
+function literalIntervals(domain: RefinedI32Domain | undefined): LiteralInterval[] {
+  if (!domain) return [];
+  const intervals: LiteralInterval[] = [];
+  for (const interval of domain.intervals) {
+    if (interval.start.kind !== "literal" || interval.end.kind !== "literal") return [];
+    intervals.push({ start: interval.start.value, end: interval.end.value });
+  }
+  return intervals;
+}
+
+function normalizeLiteralIntervals(intervals: LiteralInterval[]): LiteralInterval[] {
+  const sorted = intervals
+    .filter((interval) => interval.start < interval.end)
+    .toSorted((left, right) => left.start - right.start || left.end - right.end);
+  const result: LiteralInterval[] = [];
+  for (const interval of sorted) {
+    const previous = result.at(-1);
+    if (previous && interval.start <= previous.end) {
+      previous.end = Math.max(previous.end, interval.end);
+    } else {
+      result.push({ ...interval });
+    }
+  }
+  return result;
+}
+
+function literalIntervalsContain(
+  expected: LiteralInterval[],
+  actual: LiteralInterval[],
+): boolean {
+  return actual.every((actualInterval) =>
+    expected.some((expectedInterval) =>
+      expectedInterval.start <= actualInterval.start && actualInterval.end <= expectedInterval.end
+    )
+  );
+}
+
+function intervalRange(intervals: LiteralInterval[]): { min: number; max: number } {
+  return {
+    min: Math.min(...intervals.map((interval) => interval.start)),
+    max: Math.max(...intervals.map((interval) => interval.end - 1)),
+  };
+}
+
+function affineDelta(expr: Expr | undefined, param: string): number | undefined {
+  if (!expr) return undefined;
+  if (expr.kind === "var" && expr.name === param) return 0;
+  if (expr.kind !== "binary") return undefined;
+  const leftLiteral = numericLiteralValue(expr.left);
+  const rightLiteral = numericLiteralValue(expr.right);
+  if (expr.op === "+") {
+    if (expr.left.kind === "var" && expr.left.name === param && rightLiteral !== undefined) {
+      return rightLiteral;
+    }
+    if (expr.right.kind === "var" && expr.right.name === param && leftLiteral !== undefined) {
+      return leftLiteral;
+    }
+  }
+  if (
+    expr.op === "-" && expr.left.kind === "var" && expr.left.name === param &&
+    rightLiteral !== undefined
+  ) {
+    return -rightLiteral;
+  }
+  return undefined;
+}
+
+function numericLiteralValue(expr: Expr): number | undefined {
+  if (expr.kind !== "literal" || expr.literalKind !== "number") return undefined;
+  const value = Number(expr.value);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+function classifyRecurrence(
+  calls: RecursiveCall[],
+  clauses: RecurrenceClause[],
+  measure: DomainMeasure | undefined,
+): RecurrenceKind {
+  const allTail = calls.every((call) => call.tail);
+  if (measure?.terminates) return "finite_static";
+  if (allTail) return "tail_linear";
+  if (
+    clauses.some((clause) => clause.body.expr?.kind === "match") &&
+    calls.every((call) => !call.args.some((arg) => arg.kind === "binary"))
+  ) {
+    return "structural";
+  }
+  return "general_recursive";
+}
+
+function recursiveCallDetails(
+  expr: Expr | BlockExpr | undefined,
+  targets: Set<string>,
+  clause: string,
+  tailPosition: boolean,
+): RecursiveCall[] {
+  if (!expr) return [];
+  const visitStatement = (stmt: Statement): RecursiveCall[] =>
+    stmt.kind === "let" || stmt.kind === "destructure_let"
+      ? recursiveCallDetails(stmt.value, targets, clause, false)
+      : [];
+  switch (expr.kind) {
+    case "call": {
+      const calleeName = expr.callee.kind === "var" ? expr.callee.name : undefined;
+      const calls = targets.has(calleeName ?? "")
+        ? [{ clause, target: calleeName!, tail: tailPosition, args: expr.args }]
+        : recursiveCallDetails(expr.callee, targets, clause, false);
+      return [
+        ...calls,
+        ...expr.args.flatMap((arg) => recursiveCallDetails(arg, targets, clause, false)),
+      ];
+    }
+    case "match":
+      return [
+        ...recursiveCallDetails(expr.value, targets, clause, false),
+        ...expr.arms.flatMap((arm) =>
+          recursiveCallDetails(arm.value, targets, clause, tailPosition)
+        ),
+      ];
+    case "block":
+      return [
+        ...expr.statements.flatMap(visitStatement),
+        ...recursiveCallDetails(expr.expr, targets, clause, tailPosition),
+      ];
+    case "pipe_bind":
+      return [
+        ...recursiveCallDetails(expr.value, targets, clause, false),
+        ...recursiveCallDetails(expr.body, targets, clause, tailPosition),
+      ];
+    case "do":
+      return [
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "proof_const"
+            ? []
+            : recursiveCallDetails(stmt.value, targets, clause, false)
+        ),
+        ...recursiveCallDetails(expr.expr, targets, clause, tailPosition),
+      ];
+    case "const_fn":
+      return recursiveCallDetails(expr.body, targets, clause, false);
+    case "index":
+      return [
+        ...recursiveCallDetails(expr.target, targets, clause, false),
+        ...recursiveCallDetails(expr.index, targets, clause, false),
+      ];
+    case "binary":
+      return [
+        ...recursiveCallDetails(expr.left, targets, clause, false),
+        ...recursiveCallDetails(expr.right, targets, clause, false),
+      ];
+    case "shape":
+    case "product_constructor":
+      return expr.slots.flatMap((slot) => [
+        ...(slot.index ? recursiveCallDetails(slot.index, targets, clause, false) : []),
+        ...recursiveCallDetails(slot.value, targets, clause, false),
+      ]);
+    case "static_for_slots":
+      return [
+        ...(expr.source.kind === "range"
+          ? [
+            ...recursiveCallDetails(expr.source.start, targets, clause, false),
+            ...recursiveCallDetails(expr.source.end, targets, clause, false),
+          ]
+          : recursiveCallDetails(expr.source.shape, targets, clause, false)),
+        ...recursiveCallDetails(expr.value, targets, clause, false),
+      ];
+    case "field":
+      return [
+        ...recursiveCallDetails(expr.value, targets, clause, false),
+        ...recursiveCallDetails(expr.key, targets, clause, false),
+      ];
+    case "range":
+      return [
+        ...recursiveCallDetails(expr.start, targets, clause, false),
+        ...recursiveCallDetails(expr.end, targets, clause, false),
+      ];
+    case "literal":
+    case "placeholder":
+    case "var":
+      return [];
+  }
+}
+
+function directSelfRecursiveKind(fn: FnDecl): FunctionSummary["recursiveKind"] {
+  const calls = directSelfCalls(fn.body, fn.name, true);
+  if (calls.nonTail) return "self_non_tail";
+  return calls.tail ? "self_tail" : "none";
+}
+
+function directSelfCalls(
+  expr: Expr | BlockExpr | undefined,
+  name: string,
+  tailPosition: boolean,
+): { tail: boolean; nonTail: boolean } {
+  const result = { tail: false, nonTail: false };
+  const add = (calls: { tail: boolean; nonTail: boolean }) => {
+    result.tail ||= calls.tail;
+    result.nonTail ||= calls.nonTail;
+  };
+  if (!expr) return result;
+  switch (expr.kind) {
+    case "call":
+      if (expr.callee.kind === "var" && expr.callee.name === name) {
+        if (tailPosition) result.tail = true;
+        else result.nonTail = true;
+      } else {
+        add(directSelfCalls(expr.callee, name, false));
+      }
+      expr.args.forEach((arg) => add(directSelfCalls(arg, name, false)));
+      return result;
+    case "match":
+      add(directSelfCalls(expr.value, name, false));
+      expr.arms.forEach((arm) => add(directSelfCalls(arm.value, name, tailPosition)));
+      return result;
+    case "block":
+      expr.statements.forEach((stmt) => {
+        if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+          add(directSelfCalls(stmt.value, name, false));
+        }
+      });
+      add(directSelfCalls(expr.expr, name, tailPosition));
+      return result;
+    case "pipe_bind":
+      add(directSelfCalls(expr.value, name, false));
+      add(directSelfCalls(expr.body, name, tailPosition));
+      return result;
+    case "do":
+      expr.statements.forEach((stmt) => {
+        if (stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let") {
+          add(directSelfCalls(stmt.value, name, false));
+        }
+      });
+      add(directSelfCalls(expr.expr, name, tailPosition));
+      return result;
+    case "const_fn":
+      add(directSelfCalls(expr.body, name, false));
+      return result;
+    case "index":
+      add(directSelfCalls(expr.target, name, false));
+      add(directSelfCalls(expr.index, name, false));
+      return result;
+    case "binary":
+      add(directSelfCalls(expr.left, name, false));
+      add(directSelfCalls(expr.right, name, false));
+      return result;
+    case "shape":
+    case "product_constructor":
+      expr.slots.forEach((slot) => {
+        if (slot.index) add(directSelfCalls(slot.index, name, false));
+        add(directSelfCalls(slot.value, name, false));
+      });
+      return result;
+    case "static_for_slots":
+      if (expr.source.kind === "range") {
+        add(directSelfCalls(expr.source.start, name, false));
+        add(directSelfCalls(expr.source.end, name, false));
+      } else {
+        add(directSelfCalls(expr.source.shape, name, false));
+      }
+      add(directSelfCalls(expr.value, name, false));
+      return result;
+    case "field":
+      add(directSelfCalls(expr.value, name, false));
+      add(directSelfCalls(expr.key, name, false));
+      return result;
+    case "range":
+      add(directSelfCalls(expr.start, name, false));
+      add(directSelfCalls(expr.end, name, false));
+      return result;
+    case "literal":
+    case "var":
+    case "placeholder":
+      return result;
   }
 }
 

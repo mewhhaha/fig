@@ -192,10 +192,8 @@ Supported expressions include:
 - Function calls: `f(x)`.
 - Field access: `Point.x`.
 - Indexing: `xs[0]`.
-- Product construction: `Point {x: 1, y: 2}` with labeled, positioned, punned, spread, or static
-  generated slots.
-- Shape values: `{x: 1, y: 2}`, `{x, y}`, `{...base, z: 3}`, and
-  `{for Key, Spec in (fields): value}`.
+- Product construction: `Point {x: 1, y: 2}` with labeled, positioned, punned, or spread slots.
+- Shape values: `{x: 1, y: 2}`, `{x, y}`, and `{...base, z: 3}`.
 - Tuple and repeat values: `[1, 2]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
 - Target-typed collection literals: `<1, 2, 3>`, `<0, ...rest>`.
 - `match value { pattern => expr, _ => fallback }` and boolean `if cond { a } else { b }`.
@@ -226,10 +224,12 @@ fn score(true: bool, true: bool) -> i32 { 3 }
 fn score(_: bool, _: bool) -> i32 { 0 }
 ```
 
-Value function clauses must keep the same arity, visibility, return type, effect row, and parameter
-types. Current value-clause dispatch is best for literal, wildcard, and binding cases; use `match`
-arms for sum-variant payload deconstruction. Type functions also support ordered clauses and `match`
-over static values and types.
+Value function clauses must keep the same arity, visibility, return type, effect row, and compatible
+runtime parameter representation. Refined `i32(...)` parameter domains may vary across clauses
+because they all lower to runtime `i32`. Current value-clause dispatch is best for literal,
+wildcard, binding, and refined scalar-domain cases; use `match` arms for sum-variant payload
+deconstruction. Type functions also support ordered clauses and `match` over static values and
+types.
 
 ## Products, Sums, Shapes, and Arrays
 

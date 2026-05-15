@@ -26,28 +26,39 @@ import { isCatchAllPattern, patternBindingNames } from "./patterns.ts";
 import { intrinsicWrapperId, isIntrinsicWrapper, isKnownIntrinsicId } from "./primitives.ts";
 import {
   annotationBranchHint,
+  type CompilerPluginOptions,
+  type CompilerPluginRegistry,
   createCompilerPluginRegistry,
   defaultCompilerPluginRegistry,
   isStaticBuiltinName,
-  type CompilerPluginOptions,
-  type CompilerPluginRegistry,
   staticBuiltinName,
   staticBuiltinParamKind,
 } from "./plugins.ts";
 import {
+  canonicalDomainKey,
+  domainContains,
   type DomainInterval,
+  domainIsEmpty,
   endpointFromTypeExprText,
+  I32_MAX,
   I32_MAX_EXCLUSIVE,
   I32_MIN,
-  intersectRefinedI32Type,
+  intersectDomain,
   literalEndpoint,
   parseRefinedI32Type,
   refinedI32Assignable,
   refinedI32ContainsLiteral,
+  type RefinedI32Domain,
+  refinedI32DomainDifference,
+  refinedI32DomainIntersection,
   refinedI32FromRange,
   refinedI32TypeCanonical,
+  renderRefinedI32Domain,
   scalarDomainRuntimeType,
+  scalarFactsFromI32Range,
   scalarFactsFromRefinedI32Type,
+  subtractDomain,
+  unionDomain,
   validateScalarDomainType,
 } from "./refined_scalar.ts";
 import { type ShaderManifestEntry, shaderManifestEntry, wgslShaderId } from "./wgsl.ts";
@@ -561,7 +572,10 @@ function lowerResolvedOperators(
         const right = lowerExpr(expr.right, env);
         const leftType = inferRuntimeType(left, env, functions, constructorTypes);
         const rightType = inferRuntimeType(right, env, functions, constructorTypes);
-        if (isPrimitiveBinaryOperator(expr.op, leftType, rightType) || (!leftType && !rightType)) {
+        if (
+          isPrimitiveBinaryOperator(expr.op, leftType, rightType, typeDecls) ||
+          (!leftType && !rightType)
+        ) {
           return { ...expr, left, right };
         }
         const resolved = resolveInfixOperator(
@@ -655,13 +669,29 @@ function lowerResolvedOperators(
   }
 }
 
-function isPrimitiveBinaryOperator(op: string, left?: string, right?: string): boolean {
+function isPrimitiveBinaryOperator(
+  op: string,
+  left: string | undefined,
+  right: string | undefined,
+  types: TypeDecl[],
+): boolean {
   if (op === "..") return true;
   if (["==", "!="].includes(op) && (literalTypeCarrier(left) || literalTypeCarrier(right))) {
     return (literalTypeCarrier(left) ?? left) === (literalTypeCarrier(right) ?? right);
   }
-  return left === "i32" && right === "i32" &&
+  const leftRuntime = primitiveNumericRuntimeType(left, types);
+  const rightRuntime = primitiveNumericRuntimeType(right, types);
+  return leftRuntime === "i32" && rightRuntime === "i32" &&
     ["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">="].includes(op);
+}
+
+function primitiveNumericRuntimeType(
+  type: string | undefined,
+  types: TypeDecl[],
+): string | undefined {
+  const resolved = resolveAliasType(type, types) ?? type;
+  const runtime = scalarDomainRuntimeType(resolved);
+  return runtime === "count" ? "i32" : runtime;
 }
 
 function lowerCollectorLiterals(
@@ -1278,15 +1308,12 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
   for (const group of groups.values()) {
     if (group.length < 2) continue;
     const first = group[0];
-    if (first.memberOf) {
-      diagnostics.push({
-        code: "type.duplicate_member",
-        message:
-          `type ${first.memberOf.owner} has duplicate static member ${first.memberOf.member}`,
-      });
-      continue;
-    }
     let compatible = true;
+    const dispatcherParams = first.params.map((param, index) => ({
+      ...param,
+      type: groupParamDispatchType(group, index),
+    }));
+    const dispatcherSignature = { ...first, params: dispatcherParams };
     for (const clause of group.slice(1)) {
       if (clause.params.length !== first.params.length) {
         diagnostics.push({
@@ -1317,7 +1344,7 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
         compatible = false;
       }
       clause.params.forEach((param, index) => {
-        if (param.type !== first.params[index]?.type) {
+        if (!clauseParamTypesCompatible(first.params[index]?.type, param.type)) {
           diagnostics.push({
             code: "fn.clause_param_type",
             message: `function ${first.name} clause parameter ${index + 1} has incompatible type`,
@@ -1327,14 +1354,27 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
       });
     }
     if (!compatible) continue;
+    checkUnreachableFunctionClauses(dispatcherSignature, group, diagnostics);
+    checkOverlappingFunctionClauses(group, diagnostics);
+    if (
+      first.memberOf &&
+      group.every((clause) => clauseTests(dispatcherSignature, clause).length === 0)
+    ) {
+      diagnostics.push({
+        code: "type.duplicate_member",
+        message:
+          `type ${first.memberOf.owner} has duplicate static member ${first.memberOf.member}`,
+      });
+      continue;
+    }
     for (let index = 0; index < group.length; index++) {
       const clause = group[index]!;
       if (!clause.branchHint) continue;
-      if (clausePatternTests(first, clause).length > 0) continue;
+      if (clauseTests(first, clause).length > 0) continue;
       const previous = group[index - 1];
       if (
         index === group.length - 1 && previous &&
-        clausePatternTests(first, previous).length > 0 && !previous.branchHint
+        clauseTests(first, previous).length > 0 && !previous.branchHint
       ) continue;
       diagnostics.push({
         code: "branch_hint.unmapped",
@@ -1354,14 +1394,18 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
       generated: true,
       branchHint: undefined,
     }));
+    const inlineableDispatcher = group.every((clause) =>
+      !exprCallsFunction(clause.body, first.name)
+    );
     const dispatcher: FnDecl = {
       ...first,
-      params: first.params.map((param) => ({
+      params: dispatcherParams.map((param) => ({
         ...param,
         pattern: { kind: "binding", name: param.name },
       })),
-      body: clauseDispatcherBody(first, group),
+      body: clauseDispatcherBody(dispatcherSignature, group),
       generated: true,
+      generatedInlineable: inlineableDispatcher,
       branchHint: undefined,
     };
     replacements.set(first, [dispatcher, ...generated]);
@@ -1371,6 +1415,196 @@ function groupFunctionClauses(program: Program, diagnostics: Diagnostic[]) {
   program.declarations = program.declarations.flatMap((decl): Program["declarations"] =>
     decl.kind === "fn" ? (replacements.get(decl) ?? [decl]) : [decl]
   );
+}
+
+function checkUnreachableFunctionClauses(
+  signature: FnDecl,
+  clauses: FnDecl[],
+  diagnostics: Diagnostic[],
+): void {
+  if (signature.params.length !== 1 || clauses.length < 2) return;
+  let coveredAll = false;
+  const coveredValues = new Set<string>();
+  for (let index = 0; index < clauses.length; index++) {
+    const clause = clauses[index]!;
+    const coverage = singleParamClauseCoverage(signature, clause);
+    if (coverage === undefined) continue;
+    const unreachable = coveredAll ||
+      (coverage !== "all" && coverage.every((value) => coveredValues.has(value)));
+    if (unreachable) {
+      diagnostics.push(diagnosticAt(
+        "fn.unreachable_clause",
+        `function ${clause.name} clause ${
+          index + 1
+        } is unreachable because earlier clauses cover it`,
+        clause,
+      ));
+      continue;
+    }
+    if (coverage === "all") {
+      coveredAll = true;
+    } else {
+      for (const value of coverage) coveredValues.add(value);
+    }
+  }
+}
+
+function checkOverlappingFunctionClauses(
+  clauses: FnDecl[],
+  diagnostics: Diagnostic[],
+): void {
+  for (let rightIndex = 1; rightIndex < clauses.length; rightIndex++) {
+    const right = clauses[rightIndex]!;
+    for (let leftIndex = 0; leftIndex < rightIndex; leftIndex++) {
+      const left = clauses[leftIndex]!;
+      const overlap = refinedClauseOverlap(left, right);
+      if (!overlap) continue;
+      diagnostics.push(diagnosticAt(
+        "fn.overlapping_clause",
+        `function ${right.name} clause ${rightIndex + 1} overlaps clause ${
+          leftIndex + 1
+        } on ${overlap}`,
+        right,
+      ));
+      break;
+    }
+  }
+}
+
+function refinedClauseOverlap(left: FnDecl, right: FnDecl): string | undefined {
+  const overlaps: string[] = [];
+  let sawRefinedPair = false;
+  let rightContainedInLeft = true;
+  for (let index = 0; index < Math.min(left.params.length, right.params.length); index++) {
+    const leftDomain = clauseParamEffectiveDomain(left.params[index]);
+    const rightDomain = clauseParamEffectiveDomain(right.params[index]);
+    if (!leftDomain || !rightDomain) continue;
+    sawRefinedPair = true;
+    const intersection = intersectDomain(leftDomain, rightDomain);
+    if (domainIsEmpty(intersection)) return undefined;
+    overlaps.push(canonicalDomainKey(intersection));
+    if (!domainContains(leftDomain, rightDomain)) rightContainedInLeft = false;
+  }
+  if (!sawRefinedPair || rightContainedInLeft) return undefined;
+  return overlaps.join(", ");
+}
+
+function checkCallClauseDomainCoverage(
+  expr: Extract<Expr, { kind: "call" }>,
+  calleeName: string,
+  env: Map<string, OwnershipBinding>,
+  diagnostics: Diagnostic[],
+  types: TypeDecl[],
+  functions: FnDecl[],
+  options: { recoverTypes: boolean },
+): void {
+  const clauses = functions.filter((fn) =>
+    fn.generated && fn.name.startsWith(`${calleeName}__clause_`)
+  );
+  if (!clauses.length) return;
+  const dispatcher = functions.find((fn) => fn.name === calleeName);
+  const arity = dispatcher?.params.length ?? clauses[0]?.params.length ?? 0;
+  for (let index = 0; index < Math.min(expr.args.length, arity); index++) {
+    const covered = refinedClauseParameterUnion(clauses, index);
+    if (!covered) continue;
+    const actual = refinedArgumentDomain(
+      expr.args[index]!,
+      env,
+      types,
+      functions,
+      options.recoverTypes,
+    );
+    if (!actual || domainContains(covered, actual)) continue;
+    const uncovered = subtractDomain(actual, covered);
+    if (!uncovered || domainIsEmpty(uncovered)) continue;
+    diagnostics.push(diagnosticAt(
+      "fn.clause_domain_uncovered",
+      `call to ${calleeName} may reach no function clause for argument ${index + 1} domain ${
+        canonicalDomainKey(uncovered)
+      }`,
+      expr.args[index],
+    ));
+  }
+}
+
+function refinedClauseParameterUnion(
+  clauses: FnDecl[],
+  index: number,
+): RefinedI32Domain | undefined {
+  let covered: RefinedI32Domain | undefined;
+  for (const clause of clauses) {
+    const param = clause.params[index];
+    if (!param) return undefined;
+    const domain = parseRefinedI32Type(param.type);
+    if (!domain) return undefined;
+    covered = covered ? unionDomain(covered, domain) : domain;
+  }
+  return covered;
+}
+
+function refinedArgumentDomain(
+  arg: Expr,
+  env: Map<string, OwnershipBinding>,
+  types: TypeDecl[],
+  functions: FnDecl[],
+  recoverTypes: boolean,
+): RefinedI32Domain | undefined {
+  const literal = staticIntegerLiteral(arg);
+  if (literal !== undefined) return scalarFactsFromI32Range({ min: literal, max: literal }).domain;
+  const actual = exprBindingType(arg, env, types, functions, recoverTypes);
+  const resolved = resolveAliasType(actual, types) ?? actual;
+  return parseRefinedI32Type(resolved);
+}
+
+function clauseParamEffectiveDomain(param: Param | undefined): RefinedI32Domain | undefined {
+  if (!param) return undefined;
+  const typeDomain = parseRefinedI32Type(param.type);
+  const literal = param.pattern
+    ? finitePatternValue(param.pattern, scalarDomainRuntimeType(param.type) ?? param.type)
+    : undefined;
+  if (literal === undefined || !/^-?[0-9]+$/.test(literal)) return typeDomain;
+  const value = Number.parseInt(literal, 10);
+  if (!Number.isSafeInteger(value)) return typeDomain;
+  const literalDomain = scalarFactsFromI32Range({ min: value, max: value }).domain;
+  return typeDomain ? intersectDomain(typeDomain, literalDomain) : literalDomain;
+}
+
+function singleParamClauseCoverage(
+  signature: FnDecl,
+  clause: FnDecl,
+): "all" | string[] | undefined {
+  const param = clause.params[0];
+  if (!param) return undefined;
+  const pattern = param.pattern;
+  const signatureType = scalarDomainRuntimeType(signature.params[0]?.type) ??
+    signature.params[0]?.type;
+  if (isCatchAllPattern(pattern)) {
+    const domainValues = finiteI32DomainValues(parseRefinedI32Type(param.type));
+    if (domainValues) return domainValues;
+    return signatureType === scalarDomainRuntimeType(param.type) ? "all" : undefined;
+  }
+  if (!pattern) return undefined;
+  const literal = finitePatternValue(pattern, scalarDomainRuntimeType(param.type) ?? param.type);
+  return literal === undefined ? undefined : [literal];
+}
+
+function groupParamDispatchType(group: FnDecl[], index: number): string {
+  const types = group.map((clause) => clause.params[index]?.type);
+  const first = types[0] ?? "i32";
+  if (types.every((type) => type === first)) return first;
+  const runtimeTypes = types.map((type) => scalarDomainRuntimeType(type));
+  const runtime = runtimeTypes[0];
+  return runtime && runtimeTypes.every((type) => type === runtime) ? runtime : first;
+}
+
+function clauseParamTypesCompatible(
+  left: string | undefined,
+  right: string | undefined,
+): boolean {
+  if (left === right) return true;
+  const leftRuntime = scalarDomainRuntimeType(left);
+  const rightRuntime = scalarDomainRuntimeType(right);
+  return !!leftRuntime && leftRuntime === rightRuntime;
 }
 
 function checkBranchHints(
@@ -1549,19 +1783,122 @@ function buildClauseBranch(
   fallback: Expr,
   nextClause?: FnDecl,
 ): Expr {
-  const tests = clausePatternTests(signature, clause);
-  if (!tests.length) {
-    return {
-      kind: "call",
-      callee: { kind: "var", name: `${signature.name}__clause_${index}` },
-      args: signature.params.map((param) => ({ kind: "var", name: param.name })),
-    };
-  }
-  const test = tests.reduce((left, right) => ({ kind: "binary", op: "==", left, right }));
-  const nextHint = nextClause?.branchHint && clausePatternTests(signature, nextClause).length === 0
+  const tests = clauseTests(signature, clause);
+  const success: Expr = {
+    kind: "call",
+    callee: { kind: "var", name: `${signature.name}__clause_${index}` },
+    args: signature.params.map((param) => ({ kind: "var", name: param.name })),
+  };
+  if (!tests.length) return success;
+  const nextHint = nextClause?.branchHint && clauseTests(signature, nextClause).length === 0
     ? invertBranchHint(nextClause.branchHint)
     : undefined;
   const branchHint = clause.branchHint ?? nextHint;
+  return buildClauseTestBranch(tests, success, fallback, branchHint);
+}
+
+type ClauseTest =
+  | { kind: "expr"; test: Expr }
+  | { kind: "domain"; value: Expr; domain: NonNullable<ReturnType<typeof parseRefinedI32Type>> };
+
+function buildClauseTestBranch(
+  tests: ClauseTest[],
+  success: Expr,
+  fallback: Expr,
+  branchHint?: BranchHint,
+): Expr {
+  const [test, ...rest] = tests;
+  if (!test) return success;
+  const next = buildClauseTestBranch(rest, success, fallback);
+  if (test.kind === "domain") {
+    return buildDomainTestBranch(test.value, test.domain.intervals, next, fallback, branchHint);
+  }
+  return {
+    kind: "match",
+    value: test.test,
+    arms: [
+      {
+        pattern: literalPattern("true", "bool"),
+        ...(branchHint ? { branchHint } : {}),
+        value: next,
+      },
+      { pattern: wildcardPattern(), value: fallback },
+    ],
+  };
+}
+
+function buildDomainTestBranch(
+  value: Expr,
+  intervals: NonNullable<ReturnType<typeof parseRefinedI32Type>>["intervals"],
+  success: Expr,
+  fallback: Expr,
+  branchHint?: BranchHint,
+): Expr {
+  let expr = fallback;
+  for (let index = intervals.length - 1; index >= 0; index--) {
+    expr = buildIntervalTestBranch(value, intervals[index], success, expr, branchHint);
+  }
+  return expr;
+}
+
+function buildIntervalTestBranch(
+  value: Expr,
+  interval: DomainInterval,
+  success: Expr,
+  fallback: Expr,
+  branchHint?: BranchHint,
+): Expr {
+  if (
+    interval.start.kind === "literal" && interval.end.kind === "literal" &&
+    interval.end.value === interval.start.value + 1
+  ) {
+    return matchTrue(
+      {
+        kind: "binary",
+        op: "==",
+        left: value,
+        right: { kind: "literal", literalKind: "number", value: interval.start.source },
+      },
+      success,
+      fallback,
+      branchHint,
+    );
+  }
+  const lower = matchTrue(
+    {
+      kind: "binary",
+      op: "<=",
+      left: endpointExpr(interval.start),
+      right: value,
+    },
+    matchTrue(
+      {
+        kind: "binary",
+        op: "<",
+        left: value,
+        right: endpointExpr(interval.end),
+      },
+      success,
+      fallback,
+    ),
+    fallback,
+    branchHint,
+  );
+  return lower;
+}
+
+function endpointExpr(endpoint: DomainInterval["start"]): Expr {
+  return endpoint.kind === "literal"
+    ? { kind: "literal", literalKind: "number", value: endpoint.source }
+    : { kind: "var", name: endpoint.name };
+}
+
+function matchTrue(
+  test: Expr,
+  success: Expr,
+  fallback: Expr,
+  branchHint?: BranchHint,
+): Expr {
   return {
     kind: "match",
     value: test,
@@ -1569,11 +1906,7 @@ function buildClauseBranch(
       {
         pattern: literalPattern("true", "bool"),
         ...(branchHint ? { branchHint } : {}),
-        value: {
-          kind: "call",
-          callee: { kind: "var", name: `${signature.name}__clause_${index}` },
-          args: signature.params.map((param) => ({ kind: "var", name: param.name })),
-        },
+        value: success,
       },
       { pattern: wildcardPattern(), value: fallback },
     ],
@@ -1584,10 +1917,29 @@ function invertBranchHint(hint: BranchHint): BranchHint {
   return hint === "likely" ? "unlikely" : "likely";
 }
 
+function clauseTests(signature: FnDecl, clause: FnDecl): ClauseTest[] {
+  return [
+    ...clausePatternTests(signature, clause).map((test): ClauseTest => ({ kind: "expr", test })),
+    ...clauseDomainTests(signature, clause),
+  ];
+}
+
 function clausePatternTests(signature: FnDecl, clause: FnDecl): Expr[] {
   return clause.params.map((param, paramIndex) =>
     patternTestExpr(param.pattern, { kind: "var", name: signature.params[paramIndex].name })
   ).filter((expr): expr is Expr => Boolean(expr));
+}
+
+function clauseDomainTests(signature: FnDecl, clause: FnDecl): ClauseTest[] {
+  return clause.params.flatMap((param, paramIndex): ClauseTest[] => {
+    const domain = parseRefinedI32Type(param.type);
+    if (!domain) return [];
+    return [{
+      kind: "domain",
+      value: { kind: "var", name: signature.params[paramIndex].name },
+      domain,
+    }];
+  });
 }
 
 function wildcardPattern(): ParamPattern {
@@ -4306,6 +4658,11 @@ function constValueMatchesExpectedType(value: ConstValue, expectedType: string):
 }
 
 function typeProofMatchesExpected(proof: string, expectedType: string): boolean {
+  const proofDomain = parseRefinedI32Type(proof);
+  const expectedDomain = parseRefinedI32Type(expectedType);
+  if (proofDomain || expectedDomain) {
+    return refinedI32TypeCanonical(proof) === refinedI32TypeCanonical(expectedType);
+  }
   if (proof === expectedType) return true;
   const proofCall = proof.match(/^([A-Za-z_][A-Za-z0-9_.]*)\((.*)\)$/);
   const expectedCall = expectedType.match(/^([A-Za-z_][A-Za-z0-9_.]*)\((.*)\)$/);
@@ -4888,7 +5245,7 @@ function escapeRegExp(source: string): string {
 
 function renderTypeProofArg(expr: Expr): string | undefined {
   if (expr.kind === "literal" && expr.literalKind === "number") return expr.value;
-  if (expr.kind === "var") return expr.name;
+  if (expr.kind === "var") return canonicalTypeProofName(expr.name);
   if (expr.kind === "range") {
     const start = renderTypeProofArg(expr.start);
     const end = renderTypeProofArg(expr.end);
@@ -4897,9 +5254,13 @@ function renderTypeProofArg(expr: Expr): string | undefined {
   if (expr.kind === "call" && expr.callee.kind === "var") {
     const args = expr.args.map(renderTypeProofArg);
     if (args.some((arg) => arg === undefined)) return undefined;
-    return `${expr.callee.name}(${args.join(", ")})`;
+    return canonicalTypeProofName(`${expr.callee.name}(${args.join(", ")})`);
   }
   return undefined;
+}
+
+function canonicalTypeProofName(proof: string): string {
+  return refinedI32TypeCanonical(proof) ?? proof;
 }
 
 function allocateSpecializationName(
@@ -8970,6 +9331,7 @@ function checkFn(
   functions: FnDecl[],
   options: { recoverTypes: boolean },
 ) {
+  checkRuntimeScalarDomainSymbols(fn, diagnostics);
   if (
     exprContainsStaticExpansion(fn.body) || isInlineArrayExprBuiltinWrapper(fn) ||
     fn.name.endsWith("ComponentStore.set")
@@ -8989,6 +9351,69 @@ function checkFn(
     functions,
     options,
   );
+}
+
+function checkRuntimeScalarDomainSymbols(fn: FnDecl, diagnostics: Diagnostic[]) {
+  const staticParams = new Set(
+    fn.params.filter((param) => param.const).map((param) => param.name),
+  );
+  for (const param of fn.params) {
+    checkScalarDomainSymbols(param.type, staticParams, diagnostics, param);
+  }
+  checkScalarDomainSymbols(fn.returnType, staticParams, diagnostics, fn);
+  checkBlockScalarDomainSymbols(fn.body, staticParams, diagnostics);
+}
+
+function checkBlockScalarDomainSymbols(
+  block: BlockExpr,
+  staticParams: Set<string>,
+  diagnostics: Diagnostic[],
+) {
+  for (const stmt of block.statements) {
+    if (stmt.kind === "let" && stmt.type) {
+      checkScalarDomainSymbols(stmt.type, staticParams, diagnostics, stmt);
+    }
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+      checkExprScalarDomainSymbols(stmt.value, staticParams, diagnostics);
+    }
+  }
+  if (block.expr) checkExprScalarDomainSymbols(block.expr, staticParams, diagnostics);
+}
+
+function checkExprScalarDomainSymbols(
+  expr: Expr,
+  staticParams: Set<string>,
+  diagnostics: Diagnostic[],
+) {
+  if (expr.kind === "block") {
+    checkBlockScalarDomainSymbols(expr, staticParams, diagnostics);
+  } else if (expr.kind === "match") {
+    checkExprScalarDomainSymbols(expr.value, staticParams, diagnostics);
+    for (const arm of expr.arms) checkExprScalarDomainSymbols(arm.value, staticParams, diagnostics);
+  }
+}
+
+function checkScalarDomainSymbols(
+  type: string | undefined,
+  staticParams: Set<string>,
+  diagnostics: Diagnostic[],
+  spanLike?: { span?: Span; nameSpan?: Span },
+) {
+  const domain = parseRefinedI32Type(type);
+  if (!domain) return;
+  const symbols = new Set<string>();
+  for (const interval of domain.intervals) {
+    if (interval.start.kind === "symbol") symbols.add(interval.start.name);
+    if (interval.end.kind === "symbol") symbols.add(interval.end.name);
+  }
+  for (const symbol of symbols) {
+    if (staticParams.has(symbol)) continue;
+    diagnostics.push({
+      code: "type.scalar_domain_endpoint",
+      message: `scalar domain endpoint ${symbol} must be a const parameter`,
+      span: spanLike?.span ?? spanLike?.nameSpan,
+    });
+  }
 }
 
 function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
@@ -9282,6 +9707,17 @@ function checkExpr(
           ));
         }
       }
+      if (calleeName) {
+        checkCallClauseDomainCoverage(
+          expr,
+          calleeName,
+          env,
+          diagnostics,
+          types,
+          functions,
+          options,
+        );
+      }
       return;
     }
     case "index":
@@ -9307,7 +9743,7 @@ function checkExpr(
         functions,
         options,
       );
-      checkDirectIndex(expr, env, types, diagnostics);
+      checkDirectIndex(expr, env, types, functions, diagnostics, options);
       return;
     case "binary":
       if (expr.op === "==" || expr.op === "!=") {
@@ -9357,6 +9793,16 @@ function checkExpr(
           functions,
           options,
         );
+      }
+      if (expectedType) {
+        const actual = exprBindingType(expr, env, types, functions, options.recoverTypes);
+        if (actual && !runtimeValueTypeAssignable(expectedType, actual)) {
+          diagnostics.push(diagnosticAt(
+            "type.literal_mismatch",
+            `expected ${expectedType} but got ${actual}`,
+            expr,
+          ));
+        }
       }
       return;
     case "pipe_bind": {
@@ -9412,6 +9858,7 @@ function checkExpr(
         functions,
         options.recoverTypes,
       );
+      checkRuntimeMatchCoverage(expr, matchValueType, diagnostics, types);
       for (const arm of expr.arms) {
         const armEnv = narrowedEnvForMatchPattern(expr.value, arm.pattern, env, types);
         bindMatchPatternLocals(arm.pattern, matchValueType, armEnv, diagnostics, types);
@@ -9625,6 +10072,20 @@ function exprBindingType(
   recoverTypes = false,
 ): string | undefined {
   if (expr.kind === "var") return projectedBindingType(expr.name, env, types);
+  if (expr.kind === "binary") {
+    if (["==", "!=", "<", "<=", ">", ">="].includes(expr.op)) return "bool";
+    const facts = exprI32Facts(expr, env, types, functions, recoverTypes);
+    if (facts) return renderRefinedI32Domain(facts.domain);
+    if (arithmeticBinaryOp(expr.op)) {
+      const left = scalarDomainRuntimeType(
+        exprBindingType(expr.left, env, types, functions, recoverTypes),
+      );
+      const right = scalarDomainRuntimeType(
+        exprBindingType(expr.right, env, types, functions, recoverTypes),
+      );
+      if (left === "i32" && right === "i32") return "i32";
+    }
+  }
   if (expr.kind === "call") {
     const callee = expr.callee;
     if (callee.kind === "var") return functions.find((fn) => fn.name === callee.name)?.returnType;
@@ -9649,6 +10110,75 @@ function exprBindingType(
   if (expr.kind === "literal") return expr.inferredType;
   if (recoverTypes) return recoveredExprType(expr, env, types, functions);
   return undefined;
+}
+
+function arithmeticBinaryOp(op: string): boolean {
+  return op === "+" || op === "-" || op === "*" || op === "/" || op === "%";
+}
+
+function exprI32Facts(
+  expr: Expr,
+  env: Map<string, OwnershipBinding>,
+  types: TypeDecl[],
+  functions: FnDecl[],
+  recoverTypes: boolean,
+): ReturnType<typeof scalarFactsFromI32Range> | undefined {
+  const literal = staticIntegerLiteral(expr);
+  if (literal !== undefined) {
+    return literal >= I32_MIN && literal <= I32_MAX
+      ? scalarFactsFromI32Range({ min: literal, max: literal })
+      : undefined;
+  }
+  if (expr.kind === "var") {
+    const type = resolveAliasType(projectedBindingType(expr.name, env, types), types) ??
+      projectedBindingType(expr.name, env, types);
+    return scalarFactsFromRefinedI32Type(type);
+  }
+  if (expr.kind !== "binary") return undefined;
+  const left = exprI32Range(expr.left, env, types, functions, recoverTypes);
+  const right = exprI32Range(expr.right, env, types, functions, recoverTypes);
+  if (!left || !right) return undefined;
+  if (expr.op === "+") {
+    return i32FactsFromRangeBounds(left.min + right.min, left.max + right.max);
+  }
+  if (expr.op === "-") {
+    return i32FactsFromRangeBounds(left.min - right.max, left.max - right.min);
+  }
+  if (expr.op === "*") {
+    const products = [
+      left.min * right.min,
+      left.min * right.max,
+      left.max * right.min,
+      left.max * right.max,
+    ];
+    return i32FactsFromRangeBounds(Math.min(...products), Math.max(...products));
+  }
+  const divisor = staticIntegerLiteral(expr.right);
+  if (divisor === undefined || divisor <= 0 || left.min < 0) return undefined;
+  if (expr.op === "/") {
+    return scalarFactsFromI32Range({ min: 0, max: Math.floor(left.max / divisor) });
+  }
+  if (expr.op === "%") {
+    return scalarFactsFromI32Range({ min: 0, max: divisor - 1 });
+  }
+  return undefined;
+}
+
+function exprI32Range(
+  expr: Expr,
+  env: Map<string, OwnershipBinding>,
+  types: TypeDecl[],
+  functions: FnDecl[],
+  recoverTypes: boolean,
+): { min: number; max: number } | undefined {
+  return exprI32Facts(expr, env, types, functions, recoverTypes)?.range;
+}
+
+function i32FactsFromRangeBounds(
+  min: number,
+  max: number,
+): ReturnType<typeof scalarFactsFromI32Range> | undefined {
+  return min >= I32_MIN && max <= I32_MAX ? scalarFactsFromI32Range({ min, max }) : undefined;
 }
 
 function recoveredExprType(
@@ -10119,6 +10649,97 @@ function checkProjection(
   }
 }
 
+const MATCH_EXHAUSTIVE_DOMAIN_LIMIT = 256;
+
+function checkRuntimeMatchCoverage(
+  expr: Extract<Expr, { kind: "match" }>,
+  matchValueType: string | undefined,
+  diagnostics: Diagnostic[],
+  types: TypeDecl[],
+): void {
+  const resolvedType = resolveAliasType(matchValueType, types) ?? matchValueType;
+  const domain = resolvedType === "bool"
+    ? ["false", "true"]
+    : finiteI32DomainValues(parseRefinedI32Type(resolvedType));
+  if (!domain) return;
+
+  const required = new Set(domain);
+  const covered = new Set<string>();
+  let exhaustiveAt: number | undefined;
+  for (let index = 0; index < expr.arms.length; index++) {
+    const arm = expr.arms[index]!;
+    if (exhaustiveAt !== undefined) {
+      diagnostics.push(diagnosticAt(
+        "match.unreachable_arm",
+        `match arm ${index + 1} is unreachable because an earlier arm covers all values`,
+        arm,
+      ));
+      continue;
+    }
+    if (isCatchAllPattern(arm.pattern)) {
+      for (const value of required) covered.add(value);
+      exhaustiveAt = index;
+      continue;
+    }
+    const literal = finitePatternValue(arm.pattern, resolvedType);
+    if (literal === undefined) continue;
+    if (!required.has(literal)) {
+      diagnostics.push(diagnosticAt(
+        "match.unreachable_arm",
+        `match arm ${renderParamPattern(arm.pattern)} is unreachable for ${resolvedType}`,
+        arm,
+      ));
+      continue;
+    }
+    if (covered.has(literal)) {
+      diagnostics.push(diagnosticAt(
+        "match.unreachable_arm",
+        `match arm ${renderParamPattern(arm.pattern)} is shadowed by an earlier arm`,
+        arm,
+      ));
+      continue;
+    }
+    covered.add(literal);
+    if (covered.size === required.size) exhaustiveAt = index;
+  }
+
+  if (covered.size < required.size) {
+    const missing = [...required].filter((value) => !covered.has(value));
+    diagnostics.push(diagnosticAt(
+      "type.non_exhaustive_match",
+      `match is missing ${missing.slice(0, 4).join(", ")}${
+        missing.length > 4 ? ", ..." : ""
+      } for ${resolvedType}`,
+      expr,
+    ));
+  }
+}
+
+function finiteI32DomainValues(domain: RefinedI32Domain | undefined): string[] | undefined {
+  if (!domain) return undefined;
+  const values: string[] = [];
+  for (const interval of domain.intervals) {
+    if (interval.start.kind !== "literal" || interval.end.kind !== "literal") return undefined;
+    const count = interval.end.value - interval.start.value;
+    if (count < 0 || values.length + count > MATCH_EXHAUSTIVE_DOMAIN_LIMIT) return undefined;
+    for (let value = interval.start.value; value < interval.end.value; value++) {
+      values.push(String(value));
+    }
+  }
+  return values;
+}
+
+function finitePatternValue(
+  pattern: ParamPattern,
+  matchValueType: string | undefined,
+): string | undefined {
+  if (matchValueType === "bool") return boolPatternValue(pattern)?.toString();
+  if (pattern.kind !== "literal" || pattern.literalKind !== "number") return undefined;
+  if (!/^-?[0-9]+$/.test(pattern.value)) return undefined;
+  const value = Number.parseInt(pattern.value, 10);
+  return Number.isSafeInteger(value) ? String(value) : undefined;
+}
+
 function narrowedEnvForMatchPattern(
   value: Expr,
   pattern: ParamPattern,
@@ -10126,21 +10747,26 @@ function narrowedEnvForMatchPattern(
   types: TypeDecl[],
 ): Map<string, OwnershipBinding> {
   const scoped = new Map(env);
-  if (!isTrueLikePattern(pattern)) return scoped;
-  const narrowed = conditionI32Narrowing(value);
+  const truth = boolPatternValue(pattern);
+  if (truth === undefined) return scoped;
+  const narrowed = conditionI32Narrowing(value, truth);
   if (!narrowed) return scoped;
   const binding = scoped.get(narrowed.name);
   const currentType = resolveAliasType(binding?.type, types) ?? binding?.type;
   if (scalarDomainRuntimeType(currentType) !== "i32") return scoped;
   if (
     !scalarFactsFromRefinedI32Type(currentType) &&
-    isUpperOnlyI32Narrowing(narrowed.interval)
+    narrowed.domain.intervals.every(isUpperOnlyI32Narrowing)
   ) {
     return scoped;
   }
-  const refined = intersectRefinedI32Type(currentType, narrowed.interval);
-  if (!refined) return scoped;
-  scoped.set(narrowed.name, { moved: binding?.moved ?? false, type: refined });
+  const currentDomain = parseRefinedI32Type(currentType) ?? anyI32Domain();
+  const refined = refinedI32DomainIntersection(currentDomain, narrowed.domain);
+  if (!refined.intervals.length) return scoped;
+  scoped.set(narrowed.name, {
+    moved: binding?.moved ?? false,
+    type: renderRefinedI32Domain(refined),
+  });
   return scoped;
 }
 
@@ -10154,14 +10780,15 @@ function isUpperOnlyI32Narrowing(interval: DomainInterval): boolean {
 
 function conditionI32Narrowing(
   expr: Expr,
-): { name: string; interval: DomainInterval } | undefined {
+  truth: boolean,
+): { name: string; domain: RefinedI32Domain } | undefined {
   if (expr.kind !== "binary") return undefined;
   if (expr.op === "==" && expr.left.kind === "var") {
     const right = endpointForI32Condition(expr.right);
     if (right?.kind === "literal") {
       return {
         name: expr.left.name,
-        interval: { start: right, end: literalEndpoint(right.value + 1) },
+        domain: equalityNarrowingDomain(right, truth),
       };
     }
   }
@@ -10170,35 +10797,106 @@ function conditionI32Narrowing(
     if (left?.kind === "literal") {
       return {
         name: expr.right.name,
-        interval: { start: left, end: literalEndpoint(left.value + 1) },
+        domain: equalityNarrowingDomain(left, truth),
       };
     }
   }
   if (expr.left.kind === "var") {
     const right = endpointForI32Condition(expr.right);
-    if (right && (expr.op === "<" || expr.op === "<=")) {
-      const end = expr.op === "<" ? right : incrementEndpoint(right);
-      if (end) {
-        return {
-          name: expr.left.name,
-          interval: { start: literalEndpoint(I32_MIN), end },
-        };
-      }
-    }
+    const domain = right ? leftVarComparisonDomain(expr.op, right, truth) : undefined;
+    if (domain) return { name: expr.left.name, domain };
   }
   if (expr.right.kind === "var") {
     const left = endpointForI32Condition(expr.left);
-    if (left && (expr.op === "<" || expr.op === "<=")) {
-      const start = expr.op === "<" ? incrementEndpoint(left) : left;
-      if (start) {
-        return {
-          name: expr.right.name,
-          interval: { start, end: literalEndpoint(I32_MAX_EXCLUSIVE) },
-        };
-      }
-    }
+    const domain = left ? rightVarComparisonDomain(expr.op, left, truth) : undefined;
+    if (domain) return { name: expr.right.name, domain };
   }
   return undefined;
+}
+
+function equalityNarrowingDomain(
+  endpoint: DomainInterval["start"] & { kind: "literal" },
+  truth: boolean,
+): RefinedI32Domain {
+  const singleton = domainFromIntervals([{
+    start: endpoint,
+    end: literalEndpoint(endpoint.value + 1),
+  }]);
+  if (truth) return singleton;
+  return refinedI32DomainDifference(anyI32Domain(), singleton) ?? anyI32Domain();
+}
+
+function leftVarComparisonDomain(
+  op: string,
+  endpoint: DomainInterval["end"],
+  truth: boolean,
+): RefinedI32Domain | undefined {
+  if (op === "<") {
+    return truth ? lessThanDomain(endpoint) : greaterEqualDomain(endpoint);
+  }
+  if (op === "<=") {
+    const next = incrementEndpoint(endpoint);
+    return next ? (truth ? lessThanDomain(next) : greaterEqualDomain(next)) : undefined;
+  }
+  if (op === ">") {
+    const next = incrementEndpoint(endpoint);
+    return next ? (truth ? greaterEqualDomain(next) : lessThanDomain(next)) : undefined;
+  }
+  if (op === ">=") {
+    return truth ? greaterEqualDomain(endpoint) : lessThanDomain(endpoint);
+  }
+  return undefined;
+}
+
+function rightVarComparisonDomain(
+  op: string,
+  endpoint: DomainInterval["start"],
+  truth: boolean,
+): RefinedI32Domain | undefined {
+  if (op === "<") {
+    const next = incrementEndpoint(endpoint);
+    return next ? (truth ? greaterEqualDomain(next) : lessThanDomain(next)) : undefined;
+  }
+  if (op === "<=") {
+    return truth ? greaterEqualDomain(endpoint) : lessThanDomain(endpoint);
+  }
+  if (op === ">") {
+    return truth ? lessThanDomain(endpoint) : greaterEqualDomain(endpoint);
+  }
+  if (op === ">=") {
+    const next = incrementEndpoint(endpoint);
+    return next ? (truth ? lessThanDomain(next) : greaterEqualDomain(next)) : undefined;
+  }
+  return undefined;
+}
+
+function lessThanDomain(end: DomainInterval["end"]): RefinedI32Domain {
+  return domainFromIntervals([{ start: literalEndpoint(I32_MIN), end }]);
+}
+
+function greaterEqualDomain(start: DomainInterval["start"]): RefinedI32Domain {
+  return domainFromIntervals([{ start, end: literalEndpoint(I32_MAX_EXCLUSIVE) }]);
+}
+
+function anyI32Domain(): RefinedI32Domain {
+  return domainFromIntervals([{
+    start: literalEndpoint(I32_MIN),
+    end: literalEndpoint(I32_MAX_EXCLUSIVE),
+  }]);
+}
+
+function domainFromIntervals(intervals: DomainInterval[]): RefinedI32Domain {
+  return refinedI32DomainIntersection(
+    { carrier: "i32", intervals },
+    anyI32DomainRaw(),
+  );
+}
+
+function anyI32DomainRaw(): RefinedI32Domain {
+  return {
+    carrier: "i32",
+    intervals: [{ start: literalEndpoint(I32_MIN), end: literalEndpoint(I32_MAX_EXCLUSIVE) }],
+  };
 }
 
 function endpointForI32Condition(expr: Expr): ReturnType<typeof endpointFromTypeExprText> {
@@ -10217,9 +10915,16 @@ function incrementEndpoint(
   return endpoint.kind === "literal" ? literalEndpoint(endpoint.value + 1) : undefined;
 }
 
-function isTrueLikePattern(pattern: ParamPattern): boolean {
-  return (pattern.kind === "literal" && pattern.value === "true") ||
-    (pattern.kind === "type" && pattern.name === "true");
+function boolPatternValue(pattern: ParamPattern): boolean | undefined {
+  if (pattern.kind === "literal") {
+    if (pattern.value === "true") return true;
+    if (pattern.value === "false") return false;
+  }
+  if (pattern.kind === "type") {
+    if (pattern.name === "true") return true;
+    if (pattern.name === "false") return false;
+  }
+  return undefined;
 }
 
 function bindMatchPatternLocals(
@@ -10324,7 +11029,9 @@ function checkDirectIndex(
   expr: Extract<Expr, { kind: "index" }>,
   env: Map<string, OwnershipBinding>,
   types: TypeDecl[],
+  functions: FnDecl[],
   diagnostics: Diagnostic[],
+  options: { recoverTypes: boolean },
 ) {
   if (expr.target.kind !== "var") return;
   const targetType = stripBorrowType(env.get(expr.target.name)?.type);
@@ -10340,7 +11047,7 @@ function checkDirectIndex(
     }
     return;
   }
-  const indexType = expr.index.kind === "var" ? env.get(expr.index.name)?.type : undefined;
+  const indexType = exprBindingType(expr.index, env, types, functions, options.recoverTypes);
   if (indexTypeProvesInlineArrayCapacity(indexType, capacity, types)) return;
   const resolvedIndexType = resolveAliasType(indexType, types) ?? indexType;
   if (scalarFactsFromRefinedI32Type(resolvedIndexType)) {
@@ -10558,7 +11265,7 @@ function collectBlockRefs(
 }
 
 function numericExpectedType(expectedType: string | undefined): string | undefined {
-  return expectedType === "i32" ? "i32" : undefined;
+  return scalarDomainRuntimeType(expectedType) === "i32" ? "i32" : undefined;
 }
 
 function isUnsuffixedInteger(value: string): boolean {

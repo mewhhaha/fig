@@ -80,11 +80,19 @@ export async function wasmFromSource(
 export { parse } from "./parser.ts";
 export { formatSource, isFormatted } from "./format.ts";
 export { tokenize } from "./tokenize.ts";
-export { optimizeProgram, type OptMode, summarizeProgram } from "./optimize.ts";
+export {
+  type AbstractFunctionFacts,
+  type AbstractValue,
+  optimizeProgram,
+  type OptMode,
+  type Recurrence,
+  summarizeAbstractValues,
+  summarizeProgram,
+  summarizeRecurrences,
+} from "./optimize.ts";
 export { CompileError, formatDiagnostic } from "./diagnostics.ts";
 export {
   COMPILER_PLUGIN_API_VERSION,
-  createCompilerPluginRegistry,
   type CompilerAnnotationBuiltin,
   type CompilerDeclarationBuiltin,
   type CompilerDoStrategyBuiltin,
@@ -94,6 +102,7 @@ export {
   type CompilerStaticBuiltin,
   type ConstBuiltinContext,
   type ConstPluginValue,
+  createCompilerPluginRegistry,
   type TypeBuiltinContext,
   type TypePluginValue,
 } from "./plugins.ts";
@@ -222,7 +231,7 @@ function mergePrograms(
   const declarations: Declaration[] = [];
   for (const decl of [...importedDecls, ...aliasedDecls, ...destructuredDecls]) {
     const name = declarationName(decl);
-    if (localNames.has(name) || seenImported.has(name)) {
+    if (localNames.has(name)) {
       diagnostics.push({
         code: "module.duplicate_import",
         message: `imported declaration ${name} conflicts with another declaration`,
@@ -230,7 +239,16 @@ function mergePrograms(
       });
       continue;
     }
-    seenImported.set(name, decl);
+    const previous = seenImported.get(name);
+    if (previous && !importedDeclarationsCanShareName(previous, decl)) {
+      diagnostics.push({
+        code: "module.duplicate_import",
+        message: `imported declaration ${name} conflicts with another declaration`,
+        span: decl.nameSpan ?? decl.span,
+      });
+      continue;
+    }
+    if (!previous) seenImported.set(name, decl);
     declarations.push(decl);
   }
   declarations.push(...program.declarations);
@@ -245,6 +263,10 @@ function mergePrograms(
     sourceImports: [],
     declarations,
   });
+}
+
+function importedDeclarationsCanShareName(left: Declaration, right: Declaration): boolean {
+  return left.kind === "fn" && right.kind === "fn";
 }
 
 function destructureImportedDeclarations(
