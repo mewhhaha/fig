@@ -220,6 +220,7 @@ const scenarios: Scenario[] = [
       module: { ...scalarFlatShape.module, fig_buffers_refs: { max: 0 } },
     },
     notes: "Iterator filter/map/collect builds a CompactArray without heap allocation.",
+    maxWatBytes: 30_000,
     source: `
       const array = @import("prelude.array_static");
       fn inc(x: i32) -> i32 { x + 1 }

@@ -288,6 +288,11 @@ export const OPTIMIZATION_RULES: readonly OptimizationRule[] = [
     structuralMatcher: "comparison truth implied by abstract/domain facts",
   },
   {
+    id: "domain.compare.always_false",
+    phase: "plan",
+    structuralMatcher: "comparison falsehood implied by abstract/domain facts",
+  },
+  {
     id: "product.project.known_slot",
     phase: "rewrite",
     structuralMatcher: "effect-safe known product projected by slot",
@@ -882,18 +887,21 @@ function addDomainFoldDecisions(
     );
     if (!folds.length) continue;
     const plan = plans.get(fn.name);
-    for (const reason of folds) {
+    for (const fold of folds) {
+      const rule: RewriteRuleId = fold.value === "true"
+        ? "domain.compare.always_true"
+        : "domain.compare.always_false";
       const action: PlannedAction = {
         kind: "fold_domain_branch",
-        reason,
-        rule: "domain.compare.always_true",
+        reason: fold.reason,
+        rule,
       };
       plan?.actions.push(action);
       decisions.push({
         pass: "plan.abstract",
         target: fn.name,
-        action: "domain.compare.always_true",
-        reason,
+        action: rule,
+        reason: fold.reason,
       });
     }
   }
@@ -902,13 +910,19 @@ function addDomainFoldDecisions(
 function foldableDomainBranchReasons(
   block: BlockExpr,
   env: Map<string, AbstractValue>,
-): string[] {
-  const reasons: string[] = [];
+): { value: "true" | "false"; reason: string }[] {
+  const reasons: { value: "true" | "false"; reason: string }[] = [];
   const visitExpr = (expr: Expr, scoped: Map<string, AbstractValue>) => {
     if (expr.kind === "match") {
       const value = abstractExpr(expr.value, scoped);
-      if (value.kind === "constant" && value.literalKind === "bool") {
-        reasons.push(`match scrutinee is always ${value.value}`);
+      if (
+        value.kind === "constant" && value.literalKind === "bool" &&
+        (value.value === "true" || value.value === "false")
+      ) {
+        reasons.push({
+          value: value.value,
+          reason: `match scrutinee is always ${value.value}`,
+        });
       }
       visitExpr(expr.value, scoped);
       for (const arm of expr.arms) visitExpr(arm.value, scoped);

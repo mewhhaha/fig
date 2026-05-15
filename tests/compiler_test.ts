@@ -3441,6 +3441,39 @@ Deno.test("optimizes repeated forwarding wrapper call sites", async () => {
   assertEquals(counts.get("map_box") ?? 0, 0);
 });
 
+Deno.test("repeated const-param call specialization reuses one generated wrapper", async () => {
+  const calls = 100;
+  const steps = [
+    "let v0: Box = {value: 0};",
+    ...Array.from(
+      { length: calls },
+      (_, index) => `let v${index + 1} = mapped(box_functor, v${index});`,
+    ),
+    `v${calls}`,
+  ].join("\n");
+  const checked = await checkSource(
+    `
+    type fn Box() { let Box = {value: i32}; struct(Box) }
+    type fn Functor(f: type) { let Functor = {map: fn(x: f) -> f}; struct(Functor) }
+    fn map_box(x: Box) -> Box { {value: x.value + 1} }
+    const box_functor: Functor(Box) = {map: map_box};
+    fn mapped(const dict: Functor(Box), x: Box) -> Box { dict.map(x) }
+    pub fn main() -> Box { ${steps} }
+  `,
+    { trace: true },
+  );
+
+  assertEquals(findFns(checked.program, "mapped__box_functor").length, 1);
+  const constPass = checked.trace?.phases.find((phase) =>
+    phase.name === "specializeConstParamCalls #1"
+  )?.specialization;
+  assert(constPass);
+  assertEquals(constPass.generatedSpecializations, 1);
+  assertEquals(constPass.cacheMisses, 1);
+  assert(constPass.cacheHits >= calls - 1);
+  assert(constPass.visitedCalls >= calls);
+});
+
 Deno.test("optimizes nested forwarding specializations transitively", async () => {
   const checked = await checkSource(`
     type fn Box() { let Box = {value: i32}; struct(Box) }
@@ -3705,6 +3738,28 @@ Deno.test("optimization plan domain branch action matches release WAT shape", as
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assert(!main.includes("if"));
   assert(!main.includes("i32.const 0"));
+  assert(!main.includes("call $inc"));
+});
+
+Deno.test("optimization plan domain false branch action matches release WAT shape", async () => {
+  const source = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn never(i: i32(0..4)) -> i32 {
+      match i > 5 { true => inc(i), false => 0 }
+    }
+    pub fn main(i: i32(0..4)) -> i32 { never(i) }
+  `;
+  const plan = await explainOptimization(source, { optMode: "release" });
+  assert(
+    plan.decisions.some((decision) =>
+      decision.target === "never" && decision.action === "domain.compare.always_false"
+    ),
+  );
+
+  const { wat } = await compileArtifactsFromSource(source, { optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(!main.includes("if"));
+  assert(!main.includes("i32.gt_s"));
   assert(!main.includes("call $inc"));
 });
 

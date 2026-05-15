@@ -1,5 +1,5 @@
 import type { Expr, Program } from "../src/core_ast.ts";
-import { type CheckTrace, checkSource, optimizeProgram } from "../src/mod.ts";
+import { checkSource, type CheckTrace, optimizeProgram } from "../src/mod.ts";
 
 const sizes = stringArg("--sizes")
   ?.split(",")

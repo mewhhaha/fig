@@ -47,16 +47,28 @@ Selected rows:
 | `mat4_dot1`                | 100000 |     18.6 |    0.743 |     0.064 |    0.370 |  1.483 |   1.444 |    4.104 |       853 |        145 |     0 |               0 |       14 |
 | `mat4_full`                | 100000 |     95.6 |    4.632 |     0.151 |    1.172 | 13.714 |  11.391 |   31.060 |      3933 |        426 |     0 |               0 |       38 |
 
-Focused compile-time scaling from `bench_const_params`:
+Focused compile-time scaling from:
 
-| Calls | Direct avg ms | Runtime-dict avg ms | Const-param avg ms |
-| ----: | ------------: | ------------------: | -----------------: |
-|    10 |         2.021 |               1.629 |              1.670 |
-|   100 |       137.282 |             142.766 |            143.506 |
-|   200 |       997.574 |            1012.835 |           1028.437 |
+```bash
+deno run --allow-read scripts/bench_const_params.ts --sizes=10,100,200,500,1000 --iterations=3
+```
 
-The 500/1000-call compile benchmark did not finish within the 180s timeout, even with 3 samples.
-This is the clearest scaling pressure from the current run.
+| Calls | Direct avg ms | Runtime-dict avg ms | Const-param avg ms | Slowest traced check phase at const-param | Const-param specialization summary |
+| ----: | ------------: | ------------------: | -----------------: | ----------------------------------------- | ---------------------------------- |
+|    10 |         2.166 |               1.695 |              1.480 | `checkFn loop:0.101ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+|   100 |        17.236 |              22.625 |             24.581 | `checkFn loop:1.380ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+|   200 |        50.665 |              76.411 |             78.425 | `checkFn loop:4.192ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+|   500 |       285.776 |             439.795 |            435.986 | `checkFn loop:17.992ms`                   | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+|  1000 |      1081.818 |            1690.625 |           1694.981 | `checkFn loop:66.324ms`                   | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+
+The repeated-call benchmark now completes through 1000 calls without timeout. Doubling 100 to 200 is
+well below the old ~7x cliff, and the checker trace shows the remaining wall time is not dominated
+by specialization. The generated specialization count stays stable in the traced benchmark, and the
+focused regression test covers the 100 repeated const-param call shape with one generated wrapper,
+one specialization cache miss, and cache hits growing with repeated calls.
+
+The current memory-model run also passed the compact-filter WAT gate: `compact_filter_collect`
+compiled to 25363 WAT bytes and 1483 Wasm bytes, under the 30000-byte WAT limit.
 
 Tail-recursion benchmark medians:
 
