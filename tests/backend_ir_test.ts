@@ -453,7 +453,7 @@ Deno.test("backend folds comparisons proven by refined i32 domains", async () =>
   assertEquals((instance.exports.main as CallableFunction)(3, 4), 30);
 });
 
-Deno.test("backend lowers Index.try refined-domain matches as checked bounds", async () => {
+Deno.test("backend lowers Index::try refined-domain matches as checked bounds", async () => {
   const source = `
     const core = @import("prelude.core");
     type fn InlineArray(n: count, a: type) {
@@ -461,13 +461,13 @@ Deno.test("backend lowers Index.try refined-domain matches as checked bounds", a
       struct(InlineArray)
     }
     pub fn main(raw: i32, xs: InlineArray(4, i32)) -> i32 {
-      match core.Index.try(4, raw) {
+      match core.Index::try(4, raw) {
         Some(i) => xs[i],
         None => 0,
       }
     }
     pub fn generic(raw: i32) -> i32 {
-      match core.i32.try_domain(i32(0..4), raw) {
+      match core.i32::try_domain(i32(0..4), raw) {
         Some(i) => i + 1,
         None => 0,
       }
@@ -883,11 +883,11 @@ Deno.test("release inlines generated pure const-function helpers", async () => {
   const source = `
     type fn Id(a: type) -> type { a }
 
-    fn Id.pure(value: a) -> Id(a) {
+    fn Id::pure(value: a) -> Id(a) {
       value
     }
 
-    fn Id.bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) {
+    fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) {
       f(value)
     }
 
@@ -1260,7 +1260,7 @@ Deno.test("packed fixed-array dynamic read lowers through shift and mask", async
       xs[index]
     }
     fn bump_read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
-      read(layout.InlineArray.set(4, u3, xs, index, 7), index)
+      read(layout.InlineArray::set(4, u3, xs, index, 7), index)
     }
     pub fn main(index: i32) -> i32 {
       bump_read(<1, 2, 3, 4>, index)
@@ -1284,7 +1284,7 @@ Deno.test("packed fixed-array dynamic set updates with shifts and masks", async 
   const source = `
     const layout = @import("prelude.layout");
     fn set_at(xs: layout.InlineArray(4, u3), index: i32, value: u3) -> layout.InlineArray(4, u3) {
-      layout.InlineArray.set(4, u3, xs, index, value)
+      layout.InlineArray::set(4, u3, xs, index, value)
     }
     pub fn main(index: i32) -> i32 {
       let ys = set_at(<1, 2, 3, 4>, index, 7);
@@ -1313,7 +1313,7 @@ Deno.test("packed fixed-array update inlines small private scalar updater", asyn
       x - 1
     }
     fn update_at(xs: layout.InlineArray(7, u3), index: i32) -> layout.InlineArray(7, u3) {
-      layout.InlineArray.update(7, u3, xs, index, dec)
+      layout.InlineArray::update(7, u3, xs, index, dec)
     }
     pub fn main(index: i32) -> i32 {
       let ys = update_at(<0, 1, 2, 3, 4, 5, 6>, index);
@@ -1340,7 +1340,7 @@ Deno.test("packed fixed-array read/update reuses old dynamic lane", async () => 
     }
     fn update_after_read(xs: layout.InlineArray(7, u3), index: i32) -> i32 {
       let old = xs[index];
-      let ys = layout.InlineArray.update(7, u3, xs, index, dec);
+      let ys = layout.InlineArray::update(7, u3, xs, index, dec);
       old * 10 + ys[index]
     }
     pub fn main(index: i32) -> i32 {
@@ -1368,11 +1368,11 @@ Deno.test("public fixed-array kernel uses optimized private representation clone
       layout.InlineArray(7, u3)
     }
     pub fn public_kernel(xs: A, i: i32, v: u3) -> u3 {
-      let ys = layout.InlineArray.set(7, u3, xs, i, v);
+      let ys = layout.InlineArray::set(7, u3, xs, i, v);
       ys[i]
     }
     fn private_kernel(xs: A, i: i32, v: u3) -> u3 {
-      let ys = layout.InlineArray.set(7, u3, xs, i, v);
+      let ys = layout.InlineArray::set(7, u3, xs, i, v);
       ys[i]
     }
     pub fn main(i: i32) -> i32 {
@@ -1399,8 +1399,8 @@ Deno.test("packed fixed-array swap stays loop-lowered without helpers", async ()
     fn swap(xs: layout.InlineArray(4, u3), left: i32, right: i32) -> layout.InlineArray(4, u3) {
       let a = xs[left];
       let b = xs[right];
-      layout.InlineArray.set(4, u3, xs, left, b) \\ys ->
-      layout.InlineArray.set(4, u3, ys, right, a)
+      layout.InlineArray::set(4, u3, xs, left, b) \\ys ->
+      layout.InlineArray::set(4, u3, ys, right, a)
     }
     fn reverse_loop(xs: layout.InlineArray(4, u3), left: i32, right: i32) -> layout.InlineArray(4, u3) {
       match left < right {
@@ -1474,8 +1474,8 @@ Deno.test("tail-recursive scalar inline-array set mutates local slots in loop", 
       first: i32
     ) -> layout.InlineArray(4, i32) {
       match i < r {
-        true => rotate_left_loop(layout.InlineArray.set(4, i32, xs, i, xs[i + 1]), i + 1, r, first),
-        false => layout.InlineArray.set(4, i32, xs, r, first),
+        true => rotate_left_loop(layout.InlineArray::set(4, i32, xs, i, xs[i + 1]), i + 1, r, first),
+        false => layout.InlineArray::set(4, i32, xs, r, first),
       }
     }
     pub fn main() -> i32 {
@@ -1508,8 +1508,8 @@ Deno.test("tail-recursive packed adjacent lane copy folds dynamic shifts", async
       first: u3
     ) -> layout.InlineArray(7, u3) {
       match i < r {
-        true => rotate_left_loop(layout.InlineArray.set(7, u3, xs, i, xs[i + 1]), i + 1, r, first),
-        false => layout.InlineArray.set(7, u3, xs, r, first),
+        true => rotate_left_loop(layout.InlineArray::set(7, u3, xs, i, xs[i + 1]), i + 1, r, first),
+        false => layout.InlineArray::set(7, u3, xs, r, first),
       }
     }
     pub fn main(seed: i32) -> i32 {
@@ -1538,9 +1538,9 @@ Deno.test("private fixed-array forwarding transformer parameter stays packed whe
     type fn Perm() -> type { layout.InlineArray(7, u3) }
     fn rotate_left_loop(xs: Perm, i: i32, r: i32, first: u3) -> Perm {
       if i < r {
-        rotate_left_loop(layout.InlineArray.set(7, u3, xs, i, xs[i + 1]), i + 1, r, first)
+        rotate_left_loop(layout.InlineArray::set(7, u3, xs, i, xs[i + 1]), i + 1, r, first)
       } else {
-        layout.InlineArray.set(7, u3, xs, r, first)
+        layout.InlineArray::set(7, u3, xs, r, first)
       }
     }
     fn rotate_left(xs: Perm, r: i32) -> Perm {
@@ -1572,9 +1572,9 @@ Deno.test("backed fixed-array transformer folds pure scalar aliases into prefix 
     type fn Perm() -> type { layout.InlineArray(7, u3) }
     fn rotate_left_loop(xs: Perm, i: i32, r: i32, first: u3) -> Perm {
       if i < r {
-        rotate_left_loop(layout.InlineArray.set(7, u3, xs, i, xs[i + 1]), i + 1, r, first)
+        rotate_left_loop(layout.InlineArray::set(7, u3, xs, i, xs[i + 1]), i + 1, r, first)
       } else {
-        layout.InlineArray.set(7, u3, xs, r, first)
+        layout.InlineArray::set(7, u3, xs, r, first)
       }
     }
     fn apply(xs: Perm, r: i32) -> Perm {
@@ -1608,8 +1608,8 @@ Deno.test("tail-recursive scalar inline-array swap mutates local slots in loop",
     fn swap(xs: layout.InlineArray(4, i32), left: i32, right: i32) -> layout.InlineArray(4, i32) {
       let a = xs[left];
       let b = xs[right];
-      layout.InlineArray.set(4, i32, xs, left, b) \\ys ->
-      layout.InlineArray.set(4, i32, ys, right, a)
+      layout.InlineArray::set(4, i32, xs, left, b) \\ys ->
+      layout.InlineArray::set(4, i32, ys, right, a)
     }
     fn reverse_loop(xs: layout.InlineArray(4, i32), left: i32, right: i32) -> layout.InlineArray(4, i32) {
       match left < right {
@@ -1647,7 +1647,7 @@ Deno.test("tail-recursive product fixed-array field update stays backed in loop"
     fn prepare(state: State) -> State {
       if state.r != 1 {
         prepare(State {
-          values: layout.InlineArray.set(4, u3, state.values, state.r - 1, state.r),
+          values: layout.InlineArray::set(4, u3, state.values, state.r - 1, state.r),
           r: state.r - 1,
         })
       } else {
@@ -1682,8 +1682,8 @@ Deno.test("tail-recursive product update keeps multiple fixed-array fields backe
     fn prepare(state: State) -> State {
       if state.r != 0 {
         prepare(State {
-          left: layout.InlineArray.set(4, u3, state.left, state.r, state.r),
-          right: layout.InlineArray.set(4, u3, state.right, state.r, state.r + 1),
+          left: layout.InlineArray::set(4, u3, state.left, state.r, state.r),
+          right: layout.InlineArray::set(4, u3, state.right, state.r, state.r + 1),
           r: state.r - 1,
         })
       } else {
@@ -1718,9 +1718,9 @@ Deno.test("tail-recursive product update keeps recursive fixed-array transformer
     }
     fn rotate_loop(xs: Small, i: i32, first: u3) -> Small {
       if i < 3 {
-        rotate_loop(layout.InlineArray.set(4, u3, xs, i, xs[i + 1]), i + 1, first)
+        rotate_loop(layout.InlineArray::set(4, u3, xs, i, xs[i + 1]), i + 1, first)
       } else {
-        layout.InlineArray.set(4, u3, xs, 3, first)
+        layout.InlineArray::set(4, u3, xs, 3, first)
       }
     }
     fn step(state: State) -> State {
@@ -1758,7 +1758,7 @@ Deno.test("tail-recursive product update defers let-bound fixed-array update int
     }
     fn step(state: State) -> State {
       if state.r != 0 {
-        let count = layout.InlineArray.set(4, u3, state.count, state.r, state.r);
+        let count = layout.InlineArray::set(4, u3, state.count, state.r, state.r);
         step(State { count: count, r: state.r - 1 })
       } else {
         state
@@ -1790,7 +1790,7 @@ Deno.test("backed product tail loop updates scalar parameters when product stays
     }
     fn step_continue(state: State, r: i32) -> State {
       let old = state.count[r];
-      let count = layout.InlineArray.update(4, u3, state.count, r, dec);
+      let count = layout.InlineArray::update(4, u3, state.count, r, dec);
       if old > 1 {
         State { count: count, r: r, index: state.index + 1 }
       } else {
@@ -1823,8 +1823,8 @@ Deno.test("tail-recursive fixed-array transformer stays backed across caller loo
     fn swap(xs: Perm, left: i32, right: i32) -> Perm {
       let a = xs[left];
       let b = xs[right];
-      layout.InlineArray.set(4, u3, xs, left, b)
-        \\ys -> layout.InlineArray.set(4, u3, ys, right, a)
+      layout.InlineArray::set(4, u3, xs, left, b)
+        \\ys -> layout.InlineArray::set(4, u3, ys, right, a)
     }
     fn reverse_loop(xs: Perm, left: i32, right: i32) -> Perm {
       if left < right {
@@ -1866,7 +1866,7 @@ Deno.test("private product fixed-array field dynamic set uses scratch storage", 
     }
     fn bump(box: Box, index: i32) -> Box {
       Box {
-        values: layout.InlineArray.set(4, i32, box.values, index, box.tag + 1),
+        values: layout.InlineArray::set(4, i32, box.values, index, box.tag + 1),
         tag: box.tag,
       }
     }
@@ -1900,7 +1900,7 @@ Deno.test("scratch fixed-array update evaluates old value without helper call", 
     fn inc(x: i32) -> i32 { x + 1 }
     fn bump(box: Box, index: i32) -> Box {
       Box {
-        values: layout.InlineArray.update(4, i32, box.values, index, inc),
+        values: layout.InlineArray::update(4, i32, box.values, index, inc),
         tag: box.tag,
       }
     }
@@ -1932,7 +1932,7 @@ Deno.test("scratch fixed-array argument forwards to private dynamic read callee"
       xs[index]
     }
     fn bump_read(xs: layout.InlineArray(4, i32), index: i32) -> i32 {
-      read(layout.InlineArray.update(4, i32, xs, index, inc), index)
+      read(layout.InlineArray::update(4, i32, xs, index, inc), index)
     }
     pub fn main(index: i32) -> i32 {
       bump_read(<1, 2, 3, 4>, index)
@@ -1961,19 +1961,19 @@ Deno.test("index cursor Yield item proves inline-array indexing and lowers inlin
       struct(InlineArray)
     }
     fn sum_loop(xs: InlineArray(3, i32), cursor: core.IndexCursor(3), acc: i32) -> i32 {
-      match core.IndexCursor.next(3, cursor) {
+      match core.IndexCursor::next(3, cursor) {
         Yield(i, next) => sum_loop(xs, next, acc + xs[i]),
         Done => acc,
       }
     }
     pub fn main() -> i32 {
-      sum_loop([10, 20, 12], core.IndexCursor.start(3), 0)
+      sum_loop([10, 20, 12], core.IndexCursor::start(3), 0)
     }
   `;
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
   const sum = wat.match(/\(func \$sum_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(sum, "loop");
-  assert(!sum.includes("IndexCursor.next"));
+  assert(!sum.includes("IndexCursor::next"));
   assert(!sum.includes("call $sum_loop"));
 
   const instance = new WebAssembly.Instance(
@@ -1986,13 +1986,13 @@ Deno.test("index cursor Yield wildcard payload skips unused item local", async (
   const source = `
     const core = @import("prelude.core");
     fn skip_items(cursor: core.IndexCursor(3), acc: i32) -> i32 {
-      match core.IndexCursor.next(3, cursor) {
+      match core.IndexCursor::next(3, cursor) {
         Yield(_, next) => skip_items(next, acc + 1),
         Done => acc,
       }
     }
     pub fn main() -> i32 {
-      skip_items(core.IndexCursor.start(3), 0)
+      skip_items(core.IndexCursor::start(3), 0)
     }
   `;
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
@@ -2019,10 +2019,10 @@ Deno.test("inline array builder primitives lower without runtime calls", async (
       let Builder = {n*a};
       struct(Builder)
     }
-    fn InlineArrayBuilder.start(const n: count, const a: type) -> InlineArrayBuilder(n, a) {
+    fn InlineArrayBuilder::start(const n: count, const a: type) -> InlineArrayBuilder(n, a) {
       @inline_array_builder_start(n, a)
     }
-    fn InlineArrayBuilder.push(
+    fn InlineArrayBuilder::push(
       const n: count,
       const a: type,
       builder: InlineArrayBuilder(n, a),
@@ -2031,23 +2031,23 @@ Deno.test("inline array builder primitives lower without runtime calls", async (
     ) -> InlineArrayBuilder(n, a) {
       @inline_array_builder_push(n, a, builder, i, value)
     }
-    fn InlineArrayBuilder.finish(const n: count, const a: type, builder: InlineArrayBuilder(n, a)) -> InlineArray(n, a) {
+    fn InlineArrayBuilder::finish(const n: count, const a: type, builder: InlineArrayBuilder(n, a)) -> InlineArray(n, a) {
       @inline_array_builder_finish(n, a, builder)
     }
     pub fn main() -> i32 {
-      let b0 = InlineArrayBuilder.start(2, i32);
-      let b1 = InlineArrayBuilder.push(2, i32, b0, 0, 10);
-      let b2 = InlineArrayBuilder.push(2, i32, b1, 1, 20);
-      let xs = InlineArrayBuilder.finish(2, i32, b2);
+      let b0 = InlineArrayBuilder::start(2, i32);
+      let b1 = InlineArrayBuilder::push(2, i32, b0, 0, 10);
+      let b2 = InlineArrayBuilder::push(2, i32, b1, 1, 20);
+      let xs = InlineArrayBuilder::finish(2, i32, b2);
       xs[0] + xs[1]
     }
   `,
     { optMode: "release" },
   );
 
-  assert(!wat.includes("InlineArrayBuilder.start"));
-  assert(!wat.includes("InlineArrayBuilder.push"));
-  assert(!wat.includes("InlineArrayBuilder.finish"));
+  assert(!wat.includes("InlineArrayBuilder::start"));
+  assert(!wat.includes("InlineArrayBuilder::push"));
+  assert(!wat.includes("InlineArrayBuilder::finish"));
   assert(!wat.includes("call $inline_array_builder"));
 });
 
@@ -2084,7 +2084,7 @@ Deno.test("public inline array update folds statically known index", async () =>
     fn bump(x: i32) -> i32 { x + 3 }
     pub fn main(seed: i32) -> i32 {
       let xs: layout.InlineArray(4, i32) = <1, 2, 3, 4>;
-      let ys: layout.InlineArray(4, i32) = layout.InlineArray.update(4, i32, xs, seed - seed + 2, bump);
+      let ys: layout.InlineArray(4, i32) = layout.InlineArray::update(4, i32, xs, seed - seed + 2, bump);
       xs[2] + ys[2] + ys[3]
     }
   `;
@@ -2109,8 +2109,8 @@ Deno.test("projected fixed-array update only tabulates source indexes used later
     fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
     fn bump(x: i32) -> i32 { x + 3 }
     pub fn main(seed: i32) -> i32 {
-      let xs = layout.InlineArray.tabulate(16, i32, make);
-      let ys = layout.InlineArray.update(16, i32, xs, seed - seed + 7, bump);
+      let xs = layout.InlineArray::tabulate(16, i32, make);
+      let ys = layout.InlineArray::update(16, i32, xs, seed - seed + 7, bump);
       xs[7] + ys[7] + ys[15]
     }
   `;
@@ -2154,8 +2154,8 @@ Deno.test("backend prunes lowered helpers unused after fixed update lowering", a
     fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
     fn bump(x: i32) -> i32 { x + 3 }
     pub fn main(seed: i32) -> i32 {
-      let xs = layout.InlineArray.tabulate(16, i32, make);
-      let ys = layout.InlineArray.update(16, i32, xs, seed - seed + 7, bump);
+      let xs = layout.InlineArray::tabulate(16, i32, make);
+      let ys = layout.InlineArray::update(16, i32, xs, seed - seed + 7, bump);
       xs[7] + ys[7] + ys[15]
     }
   `;
@@ -2172,7 +2172,7 @@ Deno.test("tail-loop lowering folds pure scalar branch aliases", async () => {
     const array = @import("prelude.array_static");
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main(seed: i32) -> i32 {
-      array.RangeIter.fold(array.RangeI32.Iter(seed - seed .. 1000), 0, add)
+      array.RangeIter::fold(array.RangeI32::Iter(seed - seed .. 1000), 0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });

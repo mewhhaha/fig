@@ -83,6 +83,7 @@ interface MemberCompletionContext {
   receiver: string;
   prefix: string;
   offset: number;
+  separator: "." | "::";
 }
 
 const BUILTIN_COMPLETIONS: CompletionItem[] = [
@@ -1320,9 +1321,7 @@ function symbolsForStatement(
   program?: Program,
   localTypes?: Map<string, string>,
 ): IndexedSymbol[] {
-  const names = stmt.kind === "let" || stmt.kind === "proof_const"
-    ? [stmt.name]
-    : stmt.names;
+  const names = stmt.kind === "let" || stmt.kind === "proof_const" ? [stmt.name] : stmt.names;
   return names.map((name) => {
     const range = rangeFromSpan(spanForStatementName(stmt, name), mapper) ??
       rangeFromFound(findNameRange(source, name), mapper) ?? mapper.range(0, 0);
@@ -1764,6 +1763,9 @@ function qualifiedDefinitionSymbolAt(
   if (!segment) return undefined;
   if (segment.segmentIndex === 0) {
     return resolveValueNameAt(result, segment.segmentText, offset);
+  }
+  if (segment.fullText.includes("::")) {
+    return resolveName(result, segment.fullText);
   }
   return resolveName(result, segment.segmentText);
 }
@@ -2715,7 +2717,7 @@ function memberCompletionItems(
   const decl = receiverType ? resolveTypeDecl(receiverType, typeDecls(result)) : undefined;
   if (!decl?.normalized) return undefined;
   const items: CompletionItem[] = [];
-  if (receiverSymbol?.kind === "type") {
+  if (receiverSymbol?.kind === "type" && context.separator === "::") {
     if (decl.normalized.kind === "product" || decl.normalized.kind === "sum") {
       for (const member of decl.normalized.members ?? []) {
         items.push({
@@ -2726,7 +2728,7 @@ function memberCompletionItems(
         });
       }
     }
-  } else if (decl.normalized.kind === "product") {
+  } else if (context.separator === "." && decl.normalized.kind === "product") {
     for (const slot of decl.normalized.shape.slots) {
       if (!slot.label) continue;
       items.push({
@@ -2799,11 +2801,14 @@ function qualifiedSegmentAt(source: string, offset: number): QualifiedSegmentMat
   if (source[offset] === "." || source[offset] === "[" || source[offset] === "]") {
     return undefined;
   }
-  const chainRegex = /[A-Za-z_]\w*(?:\[[^\]\s.]*\])?(?:\.[A-Za-z_]\w*(?:\[[^\]\s.]*\])?)*/g;
+  const chainRegex =
+    /[A-Za-z_]\w*(?:\[[^\]\s.:]*\])?(?:(?:\.|::)[A-Za-z_]\w*(?:\[[^\]\s.:]*\])?)*/g;
   for (const match of source.matchAll(chainRegex)) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
-    if (!match[0].includes(".") || offset < start || offset > end) continue;
+    if ((!match[0].includes(".") && !match[0].includes("::")) || offset < start || offset > end) {
+      continue;
+    }
     const segments = qualifiedSegments(match[0], start);
     const segmentIndex = segments.findIndex((segment) =>
       offset >= segment.identifierStart && offset <= segment.identifierEnd
@@ -3045,9 +3050,9 @@ function memberCompletionContext(
   offset: number,
 ): MemberCompletionContext | undefined {
   const before = source.slice(0, offset);
-  const match = before.match(/([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)\.([A-Za-z_][\w]*)?$/);
+  const match = before.match(/([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)(\.|::)([A-Za-z_][\w]*)?$/);
   if (!match) return undefined;
-  return { receiver: match[1], prefix: match[2] ?? "", offset };
+  return { receiver: match[1], separator: match[2] as "." | "::", prefix: match[3] ?? "", offset };
 }
 
 function qualifiedPrefix(source: string, offset: number): string | undefined {

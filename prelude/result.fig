@@ -8,26 +8,26 @@ fn err(error: e) -> core.Result(a, e) {
   error
 }
 
-fn core.Result.is_ok(value: core.Result(a, e)) -> bool {
+fn core.Result::is_ok(value: core.Result(a, e)) -> bool {
   match value { Ok => true, Err => false }
 }
 
-fn core.Result.is_err(value: core.Result(a, e)) -> bool {
+fn core.Result::is_err(value: core.Result(a, e)) -> bool {
   match value { Ok => false, Err => true }
 }
 
-fn core.Result.unwrap_or(value: core.Result(a, e), fallback: a) -> a {
+fn core.Result::unwrap_or(value: core.Result(a, e), fallback: a) -> a {
   match value { Ok(inner) => inner, Err => fallback }
 }
 
-fn core.Result.map(const f: fn(x: a) -> b, value: core.Result(a, e)) -> core.Result(b, e) {
+fn core.Result::map(const f: fn(x: a) -> b, value: core.Result(a, e)) -> core.Result(b, e) {
   match value { Ok(inner) => ok(f(inner)), Err(error) => err(error) }
 }
 
-fn core.Result.map_err(const f: fn(x: e) -> f, value: core.Result(a, e)) -> core.Result(a, f) {
+fn core.Result::map_err(const f: fn(x: e) -> f, value: core.Result(a, e)) -> core.Result(a, f) {
   match value { Ok(inner) => ok(inner), Err(error) => err(f(error)) }
 }
 
-fn core.Result.bind(value: core.Result(a, e), const f: fn(x: a) -> core.Result(b, e)) -> core.Result(b, e) {
+fn core.Result::bind(value: core.Result(a, e), const f: fn(x: a) -> core.Result(b, e)) -> core.Result(b, e) {
   match value { Ok(inner) => f(inner), Err(error) => err(error) }
 }

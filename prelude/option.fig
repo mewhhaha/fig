@@ -8,45 +8,45 @@ fn none() -> core.Option(a) {
   0
 }
 
-fn core.Option.is_some(value: core.Option(a)) -> bool {
+fn core.Option::is_some(value: core.Option(a)) -> bool {
   match value { Some => true, None => false }
 }
 
-fn core.Option.is_none(value: core.Option(a)) -> bool {
+fn core.Option::is_none(value: core.Option(a)) -> bool {
   match value { Some => false, None => true }
 }
 
-fn core.Option.unwrap_or(value: core.Option(a), fallback: a) -> a {
+fn core.Option::unwrap_or(value: core.Option(a), fallback: a) -> a {
   match value { Some(inner) => inner, None => fallback }
 }
 
-fn core.Option.map(const f: fn(x: a) -> b, value: core.Option(a)) -> core.Option(b) {
+fn core.Option::map(const f: fn(x: a) -> b, value: core.Option(a)) -> core.Option(b) {
   match value { Some(inner) => f(inner), None => none() }
 }
 
-fn core.Option.pure(value: a) -> core.Option(a) {
+fn core.Option::pure(value: a) -> core.Option(a) {
   some(value)
 }
 
-fn core.Option.apply(value: core.Option(fn(x: a) -> b), arg: core.Option(a)) -> core.Option(b) {
+fn core.Option::apply(value: core.Option(fn(x: a) -> b), arg: core.Option(a)) -> core.Option(b) {
   match value {
     Some(f) => match arg { Some(inner) => f(inner), None => none() },
     None => none(),
   }
 }
 
-fn core.Option.bind(value: core.Option(a), const f: fn(x: a) -> core.Option(b)) -> core.Option(b) {
+fn core.Option::bind(value: core.Option(a), const f: fn(x: a) -> core.Option(b)) -> core.Option(b) {
   match value { Some(inner) => f(inner), None => none() }
 }
 
-fn core.Option.append(value: core.Option(a), fallback: core.Option(a)) -> core.Option(a) {
+fn core.Option::append(value: core.Option(a), fallback: core.Option(a)) -> core.Option(a) {
   match value { Some => value, None => fallback }
 }
 
-fn core.Option.empty() -> core.Option(a) {
+fn core.Option::empty() -> core.Option(a) {
   none()
 }
 
-fn core.Option.or_else(value: core.Option(a), const fallback: fn() -> core.Option(a)) -> core.Option(a) {
+fn core.Option::or_else(value: core.Option(a), const fallback: fn() -> core.Option(a)) -> core.Option(a) {
   match value { Some => value, None => fallback() }
 }

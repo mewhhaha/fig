@@ -78,7 +78,7 @@ For example, these two functions are expected to be equivalent lowering candidat
 
 ```fig
 fn prelude_path(xs: fixed.Array(4, u3), i: i32, v: u3) -> fixed.Array(4, u3) {
-  fixed.Array.set(4, u3, xs, i, v)
+  fixed.Array::set(4, u3, xs, i, v)
 }
 
 fn user_path(xs: fixed.Array(4, u3), i: i32, v: u3) -> fixed.Array(4, u3) {

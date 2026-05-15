@@ -219,13 +219,19 @@ function lowerFnName(
   nameNode?: Node;
   memberOf?: { owner: string; member: string; span?: Span; nameSpan?: Span };
 } {
-  const ids = named(node).filter(isIdentifier);
+  const compact = node.text.replace(/\s+/g, "");
+  const ids = identifierDescendants(node);
+  if (compact.includes("::")) {
+    const [owner, member] = compact.split("::");
+    return {
+      name: compact,
+      nameNode: ids.at(-1),
+      memberOf: { owner, member, ...meta(node, ids.at(-1)) },
+    };
+  }
   const parts = ids.map((id) => id.text);
   const name = parts.join(".");
-  if (parts.length < 2) return { name, nameNode: ids[0] };
-  const member = parts[parts.length - 1];
-  const owner = parts.slice(0, -1).join(".");
-  return { name, nameNode: ids.at(-1), memberOf: { owner, member, ...meta(node, ids.at(-1)) } };
+  return { name, nameNode: ids[0] };
 }
 
 function lowerTypeDecl(node: Node): TypeDecl {
@@ -1248,6 +1254,7 @@ function lowerCall(node: Node): Expr {
   let expr = lowerPrimary(children[0]);
   const isZeroArgCall = !children.some(is("Args")) && /\)\s*$/.test(node.text);
   let pendingMember: { receiver: Expr; member: string } | undefined;
+  let associatedTail = false;
   for (let i = 1; i < children.length; i++) {
     const child = children[i];
     if (child.type === "Args") {
@@ -1269,10 +1276,22 @@ function lowerCall(node: Node): Expr {
           expr = { kind: "field", span: expr.span, value: expr.args[0], key: expr.args[1] };
         }
       }
+    } else if (child.type === "TypeAssociatedTail") {
+      expr = {
+        kind: "var",
+        ...spanOnly(child),
+        name: `${nameOf(expr)}::${text(firstIdentifier(child), "associated member")}`,
+      };
+      associatedTail = false;
+    } else if (child.text === "::") {
+      associatedTail = true;
     } else if (
       child.type === "LowerIdent" || child.type === "PascalIdent" || child.type === "Ident"
     ) {
-      if (
+      if (associatedTail) {
+        expr = { kind: "var", ...spanOnly(child), name: `${nameOf(expr)}::${child.text}` };
+        associatedTail = false;
+      } else if (
         (expr.kind === "call" || expr.kind === "range" || isPipelineReceiver(expr)) &&
         (nextNamedCallChild(children, i)?.type === "Args" || children[i + 1]?.type === "(")
       ) {
@@ -1756,6 +1775,13 @@ function first(node: Node, type: string): Node {
 
 function isIdentifier(node: Node | undefined): node is Node {
   return node?.type === "LowerIdent" || node?.type === "PascalIdent" || node?.type === "Ident";
+}
+
+function identifierDescendants(node: Node): Node[] {
+  return descendants(node, "LowerIdent").concat(descendants(node, "PascalIdent")).sort((
+    left,
+    right,
+  ) => (left.startIndex ?? 0) - (right.startIndex ?? 0));
 }
 
 function isFieldName(node: Node | undefined): node is Node {

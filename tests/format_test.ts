@@ -170,15 +170,15 @@ _=>2 // fallback
   {
     name: "function clauses and custom operators",
     input:
-      "fn Choose(0)->i32{0} fn Choose(_)->i32{1} fn Box.append(a:Box,b:Box)->Box{Box {value:a.value <> b.value}}",
+      "fn Choose(0)->i32{0} fn Choose(_)->i32{1} fn Box::append(a:Box,b:Box)->Box{Box {value:a.value <> b.value}}",
     expected:
-      "fn Choose(0) -> i32 {\n  0\n}\nfn Choose(_) -> i32 {\n  1\n}\n\nfn Box.append(a: Box, b: Box) -> Box {\n  Box {value: a.value <> b.value}\n}\n",
+      "fn Choose(0) -> i32 {\n  0\n}\nfn Choose(_) -> i32 {\n  1\n}\n\nfn Box::append(a: Box, b: Box) -> Box {\n  Box {value: a.value <> b.value}\n}\n",
   },
   {
     name: "dotted function clauses stay grouped",
-    input: "fn Box.append(0)->i32{0} fn Box.append(_)->i32{1} fn Box.clear()->i32{0}",
+    input: "fn Box::append(0)->i32{0} fn Box::append(_)->i32{1} fn Box::clear()->i32{0}",
     expected:
-      "fn Box.append(0) -> i32 {\n  0\n}\nfn Box.append(_) -> i32 {\n  1\n}\n\nfn Box.clear() -> i32 {\n  0\n}\n",
+      "fn Box::append(0) -> i32 {\n  0\n}\nfn Box::append(_) -> i32 {\n  1\n}\n\nfn Box::clear() -> i32 {\n  0\n}\n",
   },
   {
     name: "strings chars fenced text and comment markers inside literals",
@@ -208,16 +208,17 @@ _=>2 // fallback
   },
   {
     name: "pipe placeholder and fluent chains",
-    input: "fn main()->i32{InlineArray.Iter([1,2,3,4])\\$->$.map(double).filter(keep).fold(0,add)}",
+    input:
+      "fn main()->i32{InlineArray::Iter([1,2,3,4])\\$->$.map(double).filter(keep).fold(0,add)}",
     expected:
-      "fn main() -> i32 {\n  InlineArray.Iter([1, 2, 3, 4])\n    \\$ -> $.map(double)\n    .filter(keep)\n    .fold(0, add)\n}\n",
+      "fn main() -> i32 {\n  InlineArray::Iter([1, 2, 3, 4])\n    \\$ -> $.map(double)\n    .filter(keep)\n    .fold(0, add)\n}\n",
   },
   {
     name: "const function literals",
     input:
-      "fn main()->i32{let mapped=Option.map(\\x->x+1,some(1));RangeIter.fold(mapped,0,\\(acc,x)->{let next=acc+x;next})}",
+      "fn main()->i32{let mapped=Option::map(\\x->x+1,some(1));RangeIter::fold(mapped,0,\\(acc,x)->{let next=acc+x;next})}",
     expected:
-      "fn main() -> i32 {\n  let mapped = Option.map(\\x -> x + 1, some(1));\n  RangeIter.fold(\n    mapped,\n    0,\n    \\(acc, x) -> {\n      let next = acc + x;\n      next\n    }\n  )\n}\n",
+      "fn main() -> i32 {\n  let mapped = Option::map(\\x -> x + 1, some(1));\n  RangeIter::fold(\n    mapped,\n    0,\n    \\(acc, x) -> {\n      let next = acc + x;\n      next\n    }\n  )\n}\n",
   },
   {
     name: "wrapped fluent call chains verticalize every call",
@@ -250,9 +251,9 @@ _=>2 // fallback
   {
     name: "operator descriptors",
     input:
-      'type fn OpAdd(t:type)->operator{operator(#infixl,60,"+",t.add)} type fn OpBind(t:type)->operator{operator(#infixl,10,">>=",t.bind)}',
+      'type fn OpAdd(t:type)->operator{operator(#infixl,60,"+",t::add)} type fn OpBind(t:type)->operator{operator(#infixl,10,">>=",t::bind)}',
     expected:
-      'type fn OpAdd(t: type) -> operator {\n  operator(#infixl, 60, "+", t.add)\n}\n\ntype fn OpBind(t: type) -> operator {\n  operator(#infixl, 10, ">>=", t.bind)\n}\n',
+      'type fn OpAdd(t: type) -> operator {\n  operator(#infixl, 60, "+", t::add)\n}\n\ntype fn OpBind(t: type) -> operator {\n  operator(#infixl, 10, ">>=", t::bind)\n}\n',
   },
   {
     name: "type reflection helper surface",
@@ -294,9 +295,9 @@ defaults:@field(defaults,#key)
   {
     name: "constructor pattern parameters and attached members",
     input:
-      "fn Choose(Some(value))->i32{value} fn Choose(None)->i32{0} fn World.tick(world:World,dt_ms:i32)->World{World.step(dt_ms)} fn World.render(world:World)->Geometry{Geometry.empty()}",
+      "fn Choose(Some(value))->i32{value} fn Choose(None)->i32{0} fn World::tick(world:World,dt_ms:i32)->World{World.step(dt_ms)} fn World::render(world:World)->Geometry{Geometry.empty()}",
     expected:
-      "fn Choose(Some(value)) -> i32 {\n  value\n}\nfn Choose(None) -> i32 {\n  0\n}\n\nfn World.tick(world: World, dt_ms: i32) -> World {\n  World.step(dt_ms)\n}\n\nfn World.render(world: World) -> Geometry {\n  Geometry.empty()\n}\n",
+      "fn Choose(Some(value)) -> i32 {\n  value\n}\nfn Choose(None) -> i32 {\n  0\n}\n\nfn World::tick(world: World, dt_ms: i32) -> World {\n  World.step(dt_ms)\n}\n\nfn World::render(world: World) -> Geometry {\n  Geometry.empty()\n}\n",
   },
   {
     name: "newline separated const declarations without semicolons",

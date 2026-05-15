@@ -128,7 +128,20 @@ function coreStaticParamKind(name: string, index: number): TypeParamKind | undef
   if (name === "shape_concat") return "const";
   if (
     (name === "type_slots" || name === "type_slot_count" || name === "type_variant_slots" ||
-      name === "type_variants") && index === 0
+      name === "type_variants" || name === "type_members" || name === "type_member_target" ||
+      name === "type_layout" ||
+      name === "type_storage_kind" || name === "type_flat_slot_count" ||
+      name === "type_flat_slots" || name === "type_size_bits" || name === "type_align_bits" ||
+      name === "type_is_inline_array" || name === "type_inline_array_len" ||
+      name === "type_inline_array_item" || name === "type_is_fn" || name === "type_fn_params" ||
+      name === "type_fn_return" || name === "type_fn_effects" || name === "type_fn_param_count" ||
+      name === "type_is_scalar" || name === "type_scalar_carrier" ||
+      name === "type_scalar_min" || name === "type_scalar_max" ||
+      name === "type_scalar_bit_width" || name === "type_scalar_signed" ||
+      name === "type_scalar_domain" || name === "type_is_refined_scalar" ||
+      name === "type_variant_count" || name === "type_variant_tag_type" ||
+      name === "type_variant_payload_type" ||
+      name === "type_has_niche" || name === "type_niche_value") && index === 0
   ) return "type";
   if (
     (name === "wgsl_shader_id" || name === "wgsl_bindings" || name === "wgsl_locations") &&
@@ -147,8 +160,37 @@ const coreStaticBuiltinNames = [
   "type_slot_type",
   "type_has_member",
   "type_member_type",
+  "type_members",
+  "type_member_target",
+  "type_is_fn",
+  "type_fn_params",
+  "type_fn_return",
+  "type_fn_effects",
+  "type_fn_param_count",
+  "type_is_scalar",
+  "type_scalar_carrier",
+  "type_scalar_min",
+  "type_scalar_max",
+  "type_scalar_bit_width",
+  "type_scalar_signed",
+  "type_scalar_domain",
+  "type_is_refined_scalar",
+  "type_layout",
+  "type_storage_kind",
+  "type_flat_slot_count",
+  "type_flat_slots",
+  "type_size_bits",
+  "type_align_bits",
+  "type_is_inline_array",
+  "type_inline_array_len",
+  "type_inline_array_item",
   "type_has_variant",
   "type_variant_has_slot",
+  "type_variant_count",
+  "type_variant_tag_type",
+  "type_variant_payload_type",
+  "type_has_niche",
+  "type_niche_value",
   "type_slots",
   "type_slot_count",
   "type_variant_slots",
@@ -317,7 +359,9 @@ export function staticBuiltinParamKind(
   index: number,
   registry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
 ): TypeParamKind | undefined {
-  return name ? registry.staticBuiltins.get(staticBuiltinName(name))?.paramKind?.(index) : undefined;
+  return name
+    ? registry.staticBuiltins.get(staticBuiltinName(name))?.paramKind?.(index)
+    : undefined;
 }
 
 export function isKnownIntrinsicId(

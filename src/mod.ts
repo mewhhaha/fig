@@ -210,11 +210,7 @@ export {
   summarizeRecurrences,
 } from "./optimize.ts";
 export { CompileError, formatDiagnostic } from "./diagnostics.ts";
-export {
-  type CheckPhaseTrace,
-  type CheckProgramOptions,
-  type CheckTrace,
-} from "./check.ts";
+export { type CheckPhaseTrace, type CheckProgramOptions, type CheckTrace } from "./check.ts";
 export {
   COMPILER_PLUGIN_API_VERSION,
   type CompilerAnnotationBuiltin,
@@ -1063,7 +1059,9 @@ function qualifyTypeSource(source: string, alias: string, names: Set<string>): s
 
 function qualifyReference(name: string, alias: string, names: Set<string>): string {
   const match = [...names]
-    .filter((candidate) => name === candidate || name.startsWith(`${candidate}.`))
+    .filter((candidate) =>
+      name === candidate || name.startsWith(`${candidate}.`) || name.startsWith(`${candidate}::`)
+    )
     .sort((a, b) => b.length - a.length)[0];
   if (!match) return name;
   return `${qualifyName(match, alias)}${name.slice(match.length)}`;

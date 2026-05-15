@@ -785,7 +785,6 @@ Deno.test("LSP hover prefers dotted value bases over same-named types", async ()
   const valueHover = hoverAt(result, positionIn(source, "thing.value", 1));
   assertStringIncludes(valueHover?.contents.value ?? "", "```fig\nthing: Thing\n```");
   assert(!valueHover?.contents.value.includes("type fn Thing"));
-
 });
 
 Deno.test("LSP hover walks nested dotted value chains by segment", async () => {
@@ -1074,20 +1073,20 @@ Deno.test("LSP completions filter checked product members after dot", async () =
   assertEquals(prefixed.map((item) => item.label), ["y"]);
 });
 
-Deno.test("LSP completions include checked attached type members after dot", async () => {
+Deno.test("LSP completions include checked attached type members after ::", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   const lines = [
     "type fn Point() -> struct { let Point = {x: i32}; struct(Point) }",
     "/// equality member",
-    "fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }",
-    "pub fn main() -> i32 { Point. }",
+    "fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }",
+    "pub fn main() -> i32 { Point:: }",
   ];
   cache.open(uri, 1, lines.join("\n"));
 
   const items = await cache.completionsAt(uri, {
     line: 3,
-    character: lines[3].indexOf("Point.") + 6,
+    character: lines[3].indexOf("Point::") + 7,
   });
   assert(items.some((item) =>
     item.label === "eql" &&

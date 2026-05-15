@@ -9,7 +9,7 @@ type fn Option(a: type) -> union {
   union(None, Some)
 }
 type fn Plus(t: type) -> operator {
-  operator(#infixl, 60, "+", t.add)
+  operator(#infixl, 60, "+", t::add)
 }
 type fn Choose(i32: type) -> type { bool }
 type fn Choose(_: type) -> type { i32 }

@@ -12,17 +12,17 @@ annotation, intrinsic, or do-strategy builtins it provides.
 
 First-party compiler behavior is registered through built-in plugins:
 
-| Plugin             | Builtins                                                            |
-| ------------------ | ------------------------------------------------------------------- |
-| `core-imports`     | `@import`, `@capability`                                            |
-| `core-static`      | `@require`, `@compile_error`, `@shape_*`, `@type_*`, `@wgsl_*`      |
-| `core-annotations` | `@likely`, `@unlikely`                                              |
-| `core-intrinsics`  | backend/compiler intrinsics such as `@branch_*` and `@temporal_*`   |
+| Plugin             | Builtins                                                          |
+| ------------------ | ----------------------------------------------------------------- |
+| `core-imports`     | `@import`, `@capability`                                          |
+| `core-static`      | `@require`, `@compile_error`, `@shape_*`, `@type_*`, `@wgsl_*`    |
+| `core-annotations` | `@likely`, `@unlikely`                                            |
+| `core-intrinsics`  | backend/compiler intrinsics such as `@branch_*` and `@temporal_*` |
 
 Plugin ids and builtin names must be unique after the built-in plugins are registered. Duplicate
-registrations are compile diagnostics. In v1, backend plugins register compiler intrinsic identities;
-the low-level lowering for those identities still runs through compiler-owned IR paths rather than
-raw Wasm byte emission.
+registrations are compile diagnostics. In v1, backend plugins register compiler intrinsic
+identities; the low-level lowering for those identities still runs through compiler-owned IR paths
+rather than raw Wasm byte emission.
 
 ## Module and Capability Builtins
 
@@ -97,7 +97,7 @@ The compiler records shader manifest entries when these helpers are evaluated.
 
 These builtins are compiler-recognized expression primitives used by the `prelude.layout`
 `inline_array` helpers. They generate fixed structural product slots during const specialization;
-source code should prefer the public `InlineArray.tabulate`, `tabulate_with`, `imap`,
+source code should prefer the public `InlineArray::tabulate`, `tabulate_with`, `imap`,
 `imap_with_state`, `fill`, `map`, `set`, and `update` APIs.
 
 | Builtin                         | Purpose                                  |

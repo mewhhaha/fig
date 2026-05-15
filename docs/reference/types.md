@@ -73,7 +73,7 @@ Inline counted arrays use repeat syntax in shapes:
 Values can be composed with the function-shaped builder API:
 
 ```fig
-InlineArray.tabulate(4, i32, make_value)
+InlineArray::tabulate(4, i32, make_value)
 ```
 
 The grammar also accepts PascalCase and lowercase repeat prefixes in type shapes, such as `N*a` or

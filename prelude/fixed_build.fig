@@ -9,11 +9,11 @@ type fn ArrayBuilder(n: count, a: type) -> type {
   layout.InlineArrayBuilder(n, a)
 }
 
-fn ArrayBuilder.start(const n: count, const a: type) -> ArrayBuilder(n, a) {
+fn ArrayBuilder::start(const n: count, const a: type) -> ArrayBuilder(n, a) {
   @inline_array_builder_start(n, a)
 }
 
-fn ArrayBuilder.push(
+fn ArrayBuilder::push(
   const n: count,
   const a: type,
   builder: ArrayBuilder(n, a),
@@ -23,6 +23,6 @@ fn ArrayBuilder.push(
   @inline_array_builder_push(n, a, builder, i, value)
 }
 
-fn ArrayBuilder.finish(const n: count, const a: type, builder: ArrayBuilder(n, a)) -> fixed.Array(n, a) {
+fn ArrayBuilder::finish(const n: count, const a: type, builder: ArrayBuilder(n, a)) -> fixed.Array(n, a) {
   @inline_array_builder_finish(n, a, builder)
 }

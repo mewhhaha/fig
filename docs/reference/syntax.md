@@ -10,7 +10,7 @@ capabilities, imports, primitive type names, and type functions. PascalCase iden
 `[a-Z][a-Za-z0-9]*` and are used for product constructors, union variants, and type-level local
 shape bindings.
 
-Qualified names use dots, for example `Option.map`, `Point.eql`, or `Geometry.Layout.vertex2d_i32`.
+Qualified names use dots, for example `Option.map`, `Point::eql`, or `Geometry.Layout.vertex2d_i32`.
 Literal tags begin with `#`, for example `#field`, `#Some`, and `#infixl`.
 
 ## Doc Comments
@@ -114,7 +114,7 @@ pub fn main() -> i32 { add(40, 2) }
 Attached member functions use dotted names and are visible to type reflection:
 
 ```fig
-fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }
+fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
 ```
 
 Repeated functions with the same name are ordered clauses. Clauses must keep compatible visibility,

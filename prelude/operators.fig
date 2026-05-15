@@ -1,5 +1,5 @@
 type fn OpAdd(t: type) -> operator {
-  operator(#infixl, 60, "+", t.add)
+  operator(#infixl, 60, "+", t::add)
 }
 
 type fn OpSub(t: type) -> operator {
@@ -19,7 +19,7 @@ type fn OpRem(t: type) -> operator {
 }
 
 type fn OpEql(t: type) -> operator {
-  operator(#infix, 40, "==", t.eql)
+  operator(#infix, 40, "==", t::eql)
 }
 
 type fn OpNeq(t: type) -> operator {
@@ -27,11 +27,11 @@ type fn OpNeq(t: type) -> operator {
 }
 
 type fn OpLt(t: type) -> operator {
-  operator(#infix, 50, "<", t.lt)
+  operator(#infix, 50, "<", t::lt)
 }
 
 type fn OpLte(t: type) -> operator {
-  operator(#infix, 50, "<=", t.lte)
+  operator(#infix, 50, "<=", t::lte)
 }
 
 type fn OpGt(t: type) -> operator {
@@ -86,17 +86,17 @@ type fn OpBoolNeq() -> operator {
 }
 
 type fn OpAppend(t: type) -> operator {
-  operator(#infixr, 55, "<>", t.append)
+  operator(#infixr, 55, "<>", t::append)
 }
 
 type fn OpApply(t: type) -> operator {
-  operator(#infixl, 65, "<*>", t.apply)
+  operator(#infixl, 65, "<*>", t::apply)
 }
 
 type fn OpMap(t: type) -> operator {
-  operator(#infixl, 65, "<$>", t.map)
+  operator(#infixl, 65, "<$>", t::map)
 }
 
 type fn OpBind(t: type) -> operator {
-  operator(#infixl, 10, ">>=", t.bind)
+  operator(#infixl, 10, ">>=", t::bind)
 }

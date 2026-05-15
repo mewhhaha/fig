@@ -5,9 +5,9 @@ type fn Box() -> struct {
   struct(Box)
 }
 
-fn Box.add(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
-fn Box.eql(a: Box, b: Box) -> bool { a.value == b.value }
-fn Box.append(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+fn Box::add(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+fn Box::eql(a: Box, b: Box) -> bool { a.value == b.value }
+fn Box::append(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
 
 pub fn main(a: Box, b: Box) -> i32 {
   let added = a + b;

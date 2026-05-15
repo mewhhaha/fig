@@ -1,4 +1,8 @@
-import { parse as parseSyntax, type ParseNode, type RuleParseNode } from "../generated/baba-workbench/parser.ts";
+import {
+  parse as parseSyntax,
+  type ParseNode,
+  type RuleParseNode,
+} from "../generated/baba-workbench/parser.ts";
 import { lex, type Token } from "../generated/baba-workbench/tokenizer.ts";
 import { fail } from "./diagnostics.ts";
 
@@ -48,8 +52,8 @@ const binaryOperators = new Set([
   "..",
 ]);
 
-const compactBefore = new Set([")", "]", ",", ";", ".", ":"]);
-const compactAfter = new Set(["(", "[", ".", "@", "\\"]);
+const compactBefore = new Set([")", "]", ",", ";", ".", ":", "::"]);
+const compactAfter = new Set(["(", "[", ".", "::", "@", "\\"]);
 const spacedSymbols = new Set(["=", "->", "=>"]);
 const declarationKeywords = new Set(["pub", "fn", "type", "const", "let", "capability", "import"]);
 
@@ -201,7 +205,10 @@ export function formatSource(source: string): string {
       }
       continue;
     }
-    if (token.text === "(" || token.text === "[" || (token.text === "<" && collectionDelimiterStarts.has(token.token.span.start))) {
+    if (
+      token.text === "(" || token.text === "[" ||
+      (token.text === "<" && collectionDelimiterStarts.has(token.token.span.start))
+    ) {
       const shouldBreak = groupWouldOverflow(writer, items, index);
       delimiterContexts.push({
         delimiter: token.text,
@@ -221,7 +228,10 @@ export function formatSource(source: string): string {
       if (
         braceModes.length === 0 && delimiterContexts.length === 0 &&
         nextStartsTopLevelItem(items, index) &&
-        shouldBlankBeforeNextTopLevelDecl(previousTopLevelDecl, nextTopLevelDecl(items, index, topLevelDeclByStart))
+        shouldBlankBeforeNextTopLevelDecl(
+          previousTopLevelDecl,
+          nextTopLevelDecl(items, index, topLevelDeclByStart),
+        )
       ) {
         writer.blankLine();
       } else if (
@@ -310,11 +320,13 @@ function collectTopLevelDecls(root: RuleParseNode | null, source: string): TopLe
   if (!root) return [];
   return root.children
     .filter((child): child is RuleParseNode => child.kind === "rule" && child.name === "Decl")
-    .map((decl) => decl.children.find((child): child is RuleParseNode =>
-      child.kind === "rule" &&
-      (child.name === "ConstDecl" || child.name === "TopLetDecl" || child.name === "FnDecl" ||
-        child.name === "TypeFnDecl")
-    ))
+    .map((decl) =>
+      decl.children.find((child): child is RuleParseNode =>
+        child.kind === "rule" &&
+        (child.name === "ConstDecl" || child.name === "TopLetDecl" || child.name === "FnDecl" ||
+          child.name === "TypeFnDecl")
+      )
+    )
     .filter((decl): decl is RuleParseNode => !!decl)
     .map((decl): TopLevelDecl => ({
       kind: decl.name as TopLevelDeclKind,
@@ -489,7 +501,9 @@ function startsEffectRow(left: TokenItem, right: TokenItem): boolean {
 }
 
 function opensBracketWithoutSpace(left: TokenItem): boolean {
-  if (left.text === "=" || left.text === "=>" || left.text === "->" || left.text === ":") return false;
+  if (left.text === "=" || left.text === "=>" || left.text === "->" || left.text === ":") {
+    return false;
+  }
   if (startsProductConstructor(left)) return false;
   return isIndexOrCallBracket(left) || isShapeLiteralBracket(left) || isStaticForBracket(left);
 }
@@ -772,7 +786,9 @@ function groupHasLineBreak(source: string, items: item[], openIndex: number): bo
     const item = items[index];
     if (item.kind !== "token") continue;
     if (item.text === close) {
-      if (depth === 0) return source.slice(open.token.span.start, item.token.span.end).includes("\n");
+      if (depth === 0) {
+        return source.slice(open.token.span.start, item.token.span.end).includes("\n");
+      }
       depth--;
     } else if (item.text === "(" || item.text === "[" || item.text === "{") {
       depth++;
@@ -935,7 +951,8 @@ function callChainWouldBreak(writer: Writer, items: item[], dotIndex: number): b
 
     if (
       depth === 0 && index > startIndex &&
-      (item.text === ";" || item.text === "," || item.text === "{" || item.text === "}" || item.text === "=>" ||
+      (item.text === ";" || item.text === "," || item.text === "{" || item.text === "}" ||
+        item.text === "=>" ||
         item.text === "->" || binaryOperators.has(item.text) || item.text === "\\")
     ) {
       break;
@@ -973,8 +990,9 @@ function callChainStart(items: item[], dotIndex: number): number {
     const item = items[index];
     if (item.kind === "comment") break;
     if (item.text === ")" || item.text === "]" || item.text === "}") backwardDepth++;
-    else if ((item.text === "(" || item.text === "[" || item.text === "{") && backwardDepth > 0) backwardDepth--;
-    else if (
+    else if ((item.text === "(" || item.text === "[" || item.text === "{") && backwardDepth > 0) {
+      backwardDepth--;
+    } else if (
       backwardDepth === 0 &&
       (item.text === ";" || item.text === "," || item.text === "{" || item.text === "=>" ||
         item.text === "->" || binaryOperators.has(item.text) || item.text === "\\")
@@ -996,10 +1014,12 @@ function binaryChainWouldBreak(writer: Writer, items: item[], operatorIndex: num
     const item = items[index];
     if (item.kind === "comment") break;
     if (item.text === ")" || item.text === "]" || item.text === "}") backwardDepth++;
-    else if ((item.text === "(" || item.text === "[" || item.text === "{") && backwardDepth > 0) backwardDepth--;
-    else if (
+    else if ((item.text === "(" || item.text === "[" || item.text === "{") && backwardDepth > 0) {
+      backwardDepth--;
+    } else if (
       backwardDepth === 0 &&
-      (item.text === ";" || item.text === "," || item.text === "{" || item.text === "=>" || item.text === "->")
+      (item.text === ";" || item.text === "," || item.text === "{" || item.text === "=>" ||
+        item.text === "->")
     ) {
       break;
     }
@@ -1015,7 +1035,10 @@ function binaryChainWouldBreak(writer: Writer, items: item[], operatorIndex: num
     const item = items[index];
     if (item.kind === "comment") return true;
 
-    if (depth === 0 && index > startIndex && (item.text === ";" || item.text === "," || item.text === "}")) {
+    if (
+      depth === 0 && index > startIndex &&
+      (item.text === ";" || item.text === "," || item.text === "}")
+    ) {
       break;
     }
     if (item.text === "(" || item.text === "[" || item.text === "{") depth++;

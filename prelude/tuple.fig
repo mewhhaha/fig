@@ -1,37 +1,37 @@
 const core = @import("prelude.core");
 
-fn core.Pair.first(value: core.Pair(a, b)) -> a {
+fn core.Pair::first(value: core.Pair(a, b)) -> a {
   value.first
 }
 
-fn core.Pair.second(value: core.Pair(a, b)) -> b {
+fn core.Pair::second(value: core.Pair(a, b)) -> b {
   value.second
 }
 
-fn core.Pair.swap(value: core.Pair(a, b)) -> core.Pair(b, a) {
+fn core.Pair::swap(value: core.Pair(a, b)) -> core.Pair(b, a) {
   {first: value.second, second: value.first}
 }
 
-fn core.Pair.map_first(const f: fn(x: a) -> c, value: core.Pair(a, b)) -> core.Pair(c, b) {
+fn core.Pair::map_first(const f: fn(x: a) -> c, value: core.Pair(a, b)) -> core.Pair(c, b) {
   {first: f(value.first), second: value.second}
 }
 
-fn core.Pair.map_second(const f: fn(x: b) -> c, value: core.Pair(a, b)) -> core.Pair(a, c) {
+fn core.Pair::map_second(const f: fn(x: b) -> c, value: core.Pair(a, b)) -> core.Pair(a, c) {
   {first: value.first, second: f(value.second)}
 }
 
-fn core.Pair.bimap(const f: fn(x: a) -> c, const g: fn(x: b) -> D, value: core.Pair(a, b)) -> core.Pair(c, D) {
+fn core.Pair::bimap(const f: fn(x: a) -> c, const g: fn(x: b) -> D, value: core.Pair(a, b)) -> core.Pair(c, D) {
   {first: f(value.first), second: g(value.second)}
 }
 
-fn core.Tuple3.first(value: core.Tuple3(a, b, c)) -> a {
+fn core.Tuple3::first(value: core.Tuple3(a, b, c)) -> a {
   value.first
 }
 
-fn core.Tuple3.second(value: core.Tuple3(a, b, c)) -> b {
+fn core.Tuple3::second(value: core.Tuple3(a, b, c)) -> b {
   value.second
 }
 
-fn core.Tuple3.third(value: core.Tuple3(a, b, c)) -> c {
+fn core.Tuple3::third(value: core.Tuple3(a, b, c)) -> c {
   value.third
 }

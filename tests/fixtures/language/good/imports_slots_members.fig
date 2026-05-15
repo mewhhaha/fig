@@ -5,7 +5,7 @@ type fn Point() -> type {
   struct(Point)
 }
 
-fn Point.eql(a: Point, b: Point) -> bool {
+fn Point::eql(a: Point, b: Point) -> bool {
   a.x == b.x && a.y == b.y
 }
 
@@ -32,7 +32,7 @@ pub fn main() -> i32 {
   let weird: Weird = {fst: 3, [0]: 4, [1]: 5};
   let xs = map4_i32(inc, <1, 2, 3, 4>);
   let doubled = lane4_add_i32(xs, xs);
-  match Point.eql(point, point) {
+  match Point::eql(point, point) {
     true => record.left + generated.x + weird[0] + doubled[0],
     false => 0,
   }

@@ -53,7 +53,7 @@ over deeply nested pipe-bind chains when several intermediate values feed the br
 ```fig
 let old_count = state.count[r];
 let rotated = rotate_left(state.perm, r);
-let count = fixed.Array.update(7, u3, state.count, r, dec);
+let count = fixed.Array::update(7, u3, state.count, r, dec);
 
 match old_count > 1 {
   true => State {...state, perm: rotated, count, r},
@@ -67,9 +67,9 @@ Const-function literals provide inline templates where an expected `const fn` pa
 parameter and return types:
 
 ```fig
-Option.map(\x -> x + 1, some(1))
-RangeIter.fold(xs, 0, \(acc, x) -> acc + x)
-Option.map(\x -> { let y = x + 1; y }, some(1))
+Option::map(\x -> x + 1, some(1))
+RangeIter::fold(xs, 0, \(acc, x) -> acc + x)
+Option::map(\x -> { let y = x + 1; y }, some(1))
 ```
 
 They are compile-time templates, not runtime closure values. They are valid only in expected

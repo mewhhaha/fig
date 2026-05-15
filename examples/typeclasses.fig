@@ -22,7 +22,7 @@ type fn Box(a: type) -> type {
   struct(Box)
 }
 
-fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
@@ -38,14 +38,14 @@ fn inc(x: i32) -> i32 {
 }
 
 fn same(const t, const _proof: Eq(t), a: t, b: t) -> i32 {
-  match t.eql(a, b) {
+  match t::eql(a, b) {
     true => 1,
     false => 0,
   }
 }
 
 fn Mapper(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
-  t.map(f, v)
+  t::map(f, v)
 }
 
 pub fn main() -> i32 {

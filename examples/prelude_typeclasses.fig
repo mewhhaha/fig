@@ -5,11 +5,11 @@ type fn Point() -> type {
   struct(Point)
 }
 
-fn Point.eql(a: Point, b: Point) -> bool {
+fn Point::eql(a: Point, b: Point) -> bool {
   a.x == b.x
 }
 
-fn Point.append(a: Point, b: Point) -> Point {
+fn Point::append(a: Point, b: Point) -> Point {
   Point {x: a.x + b.x, y: a.y + b.y}
 }
 
@@ -18,11 +18,11 @@ type fn Box(a: type) -> type {
   struct(Box)
 }
 
-fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
-fn Box.bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
+fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
   f(v.value)
 }
 

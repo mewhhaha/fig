@@ -29,7 +29,7 @@ type fn Monoid(t: type) -> type {
 }
 
 fn append(const t, const _proof: Semigroup(t), a: t, b: t) -> t {
-  t.append(a, b)
+  t::append(a, b)
 }
 
 fn empty(const t: type) -> t {
@@ -70,11 +70,11 @@ type fn Index(n: count) -> type {
   i32(0..n)
 }
 
-fn i32.try_domain(const domain: type, x: i32) -> Option(domain) {
+fn i32::try_domain(const domain: type, x: i32) -> Option(domain) {
   x
 }
 
-fn Index.try(const n: count, x: i32) -> Option(Index(n)) {
+fn Index::try(const n: count, x: i32) -> Option(Index(n)) {
   match 0 <= x {
     true => match x < n { true => x, false => 0 },
     false => 0,
@@ -98,11 +98,11 @@ type fn IndexCursor(n: count) -> type {
   i32
 }
 
-fn IndexCursor.start(const n: count) -> IndexCursor(n) {
+fn IndexCursor::start(const n: count) -> IndexCursor(n) {
   0
 }
 
-fn IndexCursor.next(const n: count, cursor: IndexCursor(n)) -> IterStep(IndexCursor(n), Index(n)) {
+fn IndexCursor::next(const n: count, cursor: IndexCursor(n)) -> IterStep(IndexCursor(n), Index(n)) {
   @index_cursor_next(n, cursor)
 }
 

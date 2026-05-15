@@ -69,7 +69,7 @@ type fn EntityRow(components: const, row: type) -> type {
   row
 }
 
-fn ComponentStore.get_typed(
+fn ComponentStore::get_typed(
   const n: count,
   const component: type,
   store: ComponentStore(n, component),
@@ -84,11 +84,11 @@ fn ComponentStore.get_typed(
   }
 }
 
-fn ComponentStore.get_present(store: ComponentStore(3, bool), index: i32) -> bool {
-  ComponentStore.get_typed(3, bool, store, index)
+fn ComponentStore::get_present(store: ComponentStore(3, bool), index: i32) -> bool {
+  ComponentStore::get_typed(3, bool, store, index)
 }
 
-fn ComponentSlot.set_typed(
+fn ComponentSlot::set_typed(
   const component: type,
   slot: ComponentSlot(3, component),
   index: i32,
@@ -104,7 +104,7 @@ fn ComponentSlot.set_typed(
   }
 }
 
-fn ComponentSlot.put_typed(
+fn ComponentSlot::put_typed(
   const component: type,
   slot: ComponentSlot(3, component),
   index: i32,
@@ -125,7 +125,7 @@ fn ComponentSlot.put_typed(
   }
 }
 
-fn SparseWorld.empty(const components) -> SparseWorld(3, components) {
+fn SparseWorld::empty(const components) -> SparseWorld(3, components) {
   @empty(SparseWorld(3, components))
 }
 
@@ -167,22 +167,22 @@ fn selected_present(const selected, world: w, entity: i32) -> bool {
 }
 
 fn selected_present_one(const selected, world: w, entity: i32) -> bool {
-  ComponentStore.get_present(@field(@field(world, @shape_first_key(selected)), #present), entity)
+  ComponentStore::get_present(@field(@field(world, @shape_first_key(selected)), #present), entity)
 }
 
 fn selected_present_two(const selected, world: w, entity: i32) -> bool {
   bool_and(
-    ComponentStore.get_present(@field(@field(world, @shape_first_key(selected)), #present), entity),
-    ComponentStore.get_present(@field(@field(world, @shape_first_key(@shape_tail(selected))), #present), entity)
+    ComponentStore::get_present(@field(@field(world, @shape_first_key(selected)), #present), entity),
+    ComponentStore::get_present(@field(@field(world, @shape_first_key(@shape_tail(selected))), #present), entity)
   )
 }
 
 fn selected_present_three(const selected, world: w, entity: i32) -> bool {
   bool_and(
-    ComponentStore.get_present(@field(@field(world, @shape_first_key(selected)), #present), entity),
+    ComponentStore::get_present(@field(@field(world, @shape_first_key(selected)), #present), entity),
     bool_and(
-      ComponentStore.get_present(@field(@field(world, @shape_first_key(@shape_tail(selected))), #present), entity),
-      ComponentStore.get_present(@field(@field(world, @shape_first_key(@shape_tail(@shape_tail(selected)))), #present), entity)
+      ComponentStore::get_present(@field(@field(world, @shape_first_key(@shape_tail(selected))), #present), entity),
+      ComponentStore::get_present(@field(@field(world, @shape_first_key(@shape_tail(@shape_tail(selected)))), #present), entity)
     )
   )
 }
@@ -199,7 +199,7 @@ fn apply_writes(const writes, world: w, entity: i32, write_values: Values(writes
 }
 
 fn apply_writes_nonempty(const writes, world: w, entity: i32, write_values: Values(writes)) -> w {
-  let next_slot = ComponentSlot.set_typed(
+  let next_slot = ComponentSlot::set_typed(
     @shape_slot(writes, @shape_first_key(writes)),
     @field(world, @shape_first_key(writes)),
     entity,

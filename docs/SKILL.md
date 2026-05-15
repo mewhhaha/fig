@@ -123,8 +123,8 @@ right-hand sides.
 
 - Type function names are UpperCamelCase, including type constructor references such as `Pair(i32)`.
 - Product constructor names are PascalCase and are introduced by `struct(Shape)`.
-- Runtime function names are lowercase and may be qualified as attached members, such as `Point.eql`
-  or `Box.map`.
+- Runtime function names are lowercase and may be qualified as attached members, such as
+  `Point::eql` or `Box::map`.
 - `pub fn` exports through the Wasm backend and must include an explicit return signature.
 - Non-public helper functions may omit `pub` but still need parseable parameter and return forms
   when used by the checker.
@@ -299,7 +299,7 @@ When choosing a type-function pattern:
 - If you intend to define a runtime data layout, write a `type fn`, bind a PascalCase shape, and
   return `struct(Shape)` or `union(...)`.
 - If you intend to require behavior on a type, write a contract `type fn` with `@require` and
-  attached members such as `t.eql`, `t.append`, or `t.map`.
+  attached members such as `t::eql`, `t::append`, or `t::map`.
 - If you intend generic runtime helpers with no runtime proof cost, pass
   `const _proof:
   contract(t)` and call attached members through `t.member(...)`.
@@ -335,7 +335,7 @@ must be labeled, and duplicate generated labels are rejected.
 Model typeclasses as ordinary type functions plus attached member functions:
 
 ```fig
-fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }
+fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
 
 type fn Eq(t: type) -> type {
   let Expected = fn(a: t, b: t) -> bool;
@@ -346,13 +346,13 @@ type fn Eq(t: type) -> type {
 ```
 
 Attached members use qualified function names, are discoverable through type reflection, and can be
-called statically as `t.map(...)` inside generic code. Local proof consts such as
+called statically as `t::map(...)` inside generic code. Local proof consts such as
 `const Mapper = Functor(t);` are erased after they prove the contract.
 
 Const dictionaries are product-shaped constants whose fields are function references:
 
 ```fig
-const point_eq: Eq(Point) = {eql: Point.eql, neq: Point.neq};
+const point_eq: Eq(Point) = {eql: Point::eql, neq: Point.neq};
 ```
 
 Fields must match the annotated product shape, and slot values must be function references rather
@@ -385,7 +385,7 @@ type fn Box(a: type) -> type {
   struct(Box)
 }
 
-fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
@@ -399,7 +399,7 @@ pub fn main() -> i32 {
 Define monad-like types by attaching both `map` and `bind`:
 
 ```fig
-fn Box.bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
+fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
   f(v.value)
 }
 
@@ -415,18 +415,18 @@ pub fn main() -> i32 {
 Define applicative-like types with `map`, `pure`, and `apply`:
 
 ```fig
-fn Box.pure(value: a) -> Box(a) { Box {value: value} }
-fn Box.apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) { Box {value: v.value(x.value)} }
+fn Box::pure(value: a) -> Box(a) { Box {value: value} }
+fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) { Box {value: v.value(x.value)} }
 fn Proof(const _proof: Applicative(Box)) -> i32 { 0 }
 ```
 
 Use semigroup/monoid patterns for append and empty operations on concrete types:
 
 ```fig
-fn Point.append(a: Point, b: Point) -> Point {
+fn Point::append(a: Point, b: Point) -> Point {
   Point {x: a.x + b.x, y: a.y + b.y}
 }
-fn Point.empty() -> Point { Point {x: 0, y: 0} }
+fn Point::empty() -> Point { Point {x: 0, y: 0} }
 
 pub fn main() -> i32 {
   let total = append(Point, Semigroup(Point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
@@ -443,8 +443,8 @@ fn inc(x: i32) -> i32 { x + 1 }
 fn next(x: i32) -> option.core.Option(i32) { option.some(x + 1) }
 
 pub fn main() -> i32 {
-  let maybe = option.core.Option.bind(option.core.Option.map(inc, option.some(1)), next);
-  option.core.Option.unwrap_or(maybe, 0)
+  let maybe = option.core.Option::bind(option.core.Option::map(inc, option.some(1)), next);
+  option.core.Option::unwrap_or(maybe, 0)
 }
 ```
 
@@ -494,7 +494,7 @@ type function returning `operator`:
 
 ```fig
 type fn OpAdd(t: type) -> operator {
-  operator(#infixl, 60, "+", t.add)
+  operator(#infixl, 60, "+", t::add)
 }
 ```
 

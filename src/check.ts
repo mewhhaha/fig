@@ -16,10 +16,12 @@ import type {
   TypeCountExpr,
   TypeDecl,
   TypeExpr,
+  TypeMember,
   TypeParamKind,
   TypePattern,
   TypeResultKind,
   TypeShape,
+  TypeVariant,
 } from "./core_ast.ts";
 import { CompileError, type Diagnostic, type Span } from "./diagnostics.ts";
 import { isCatchAllPattern, patternBindingNames } from "./patterns.ts";
@@ -210,6 +212,10 @@ function checkProgramInternal(
     () => checkPrimitiveDecls(fnDecls, diagnostics, pluginRegistry),
   );
   recordPhase("evaluateTypeDecls", () => evaluateTypeDecls(typeDecls, diagnostics));
+  recordPhase(
+    "checkDotQualifiedTypeMemberSyntax",
+    () => checkDotQualifiedTypeMemberSyntax(typeDecls, fnDecls, diagnostics),
+  );
   recordPhase(
     "attachQualifiedTypeMembers",
     () => attachQualifiedTypeMembers(typeDecls, fnDecls, diagnostics),
@@ -599,9 +605,9 @@ function lowerDoExpression(
 
 function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
   const [head, ...tail] = statements;
-  if (!head) return callExpr(`${effect}.pure`, [finalExpr]);
+  if (!head) return callExpr(`${effect}::pure`, [finalExpr]);
   if (head.kind === "do_bind") {
-    return callExpr(`${effect}.bind`, [
+    return callExpr(`${effect}::bind`, [
       head.value,
       {
         kind: "const_fn",
@@ -616,9 +622,9 @@ function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): 
 
 function applicativeDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
   const [head, ...tail] = statements;
-  if (!head) return callExpr(`${effect}.pure`, [finalExpr]);
+  if (!head) return callExpr(`${effect}::pure`, [finalExpr]);
   if (head.kind === "do_bind") {
-    return callExpr(`${effect}.map`, [
+    return callExpr(`${effect}::map`, [
       {
         kind: "const_fn",
         params: [head.name],
@@ -1413,6 +1419,7 @@ function substituteOperatorTarget(
     let result = target;
     for (const param of decl.params) {
       result = result.replace(new RegExp(`\\b${param.name}\\.`, "g"), `${base}.`);
+      result = result.replace(new RegExp(`\\b${param.name}::`, "g"), `${base}::`);
     }
     if (functions.has(result)) return result;
   }
@@ -2403,7 +2410,7 @@ function attachQualifiedTypeMembers(
       }
       continue;
     }
-    const key = `${fn.memberOf.owner}.${fn.memberOf.member}`;
+    const key = `${fn.memberOf.owner}::${fn.memberOf.member}`;
     if (
       attached.has(key) ||
       typeFragmentMembers(owner).some((member) => member.name === fn.memberOf!.member)
@@ -2429,6 +2436,26 @@ function attachQualifiedTypeMembers(
   }
 }
 
+function checkDotQualifiedTypeMemberSyntax(
+  types: TypeDecl[],
+  functions: FnDecl[],
+  diagnostics: Diagnostic[],
+) {
+  const typeNames = new Set(types.map((decl) => decl.name));
+  for (const fn of functions) {
+    if (fn.memberOf || fn.primitiveId || isIntrinsicWrapper(fn) || !fn.name.includes(".")) continue;
+    const split = fn.name.lastIndexOf(".");
+    const owner = fn.name.slice(0, split);
+    const member = fn.name.slice(split + 1);
+    if (!typeNames.has(owner)) continue;
+    diagnostics.push({
+      code: "type.member_syntax",
+      message: `type member ${owner}.${member} must be declared as ${owner}::${member}`,
+      span: fn.nameSpan ?? fn.span,
+    });
+  }
+}
+
 function renderFnType(fn: FnDecl): string {
   return `fn(${
     fn.params.map((param) => `${param.const ? "const " : ""}${param.name}: ${param.type}`).join(
@@ -2443,7 +2470,7 @@ function resolveAttachedMemberCalls(program: Program, types: TypeDecl[]) {
     const normalized = type.normalized;
     if (normalized?.kind !== "product" && normalized?.kind !== "sum") continue;
     for (const member of normalized.members ?? []) {
-      members.set(`${type.name}.${member.name}`, member.target);
+      members.set(`${type.name}::${member.name}`, member.target);
     }
   }
   for (const decl of program.declarations) {
@@ -2998,12 +3025,13 @@ class ConstEvaluator {
       report: (diagnostic) => this.diagnostics.push(diagnostic),
     });
     if (pluginValue) return pluginValue as ConstValue;
+    if (name.startsWith("@")) name = name.slice(1);
     if (name === "compile_error") {
       const message = args[0]?.kind === "string" ? args[0].value : "compile-time error";
       this.report("const.compile_error", message, args[0]?.span);
       return { kind: "never" };
     }
-    if (name === "@wgsl_shader_id" || name === "wgsl_shader_id") {
+    if (name === "wgsl_shader_id") {
       const source = args[0]?.kind === "string" ? args[0].value : undefined;
       if (source === undefined) return undefined;
       this.addShader(source);
@@ -3123,6 +3151,88 @@ class ConstEvaluator {
           : undefined,
       };
     }
+    if (name === "type_members") return constTypeMembers(type, this.typesByName);
+    if (name === "type_member_target") {
+      const member = constTypeMember(type, args[1], this.typesByName);
+      if (!member) {
+        this.report(
+          "type.unknown_type_member",
+          `unknown type member ${literalName(args[1]) ?? "<unknown>"}`,
+          args[1]?.span ?? args[0]?.span,
+        );
+        return { kind: "never" };
+      }
+      return this.functions.has(member.target)
+        ? { kind: "fn", name: member.target }
+        : { kind: "string", value: member.target };
+    }
+    const fn = parseFnSignatureDetailed(args[0]?.kind === "type" ? args[0].name : "");
+    if (name === "type_is_fn") return { kind: "bool", value: !!fn };
+    if (name === "type_fn_params") return fn ? constFnParamsValue(fn) : undefined;
+    if (name === "type_fn_return") return fn ? { kind: "type", name: fn.returnType } : undefined;
+    if (name === "type_fn_effects") return fn ? constFnEffectsValue(fn.effects) : undefined;
+    if (name === "type_fn_param_count") {
+      return fn ? { kind: "number", value: String(fn.params.length) } : undefined;
+    }
+    const scalar = args[0]?.kind === "type" ? scalarReflection(args[0].name) : undefined;
+    if (name === "type_is_scalar") return { kind: "bool", value: !!scalar };
+    if (name === "type_is_refined_scalar") {
+      return {
+        kind: "bool",
+        value: args[0]?.kind === "type" && !!parseRefinedI32Type(args[0].name),
+      };
+    }
+    if (name === "type_scalar_carrier") {
+      return scalar ? { kind: "literal_type", value: scalar.carrier } : undefined;
+    }
+    if (name === "type_scalar_min") {
+      return scalar?.min !== undefined ? { kind: "number", value: String(scalar.min) } : undefined;
+    }
+    if (name === "type_scalar_max") {
+      return scalar?.max !== undefined ? { kind: "number", value: String(scalar.max) } : undefined;
+    }
+    if (name === "type_scalar_bit_width") {
+      return scalar?.bitWidth !== undefined
+        ? { kind: "number", value: String(scalar.bitWidth) }
+        : undefined;
+    }
+    if (name === "type_scalar_signed") {
+      return scalar ? { kind: "bool", value: scalar.signed } : undefined;
+    }
+    if (name === "type_scalar_domain") return scalar ? scalarDomainConstValue(scalar) : undefined;
+    const typeName = args[0]?.kind === "type" ? args[0].name : "";
+    const typeDecls = [...this.typesByName.values()];
+    if (name === "type_is_inline_array") {
+      return { kind: "bool", value: !!inlineArrayLikeTypeArgs(typeName, typeDecls) };
+    }
+    if (name === "type_inline_array_len") {
+      const array = inlineArrayLikeTypeArgs(typeName, typeDecls);
+      return array ? { kind: "number", value: String(array.count) } : undefined;
+    }
+    if (name === "type_inline_array_item") {
+      const array = inlineArrayLikeTypeArgs(typeName, typeDecls);
+      return array ? { kind: "type", name: array.itemType } : undefined;
+    }
+    if (name === "type_storage_kind") {
+      return {
+        kind: "literal_type",
+        value: renderTypeEvalValue(typeStorageKindValue(constToTypeEvalValue(args[0]!), typeDecls))
+          .slice(1),
+      };
+    }
+    if (name === "type_layout") return typeLayoutConstValue(typeName, typeDecls);
+    if (name === "type_flat_slot_count") {
+      return { kind: "number", value: String(flatTypeSlots(typeName, typeDecls).length) };
+    }
+    if (name === "type_flat_slots") return typeFlatSlotsConstValue(typeName, typeDecls);
+    if (name === "type_size_bits") {
+      const bits = typeSizeBits(typeName, typeDecls);
+      return bits === undefined ? undefined : { kind: "number", value: String(bits) };
+    }
+    if (name === "type_align_bits") {
+      const bits = typeAlignBits(typeName, typeDecls);
+      return bits === undefined ? undefined : { kind: "number", value: String(bits) };
+    }
     if (name === "type_has_variant") {
       const variant = literalName(args[1]);
       return {
@@ -3139,6 +3249,25 @@ class ConstEvaluator {
         : undefined;
       return { kind: "bool", value: !!found?.shape?.slots.find((item) => item.label === slot) };
     }
+    if (name === "type_variant_count") {
+      return {
+        kind: "number",
+        value: String(type.normalized?.kind === "sum" ? type.normalized.variants.length : 0),
+      };
+    }
+    if (name === "type_variant_tag_type") {
+      const count = type.normalized?.kind === "sum" ? type.normalized.variants.length : 0;
+      return { kind: "type", name: count <= 1 ? "u1" : `u${Math.ceil(Math.log2(count))}` };
+    }
+    if (name === "type_variant_payload_type") {
+      const variantName = literalName(args[1]);
+      const variant = type.normalized?.kind === "sum"
+        ? type.normalized.variants.find((item) => item.name === variantName)
+        : undefined;
+      return variant ? { kind: "type", name: variantPayloadType(variant) } : undefined;
+    }
+    if (name === "type_has_niche") return { kind: "bool", value: false };
+    if (name === "type_niche_value") return undefined;
     if (name === "type_slots") return constTypeSlots(type);
     if (name === "type_slot_count") {
       return {
@@ -3360,6 +3489,125 @@ function constTypeVariants(type: ConstValue): ConstValue {
           value: { kind: "type", name: slot.type },
         })) ?? [],
       },
+    })),
+  };
+}
+
+function constTypeMember(
+  type: ConstValue,
+  name: ConstValue | undefined,
+  typesByName: Map<string, TypeDecl>,
+): TypeMember | undefined {
+  const memberName = literalName(name);
+  if (type.kind !== "type") return undefined;
+  const resolved = resolveConstTypeValue(type, typesByName);
+  if (resolved.normalized?.kind === "product" || resolved.normalized?.kind === "sum") {
+    const member = resolved.normalized.members?.find((item) => item.name === memberName);
+    if (member) {
+      const decl = typesByName.get(typeNameOf(resolved.name));
+      const bindings = decl ? genericBindings(resolved.name, decl) : new Map<string, string>();
+      return { ...member, type: substituteTypeVars(member.type, bindings) };
+    }
+  }
+  if (
+    memberName === "empty" &&
+    typeHasDerivedEmpty(constToTypeEvalValue(resolved) as TypeEvalValue & { kind: "type" })
+  ) {
+    return { name: "empty", type: `fn() -> ${resolved.name}`, target: `${resolved.name}::empty` };
+  }
+  return undefined;
+}
+
+function constTypeMembers(
+  type: ConstValue,
+  typesByName: Map<string, TypeDecl>,
+): ConstValue {
+  if (type.kind !== "type") return { kind: "shape", slots: [] };
+  const resolved = resolveConstTypeValue(type, typesByName);
+  const normalized = resolved.normalized;
+  const members = normalized?.kind === "product" || normalized?.kind === "sum"
+    ? normalized.members ?? []
+    : [];
+  const decl = typesByName.get(typeNameOf(resolved.name));
+  const bindings = decl ? genericBindings(resolved.name, decl) : new Map<string, string>();
+  const explicit = members.map((member) => ({
+    ...member,
+    type: substituteTypeVars(member.type, bindings),
+  }));
+  const withDerivedEmpty =
+    typeHasDerivedEmpty(constToTypeEvalValue(resolved) as TypeEvalValue & { kind: "type" }) &&
+      !explicit.some((member) => member.name === "empty")
+      ? [...explicit, {
+        name: "empty",
+        type: `fn() -> ${resolved.name}`,
+        target: `${resolved.name}::empty`,
+      }]
+      : explicit;
+  return {
+    kind: "shape",
+    slots: withDerivedEmpty.map((member) => ({
+      label: member.name,
+      value: memberMetadataConstValue(member),
+    })),
+  };
+}
+
+function resolveConstTypeValue(
+  type: Extract<ConstValue, { kind: "type" }>,
+  typesByName: Map<string, TypeDecl>,
+): Extract<ConstValue, { kind: "type" }> {
+  if (type.normalized) return type;
+  const decl = typesByName.get(typeNameOf(type.name));
+  return decl?.normalized ? { ...type, normalized: decl.normalized } : type;
+}
+
+function typeLayoutConstValue(type: string, types: TypeDecl[]): ConstValue {
+  const array = inlineArrayLikeTypeArgs(type, types);
+  const itemBits = array ? typeSizeBits(array.itemType, types) : undefined;
+  const totalBits = typeSizeBits(type, types);
+  const storage = typeStorageKindConst(type, types);
+  return {
+    kind: "shape",
+    slots: [
+      { label: "kind", value: { kind: "literal_type", value: storage } },
+      ...(array
+        ? [
+          { label: "len", value: { kind: "number" as const, value: String(array.count) } },
+          { label: "item", value: { kind: "type" as const, name: array.itemType } },
+        ]
+        : []),
+      ...(itemBits !== undefined
+        ? [{ label: "item_bits", value: { kind: "number" as const, value: String(itemBits) } }]
+        : []),
+      ...(totalBits !== undefined
+        ? [{ label: "total_bits", value: { kind: "number" as const, value: String(totalBits) } }]
+        : []),
+      {
+        label: "flat_slot_count",
+        value: { kind: "number", value: String(flatTypeSlots(type, types).length) },
+      },
+    ],
+  };
+}
+
+function typeStorageKindConst(type: string, types: TypeDecl[]): string {
+  const array = inlineArrayLikeTypeArgs(type, types);
+  if (array) {
+    const itemBits = typeSizeBits(array.itemType, types);
+    return itemBits !== undefined && itemBits * array.count <= 64 ? "packed" : "flat";
+  }
+  const decl = findTypeDecl(types, typeNameOf(resolveAliasType(type, types) ?? type));
+  if (decl?.normalized?.kind === "sum") return "tagged_union";
+  if (decl?.normalized?.kind === "product") return "flat";
+  return scalarReflection(type) ? "scalar" : "opaque";
+}
+
+function typeFlatSlotsConstValue(type: string, types: TypeDecl[]): ConstValue {
+  return {
+    kind: "shape",
+    slots: flatTypeSlots(type, types).map((slot, index) => ({
+      label: `slot${index}`,
+      value: { kind: "type", name: slot },
     })),
   };
 }
@@ -4110,16 +4358,11 @@ function inferFnTypeArgs(
 }
 
 function parseFnSignature(source: string): { params: string[]; returnType: string } | undefined {
-  const match = source.match(/^fn\((.*)\)\s*->\s*(.+)$/);
-  if (!match) return undefined;
+  const parsed = parseFnSignatureDetailed(source);
+  if (!parsed) return undefined;
   return {
-    params: match[1].trim()
-      ? splitTypeArgs(match[1]).map((part) => {
-        const colon = part.indexOf(":");
-        return (colon >= 0 ? part.slice(colon + 1) : part).trim();
-      })
-      : [],
-    returnType: match[2].trim(),
+    params: parsed.params.map((param) => param.type),
+    returnType: parsed.returnType,
   };
 }
 
@@ -4277,17 +4520,20 @@ function substituteInferredExpr(
   },
 ): Expr {
   if (expr.kind === "var") {
+    const assoc = expr.name.indexOf("::");
     const dot = expr.name.indexOf(".");
-    if (dot > 0) {
-      const base = expr.name.slice(0, dot);
-      const member = expr.name.slice(dot + 1);
+    const split = assoc > 0 ? assoc : dot;
+    if (split > 0) {
+      const separator = assoc > 0 ? "::" : ".";
+      const base = expr.name.slice(0, split);
+      const member = expr.name.slice(split + separator.length);
       const proofType = proofTypes.get(base);
       const attached = proofType
         ? typeMember(proofType, { kind: "literal", value: member })
         : undefined;
       if (attached) return { kind: "var", name: attached.target };
       const type = types.get(base);
-      if (type) return { kind: "var", name: `${type}.${member}` };
+      if (type) return { kind: "var", name: `${type}${separator}${member}` };
       const staticName = staticNames.get(base);
       if (staticName) {
         const staticValue = context?.consts?.get(staticName);
@@ -4295,7 +4541,7 @@ function substituteInferredExpr(
           const slot = staticValue.slots.find((item) => item.label === member);
           if (slot?.value.kind === "fn") return { kind: "var", name: slot.value.name };
         }
-        return { kind: "var", name: `${staticName}.${member}` };
+        return { kind: "var", name: `${staticName}${separator}${member}` };
       }
     }
     const type = types.get(expr.name);
@@ -5749,10 +5995,13 @@ function substituteSpecializedExpr(
       }
       if (staticArgName) return { kind: "var", name: staticArgName };
       if (staticValue?.kind === "shape") return constValueToExpr(staticValue) ?? expr;
+      const assoc = expr.name.indexOf("::");
       const dot = expr.name.indexOf(".");
-      if (dot > 0) {
-        const base = expr.name.slice(0, dot);
-        const field = expr.name.slice(dot + 1);
+      const split = assoc > 0 ? assoc : dot;
+      if (split > 0) {
+        const separator = assoc > 0 ? "::" : ".";
+        const base = expr.name.slice(0, split);
+        const field = expr.name.slice(split + separator.length);
         const staticValue = staticValues.get(base);
         if (staticValue?.kind === "shape") {
           const slot = staticValue.slots.find((item) => item.label === field);
@@ -5761,7 +6010,7 @@ function substituteSpecializedExpr(
           if (slotExpr) return slotExpr;
         }
         if (staticValue?.kind === "type") {
-          return { kind: "var", name: `${staticValue.name}.${field}` };
+          return { kind: "var", name: `${staticValue.name}${separator}${field}` };
         }
       }
       return expr;
@@ -8129,6 +8378,87 @@ class TypeEvaluator {
       }
       return this.namedType(member.type);
     }
+    if (name === "type_members") return this.typeMembers(type);
+    if (name === "type_member_target") {
+      const member = this.typeMember(type, args[1]);
+      if (!member) {
+        this.reportDiagnostic({
+          code: "type.unknown_type_member",
+          message: `unknown type member ${typeLiteralName(args[1]) ?? "<unknown>"}`,
+          span: args[1]?.span ?? args[0]?.span,
+        });
+        return { kind: "never" };
+      }
+      return { kind: "string", value: member.target };
+    }
+    const fn = parseFnSignatureDetailed(renderTypeEvalValue(args[0] ?? { kind: "never" }));
+    if (name === "type_is_fn") return { kind: "bool", value: !!fn };
+    if (name === "type_fn_params") return fn ? typeFnParamsValue(fn) : undefined;
+    if (name === "type_fn_return") return fn ? this.namedType(fn.returnType) : undefined;
+    if (name === "type_fn_effects") return fn ? typeFnEffectsValue(fn.effects) : undefined;
+    if (name === "type_fn_param_count") {
+      return fn ? { kind: "number", value: String(fn.params.length) } : undefined;
+    }
+    if (name === "type_is_scalar") return { kind: "bool", value: !!scalarReflection(type.name) };
+    if (name === "type_is_refined_scalar") {
+      return { kind: "bool", value: !!parseRefinedI32Type(type.name) };
+    }
+    const scalar = scalarReflection(type.name);
+    if (name === "type_scalar_carrier") {
+      return scalar ? { kind: "literal", value: scalar.carrier } : undefined;
+    }
+    if (name === "type_scalar_min") {
+      return scalar?.min !== undefined ? { kind: "number", value: String(scalar.min) } : undefined;
+    }
+    if (name === "type_scalar_max") {
+      return scalar?.max !== undefined ? { kind: "number", value: String(scalar.max) } : undefined;
+    }
+    if (name === "type_scalar_bit_width") {
+      return scalar?.bitWidth !== undefined
+        ? { kind: "number", value: String(scalar.bitWidth) }
+        : undefined;
+    }
+    if (name === "type_scalar_signed") {
+      return scalar ? { kind: "bool", value: scalar.signed } : undefined;
+    }
+    if (name === "type_scalar_domain") {
+      return scalar ? scalarDomainTypeValue(scalar) : undefined;
+    }
+    if (name === "type_is_inline_array") {
+      return {
+        kind: "bool",
+        value: !!inlineArrayLikeTypeArgs(type.name, [...this.typesByName.values()]),
+      };
+    }
+    if (name === "type_inline_array_len") {
+      const array = inlineArrayLikeTypeArgs(type.name, [...this.typesByName.values()]);
+      return array ? { kind: "number", value: String(array.count) } : undefined;
+    }
+    if (name === "type_inline_array_item") {
+      const array = inlineArrayLikeTypeArgs(type.name, [...this.typesByName.values()]);
+      return array ? this.namedType(array.itemType) : undefined;
+    }
+    if (name === "type_storage_kind") {
+      return typeStorageKindValue(type, [...this.typesByName.values()]);
+    }
+    if (name === "type_layout") return typeLayoutValue(type, [...this.typesByName.values()]);
+    if (name === "type_flat_slot_count") {
+      return {
+        kind: "number",
+        value: String(flatTypeSlots(type.name, [...this.typesByName.values()]).length),
+      };
+    }
+    if (name === "type_flat_slots") {
+      return typeFlatSlotsValue(type.name, [...this.typesByName.values()]);
+    }
+    if (name === "type_size_bits") {
+      const bits = typeSizeBits(type.name, [...this.typesByName.values()]);
+      return bits === undefined ? undefined : { kind: "number", value: String(bits) };
+    }
+    if (name === "type_align_bits") {
+      const bits = typeAlignBits(type.name, [...this.typesByName.values()]);
+      return bits === undefined ? undefined : { kind: "number", value: String(bits) };
+    }
     if (name === "type_has_variant") {
       const variant = typeLiteralName(args[1]);
       return {
@@ -8145,6 +8475,26 @@ class TypeEvaluator {
         : undefined;
       return { kind: "bool", value: !!found?.shape?.slots.find((item) => item.label === slot) };
     }
+    if (name === "type_variant_count") {
+      return {
+        kind: "number",
+        value: String(type.normalized?.kind === "sum" ? type.normalized.variants.length : 0),
+      };
+    }
+    if (name === "type_variant_tag_type") {
+      const count = type.normalized?.kind === "sum" ? type.normalized.variants.length : 0;
+      return count <= 1 ? this.namedType("u1") : this.namedType(`u${Math.ceil(Math.log2(count))}`);
+    }
+    if (name === "type_variant_payload_type") {
+      const variantName = typeLiteralName(args[1]);
+      const variant = type.normalized?.kind === "sum"
+        ? type.normalized.variants.find((item) => item.name === variantName)
+        : undefined;
+      if (!variant) return undefined;
+      return this.namedType(variantPayloadType(variant));
+    }
+    if (name === "type_has_niche") return { kind: "bool", value: false };
+    if (name === "type_niche_value") return undefined;
     if (name === "type_slots") return this.typeSlots(type);
     if (name === "type_slot_count") {
       return {
@@ -8798,6 +9148,36 @@ class TypeEvaluator {
     };
   }
 
+  private typeMembers(type: TypeEvalValue): TypeEvalValue {
+    if (type.kind === "type") type = this.resolveTypeValue(type);
+    if (type.kind !== "type") return { kind: "shape", slots: [] };
+    const normalized = type.normalized;
+    const members = normalized?.kind === "product" || normalized?.kind === "sum"
+      ? normalized.members ?? []
+      : [];
+    const decl = this.typesByName.get(typeNameOf(type.name));
+    const bindings = decl ? genericBindings(type.name, decl) : new Map<string, string>();
+    const explicit = members.map((member) => ({
+      ...member,
+      type: substituteTypeVars(member.type, bindings),
+    }));
+    const withDerivedEmpty = typeHasDerivedEmpty(type) &&
+        !explicit.some((member) => member.name === "empty")
+      ? [...explicit, {
+        name: "empty",
+        type: `fn() -> ${type.name}`,
+        target: `${type.name}::empty`,
+      }]
+      : explicit;
+    return {
+      kind: "shape",
+      slots: withDerivedEmpty.map((member) => ({
+        label: member.name,
+        value: memberMetadataTypeValue(member),
+      })),
+    };
+  }
+
   resolve(value: TypeEvalValue): TypeEvalValue {
     return value.kind === "type" ? this.resolveTypeValue(value) : value;
   }
@@ -8849,7 +9229,7 @@ class TypeEvaluator {
       return {
         name: "empty",
         type: `fn() -> ${type.name}`,
-        target: `${type.name}.empty`,
+        target: `${type.name}::empty`,
       };
     }
     return undefined;
@@ -9024,6 +9404,287 @@ function typeProductSlot(type: TypeEvalValue, name: TypeEvalValue | undefined) {
   return type.normalized.shape.slots.find((slot) => slot.label === slotName);
 }
 
+function memberMetadataTypeValue(member: { type: string; target: string }): TypeEvalValue {
+  return {
+    kind: "shape",
+    slots: [
+      { label: "type", value: { kind: "type", name: member.type } },
+      { label: "target", value: { kind: "string", value: member.target } },
+    ],
+  };
+}
+
+function memberMetadataConstValue(member: { type: string; target: string }): ConstValue {
+  return {
+    kind: "shape",
+    slots: [
+      { label: "type", value: { kind: "type", name: member.type } },
+      { label: "target", value: { kind: "string", value: member.target } },
+    ],
+  };
+}
+
+function typeValue(name: string): TypeEvalValue {
+  return { kind: "type", name };
+}
+
+interface ParsedFnSignature {
+  params: { name?: string; type: string }[];
+  returnType: string;
+  effects: string[];
+}
+
+function parseFnSignatureDetailed(source: string): ParsedFnSignature | undefined {
+  const match = source.trim().match(/^fn\((.*)\)\s*->\s*([^!]+?)(?:\s*!\s*\{(.*)\})?$/);
+  if (!match) return undefined;
+  const params = match[1].trim()
+    ? splitTypeArgs(match[1]).map((part) => {
+      const colon = part.indexOf(":");
+      return colon >= 0
+        ? { name: part.slice(0, colon).trim(), type: part.slice(colon + 1).trim() }
+        : { type: part.trim() };
+    })
+    : [];
+  const effects = match[3]?.trim()
+    ? match[3].split(",").map((effect) => effect.trim()).filter(Boolean)
+    : [];
+  return { params, returnType: match[2].trim(), effects };
+}
+
+function typeFnParamsValue(fn: ParsedFnSignature): TypeEvalValue {
+  return {
+    kind: "shape",
+    slots: fn.params.map((param, index) => ({
+      label: param.name || `_${index}`,
+      value: typeValue(param.type),
+    })),
+  };
+}
+
+function typeFnEffectsValue(effects: string[]): TypeEvalValue {
+  return {
+    kind: "shape",
+    slots: effects.map((effect) => ({ label: effect, value: { kind: "bool", value: true } })),
+  };
+}
+
+function constFnParamsValue(fn: ParsedFnSignature): ConstValue {
+  return {
+    kind: "shape",
+    slots: fn.params.map((param, index) => ({
+      label: param.name || `_${index}`,
+      value: { kind: "type", name: param.type },
+    })),
+  };
+}
+
+function constFnEffectsValue(effects: string[]): ConstValue {
+  return {
+    kind: "shape",
+    slots: effects.map((effect) => ({ label: effect, value: { kind: "bool", value: true } })),
+  };
+}
+
+type ScalarReflection = {
+  carrier: string;
+  bitWidth?: number;
+  min?: number;
+  max?: number;
+  signed: boolean;
+  refined?: string;
+};
+
+function scalarReflection(type: string): ScalarReflection | undefined {
+  const trimmed = type.trim();
+  const refined = scalarFactsFromRefinedI32Type(trimmed);
+  if (refined) {
+    return {
+      carrier: "i32",
+      bitWidth: 32,
+      min: refined.range?.min,
+      max: refined.range?.max,
+      signed: true,
+      refined: renderRefinedI32Domain(refined.domain),
+    };
+  }
+  const unsigned = trimmed.match(/^u([1-9][0-9]*)$/);
+  if (unsigned) {
+    const width = Number.parseInt(unsigned[1], 10);
+    if (width >= 1 && width <= 64) {
+      return { carrier: trimmed, bitWidth: width, min: 0, max: 2 ** width - 1, signed: false };
+    }
+  }
+  if (trimmed === "i32") {
+    return { carrier: "i32", bitWidth: 32, min: I32_MIN, max: I32_MAX, signed: true };
+  }
+  if (trimmed === "i64") return { carrier: "i64", bitWidth: 64, signed: true };
+  if (trimmed === "u32") {
+    return { carrier: "u32", bitWidth: 32, min: 0, max: 2 ** 32 - 1, signed: false };
+  }
+  if (trimmed === "u64") return { carrier: "u64", bitWidth: 64, min: 0, signed: false };
+  if (trimmed === "bool") return { carrier: "bool", bitWidth: 1, min: 0, max: 1, signed: false };
+  if (trimmed === "f32") return { carrier: "f32", bitWidth: 32, signed: true };
+  if (trimmed === "f64") return { carrier: "f64", bitWidth: 64, signed: true };
+  return undefined;
+}
+
+function scalarDomainTypeValue(scalar: ScalarReflection): TypeEvalValue {
+  return {
+    kind: "shape",
+    slots: [
+      { label: "carrier", value: { kind: "literal", value: scalar.carrier } },
+      ...(scalar.min !== undefined
+        ? [{ label: "min", value: { kind: "number" as const, value: String(scalar.min) } }]
+        : []),
+      ...(scalar.max !== undefined
+        ? [{ label: "max", value: { kind: "number" as const, value: String(scalar.max) } }]
+        : []),
+      ...(scalar.refined
+        ? [{ label: "domain", value: { kind: "string" as const, value: scalar.refined } }]
+        : []),
+    ],
+  };
+}
+
+function scalarDomainConstValue(scalar: ScalarReflection): ConstValue {
+  return {
+    kind: "shape",
+    slots: [
+      { label: "carrier", value: { kind: "literal_type", value: scalar.carrier } },
+      ...(scalar.min !== undefined
+        ? [{ label: "min", value: { kind: "number" as const, value: String(scalar.min) } }]
+        : []),
+      ...(scalar.max !== undefined
+        ? [{ label: "max", value: { kind: "number" as const, value: String(scalar.max) } }]
+        : []),
+      ...(scalar.refined
+        ? [{ label: "domain", value: { kind: "string" as const, value: scalar.refined } }]
+        : []),
+    ],
+  };
+}
+
+function flatTypeSlots(type: string, types: TypeDecl[], seen = new Set<string>()): string[] {
+  const resolved = resolveAliasType(type, types) ?? type;
+  if (seen.has(resolved)) return [resolved];
+  seen.add(resolved);
+  const array = inlineArrayLikeTypeArgs(resolved, types);
+  if (array) {
+    return Array.from({ length: array.count }, () => array.itemType).flatMap((item) =>
+      flatTypeSlots(item, types, seen)
+    );
+  }
+  const scalar = scalarReflection(resolved);
+  if (scalar) return [resolved];
+  const decl = findTypeDecl(types, typeNameOf(resolved));
+  if (decl?.normalized?.kind === "product") {
+    const bindings = genericBindings(resolved, decl);
+    return decl.normalized.shape.slots.flatMap((slot) => {
+      const slotType = substituteTypeVars(slot.type, bindings);
+      const repeat = slot.repeat
+        ? Number.parseInt(substituteTypeVars(slot.repeat, bindings), 10)
+        : 1;
+      return Array.from({ length: Number.isFinite(repeat) ? repeat : 1 }, () => slotType)
+        .flatMap((item) => flatTypeSlots(item, types, seen));
+    });
+  }
+  return [resolved];
+}
+
+function typeSizeBits(type: string, types: TypeDecl[]): number | undefined {
+  const array = inlineArrayLikeTypeArgs(type, types);
+  if (array) {
+    const item = typeSizeBits(array.itemType, types);
+    return item === undefined ? undefined : item * array.count;
+  }
+  const scalar = scalarReflection(resolveAliasType(type, types) ?? type);
+  if (scalar?.bitWidth !== undefined) return scalar.bitWidth;
+  const slots = flatTypeSlots(type, types);
+  if (!slots.length) return 0;
+  let total = 0;
+  for (const slot of slots) {
+    const bits = typeSizeBits(slot, types);
+    if (bits === undefined) return undefined;
+    total += bits;
+  }
+  return total;
+}
+
+function typeAlignBits(type: string, types: TypeDecl[]): number | undefined {
+  const slots = flatTypeSlots(type, types);
+  const aligns = slots.map((slot) => typeSizeBits(slot, types)).filter((bits): bits is number =>
+    bits !== undefined
+  );
+  return aligns.length ? Math.max(...aligns) : typeSizeBits(type, types);
+}
+
+function typeStorageKindValue(type: TypeEvalValue, types: TypeDecl[]): TypeEvalValue {
+  const array = type.kind === "type" ? inlineArrayLikeTypeArgs(type.name, types) : undefined;
+  if (array) {
+    const itemBits = typeSizeBits(array.itemType, types);
+    const packed = itemBits !== undefined && itemBits * array.count <= 64;
+    return { kind: "literal", value: packed ? "packed" : "flat" };
+  }
+  if (type.kind === "type" && type.normalized?.kind === "sum") {
+    return { kind: "literal", value: "tagged_union" };
+  }
+  if (type.kind === "type" && type.normalized?.kind === "product") {
+    return { kind: "literal", value: "flat" };
+  }
+  return {
+    kind: "literal",
+    value: scalarReflection(type.kind === "type" ? type.name : "") ? "scalar" : "opaque",
+  };
+}
+
+function typeLayoutValue(type: TypeEvalValue, types: TypeDecl[]): TypeEvalValue {
+  const name = type.kind === "type" ? type.name : "";
+  const array = inlineArrayLikeTypeArgs(name, types);
+  const itemBits = array ? typeSizeBits(array.itemType, types) : undefined;
+  const totalBits = typeSizeBits(name, types);
+  return {
+    kind: "shape",
+    slots: [
+      { label: "kind", value: typeStorageKindValue(type, types) },
+      ...(array
+        ? [
+          { label: "len", value: { kind: "number" as const, value: String(array.count) } },
+          { label: "item", value: typeValue(array.itemType) },
+        ]
+        : []),
+      ...(itemBits !== undefined
+        ? [{ label: "item_bits", value: { kind: "number" as const, value: String(itemBits) } }]
+        : []),
+      ...(totalBits !== undefined
+        ? [{ label: "total_bits", value: { kind: "number" as const, value: String(totalBits) } }]
+        : []),
+      {
+        label: "flat_slot_count",
+        value: { kind: "number", value: String(flatTypeSlots(name, types).length) },
+      },
+    ],
+  };
+}
+
+function typeFlatSlotsValue(type: string, types: TypeDecl[]): TypeEvalValue {
+  return {
+    kind: "shape",
+    slots: flatTypeSlots(type, types).map((slot, index) => ({
+      label: `slot${index}`,
+      value: typeValue(slot),
+    })),
+  };
+}
+
+function variantPayloadType(variant: TypeVariant): string {
+  const slots = variant.shape?.slots ?? [];
+  if (!slots.length) return "struct({})";
+  if (slots.length === 1 && !slots[0].label && !slots[0].repeat) return slots[0].type;
+  return `struct({${
+    slots.map((slot) => `${slot.label ? `${slot.label}: ` : ""}${slot.type}`).join(", ")
+  }})`;
+}
+
 function constToTypeEvalValue(value: ConstValue): TypeEvalValue {
   switch (value.kind) {
     case "bool":
@@ -9077,19 +9738,19 @@ function typeMember(type: TypeEvalValue, name: TypeEvalValue | undefined) {
     return {
       name: "empty",
       type: `fn() -> ${type.name}`,
-      target: `${type.name}.empty`,
+      target: `${type.name}::empty`,
     };
   }
   return undefined;
 }
 
 function emptyMemberOwner(name: string): string | undefined {
-  return name.endsWith(".empty") ? name.slice(0, -".empty".length) : undefined;
+  return name.endsWith("::empty") ? name.slice(0, -"::empty".length) : undefined;
 }
 
 function emptyExprForType(type: string, context: ConstSpecializationContext): Expr | undefined {
-  if (context.functions.has(`${type}.empty`)) {
-    return { kind: "call", callee: { kind: "var", name: `${type}.empty` }, args: [] };
+  if (context.functions.has(`${type}::empty`)) {
+    return { kind: "call", callee: { kind: "var", name: `${type}::empty` }, args: [] };
   }
   return derivedEmptyExpr(type, context.types);
 }
@@ -10016,8 +10677,11 @@ function checkExpr(
           ));
         }
         if (
-          calleeName.startsWith("RangeIter.") &&
-          !functions.some((fn) => fn.name === calleeName || fn.name.endsWith(`.${calleeName}`)) &&
+          (calleeName.startsWith("RangeIter.") || calleeName.startsWith("RangeIter::")) &&
+          !functions.some((fn) =>
+            fn.name === calleeName || fn.name.endsWith(`.${calleeName}`) ||
+            fn.name.endsWith(`::${calleeName}`)
+          ) &&
           !capabilities.has(calleeName)
         ) {
           diagnostics.push(diagnosticAt(

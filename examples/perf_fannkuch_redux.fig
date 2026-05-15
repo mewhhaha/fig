@@ -26,8 +26,8 @@ fn max_i32(a: i32, b: i32) -> i32 {
 fn swap(xs: Perm7, left: i32, right: i32) -> Perm7 {
   let a = xs[left];
   let b = xs[right];
-  layout.InlineArray.set(7, u3, xs, left, b)
-    \ys -> layout.InlineArray.set(7, u3, ys, right, a)
+  layout.InlineArray::set(7, u3, xs, left, b)
+    \ys -> layout.InlineArray::set(7, u3, ys, right, a)
 }
 
 fn reverse_prefix_loop(
@@ -80,7 +80,7 @@ fn prepare(state: State) -> State {
   if state.r != 1 {
     prepare(State {
       perm: state.perm,
-      count: layout.InlineArray.set(
+      count: layout.InlineArray::set(
         7,
         u3,
         state.count,
@@ -105,13 +105,13 @@ fn rotate_left_loop(
 ) -> Perm7 {
   if i < r {
     rotate_left_loop(
-      layout.InlineArray.set(7, u3, xs, i, xs[i + 1]),
+      layout.InlineArray::set(7, u3, xs, i, xs[i + 1]),
       i + 1,
       r,
       first
     )
   } else {
-    layout.InlineArray.set(7, u3, xs, r, first)
+    layout.InlineArray::set(7, u3, xs, r, first)
   }
 }
 
@@ -123,7 +123,7 @@ fn rotate_left(xs: Perm7, r: i32) -> Perm7 {
 fn step_continue(state: State, r: i32) -> State {
   let old_count = state.count[r];
   let rotated = rotate_left(state.perm, r);
-  let count = layout.InlineArray.update(
+  let count = layout.InlineArray::update(
     7,
     u3,
     state.count,

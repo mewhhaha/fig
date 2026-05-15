@@ -83,8 +83,8 @@ Deno.test("prelude std exposes pure fixed collection helpers", async () => {
       let folded = array.fold4_i32(sum, 0, xs);
       let reduced = array.reduce4_i32(add, xs);
       let get_value: i32 = array.get(xs, 2);
-      let collected: array.CompactArray(4, i32) = array.Iter.collect(array.Iter.map(array.Iter.filter(array.layout.InlineArray.Iter(xs), keep), inc));
-      let range_sum = array.RangeIter.fold(array.RangeI32.Iter(0 .. 4), 0, sum);
+      let collected: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(xs), keep), inc));
+      let range_sum = array.RangeIter::fold(array.RangeI32::Iter(0 .. 4), 0, sum);
       let bounds_value = match array.in_bounds(xs, 3) { true => 1, false => 0 };
 
       folded + reduced + zipped[0] + array.capacity(xs) + range_sum + collected.len +
@@ -100,7 +100,7 @@ Deno.test("prelude std exposes pure fixed collection helpers", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 39);
 });
 
-Deno.test("InlineArray.fold_indices uses index cursor loop", async () => {
+Deno.test("InlineArray::fold_indices uses index cursor loop", async () => {
   const source = `
     const layout = @import("prelude.layout");
 
@@ -109,13 +109,13 @@ Deno.test("InlineArray.fold_indices uses index cursor loop", async () => {
     }
 
     pub fn main() -> i32 {
-      layout.InlineArray.fold_indices(4, i32, layout.core.IndexCursor.start(4), 0, add_index)
+      layout.InlineArray::fold_indices(4, i32, layout.core.IndexCursor::start(4), 0, add_index)
     }
   `;
 
   const wat = await watFromSource(source, { resolveModule });
   assert(wat.includes("loop"));
-  assert(!wat.includes("call $layout.core.IndexCursor.next"));
+  assert(!wat.includes("call $layout.core.IndexCursor__next"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
@@ -134,14 +134,14 @@ Deno.test("inline_array public helpers compose without runtime helper calls", as
     fn add_state(i: layout.core.Index(4), x: i32, offset: i32) -> i32 { x + i + offset }
 
     pub fn main() -> i32 {
-      let built = layout.InlineArray.tabulate(4, i32, make);
-      let with_state = layout.InlineArray.tabulate_with(4, i32, i32, 10, make_with);
-      let indexed = layout.InlineArray.imap(4, i32, i32, with_state, add_index);
-      let state_mapped = layout.InlineArray.imap_with_state(4, i32, i32, i32, indexed, 20, add_state);
-      let filled = layout.InlineArray.fill(4, i32, 7);
-      let mapped = layout.InlineArray.map(4, i32, i32, built, inc);
-      let set = layout.InlineArray.set(4, i32, mapped, 2, 99);
-      let updated = layout.InlineArray.update(4, i32, set, 0, inc);
+      let built = layout.InlineArray::tabulate(4, i32, make);
+      let with_state = layout.InlineArray::tabulate_with(4, i32, i32, 10, make_with);
+      let indexed = layout.InlineArray::imap(4, i32, i32, with_state, add_index);
+      let state_mapped = layout.InlineArray::imap_with_state(4, i32, i32, i32, indexed, 20, add_state);
+      let filled = layout.InlineArray::fill(4, i32, 7);
+      let mapped = layout.InlineArray::map(4, i32, i32, built, inc);
+      let set = layout.InlineArray::set(4, i32, mapped, 2, 99);
+      let updated = layout.InlineArray::update(4, i32, set, 0, inc);
       updated[0] + updated[1] + updated[2] + updated[3] + state_mapped[0] + state_mapped[3] + filled[1]
     }
   `;
@@ -149,10 +149,10 @@ Deno.test("inline_array public helpers compose without runtime helper calls", as
   const wat = await watFromSource(source, { resolveModule });
   for (
     const forbidden of [
-      "call $layout.core.IndexCursor.next",
-      "InlineArrayBuilder.start",
-      "InlineArrayBuilder.push",
-      "InlineArrayBuilder.finish",
+      "call $layout.core.IndexCursor::next",
+      "InlineArrayBuilder::start",
+      "InlineArrayBuilder::push",
+      "InlineArrayBuilder::finish",
       "call $layout.inline_array_map",
       "call $layout.inline_array_imap",
       "call $layout.inline_array_imap_with_state",
@@ -178,8 +178,8 @@ Deno.test("inline_array tabulate and map lower to compact direct slots", async (
     fn inc(x: i32) -> i32 { x + 1 }
 
     pub fn main() -> i32 {
-      let xs = layout.InlineArray.tabulate(16, i32, make);
-      let ys = layout.InlineArray.map(16, i32, i32, xs, inc);
+      let xs = layout.InlineArray::tabulate(16, i32, make);
+      let ys = layout.InlineArray::map(16, i32, i32, xs, inc);
       ys[0] + ys[15]
     }
   `;
@@ -188,9 +188,9 @@ Deno.test("inline_array tabulate and map lower to compact direct slots", async (
   assert(wat.length < 20_000, `unexpected WAT size ${wat.length}`);
   assertEquals(wat.match(/\bif\b/g)?.length ?? 0, 0);
   assertEquals(wat.match(/i32\.eq/g)?.length ?? 0, 0);
-  assert(!wat.includes("InlineArrayBuilder.push"));
-  assert(!wat.includes("InlineArray.tabulate_loop"));
-  assert(!wat.includes("InlineArray.map_loop"));
+  assert(!wat.includes("InlineArrayBuilder::push"));
+  assert(!wat.includes("InlineArray::tabulate_loop"));
+  assert(!wat.includes("InlineArray::map_loop"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
@@ -212,7 +212,7 @@ Deno.test("inline_array builder preserves flattened product elements", async () 
     }
 
     pub fn main() -> i32 {
-      let xs = layout.InlineArray.tabulate(2, PairI32, make);
+      let xs = layout.InlineArray::tabulate(2, PairI32, make);
       xs[0].x + xs[0].y + xs[1].x + xs[1].y
     }
   `;
@@ -240,15 +240,15 @@ Deno.test("inline_array direct helper lowering preserves flattened product eleme
     }
 
     pub fn main() -> i32 {
-      let xs = layout.InlineArray.tabulate(4, PairI32, make);
-      let ys = layout.InlineArray.map(4, PairI32, PairI32, xs, move);
+      let xs = layout.InlineArray::tabulate(4, PairI32, make);
+      let ys = layout.InlineArray::map(4, PairI32, PairI32, xs, move);
       ys[0].x + ys[0].y + ys[3].x + ys[3].y
     }
   `;
 
   const wat = await watFromSource(source, { resolveModule });
   assert(wat.length < 20_000, `unexpected WAT size ${wat.length}`);
-  assert(!wat.includes("InlineArrayBuilder.push"));
+  assert(!wat.includes("InlineArrayBuilder::push"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
@@ -263,22 +263,22 @@ Deno.test("fixed prelude exposes canonical spread update and builder fallback", 
 
     fn inc(x: u3) -> u3 { x + 1 }
     fn helper_set(xs: fixed.Array(4, u3), index: i32, value: u3) -> fixed.Array(4, u3) {
-      fixed.Array.set(4, u3, xs, index, value)
+      fixed.Array::set(4, u3, xs, index, value)
     }
     fn user_set(xs: fixed.Array(4, u3), index: i32, value: u3) -> fixed.Array(4, u3) {
       [...xs, [index]: value]
     }
     fn helper_update(xs: fixed.Array(4, u3), index: i32) -> fixed.Array(4, u3) {
-      fixed.Array.update(4, u3, xs, index, inc)
+      fixed.Array::update(4, u3, xs, index, inc)
     }
 
     pub fn main(index: i32) -> i32 {
-      let b0 = build.ArrayBuilder.start(4, u3);
-      let b1 = build.ArrayBuilder.push(4, u3, b0, 0, 1);
-      let b2 = build.ArrayBuilder.push(4, u3, b1, 1, 2);
-      let b3 = build.ArrayBuilder.push(4, u3, b2, 2, 3);
-      let b4 = build.ArrayBuilder.push(4, u3, b3, 3, 4);
-      let xs: fixed.Array(4, u3) = build.ArrayBuilder.finish(4, u3, b4);
+      let b0 = build.ArrayBuilder::start(4, u3);
+      let b1 = build.ArrayBuilder::push(4, u3, b0, 0, 1);
+      let b2 = build.ArrayBuilder::push(4, u3, b1, 1, 2);
+      let b3 = build.ArrayBuilder::push(4, u3, b2, 2, 3);
+      let b4 = build.ArrayBuilder::push(4, u3, b3, 3, 4);
+      let xs: fixed.Array(4, u3) = build.ArrayBuilder::finish(4, u3, b4);
       let helper = helper_set(xs, index, 7);
       let user = user_set(xs, index, 7);
       let updated = helper_update(xs, index);
@@ -311,19 +311,20 @@ Deno.test("range prelude fold matches user self-tail-recursive loop shape", asyn
     }
 
     pub fn main() -> i32 {
-      let prelude_sum = range.RangeIter.fold(range.RangeI32.Iter(0 .. 10), 0, add);
+      let prelude_sum = range.RangeIter::fold(range.RangeI32::Iter(0 .. 10), 0, add);
       let user_sum = user_fold_loop(0, 10, 0);
       prelude_sum * 100 + user_sum
     }
   `;
 
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
-  const preludeFold = wat.match(/\(func \$range_RangeIter_fold_loop__add[\s\S]*?\n  \)/)?.[0] ?? "";
+  const preludeFold = wat.match(/\(func \$range_RangeIter__fold_loop__add[\s\S]*?\n  \)/)?.[0] ??
+    "";
   const userFold = wat.match(/\(func \$user_fold_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(wat, "loop");
   assertStringIncludes(preludeFold, "loop");
   assert(!userFold.includes("call $user_fold_loop"));
-  assert(!preludeFold.includes("call $range_RangeIter_fold_loop__add"));
+  assert(!preludeFold.includes("call $range_RangeIter__fold_loop__add"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
@@ -341,10 +342,10 @@ Deno.test("prelude std exposes common operators for custom types", async () => {
       struct(Point)
     }
 
-    fn Point.add(a: Point, b: Point) -> Point { Point {x: a.x + b.x} }
-    fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }
-    fn Point.lt(a: Point, b: Point) -> bool { a.x < b.x }
-    fn Point.append(a: Point, b: Point) -> Point { Point {x: a.x + b.x} }
+    fn Point::add(a: Point, b: Point) -> Point { Point {x: a.x + b.x} }
+    fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
+    fn Point::lt(a: Point, b: Point) -> bool { a.x < b.x }
+    fn Point::append(a: Point, b: Point) -> Point { Point {x: a.x + b.x} }
 
     pub fn add_points(a: Point, b: Point) -> Point { a + b }
     pub fn points_equal(a: Point, b: Point) -> bool { a == b }
@@ -362,7 +363,7 @@ Deno.test("prelude std exposes common operators for custom types", async () => {
         ? decl.body.expr.callee.name
         : ""
     );
-  assertEquals(callees, ["Point.add", "Point.eql", "Point.lt", "Point.append"]);
+  assertEquals(callees, ["Point::add", "Point::eql", "Point::lt", "Point::append"]);
 });
 
 Deno.test("prelude std exposes bool infix operators", async () => {
@@ -410,7 +411,7 @@ Deno.test("prelude std exposes applicative apply operator", async () => {
       struct(Box)
     }
 
-    fn Box.apply(v: Box, x: Box) -> Box {
+    fn Box::apply(v: Box, x: Box) -> Box {
       Box {value: v.value + x.value}
     }
 
@@ -427,7 +428,7 @@ Deno.test("prelude std exposes applicative apply operator", async () => {
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "call");
   if (main.body.expr?.kind === "call" && main.body.expr.callee.kind === "var") {
-    assertEquals(main.body.expr.callee.name, "Box.apply");
+    assertEquals(main.body.expr.callee.name, "Box::apply");
   }
 });
 
@@ -441,11 +442,11 @@ Deno.test("prelude std exposes functor map and monad bind operators", async () =
       struct(Box)
     }
 
-    fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
     }
 
-    fn Box.bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
+    fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
       f(v.value)
     }
 
@@ -470,8 +471,8 @@ Deno.test("prelude std exposes functor map and monad bind operators", async () =
         args: decl.body.expr.args.map((arg) => arg.kind),
       };
     });
-  assert(calls.some((call) => call?.callee === "Box.map" && call.args.join(",") === "var,shape"));
-  assert(calls.some((call) => call?.callee === "Box.bind" && call.args.join(",") === "shape,var"));
+  assert(calls.some((call) => call?.callee === "Box::map" && call.args.join(",") === "var,shape"));
+  assert(calls.some((call) => call?.callee === "Box::bind" && call.args.join(",") === "shape,var"));
 });
 
 Deno.test("prelude std rejects functional operators without matching members", async () => {
@@ -511,10 +512,10 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
     fn fallback() -> option.core.Option(i32) { option.some(9) }
 
     pub fn main() -> i32 {
-      let mapped = option.core.Option.map(\\x -> x + 1, option.some(1));
-      let bound = option.core.Option.bind(mapped, \\x -> option.some(x + 1));
-      let picked = option.core.Option.append(option.none(), bound);
-      option.core.Option.unwrap_or(picked, 0) + option.core.Option.unwrap_or(option.core.Option.or_else(option.none(), fallback), 0)
+      let mapped = option.core.Option::map(\\x -> x + 1, option.some(1));
+      let bound = option.core.Option::bind(mapped, \\x -> option.some(x + 1));
+      let picked = option.core.Option::append(option.none(), bound);
+      option.core.Option::unwrap_or(picked, 0) + option.core.Option::unwrap_or(option.core.Option::or_else(option.none(), fallback), 0)
     }
     `,
     { resolveModule },
@@ -531,9 +532,9 @@ Deno.test("prelude result methods construct map bind and unwrap", async () => {
     fn next(x: i32) -> result.core.Result(i32, i32) { result.ok(x + 1) }
 
     pub fn main() -> i32 {
-      let mapped = result.core.Result.map(inc, result.ok(1));
-      let mapped_err = result.core.Result.map_err(err_inc, mapped);
-      result.core.Result.unwrap_or(result.core.Result.bind(mapped_err, next), 0)
+      let mapped = result.core.Result::map(inc, result.ok(1));
+      let mapped_err = result.core.Result::map_err(err_inc, mapped);
+      result.core.Result::unwrap_or(result.core.Result::bind(mapped_err, next), 0)
     }
     `,
     { resolveModule },
@@ -548,10 +549,10 @@ Deno.test("prelude tuple methods extract swap and map", async () => {
     fn inc(x: i32) -> i32 { x + 1 }
 
     pub fn main() -> i32 {
-      let swapped = tuple.core.Pair.swap(Pair {first: 1, second: 2});
-      let mapped = tuple.core.Pair.bimap(inc, inc, Pair {first: 3, second: 4});
+      let swapped = tuple.core.Pair::swap(Pair {first: 1, second: 2});
+      let mapped = tuple.core.Pair::bimap(inc, inc, Pair {first: 3, second: 4});
       let triple: tuple.core.Tuple3(i32, i32, i32) = Tuple3 {first: 5, second: 6, third: 7};
-      swapped.first + tuple.core.Pair.first(mapped) + tuple.core.Tuple3.third(triple)
+      swapped.first + tuple.core.Pair::first(mapped) + tuple.core.Tuple3::third(triple)
     }
     `,
     { resolveModule },
@@ -683,11 +684,11 @@ Deno.test("prelude std exposes result option and static contracts", async () => 
       struct(Box)
     }
 
-    fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
     }
 
-    fn Box.bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
+    fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
       f(v.value)
     }
 
@@ -699,7 +700,7 @@ Deno.test("prelude std exposes result option and static contracts", async () => 
     pub fn main() -> i32 {
       let result_value: Result(i32, i32) = ok(1);
       let option_value: Option(i32) = Maybe(2);
-      Box.bind(Box.map(inc, Box {value: 3}), wrap).value
+      Box::bind(Box::map(inc, Box {value: 3}), wrap).value
     }
     `,
     { resolveModule },
@@ -716,7 +717,7 @@ Deno.test("prelude std supports user semigroup types with erased helper proof", 
       struct(Point)
     }
 
-    fn Point.append(a: Point, b: Point) -> Point {
+    fn Point::append(a: Point, b: Point) -> Point {
       Point {x: a.x + b.x, y: a.y + b.y}
     }
 
@@ -744,11 +745,11 @@ Deno.test("prelude std accepts user monoid contracts", async () => {
       struct(Point)
     }
 
-    fn Point.append(a: Point, b: Point) -> Point {
+    fn Point::append(a: Point, b: Point) -> Point {
       Point {x: a.x + b.x, y: a.y + b.y}
     }
 
-    fn Point.empty() -> Point {
+    fn Point::empty() -> Point {
       Point {x: 0, y: 0}
     }
 
@@ -769,7 +770,7 @@ Deno.test("prelude std rejects incomplete monoid implementations", async () => {
         struct(Point)
       }
 
-      fn Point.empty() -> Point {
+      fn Point::empty() -> Point {
         Point {x: 0}
       }
 
@@ -796,11 +797,11 @@ Deno.test("prelude std helpers support user functor applicative and monad types"
       struct(Box)
     }
 
-    fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
     }
 
-    fn Box.bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
+    fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
       f(v.value)
     }
 
@@ -839,7 +840,7 @@ Deno.test("prelude std exposes option as functor applicative monad and semigroup
       let bound = bind(applied, inc_to_option, Monad(Option));
       let picked = append(Option(i32), Semigroup(Option(i32)), none(), bound);
       proof(Functor(Option), Applicative(Option), Monad(Option), Semigroup(Option(i32)), Monoid(Option(i32))) +
-        Option.unwrap_or(picked, 0)
+        Option::unwrap_or(picked, 0)
     }
     `,
     { resolveModule },
@@ -856,15 +857,15 @@ Deno.test("prelude std accepts user applicative contracts", async () => {
       struct(Box)
     }
 
-    fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
     }
 
-    fn Box.pure(value: a) -> Box(a) {
+    fn Box::pure(value: a) -> Box(a) {
       Box {value: value}
     }
 
-    fn Box.apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
+    fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
       Box {value: v.value(x.value)}
     }
 
@@ -1045,12 +1046,12 @@ Deno.test("compact_array helpers check len guards and fixed capacity", async () 
       let empty: CompactArray(4, i32) = CompactArray {items: <9, 9, 9, 9>, len: 0};
       let part: CompactArray(4, i32) = CompactArray {items: <2, 4, 8, 16>, len: 2};
       let full: CompactArray(4, i32) = CompactArray {items: <1, 2, 3, 4>, len: 4};
-      let mapped = CompactArray.map(4, i32, i32, part, inc);
-      let in_bounds = match CompactArray.get(4, i32, mapped, 1) { Some(value) => value, None => 0 };
-      let out_bounds = match CompactArray.get(4, i32, mapped, 2) { Some(value) => value, None => 7 };
-      let empty_value = match CompactArray.is_empty(4, i32, empty) { true => 3, false => 0 };
-      CompactArray.capacity(4, i32, full) + CompactArray.fold(4, i32, i32, full, 0, add) +
-        CompactArray.count(4, i32, full, even) + in_bounds + out_bounds + empty_value
+      let mapped = CompactArray::map(4, i32, i32, part, inc);
+      let in_bounds = match CompactArray::get(4, i32, mapped, 1) { Some(value) => value, None => 0 };
+      let out_bounds = match CompactArray::get(4, i32, mapped, 2) { Some(value) => value, None => 7 };
+      let empty_value = match CompactArray::is_empty(4, i32, empty) { true => 3, false => 0 };
+      CompactArray::capacity(4, i32, full) + CompactArray::fold(4, i32, i32, full, 0, add) +
+        CompactArray::count(4, i32, full, even) + in_bounds + out_bounds + empty_value
     }
   `;
   await checkSource(source, { resolveModule });
@@ -1062,16 +1063,16 @@ Deno.test("generic compact_array supports bounded literals and push overflow", a
 
     pub fn main() -> i32 {
       let xs: array.CompactArray(5, i32) = <1, 2, 3>;
-      let pushed = array.CompactArray.push(5, i32, xs, 4);
+      let pushed = array.CompactArray::push(5, i32, xs, 4);
       let full: array.CompactArray(2, bool) = <true, false>;
-      let overflowed = array.CompactArray.push(2, bool, full, true);
-      let full_value = match array.CompactArray.is_full(2, bool, full) {
+      let overflowed = array.CompactArray::push(2, bool, full, true);
+      let full_value = match array.CompactArray::is_full(2, bool, full) {
         true => 1,
         false => 0,
       };
-      let overflow_value = array.CompactArray.len(2, bool, overflowed) * 10;
-      let item: i32 = array.CompactArray.get(5, i32, pushed, 3);
-      item + array.CompactArray.len(5, i32, pushed) + overflow_value + full_value
+      let overflow_value = array.CompactArray::len(2, bool, overflowed) * 10;
+      let item: i32 = array.CompactArray::get(5, i32, pushed, 3);
+      item + array.CompactArray::len(5, i32, pushed) + overflow_value + full_value
     }
   `;
   const instance = new WebAssembly.Instance(
@@ -1102,7 +1103,7 @@ Deno.test("iterator convenience helpers check and fuse", async () => {
     fn keep(x: i32) -> bool { x > 2 }
     fn small(x: i32) -> bool { x < 5 }
     pub fn main() -> i32 {
-      let xs = InlineArray.Iter(<1, 2, 3, 4>).filter(keep).map(inc);
+      let xs = InlineArray::Iter(<1, 2, 3, 4>).filter(keep).map(inc);
       let any_value = match xs.any(small) { true => 1, false => 0 };
       let all_value = match xs.all(small) { true => 2, false => 0 };
       any_value + all_value + xs.count() + xs.sum()
@@ -1123,7 +1124,7 @@ Deno.test("inline array iterators support explicit attached dispatch", async () 
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main() -> i32 {
-      Iter.fold(Iter.map(InlineArray.Iter(<1, 2, 3, 4>), inc), 0, add)
+      Iter::fold(Iter::map(InlineArray::Iter(<1, 2, 3, 4>), inc), 0, add)
     }
   `,
     { resolveModule },
@@ -1142,7 +1143,7 @@ Deno.test("fluent inline array iterator chains preserve receivers and fuse", asy
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main() -> i32 {
-      InlineArray.Iter(<1, 2, 3, 4>).map(inc).reverse().fold(0, add)
+      InlineArray::Iter(<1, 2, 3, 4>).map(inc).reverse().fold(0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
@@ -1161,14 +1162,14 @@ Deno.test("inline array iterator filter map fold fuses and runs", async () => {
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      array.Iter.fold(array.Iter.map(array.Iter.filter(array.layout.InlineArray.Iter(<1, 2, 3, 4>), keep), inc), 0, add)
+      array.Iter::fold(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(<1, 2, 3, 4>), keep), inc), 0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-  assert(!main.includes("call $array.Iter.filter"));
-  assert(!main.includes("call $array.Iter.map"));
-  assert(!main.includes("call $array.Iter.fold"));
+  assert(!main.includes("call $array.Iter::filter"));
+  assert(!main.includes("call $array.Iter::map"));
+  assert(!main.includes("call $array.Iter::fold"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -1185,14 +1186,14 @@ Deno.test("pipe-bound fluent iterator chains resolve receivers and fuse", async 
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      array.layout.InlineArray.Iter(<1, 2, 3, 4>) \\$ -> array.Iter.fold(array.Iter.map(array.Iter.filter($, keep), inc), 0, add)
+      array.layout.InlineArray::Iter(<1, 2, 3, 4>) \\$ -> array.Iter::fold(array.Iter::map(array.Iter::filter($, keep), inc), 0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-  assert(!main.includes("call $array.Iter.filter"));
-  assert(!main.includes("call $array.Iter.map"));
-  assert(!main.includes("call $array.Iter.fold"));
+  assert(!main.includes("call $array.Iter::filter"));
+  assert(!main.includes("call $array.Iter::map"));
+  assert(!main.includes("call $array.Iter::fold"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -1208,14 +1209,14 @@ Deno.test("inline array iterator filter collect compacts valid prefix", async ()
     fn inc(x: i32) -> i32 { x + 1 }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      let out: array.CompactArray(4, i32) = array.Iter.collect(array.Iter.map(array.Iter.filter(array.layout.InlineArray.Iter(<1, 2, 3, 4>), keep), inc));
+      let out: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(<1, 2, 3, 4>), keep), inc));
       out.len + out.items[0] + out.items[1] + out.items[2]
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-  assert(!main.includes("call $array.Iter.filter"));
-  assert(!main.includes("call $array.Iter.map"));
+  assert(!main.includes("call $array.Iter::filter"));
+  assert(!main.includes("call $array.Iter::map"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -1230,7 +1231,7 @@ Deno.test("runtime range fold emits loop and runs", async () => {
     const array = @import("prelude.array_static");
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main() -> i32 {
-      array.RangeIter.fold(array.RangeI32.Iter(0 .. 10), 0, add)
+      array.RangeIter::fold(array.RangeI32::Iter(0 .. 10), 0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
@@ -1269,7 +1270,7 @@ Deno.test("empty runtime range folds to the initial accumulator", async () => {
     const array = @import("prelude.array_static");
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main() -> i32 {
-      array.RangeIter.fold(array.RangeI32.Iter(5 .. 5), 42, add)
+      array.RangeIter::fold(array.RangeI32::Iter(5 .. 5), 42, add)
     }
   `;
   const instance = new WebAssembly.Instance(
@@ -1295,12 +1296,12 @@ Deno.test("runtime range collect and reduce require static safety proofs", async
   for (
     const [source, expected] of [
       [
-        `pub fn main() -> i32 { RangeIter.collect((0 .. 10).Iter()) }`,
-        "unknown function RangeIter.collect",
+        `pub fn main() -> i32 { RangeIter::collect((0 .. 10).Iter()) }`,
+        "unknown function RangeIter::collect",
       ],
       [
-        `fn add(acc: i32, x: i32) -> i32 { acc + x } pub fn main() -> i32 { RangeIter.reduce((0 .. 10).Iter(), add) }`,
-        "unknown function RangeIter.reduce",
+        `fn add(acc: i32, x: i32) -> i32 { acc + x } pub fn main() -> i32 { RangeIter::reduce((0 .. 10).Iter(), add) }`,
+        "unknown function RangeIter::reduce",
       ],
     ]
   ) {

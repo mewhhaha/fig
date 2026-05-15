@@ -58,6 +58,7 @@
 "..." @operator
 "/" @operator
 ":" @punctuation.delimiter
+"::" @operator
 ";" @punctuation.delimiter
 "<$>" @operator
 "<*>" @operator

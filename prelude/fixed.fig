@@ -8,7 +8,7 @@ type fn Array(n: count, a: type) -> type {
   layout.InlineArray(n, a)
 }
 
-fn Array.set(
+fn Array::set(
   const n: count,
   const a: type,
   xs: Array(n, a),
@@ -18,7 +18,7 @@ fn Array.set(
   [...xs, [index]: value]
 }
 
-fn Array.update(
+fn Array::update(
   const n: count,
   const a: type,
   xs: Array(n, a),
@@ -29,7 +29,7 @@ fn Array.update(
   [...xs, [index]: f(old)]
 }
 
-fn Array.swap(
+fn Array::swap(
   const n: count,
   const a: type,
   xs: Array(n, a),
@@ -43,7 +43,7 @@ fn Array.swap(
   xs
 }
 
-fn Array.fold_indices(
+fn Array::fold_indices(
   const n: count,
   const acc_type: type,
   cursor: core.IndexCursor(n),
@@ -52,8 +52,8 @@ fn Array.fold_indices(
 ) -> acc_type {
   let acc_then = acc;
   let acc_else = acc;
-  match core.IndexCursor.next(n, cursor) {
-    Yield(i, next) => Array.fold_indices(n, acc_type, next, f(acc_then, i), f),
+  match core.IndexCursor::next(n, cursor) {
+    Yield(i, next) => Array::fold_indices(n, acc_type, next, f(acc_then, i), f),
     Done => acc_else,
   }
 }

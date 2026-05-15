@@ -30,7 +30,7 @@ type fn Functor(t: type fn(a: type) -> type) -> type {
 }
 
 fn fmap(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
-  t.map(f, v)
+  t::map(f, v)
 }
 
 type fn Applicative(t: type fn(a: type) -> type) -> type {
@@ -47,11 +47,11 @@ type fn Applicative(t: type fn(a: type) -> type) -> type {
 }
 
 fn pure(const t, value: a, const _proof: Applicative(t)) -> t(a) {
-  t.pure(value)
+  t::pure(value)
 }
 
 fn apply(v: t(fn(x: a) -> b), x: t(a), const _proof: Applicative(t)) -> t(b) {
-  t.apply(v, x)
+  t::apply(v, x)
 }
 
 type fn Monad(t: type fn(a: type) -> type) -> type {
@@ -65,5 +65,5 @@ type fn Monad(t: type fn(a: type) -> type) -> type {
 }
 
 fn bind(v: t(a), const f: fn(x: a) -> t(b), const _proof: Monad(t)) -> t(b) {
-  t.bind(v, f)
+  t::bind(v, f)
 }

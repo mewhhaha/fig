@@ -20,6 +20,6 @@ pub fn main() -> i32 {
   let pair = make_pair();
   let pair_sum = sum_pair(pair);
   let list: layout.InlineArrayList(4, i32) = <1, 2, ...tail()>;
-  let array = layout.InlineArray.from_list(4, i32, list);
+  let array = layout.InlineArray::from_list(4, i32, list);
   head + values[0] + values[1] + values[2] + pair_sum + array[3]
 }

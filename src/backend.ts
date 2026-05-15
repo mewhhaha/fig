@@ -5585,12 +5585,13 @@ function lowerTailStepMatch(
 }
 
 function isIndexCursorNextCallee(name: string): boolean {
-  return name.endsWith("IndexCursor.next") || name.includes("index_cursor_next__") ||
-    name.includes("IndexCursor_next__");
+  return name.endsWith("IndexCursor.next") || name.endsWith("IndexCursor::next") ||
+    name.includes("index_cursor_next__") || name.includes("IndexCursor_next__") ||
+    name.includes("IndexCursor__next__");
 }
 
 function constSpecializedCursorBound(name: string): Expr | undefined {
-  const match = name.match(/(?:index_cursor_next|IndexCursor_next)__([0-9]+)/);
+  const match = name.match(/(?:index_cursor_next|IndexCursor_next|IndexCursor__next)__([0-9]+)/);
   return match ? { kind: "literal", literalKind: "number", value: match[1] } : undefined;
 }
 
@@ -9620,8 +9621,8 @@ function lowerRefinedDomainTryMatch(
 }
 
 function isRefinedDomainTryCallee(name: string): boolean {
-  return name.endsWith("Index.try") || name.includes("Index_try__") ||
-    name.endsWith("i32.try_domain") || name.includes("i32_try_domain__");
+  return name.endsWith("Index::try") || name.includes("Index__try__") ||
+    name.endsWith("i32::try_domain") || name.includes("i32__try_domain__");
 }
 
 function optionPayloadType(type: string | undefined): string | undefined {

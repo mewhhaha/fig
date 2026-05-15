@@ -9,7 +9,7 @@ type fn Option(a: type) -> union {
   union(None, Some)
 }
 
-fn Point.eql(a: Point, b: Point) -> bool { a.x == b.x }
+fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
 
 type fn Reflected(t: type) -> type {
   let Expected = fn(a: Point, b: Point) -> bool;

@@ -16,7 +16,7 @@ import {
   watFromSource,
 } from "../src/mod.ts";
 import { CompileError } from "../src/diagnostics.ts";
-import type { Expr, FnDecl, Program, TypeDecl } from "../src/core_ast.ts";
+import type { ConstDecl, Expr, FnDecl, Program, TypeDecl } from "../src/core_ast.ts";
 import type { CompilerPlugin } from "../src/plugins.ts";
 import {
   canonicalDomainKey,
@@ -390,7 +390,7 @@ Deno.test("inline array list spread literals lower as flattened slots", async ()
       }
 
       pub fn main() -> layout.InlineArray(4, i32) {
-        layout.InlineArray.from_list(4, i32, build_list())
+        layout.InlineArray::from_list(4, i32, build_list())
       }
     `,
     { resolveModule: resolveProjectModule },
@@ -496,9 +496,9 @@ Deno.test("target-typed collection literals lower through collector members", as
       let Bag = {sum: i32};
       struct(Bag)
     }
-    fn Bag.collect_start(const a: type) -> Bag(a) { Bag {sum: 0} }
-    fn Bag.collect_push(const a: type, builder: Bag(a), item: a) -> Bag(a) { builder }
-    fn Bag.collect_finish(const a: type, builder: Bag(a)) -> Bag(a) { builder }
+    fn Bag::collect_start(const a: type) -> Bag(a) { Bag {sum: 0} }
+    fn Bag::collect_push(const a: type, builder: Bag(a), item: a) -> Bag(a) { builder }
+    fn Bag::collect_finish(const a: type, builder: Bag(a)) -> Bag(a) { builder }
     fn take(xs: Bag(i32)) -> Bag(i32) { xs }
     pub fn main() -> i32 {
       let xs: Bag(i32) = <1, 2, 3>;
@@ -512,7 +512,7 @@ Deno.test("target-typed collection literals lower through collector members", as
   const first = main?.body.statements[0];
   assertEquals(
     first?.kind === "let" && first.value.kind === "call" ? first.value.callee : undefined,
-    { kind: "var", name: "Bag.collect_finish" },
+    { kind: "var", name: "Bag::collect_finish" },
   );
   const second = main?.body.statements[1];
   assertEquals(
@@ -520,7 +520,7 @@ Deno.test("target-typed collection literals lower through collector members", as
       second.value.args[0]?.kind === "call"
       ? second.value.args[0].callee
       : undefined,
-    { kind: "var", name: "Bag.collect_finish" },
+    { kind: "var", name: "Bag::collect_finish" },
   );
 });
 
@@ -626,13 +626,13 @@ Deno.test("inline array tabulation functions compose through layout prelude", as
     fn add_index(i: layout.core.Index(4), x: i32) -> i32 { x + i }
     fn add_state(i: layout.core.Index(4), x: i32, offset: i32) -> i32 { x + i + offset }
     pub fn main() -> i32 {
-      let built = layout.InlineArray.tabulate(4, i32, make);
-      let with_state = layout.InlineArray.tabulate_with(4, i32, i32, 10, make_with);
-      let indexed = layout.InlineArray.imap(4, i32, i32, with_state, add_index);
-      let state_mapped = layout.InlineArray.imap_with_state(4, i32, i32, i32, indexed, 20, add_state);
-      let mapped = layout.InlineArray.map(4, i32, i32, built, inc);
-      let set = layout.InlineArray.set(4, i32, mapped, 2, 99);
-      let updated = layout.InlineArray.update(4, i32, set, 0, inc);
+      let built = layout.InlineArray::tabulate(4, i32, make);
+      let with_state = layout.InlineArray::tabulate_with(4, i32, i32, 10, make_with);
+      let indexed = layout.InlineArray::imap(4, i32, i32, with_state, add_index);
+      let state_mapped = layout.InlineArray::imap_with_state(4, i32, i32, i32, indexed, 20, add_state);
+      let mapped = layout.InlineArray::map(4, i32, i32, built, inc);
+      let set = layout.InlineArray::set(4, i32, mapped, 2, 99);
+      let updated = layout.InlineArray::update(4, i32, set, 0, inc);
       updated[0] + updated[1] + updated[2] + updated[3] + state_mapped[0] + state_mapped[3]
     }
   `;
@@ -1044,6 +1044,103 @@ Deno.test("static type reflection feeds shape helpers", async () => {
   assertStringIncludes(useReflected?.params[1]?.type ?? "", "ReflectedSome");
 });
 
+Deno.test("static type reflection exposes members functions scalars layouts and variants", async () => {
+  await checkSource(`
+    type fn Point() -> type { let Point = {x: i32, y: i32}; struct(Point) }
+    fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
+    type fn Option(a: type) -> type { let None = {}; let Some = {value: a}; union(None, Some) }
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    type fn Reflected() -> type {
+      let Expected = fn(a: Point, b: Point) -> bool;
+      let Members = @type_members(Point);
+      let Eql = @shape_slot(Members, #eql);
+      let Params = @type_fn_params(Expected);
+      let Layout = @type_layout(InlineArray(4, u3));
+      @require(@shape_slot(Eql, #type) == Expected, "member metadata includes type");
+      @require(@shape_slot(Eql, #target) == "Point::eql", "member metadata includes target");
+      @require(@type_member_target(Point, #eql) == "Point::eql", "member target reflects function");
+      @require(@type_is_fn(Expected), "function type reflected");
+      @require(@type_fn_param_count(Expected) == 2, "function arity reflected");
+      @require(@shape_slot(Params, #a) == Point, "function params reflected");
+      @require(@type_fn_return(Expected) == bool, "function return reflected");
+      @require(@shape_count(@type_fn_effects(Expected)) == 0, "function effects reflected");
+      @require(@type_is_scalar(u3), "u3 is scalar");
+      @require(@type_scalar_carrier(u3) == #u3, "u3 carrier reflected");
+      @require(@type_scalar_bit_width(u3) == 3, "u3 width reflected");
+      @require(@type_scalar_min(u3) == 0, "u3 min reflected");
+      @require(@type_scalar_max(u3) == 7, "u3 max reflected");
+      @require(@type_scalar_signed(u3) == false, "u3 signedness reflected");
+      @require(@type_is_refined_scalar(i32(0..4)), "refined scalar reflected");
+      @require(@type_is_inline_array(InlineArray(4, u3)), "inline array reflected");
+      @require(@type_inline_array_len(InlineArray(4, u3)) == 4, "inline array len reflected");
+      @require(@type_inline_array_item(InlineArray(4, u3)) == u3, "inline array item reflected");
+      @require(@type_storage_kind(InlineArray(4, u3)) == #packed, "storage kind reflected");
+      @require(@type_size_bits(InlineArray(4, u3)) == 12, "size bits reflected");
+      @require(@type_flat_slot_count(Point) == 2, "flat slot count reflected");
+      @require(@shape_slot(@type_flat_slots(Point), #slot0) == i32, "flat slots reflected");
+      @require(@shape_slot(Layout, #total_bits) == 12, "layout total bits reflected");
+      @require(@type_variant_count(Option(i32)) == 2, "variant count reflected");
+      @require(@type_variant_tag_type(Option(i32)) == u1, "variant tag type reflected");
+      @require(@type_variant_payload_type(Option(i32), #Some) == i32, "payload reflected");
+      @require(@type_has_niche(Option(i32)) == false, "niche default reflected");
+      Point
+    }
+    pub fn main(value: Reflected) -> i32 { value.x }
+  `);
+});
+
+Deno.test("const evaluation supports extended static type reflection", async () => {
+  const checked = await checkSource(`
+    type fn Point() -> type { let Point = {x: i32, y: i32}; struct(Point) }
+    fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
+    type fn InlineArray(n: count, a: type) -> type {
+      let InlineArray = {n*a};
+      struct(InlineArray)
+    }
+    const members = @type_members(Point);
+    const reflected = {
+      target: @type_member_target(Point, #eql),
+      width: @type_scalar_bit_width(u3),
+    };
+    const layout = @type_layout(InlineArray(4, u3));
+    pub fn main() -> i32 { 0 }
+  `);
+  const reflected = checked.program.declarations.find((decl): decl is ConstDecl =>
+    decl.kind === "const" && decl.name === "reflected"
+  );
+  assertEquals(
+    reflected?.value.kind === "shape"
+      ? reflected.value.slots.find((slot) => slot.label === "target")?.value
+      : undefined,
+    { kind: "var", name: "Point::eql" },
+  );
+  assertEquals(
+    reflected?.value.kind === "shape"
+      ? reflected.value.slots.find((slot) => slot.label === "width")?.value
+      : undefined,
+    { kind: "literal", literalKind: "number", value: "3" },
+  );
+  const layout = checked.program.declarations.find((decl): decl is ConstDecl =>
+    decl.kind === "const" && decl.name === "layout"
+  );
+  assertEquals(
+    layout?.value.kind === "shape"
+      ? layout.value.slots.find((slot) => slot.label === "total_bits")?.value
+      : undefined,
+    { kind: "literal", literalKind: "number", value: "12" },
+  );
+  const members = checked.program.declarations.find((decl): decl is ConstDecl =>
+    decl.kind === "const" && decl.name === "members"
+  );
+  assert(
+    members?.value.kind === "shape" &&
+      members.value.slots.some((slot) => slot.label === "eql"),
+  );
+});
+
 Deno.test("generic empty derives primitive and product zero values", async () => {
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -1135,7 +1232,7 @@ Deno.test("explicit empty member overrides derived product empty", async () => {
         let Point = {x: i32};
         struct(Point)
       }
-      fn Point.empty() -> Point { Point {x: 7} }
+      fn Point::empty() -> Point { Point {x: 7} }
       pub fn main() -> i32 {
         let p = core.empty(Point);
         p.x
@@ -1215,7 +1312,7 @@ Deno.test.ignore("ecs sparse world seeds from partial entity rows", async () => 
       type fn Velocity2d() -> type { let Velocity2d = {x: i32}; struct(Velocity2d) }
       const components = {transform: Transform2d, velocity: Velocity2d};
       pub fn main() -> i32 {
-        let w = ecs.SparseWorld.empty(components)
+        let w = ecs.SparseWorld::empty(components)
           \\w -> ecs.entity.add(w, {transform: Transform2d {x: 1}, velocity: Velocity2d {x: 2}})
           \\w -> ecs.entity.add(w, {transform: Transform2d {x: 10}})
           \\w -> ecs.entity.add(w, {velocity: Velocity2d {x: 20}});
@@ -1246,7 +1343,7 @@ Deno.test.ignore("ecs fold infers read shape and skips omitted components", asyn
         acc + row.transform.x + row.velocity.x
       }
       pub fn main() -> i32 {
-        let w = ecs.SparseWorld.empty(components)
+        let w = ecs.SparseWorld::empty(components)
           \\w -> ecs.entity.add(w, {transform: Transform2d {x: 1}, velocity: Velocity2d {x: 2}})
           \\w -> ecs.entity.add(w, {transform: Transform2d {x: 10}})
           \\w -> ecs.entity.add(w, {transform: Transform2d {x: 20}, velocity: Velocity2d {x: 3}});
@@ -1296,7 +1393,7 @@ Deno.test.ignore("ecs sparse world entity rows reject extra fields", async () =>
       type fn Transform2d() -> type { let Transform2d = {x: i32}; struct(Transform2d) }
       const components = {transform: Transform2d};
       pub fn main() -> i32 {
-        let w = ecs.SparseWorld.empty(components)
+        let w = ecs.SparseWorld::empty(components)
           \\w -> ecs.entity.add(w, {transform: Transform2d {x: 1}, sprite: 1});
         0
       }
@@ -1313,7 +1410,7 @@ Deno.test.ignore("ecs sparse world entity rows reject mismatched component value
       type fn Transform2d() -> type { let Transform2d = {x: i32}; struct(Transform2d) }
       const components = {transform: Transform2d};
       pub fn main() -> i32 {
-        let w = ecs.SparseWorld.empty(components)
+        let w = ecs.SparseWorld::empty(components)
           \\w -> ecs.entity.add(w, {transform: true});
         0
       }
@@ -1334,7 +1431,7 @@ Deno.test.ignore(
       type fn Marker() -> type { let Marker = {tag: i32}; struct(Marker) }
       const components = {marker: Marker};
       pub fn main() -> i32 {
-        let w = ecs.SparseWorld.empty(components)
+        let w = ecs.SparseWorld::empty(components)
           \\w -> ecs.entity.add(w, {marker: Marker {tag: 1}})
           \\w -> ecs.entity.add(w, {marker: Marker {tag: 2}})
           \\w -> ecs.entity.add(w, {marker: Marker {tag: 3}})
@@ -1430,13 +1527,13 @@ Deno.test("checks type function result kinds", async () => {
 Deno.test("operator descriptors lower custom infix calls", async () => {
   const checked = await checkSource(`
     type fn Plus(t: type) -> operator {
-      operator(#infixl, 60, "+", t.add)
+      operator(#infixl, 60, "+", t::add)
     }
     type fn Box() -> struct {
       let Box = {value: i32};
       struct(Box)
     }
-    fn Box.add(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+    fn Box::add(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
     pub fn main(a: Box, b: Box) -> Box { a + b }
   `);
   const main = checked.program.declarations.find((decl) =>
@@ -1445,28 +1542,28 @@ Deno.test("operator descriptors lower custom infix calls", async () => {
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "call");
   if (main.body.expr?.kind === "call" && main.body.expr.callee.kind === "var") {
-    assertEquals(main.body.expr.callee.name, "Box.add");
+    assertEquals(main.body.expr.callee.name, "Box::add");
   }
 });
 
 Deno.test("operator descriptors lower custom comparison and append calls", async () => {
   const checked = await checkSource(`
     type fn EqOp(t: type) -> operator {
-      operator(#infix, 40, "==", t.eql)
+      operator(#infix, 40, "==", t::eql)
     }
     type fn LtOp(t: type) -> operator {
-      operator(#infix, 50, "<", t.lt)
+      operator(#infix, 50, "<", t::lt)
     }
     type fn AppendOp(t: type) -> operator {
-      operator(#infixr, 55, "<>", t.append)
+      operator(#infixr, 55, "<>", t::append)
     }
     type fn Box() -> struct {
       let Box = {value: i32};
       struct(Box)
     }
-    fn Box.eql(a: Box, b: Box) -> bool { a.value == b.value }
-    fn Box.lt(a: Box, b: Box) -> bool { a.value < b.value }
-    fn Box.append(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+    fn Box::eql(a: Box, b: Box) -> bool { a.value == b.value }
+    fn Box::lt(a: Box, b: Box) -> bool { a.value < b.value }
+    fn Box::append(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
     pub fn Eq(a: Box, b: Box) -> bool { a == b }
     pub fn lt(a: Box, b: Box) -> bool { a < b }
     pub fn append(a: Box, b: Box) -> Box { a <> b }
@@ -1479,7 +1576,7 @@ Deno.test("operator descriptors lower custom comparison and append calls", async
         ? decl.body.expr.callee.name
         : ""
     );
-  assertEquals(callees, ["Box.eql", "Box.lt", "Box.append"]);
+  assertEquals(callees, ["Box::eql", "Box::lt", "Box::append"]);
 });
 
 Deno.test("operator parser honors precedence for extended symbols", async () => {
@@ -2060,7 +2157,7 @@ Deno.test("pruneImports keeps array_static range fold dependencies", async () =>
     const array = @import("prelude.array_static");
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main(seed: i32) -> i32 {
-      array.RangeIter.fold(array.RangeI32.Iter(seed - seed .. 1000), 0, add)
+      array.RangeIter::fold(array.RangeI32::Iter(seed - seed .. 1000), 0, add)
     }
   `;
   const checked = await checkSource(source, { resolveModule: resolveProjectModule });
@@ -2076,9 +2173,9 @@ Deno.test("pruneImports keeps array_static range fold dependencies", async () =>
   const names = pruned.program.declarations.map((decl) => decl.name);
   assert(names.includes("array.RangeI32"));
   assert(names.includes("array.RangeIter"));
-  assert(names.includes("array.RangeI32.Iter"));
-  assert(names.includes("array.RangeIter.fold"));
-  assert(names.includes("array.RangeIter.fold_loop"));
+  assert(names.includes("array.RangeI32::Iter"));
+  assert(names.includes("array.RangeIter::fold"));
+  assert(names.includes("array.RangeIter::fold_loop"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -2538,8 +2635,8 @@ Deno.test("do monad lowers through generated capturing const functions", async (
       await wasmFromSource(
         `
     type fn Id(a: type) -> type { a }
-    fn Id.pure(value: a) -> Id(a) { value }
-    fn Id.bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }
+    fn Id::pure(value: a) -> Id(a) { value }
+    fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }
     fn a() -> Id(i32) { 1 }
     fn b(x: i32) -> Id(i32) { x + 2 }
     pub fn main() -> Id(i32) {
@@ -2559,7 +2656,7 @@ Deno.test("do monad lowers through generated capturing const functions", async (
   await assertThrowsCompile(
     `
     type fn Id(a: type) -> type { a }
-    fn Id.pure(value: a) -> Id(a) { value }
+    fn Id::pure(value: a) -> Id(a) { value }
     pub fn main() -> Id(i32) {
       do @parser(Id) { 1 }
     }
@@ -2828,13 +2925,13 @@ Deno.test("models attached type members for static contracts", async () => {
   const checked = await checkSource(`
     fn eql_point(a: Point, b: Point) -> bool { a.x == b.x }
     type fn Point() { let Point = {x: i32, y: i32}; struct(Point) }
-    fn Point.eql(a: Point, b: Point) -> bool { eql_point(a, b) }
+    fn Point::eql(a: Point, b: Point) -> bool { eql_point(a, b) }
     type fn Eq(t: type) {
       let Expected = fn(a: t, b: t) -> bool;
       @require(@type_has_member(t, #eql), "Eq requires eql");
       @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
     }
-    fn same(proof: Eq(Point), x: Point, y: Point) -> bool { Point.eql(x, y) }
+    fn same(proof: Eq(Point), x: Point, y: Point) -> bool { Point::eql(x, y) }
   `);
   const point = checked.program.declarations.find((decl): decl is TypeDecl =>
     decl.kind === "type" && decl.name === "Point"
@@ -2848,7 +2945,7 @@ Deno.test("models attached type members for static contracts", async () => {
   );
   assertEquals(same?.body.expr, {
     kind: "call",
-    callee: { kind: "var", name: "Point.eql" },
+    callee: { kind: "var", name: "Point::eql" },
     args: [{ kind: "var", name: "x" }, { kind: "var", name: "y" }],
   });
 });
@@ -2868,7 +2965,7 @@ Deno.test("reports attached type member contract failures", async () => {
     `
       fn eql_point(a: Point) -> bool { true }
       type fn Point() { let Point = {x: i32}; struct(Point) }
-      fn Point.eql(a: Point) -> bool { eql_point(a) }
+      fn Point::eql(a: Point) -> bool { eql_point(a) }
       type fn Eq(t: type) {
         let Expected = fn(a: t, b: t) -> bool;
         @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
@@ -2932,12 +3029,12 @@ Deno.test("reports compile-time contract failures on caller spans", async () => 
 Deno.test("specializes functor constraints over type constructors", async () => {
   const parsed = await parse(`
     type fn Box(a: type) -> type { let Box = {value: a}; struct(Box) }
-    fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
     }
   `);
   const parsedMap = parsed.declarations.find((decl): decl is FnDecl =>
-    decl.kind === "fn" && decl.name === "Box.map"
+    decl.kind === "fn" && decl.name === "Box::map"
   );
   assertEquals(parsedMap?.body.expr?.kind, "product_constructor");
 
@@ -2946,7 +3043,7 @@ Deno.test("specializes functor constraints over type constructors", async () => 
       let Box = {value: a};
       struct(Box)
     }
-    fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
     }
     type fn Functor(t: type fn(a: type) -> type) -> type {
@@ -2957,12 +3054,12 @@ Deno.test("specializes functor constraints over type constructors", async () => 
     }
     fn inc(x: i32) -> i32 { x + 1 }
     fn mapper(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
-      t.map(f, v)
+      t::map(f, v)
     }
     pub fn main() -> Box(i32) { mapper(Box {value: 1}, inc, Functor(Box)) }
   `);
   const boxMap = checked.program.declarations.find((decl): decl is FnDecl =>
-    decl.kind === "fn" && decl.name.startsWith("Box_map__")
+    decl.kind === "fn" && decl.name.startsWith("Box__map__")
   );
   assertEquals(boxMap?.body.expr?.kind, "shape");
   const mapper = checked.program.declarations.find((decl): decl is FnDecl =>
@@ -2972,7 +3069,7 @@ Deno.test("specializes functor constraints over type constructors", async () => 
   assertEquals(mapper?.returnType, "Box(i32)");
   assertEquals(
     mapper?.body.expr?.kind === "call" ? mapper.body.expr.callee : undefined,
-    { kind: "var", name: "Box_map__i32__i32__inc" },
+    { kind: "var", name: "Box__map__i32__i32__inc" },
   );
 
   await assertThrowsCompile(
@@ -2994,7 +3091,7 @@ Deno.test("specializes functor constraints over type constructors", async () => 
         let BadBox = {value: a};
         struct(BadBox)
       }
-      fn BadBox.map(v: BadBox(a)) -> BadBox(a) { v }
+      fn BadBox::map(v: BadBox(a)) -> BadBox(a) { v }
       type fn Functor(t: type fn(a: type) -> type) -> type {
         let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
         @require(@type_has_member(t, #map), "Functor requires map");
@@ -3036,7 +3133,7 @@ Deno.test("specializes functor constraints over type constructors", async () => 
 Deno.test("attaches qualified type member functions", async () => {
   const checked = await checkSource(`
     type fn Box(a: type) -> type { let Box = {value: a}; struct(Box) }
-    fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
     }
     type fn Functor(t: type fn(a: type) -> type) -> type {
@@ -3047,7 +3144,7 @@ Deno.test("attaches qualified type member functions", async () => {
     }
     fn inc(x: i32) -> i32 { x + 1 }
     fn mapper(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
-      t.map(f, v)
+      t::map(f, v)
     }
     pub fn main() -> Box(i32) { mapper(Box {value: 1}, inc, Functor(Box)) }
   `);
@@ -3056,18 +3153,18 @@ Deno.test("attaches qualified type member functions", async () => {
   );
   assertEquals(
     box?.normalized?.kind === "product" ? box.normalized.members : undefined,
-    [{ name: "map", type: "fn(const f: fn(x: a) -> b, v: Box(a)) -> Box(b)", target: "Box.map" }],
+    [{ name: "map", type: "fn(const f: fn(x: a) -> b, v: Box(a)) -> Box(b)", target: "Box::map" }],
   );
   const mapper = checked.program.declarations.find((decl): decl is FnDecl =>
     decl.kind === "fn" && decl.name.startsWith("mapper__")
   );
   assertEquals(
     mapper?.body.expr?.kind === "call" ? mapper.body.expr.callee : undefined,
-    { kind: "var", name: "Box_map__i32__i32__inc" },
+    { kind: "var", name: "Box__map__i32__i32__inc" },
   );
   await assertThrowsCompile(
     `
-      fn missing.map() -> i32 { 0 }
+      fn missing::map() -> i32 { 0 }
     `,
     "type.unknown_type",
   );
@@ -3075,7 +3172,14 @@ Deno.test("attaches qualified type member functions", async () => {
     `
       type fn Box(a: type) -> type { let Box = {value: a}; struct(Box) }
       fn Box.map(v: Box(a)) -> Box(a) { v }
-      fn Box.map(v: Box(a)) -> Box(a) { v }
+    `,
+    "type.member_syntax",
+  );
+  await assertThrowsCompile(
+    `
+      type fn Box(a: type) -> type { let Box = {value: a}; struct(Box) }
+      fn Box::map(v: Box(a)) -> Box(a) { v }
+      fn Box::map(v: Box(a)) -> Box(a) { v }
     `,
     "type.duplicate_member",
   );
@@ -3087,7 +3191,7 @@ Deno.test("infers local proof consts at generic call sites", async () => {
       let Box = {value: a};
       struct(Box)
     }
-    fn Box.map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
     }
     type fn Functor(t: type fn(a: type) -> type) -> type {
@@ -3113,7 +3217,7 @@ Deno.test("infers local proof consts at generic call sites", async () => {
   assertEquals(mapper?.body.statements, []);
   assertEquals(
     mapper?.body.expr?.kind === "call" ? mapper.body.expr.callee : undefined,
-    { kind: "var", name: "Box_map__i32__i32__inc" },
+    { kind: "var", name: "Box__map__i32__i32__inc" },
   );
 
   await assertThrowsCompile(
@@ -3166,8 +3270,8 @@ Deno.test("rejects duplicate type function fragments and members", async () => {
         let Box = {value: a};
         struct(Box)
       }
-      fn Box.map(v: Box(a)) -> Box(a) { v }
-      fn Box.map(v: Box(a)) -> Box(a) { v }
+      fn Box::map(v: Box(a)) -> Box(a) { v }
+      fn Box::map(v: Box(a)) -> Box(a) { v }
     `,
     "type.duplicate_member",
   );
@@ -3770,7 +3874,7 @@ Deno.test("explainOptimization reports backend structural fixed-array layout dec
       xs[index]
     }
     fn bump_read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
-      read(layout.InlineArray.set(4, u3, xs, index, 7), index)
+      read(layout.InlineArray::set(4, u3, xs, index, 7), index)
     }
     pub fn main(index: i32) -> i32 {
       bump_read(<1, 2, 3, 4>, index)
@@ -3792,7 +3896,7 @@ Deno.test("explainOptimization reports packed local-slot and scratch fixed-array
       xs[index]
     }
     fn bump_read(xs: layout.InlineArray(4, u3), index: i32) -> i32 {
-      read(layout.InlineArray.set(4, u3, xs, index, 7), index)
+      read(layout.InlineArray::set(4, u3, xs, index, 7), index)
     }
     pub fn main(index: i32) -> i32 {
       bump_read(<1, 2, 3, 4>, index)
@@ -3854,7 +3958,7 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
     const range = @import("prelude.range");
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main(seed: i32) -> i32 {
-      range.RangeIter.fold(range.RangeI32.Iter(seed - seed .. 1000), 0, add)
+      range.RangeIter::fold(range.RangeI32::Iter(seed - seed .. 1000), 0, add)
     }
   `;
   const userSource = `
@@ -3880,7 +3984,7 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
 
   assert(
     preludePlan.decisions.some((decision) =>
-      decision.target.endsWith("RangeIter.fold_loop") &&
+      decision.target.endsWith("RangeIter::fold_loop") &&
       decision.action === "recurrence.lower.tail_loop"
     ),
   );
@@ -3898,7 +4002,7 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
   const userWat = await watFromSource(userSource, { optMode: "release" });
   assertStringIncludes(preludeWat, "loop");
   assertStringIncludes(userWat, "loop");
-  assert(!preludeWat.includes("call $range.RangeIter.fold_loop"));
+  assert(!preludeWat.includes("call $range.RangeIter::fold_loop"));
   assert(!userWat.includes("call $my_fold_loop"));
 });
 
@@ -4470,7 +4574,7 @@ Deno.test("core Index is a refined i32 domain proof", async () => {
         struct(InlineArray)
       }
       pub fn main(raw: i32, xs: InlineArray(16, i32)) -> i32 {
-        match core.Index.try(16, raw) {
+        match core.Index::try(16, raw) {
           Some(i) => xs[i],
           None => 0,
         }
@@ -4482,7 +4586,7 @@ Deno.test("core Index is a refined i32 domain proof", async () => {
     `
       const core = @import("prelude.core");
       fn narrow(raw: i32) -> i32(0..4) {
-        match core.i32.try_domain(i32(0..4), raw) {
+        match core.i32::try_domain(i32(0..4), raw) {
           Some(i) => i,
           None => 0,
         }
