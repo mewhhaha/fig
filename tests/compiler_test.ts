@@ -1416,6 +1416,175 @@ Deno.test("ecs fused fill iterator maps and folds without materialized batch", a
   assert([...artifact.wat.matchAll(/\bif\b/g)].length <= 4, artifact.wat);
 });
 
+Deno.test("ecs component map input can fold without materializing mapped world", async () => {
+  const source = `
+      const ecs = @import("engine.ecs");
+
+      type fn Position() -> type {
+        let Position = {x: i32, y: i32};
+        struct(Position)
+      }
+
+      type fn Velocity() -> type {
+        let Velocity = {dx: i32, dy: i32};
+        struct(Velocity)
+      }
+
+      const components = ecs.components({
+        positions: Position
+      });
+
+      type fn World() -> type {
+        let Expected = @type_slots(ecs.World(128, components));
+        let World = {
+          entities: ecs.Batch(128, ecs.BatchIndex(128)),
+          len: i32,
+          positions: ecs.Batch(128, Position)
+        };
+        let MatchesEcsWorld = @require(
+          World == Expected,
+          "test World must match ecs.World"
+        );
+        struct(World)
+      }
+
+      type fn Systems() -> type {
+        let Systems = {
+          world: World,
+          input: Velocity
+        };
+        struct(Systems)
+      }
+
+      fn move_position(
+        index: ecs.BatchIndex(128),
+        item: Position,
+        velocity: Velocity
+      ) -> Position {
+        Position {
+          x: item.x + velocity.dx + index,
+          y: item.y + velocity.dy
+        }
+      }
+
+      fn score_position(acc: i32, item: Position) -> i32 {
+        acc + item.x + item.y
+      }
+
+      fn seed_systems(seed: i32) -> Systems {
+        let world: World = ecs.World::empty(128, components);
+        Systems {
+          world: @replace_field(
+            world,
+            #positions,
+            ecs.batch_fill(128, Position, Position {x: seed, y: seed + 1})
+          ),
+          input: Velocity {dx: 2, dy: 3}
+        }
+      }
+
+      pub fn main(seed: i32) -> i32 {
+        let systems = seed_systems(seed);
+        ecs.cmap_input_fold(
+          Systems,
+          #positions,
+          systems,
+          0,
+          move_position,
+          score_position
+        )
+      }
+    `;
+  const artifact = await compileArtifactsFromSource(source, {
+    resolveModule: resolveProjectModule,
+    memoryModel: "branch",
+    optMode: "release",
+    pruneImports: true,
+  });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as (seed: number) => number)(0), 8_896);
+  assert(artifact.wasm.byteLength < 17_000, artifact.wat);
+});
+
+Deno.test("ecs component fill iterator validates world field and folds compactly", async () => {
+  const source = `
+      const ecs = @import("engine.ecs");
+
+      type fn Position() -> type {
+        let Position = {x: i32, y: i32};
+        struct(Position)
+      }
+
+      type fn Velocity() -> type {
+        let Velocity = {dx: i32, dy: i32};
+        struct(Velocity)
+      }
+
+      const components = ecs.components({
+        positions: Position
+      });
+
+      type fn World() -> type {
+        let Expected = @type_slots(ecs.World(128, components));
+        let World = {
+          entities: ecs.Batch(128, ecs.BatchIndex(128)),
+          len: i32,
+          positions: ecs.Batch(128, Position)
+        };
+        let MatchesEcsWorld = @require(
+          World == Expected,
+          "test World must match ecs.World"
+        );
+        struct(World)
+      }
+
+      type fn Systems() -> type {
+        let Systems = {
+          world: World,
+          input: Velocity
+        };
+        struct(Systems)
+      }
+
+      fn move_position(
+        index: ecs.BatchIndex(128),
+        item: Position,
+        velocity: Velocity
+      ) -> Position {
+        Position {
+          x: item.x + velocity.dx + index,
+          y: item.y + velocity.dy
+        }
+      }
+
+      fn score_position(acc: i32, item: Position) -> i32 {
+        acc + item.x + item.y
+      }
+
+      pub fn main(seed: i32) -> i32 {
+        let positions = ecs.component_ref(Systems, #positions);
+        ecs.map_input_fill_fold(
+          positions,
+          Velocity {dx: 2, dy: 3},
+          Position {x: seed, y: seed + 1},
+          0,
+          move_position,
+          score_position
+        )
+      }
+    `;
+  const artifact = await compileArtifactsFromSource(source, {
+    resolveModule: resolveProjectModule,
+    memoryModel: "branch",
+    optMode: "release",
+    pruneImports: true,
+  });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as (seed: number) => number)(0), 8_896);
+  assert(artifact.wasm.byteLength <= 512, artifact.wat);
+  assert([...artifact.wat.matchAll(/\bif\b/g)].length <= 4, artifact.wat);
+});
+
 Deno.test.ignore("ecs sparse query rejects missing sparse component slots", async () => {
   await assertThrowsCompile(
     `

@@ -5026,6 +5026,11 @@ function bindTypePattern(
           consts,
         );
       }
+      return;
+    }
+    const resolvedActual = resolveAliasType(actual, typeDecls);
+    if (resolvedActual && resolvedActual !== actual) {
+      bindTypePattern(pattern, resolvedActual, types, typeDecls, consts);
     }
     return;
   }
@@ -5151,7 +5156,10 @@ function substituteInferredExpr(
       }
     }
     const type = types.get(expr.name);
-    if (type) return { kind: "var", name: type };
+    if (type) {
+      const staticExpr = constValueToExpr(constValueFromRenderedTypeArg(type));
+      return staticExpr ?? { kind: "var", name: type };
+    }
     const staticName = staticNames.get(expr.name);
     return staticName ? { kind: "var", name: staticName } : expr;
   }
@@ -5592,7 +5600,15 @@ function specializeConstParamCallAttempt(
   const inferredStaticBindings = inferConstStaticBindings(fn, argsByParam, context);
   const staticValues = new Map<string, ConstValue>();
   const staticArgNames = new Map<string, string>();
-  const inferredTypes = new Map<string, string>();
+  const explicitStaticBodyArgs = collectExplicitConstArgNames(fn.body, context.functions);
+  const staticParamNames = new Set(
+    fn.params.filter((param) => param.const).map((param) => param.name),
+  );
+  const inferredTypes = new Map(
+    [...inferredStaticBindings].filter(([name]) =>
+      explicitStaticBodyArgs.has(name) && !staticParamNames.has(name)
+    ),
+  );
   const constArgNames: string[] = [];
   const runtimeArgs: Expr[] = [];
   const captureParams: Param[] = [];
@@ -5752,6 +5768,66 @@ function inferConstStaticBindings(
     }
   });
   return bindings;
+}
+
+function collectExplicitConstArgNames(
+  expr: Expr | undefined,
+  functions: Map<string, FnDecl>,
+  names = new Set<string>(),
+): Set<string> {
+  if (!expr) return names;
+  if (expr.kind === "call") {
+    if (expr.callee.kind === "var") {
+      const fn = functions.get(expr.callee.name);
+      fn?.params.forEach((param, index) => {
+        const arg = expr.args[index];
+        if (param.const && arg?.kind === "var") names.add(arg.name);
+      });
+    }
+    collectExplicitConstArgNames(expr.callee, functions, names);
+    expr.args.forEach((arg) => collectExplicitConstArgNames(arg, functions, names));
+    return names;
+  }
+  if (expr.kind === "block") {
+    expr.statements.forEach((stmt) => {
+      if (isRuntimeExprNode(stmt.value)) {
+        collectExplicitConstArgNames(stmt.value, functions, names);
+      }
+    });
+    collectExplicitConstArgNames(expr.expr, functions, names);
+    return names;
+  }
+  if (expr.kind === "binary") {
+    collectExplicitConstArgNames(expr.left, functions, names);
+    collectExplicitConstArgNames(expr.right, functions, names);
+  } else if (expr.kind === "index") {
+    collectExplicitConstArgNames(expr.target, functions, names);
+    collectExplicitConstArgNames(expr.index, functions, names);
+  } else if (expr.kind === "field") {
+    collectExplicitConstArgNames(expr.value, functions, names);
+    collectExplicitConstArgNames(expr.key, functions, names);
+  } else if (expr.kind === "match") {
+    collectExplicitConstArgNames(expr.value, functions, names);
+    expr.arms.forEach((arm) => collectExplicitConstArgNames(arm.value, functions, names));
+  } else if (expr.kind === "pipe_bind") {
+    collectExplicitConstArgNames(expr.value, functions, names);
+    collectExplicitConstArgNames(expr.body, functions, names);
+  } else if (expr.kind === "shape" || expr.kind === "product_constructor") {
+    expr.slots.forEach((slot) => {
+      collectExplicitConstArgNames(slot.index, functions, names);
+      collectExplicitConstArgNames(slot.value, functions, names);
+    });
+  } else if (expr.kind === "range") {
+    collectExplicitConstArgNames(expr.start, functions, names);
+    collectExplicitConstArgNames(expr.end, functions, names);
+  } else if (expr.kind === "static_for_slots") {
+    collectExplicitConstArgNames(expr.value, functions, names);
+  }
+  return names;
+}
+
+function isRuntimeExprNode(value: Expr | TypeExpr): value is Expr {
+  return !value.kind.startsWith("type_");
 }
 
 function inferredStaticArgValue(

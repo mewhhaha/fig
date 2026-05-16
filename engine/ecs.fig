@@ -153,6 +153,80 @@ fn batch_fold_loop(
   }
 }
 
+fn batch_map_with_state_fold(
+  const capacity: count,
+  const component: type,
+  const mapped: type,
+  const state: type,
+  const accumulator: type,
+  batch: Batch(capacity, component),
+  state_value: state,
+  initial: accumulator,
+  const map_step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    state_value: state
+  ) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  batch_map_with_state_fold_loop(
+    capacity,
+    component,
+    mapped,
+    state,
+    accumulator,
+    layout.core.IndexCursor::start(capacity),
+    batch,
+    state_value,
+    initial,
+    map_step,
+    reduce_step
+  )
+}
+
+fn batch_map_with_state_fold_loop(
+  const capacity: count,
+  const component: type,
+  const mapped: type,
+  const state: type,
+  const accumulator: type,
+  cursor: layout.core.IndexCursor(capacity),
+  batch: Batch(capacity, component),
+  state_value: state,
+  acc: accumulator,
+  const map_step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    state_value: state
+  ) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  let batch_then = batch;
+  let batch_else = batch;
+  let state_then = state_value;
+  let state_else = state_value;
+  let acc_then = acc;
+  let acc_else = acc;
+  let batch_item = batch_then;
+  let batch_next = batch_then;
+  match layout.core.IndexCursor::next(capacity, cursor) {
+    Yield(i, next) => batch_map_with_state_fold_loop(
+      capacity,
+      component,
+      mapped,
+      state,
+      accumulator,
+      next,
+      batch_next,
+      state_then,
+      reduce_step(acc_then, map_step(i, batch_item[i], state_then)),
+      map_step,
+      reduce_step
+    ),
+    Done => acc_else,
+  }
+}
+
 fn batch_iter_map_with_state_fold(
   const capacity: count,
   const component: type,
@@ -499,6 +573,32 @@ type fn WorldComponentField(
   component
 }
 
+type fn ComponentStorage(systems: type, field: const) -> type {
+  @shape_slot(
+    @type_slots(SystemWorld(systems)),
+    field
+  )
+}
+
+type fn ComponentRef(
+  systems: type,
+  field: const,
+  storage: type
+) -> type {
+  i32
+}
+
+fn component_ref(
+  const systems_t: type,
+  const field: const
+) -> ComponentRef(
+  systems_t,
+  field,
+  ComponentStorage(systems_t, field)
+) {
+  0
+}
+
 fn cmap_query(
   systems: systems_t,
   const query: ComponentMap(
@@ -560,6 +660,58 @@ fn cmap_input(
     systems,
     @field(systems, #input),
     step
+  )
+}
+
+fn cmap_input_fold(
+  const systems_t: type,
+  const field: const,
+  systems: systems_t,
+  initial: accumulator,
+  const map_step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    input: state
+  ) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  let world = @field(systems, #world);
+  let values: Batch(capacity, component) = @field(
+    world,
+    field
+  );
+  batch_map_with_state_fold(
+    values,
+    @field(systems, #input),
+    initial,
+    map_step,
+    reduce_step
+  )
+}
+
+fn map_input_fill_fold(
+  ref: ComponentRef(systems_t, field, Batch(capacity, item_t)),
+  input: SystemInput(systems_t),
+  value: item_t,
+  initial: accumulator,
+  const map_step: fn(
+    index: BatchIndex(capacity),
+    item: item_t,
+    input: state
+  ) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  batch_iter_map_with_state_fold(
+    capacity,
+    item_t,
+    mapped,
+    state,
+    accumulator,
+    value,
+    input,
+    initial,
+    map_step,
+    reduce_step
   )
 }
 
