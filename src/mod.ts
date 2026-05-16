@@ -619,6 +619,15 @@ function referencedDeclarationNames(decl: Declaration, names: Set<string>): Set<
       for (const clause of item.clauses ?? []) visitDecl(clause);
       return;
     }
+    if (item.kind === "contract") {
+      add(item.memberOf?.owner);
+      for (const param of item.params) {
+        addTypeSource(param.type);
+        visitPattern(param.pattern);
+      }
+      visitExpr(item.body);
+      return;
+    }
     addTypeSource(item.type);
     visitExpr(item.value);
   };
@@ -746,6 +755,25 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
       })),
       returnType: decl.returnType ? qualifyTypeSource(decl.returnType, alias, names) : undefined,
       body: qualifyExpr(decl.body, alias, names) as FnDecl["body"],
+    });
+  }
+  if (decl.kind === "contract") {
+    return withMeta(decl, {
+      ...decl,
+      name: qualifyName(decl.name, alias),
+      memberOf: decl.memberOf
+        ? {
+          ...decl.memberOf,
+          owner: qualifyReference(decl.memberOf.owner, alias, names),
+          member: decl.memberOf.member,
+        }
+        : undefined,
+      params: decl.params.map((param) => ({
+        ...param,
+        type: qualifyTypeSource(param.type, alias, names),
+        pattern: param.pattern ? qualifyParamPattern(param.pattern, alias, names) : undefined,
+      })),
+      body: qualifyExpr(decl.body, alias, names) as typeof decl.body,
     });
   }
   if (decl.kind === "type") return qualifyTypeDecl(decl, alias, names);

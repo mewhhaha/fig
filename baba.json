@@ -14,6 +14,9 @@
     ["SlotPosition", "Literal"],
     ["FieldName", "TypeAnn"],
     ["FieldName", "PatternIdent"],
+    ["FieldName", "PatternIdent", "ConstTypeFnParam"],
+    ["PatternIdent", "ConstTypeFnParam"],
+    ["FieldName", "ConstTypeFnParam"],
     ["FieldName", "TypeParamDecl"],
     ["ImportBindingItems", "ImportBindingTail"]
   ],
@@ -24,6 +27,7 @@
         { "literal": "capability", "capture": "keyword" },
         { "literal": "type", "capture": "keyword.type" },
         { "literal": "const", "capture": "keyword" },
+        { "literal": "contract", "capture": "keyword" },
         { "literal": "fn", "capture": "keyword.function" },
         { "literal": "let", "capture": "keyword" },
         { "literal": "match", "capture": "keyword.control" },
@@ -41,6 +45,7 @@
       ],
       "patterns": [
         "(FnDecl (FnTail (FnName (LowerIdent) @function)))",
+        "(ContractFnDecl (FnName (LowerIdent) @function))",
         "(Primary (LowerIdent) @variable)",
         "(Call (Primary (LowerIdent) @function.call) \"(\")",
         "(Primary (StaticBuiltin (LowerIdent) @function.builtin))",
@@ -83,10 +88,12 @@
     ],
     "tags": [
       { "node": "FnDecl", "capture": "tag.definition" },
+      { "node": "ContractFnDecl", "capture": "tag.definition" },
       { "node": "TypeFnDecl", "capture": "tag.definition" }
     ],
     "textobjects": [
       { "node": "FnDecl", "capture": "function.around" },
+      { "node": "ContractFnDecl", "capture": "function.around" },
       { "node": "Block", "capture": "function.inside" },
       { "node": "TypeFnDecl", "capture": "class.around" },
       { "node": "TypeBlock", "capture": "class.inside" },
@@ -102,7 +109,7 @@
     }
   },
   "lsp": {
-    "documentSymbols": ["FnDecl", "TypeFnDecl", "ConstDecl"],
+    "documentSymbols": ["FnDecl", "ContractFnDecl", "TypeFnDecl", "ConstDecl"],
     "diagnostics": ["Program"]
   }
 }

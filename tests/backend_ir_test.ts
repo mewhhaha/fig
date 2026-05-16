@@ -490,6 +490,32 @@ Deno.test("backend lowers Index::try refined-domain matches as checked bounds", 
   assertEquals(generic(4), 0);
 });
 
+Deno.test("backend compacts adjacent refined-domain singleton checks", async () => {
+  const source = `const core = @import("prelude.core");
+type fn Small() -> type { i32(1 | 2 | 3) }
+pub fn main(raw: i32) -> i32 {
+  match core.i32.try_domain(Small, raw) {
+    Some(i) => i + 10,
+    None => 0,
+  }
+}
+`;
+  const wat = await watFromSource(source, { resolveModule });
+  assertStringIncludes(wat, "i32.const 1");
+  assertStringIncludes(wat, "i32.ge_s");
+  assertStringIncludes(wat, "i32.const 3");
+  assertStringIncludes(wat, "i32.le_s");
+  assert(!wat.includes("i32.or"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(1), 11);
+  assertEquals(main(3), 13);
+  assertEquals(main(4), 0);
+});
+
 Deno.test("backend lowers nonnegative odd divisibility checks through modular inverses", async () => {
   const source = `
     fn score_loop(i: i32, total: i32) -> i32 {

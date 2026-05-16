@@ -9,6 +9,7 @@ export interface ParseOptions {
 }
 
 export async function parse(source: string, options: ParseOptions = {}): Promise<Program> {
+  const lines = new SourceLineMap(source);
   const result = parseSyntax(source);
   if (!result.ok || !result.tree) {
     const diagnostic = result.diagnostics[0];
@@ -16,22 +17,22 @@ export async function parse(source: string, options: ParseOptions = {}): Promise
       "parse.syntax",
       diagnostic?.message ?? "syntax error",
       diagnostic?.span
-        ? spanFor(source, diagnostic.span.start, diagnostic.span.end, options.sourceId)
+        ? lines.span(diagnostic.span.start, diagnostic.span.end, options.sourceId)
         : undefined,
     );
   }
-  return lowerProgram(adaptNode(source, result.tree), docResolver(source), options.sourceId);
+  return lowerProgram(adaptNode(source, result.tree, lines), docResolver(source), options.sourceId);
 }
 
-function adaptNode(source: string, node: ParseNode): SyntaxNodeLike {
+function adaptNode(source: string, node: ParseNode, lines: SourceLineMap): SyntaxNodeLike {
   if (node.kind === "rule") {
     return {
       type: node.name,
       text: source.slice(node.span.start, node.span.end),
       startIndex: node.span.start,
       endIndex: node.span.end,
-      startPosition: positionFor(source, node.span.start),
-      namedChildren: node.children.map((child) => adaptNode(source, child)),
+      startPosition: lines.position(node.span.start),
+      namedChildren: node.children.map((child) => adaptNode(source, child, lines)),
     } as SyntaxNodeLike;
   }
   return {
@@ -39,7 +40,7 @@ function adaptNode(source: string, node: ParseNode): SyntaxNodeLike {
     text: node.text,
     startIndex: node.span.start,
     endIndex: node.span.end,
-    startPosition: positionFor(source, node.span.start),
+    startPosition: lines.position(node.span.start),
     namedChildren: [],
   } as SyntaxNodeLike;
 }
@@ -75,26 +76,36 @@ function docResolver(source: string): (start: number | undefined) => string | un
   return (start) => start === undefined ? undefined : docs.get(start);
 }
 
-function spanFor(source: string, start: number, end: number, sourceId?: string): Span {
-  let line = 1;
-  let column = 1;
-  for (let i = 0; i < start; i++) {
-    if (source[i] === "\n") {
-      line++;
-      column = 1;
-    } else column++;
-  }
-  return { start, end, line, column, ...(sourceId ? { sourceId } : {}) };
-}
+class SourceLineMap {
+  readonly lineStarts: number[] = [0];
 
-function positionFor(source: string, offset: number): { row: number; column: number } {
-  let row = 0;
-  let column = 0;
-  for (let i = 0; i < offset; i++) {
-    if (source[i] === "\n") {
-      row++;
-      column = 0;
-    } else column++;
+  constructor(readonly source: string) {
+    for (let index = 0; index < source.length; index++) {
+      if (source[index] === "\n") this.lineStarts.push(index + 1);
+    }
   }
-  return { row, column };
+
+  span(start: number, end: number, sourceId?: string): Span {
+    const position = this.position(start);
+    return {
+      start,
+      end,
+      line: position.row + 1,
+      column: position.column + 1,
+      ...(sourceId ? { sourceId } : {}),
+    };
+  }
+
+  position(offset: number): { row: number; column: number } {
+    const safeOffset = Math.max(0, Math.min(offset, this.source.length));
+    let low = 0;
+    let high = this.lineStarts.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (this.lineStarts[mid]! <= safeOffset) low = mid + 1;
+      else high = mid - 1;
+    }
+    const row = Math.max(0, low - 1);
+    return { row, column: safeOffset - this.lineStarts[row]! };
+  }
 }

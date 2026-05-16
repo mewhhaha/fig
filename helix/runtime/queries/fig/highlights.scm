@@ -1,4 +1,5 @@
 (FnDecl (FnTail (FnName (LowerIdent) @function)))
+(ContractFnDecl (FnName (LowerIdent) @function))
 (Primary (LowerIdent) @variable)
 (Call (Primary (LowerIdent) @function.call) "(")
 (Primary (StaticBuiltin (LowerIdent) @function.builtin))
@@ -24,6 +25,7 @@
 "capability" @keyword
 "type" @keyword.type
 "const" @keyword
+"contract" @keyword
 "fn" @keyword.function
 "let" @keyword
 "match" @keyword.control

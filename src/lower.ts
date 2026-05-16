@@ -3,6 +3,7 @@ import type {
   BranchHint,
   CapabilityImport,
   ConstDecl,
+  ContractDecl,
   Declaration,
   DestructureLetDecl,
   DoStatement,
@@ -137,6 +138,8 @@ function lowerDecl(node: Node): Declaration {
   switch (decl.type) {
     case "TypeFnDecl":
       return lowerTypeDecl(decl);
+    case "ContractFnDecl":
+      return lowerContractFn(decl);
     case "ConstDecl":
       return lowerConst(decl);
     case "FnDecl":
@@ -155,6 +158,25 @@ function lowerDecl(node: Node): Declaration {
     default:
       return unreachable(decl, "declaration");
   }
+}
+
+function lowerContractFn(node: Node): ContractDecl {
+  if (optional(node, "Visibility")) {
+    fail("rewrite.public", "contract fn declarations cannot be public", spanFor(node));
+  }
+  const loweredName = lowerFnName(only(node, "FnName"));
+  return {
+    kind: "contract",
+    ...meta(node, loweredName.nameNode),
+    ...doc(node),
+    name: loweredName.name,
+    ...(loweredName.memberOf ? { memberOf: loweredName.memberOf } : {}),
+    params: optional(node, "Params")
+      ? named(only(node, "Params")).filter(is("Param")).map(lowerParam)
+      : [],
+    resultKind: "rewrite",
+    body: lowerBlock(only(node, "Block")),
+  };
 }
 
 function lowerConst(node: Node): ConstDecl | TypeDecl {
@@ -262,7 +284,9 @@ function lowerTypeDecl(node: Node): TypeDecl {
 function lowerTypeResultKind(node: Node | undefined): TypeResultKind {
   if (!node) return "type";
   const kind = optional(node, "TypeResultKind")?.text.trim();
-  return kind === "struct" || kind === "union" || kind === "operator" ? kind : "type";
+  return kind === "struct" || kind === "union" || kind === "operator" || kind === "rewrite"
+    ? kind
+    : "type";
 }
 
 function lowerTypeParam(node: Node): TypeParam {
@@ -731,12 +755,20 @@ function unwrapType(node: Node): Node {
 function lowerParam(node: Node): Param {
   const patternNode = optional(node, "Pattern") ?? optional(node, "PatternIdent") ??
     optional(node, "Literal") ?? named(node).find((child) => child.text.trim() === "_");
-  const nameNode = named(node).find((child) => isIdentifier(child) || isFieldName(child));
-  const pattern = patternNode ? lowerParamPattern(patternNode) : lowerNameParamPattern(nameNode);
-  const name = paramBindingName(pattern, nameNode);
-  const explicitType = optional(node, "Type")?.text ??
-    optional(node, "TypeAnn")?.text.replace(/^\s*:\s*/, "");
+  const constName = node.text.match(/^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/)?.[1];
+  const nameNode = constName
+    ? named(node).find((child) => isIdentifier(child) && child.text === constName)
+    : named(node).find((child) => isIdentifier(child) || isFieldName(child));
   const isConstParam = /^\s*const\b/.test(node.text);
+  const pattern = isConstParam && constName
+    ? ({ kind: "binding", ...spanOnly(nameNode ?? node), name: constName } as ParamPattern)
+    : patternNode
+    ? lowerParamPattern(patternNode)
+    : lowerNameParamPattern(nameNode);
+  const name = paramBindingName(pattern, nameNode);
+  const explicitType = constTypeFnAnnotation(node.text) ??
+    optional(node, "Type")?.text ??
+    optional(node, "TypeAnn")?.text.replace(/^\s*:\s*/, "");
   return {
     ...meta(node, nameNode),
     ...doc(node),
@@ -746,6 +778,12 @@ function lowerParam(node: Node): Param {
     ...(isConstParam && !explicitType ? { inferStaticType: true } : {}),
     ...(pattern.kind !== "binding" || pattern.name !== name ? { pattern } : {}),
   };
+}
+
+function constTypeFnAnnotation(source: string): string | undefined {
+  if (!/^\s*const\b/.test(source)) return undefined;
+  const match = source.match(/:\s*(type\s+fn\s*\([\s\S]*\)\s*->\s*(?:type|struct|union|operator))/);
+  return match?.[1]?.replace(/\s+/g, " ");
 }
 
 function lowerNameParamPattern(node: Node | undefined): ParamPattern {
@@ -1351,7 +1389,7 @@ function nextNamedCallChild(children: readonly Node[], index: number): Node | un
 }
 
 function isCallPunctuation(node: Node): boolean {
-  return ["(", ")", ".", ","].includes(node.type);
+  return ["(", ")", ".", "::", ","].includes(node.type);
 }
 
 function receiverMemberName(receiver: Expr, member: string): string {

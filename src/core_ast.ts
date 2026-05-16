@@ -12,7 +12,7 @@ export interface Program {
   declarations: Declaration[];
 }
 
-export type Declaration = FnDecl | LetDecl | ConstDecl | TypeDecl;
+export type Declaration = FnDecl | ContractDecl | LetDecl | ConstDecl | TypeDecl;
 export type BranchHint = string;
 
 export interface CapabilityImport extends AstNodeMeta {
@@ -53,6 +53,21 @@ export interface FnDecl extends AstNodeMeta {
   generatedInlineable?: boolean;
   primitiveId?: string;
   branchHint?: BranchHint;
+}
+
+export interface ContractDecl extends AstNodeMeta {
+  kind: "contract";
+  doc?: string;
+  name: string;
+  memberOf?: {
+    owner: string;
+    member: string;
+    span?: Span;
+    nameSpan?: Span;
+  };
+  params: Param[];
+  resultKind: "rewrite";
+  body: BlockExpr;
 }
 
 export interface LetDecl extends AstNodeMeta {
@@ -100,7 +115,7 @@ export interface TypeDecl extends AstNodeMeta {
   clauses?: TypeDecl[];
 }
 
-export type TypeResultKind = "type" | "struct" | "union" | "operator";
+export type TypeResultKind = "type" | "struct" | "union" | "operator" | "rewrite";
 
 export type TypeParamKind =
   | "type"

@@ -29,6 +29,16 @@ type fn Functor(t: type fn(a: type) -> type) -> type {
   t
 }
 
+type fn LawfulFunctor(t: type fn(a: type) -> type) -> type {
+  Functor(t);
+  t
+}
+
+contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
+  const proof = LawfulFunctor(T);
+  @assume(\x -> T::map(identity, x), \x -> x)
+}
+
 fn fmap(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
   t::map(f, v)
 }
@@ -44,6 +54,26 @@ type fn Applicative(t: type fn(a: type) -> type) -> type {
   @require(@type_member_type(t, #pure) == Pure, "Applicative.pure has wrong type");
   @require(@type_member_type(t, #apply) == Apply, "Applicative.apply has wrong type");
   t
+}
+
+type fn LawfulApplicative(t: type fn(a: type) -> type) -> type {
+  Applicative(t);
+  LawfulFunctor(t);
+  t
+}
+
+contract fn LawfulApplicative::apply_pure_identity(
+  const T: type fn(a: type) -> type
+) -> rewrite {
+  const proof = LawfulApplicative(T);
+  @assume(\x -> T::apply(T::pure(identity), x), \x -> x)
+}
+
+contract fn LawfulApplicative::apply_pure(
+  const T: type fn(a: type) -> type
+) -> rewrite {
+  const proof = LawfulApplicative(T);
+  @assume(\(f, x) -> T::apply(T::pure(f), x), \(f, x) -> T::map(f, x))
 }
 
 fn pure(const t, value: a, const _proof: Applicative(t)) -> t(a) {
@@ -62,6 +92,22 @@ type fn Monad(t: type fn(a: type) -> type) -> type {
   @require(@type_has_member(t, #bind), "Monad requires bind");
   @require(@type_member_type(t, #bind) == Bind, "Monad.bind has wrong type");
   t
+}
+
+type fn LawfulMonad(t: type fn(a: type) -> type) -> type {
+  Monad(t);
+  LawfulApplicative(t);
+  t
+}
+
+contract fn LawfulMonad::bind_pure_left(const T: type fn(a: type) -> type) -> rewrite {
+  const proof = LawfulMonad(T);
+  @assume(\(x, f) -> T::bind(T::pure(x), f), \(x, f) -> f(x))
+}
+
+contract fn LawfulMonad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
+  const proof = LawfulMonad(T);
+  @assume(\m -> T::bind(m, T::pure), \m -> m)
 }
 
 fn bind(v: t(a), const f: fn(x: a) -> t(b), const _proof: Monad(t)) -> t(b) {

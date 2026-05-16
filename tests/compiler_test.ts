@@ -4654,6 +4654,341 @@ Deno.test("supports arbitrary unsigned integer widths with storage-lane packing"
   assertStringIncludes(publicAbi, `(param $x i32) (param $y i64) (result i32)`);
 });
 
+Deno.test("contract fn rewrite declarations parse with associated names and const templates", async () => {
+  const program = await parse(`
+    contract fn Option::bind_left_zero() -> rewrite {
+      @assume(
+        \\f -> Option::bind(Option::zero(), f),
+        \\f -> Option::zero()
+      )
+    }
+
+    contract fn MonadZero::bind_left_zero(
+      const M: type fn(a: type) -> type
+    ) -> rewrite {
+      const proof = MonadZero(M);
+      @assume(
+        \\f -> M::bind(M::zero(), f),
+        \\f -> M::zero()
+      )
+    }
+  `);
+
+  const concrete = program.declarations[0];
+  assert(concrete?.kind === "contract");
+  assertEquals(concrete.name, "Option::bind_left_zero");
+  assertEquals(concrete.memberOf, { owner: "Option", member: "bind_left_zero" });
+  assertEquals(concrete.resultKind, "rewrite");
+
+  const generic = program.declarations[1];
+  assert(generic?.kind === "contract");
+  assertEquals(generic.params[0]?.name, "M");
+  assertEquals(generic.params[0]?.const, true);
+  assertEquals(generic.params[0]?.type, "type fn(a: type) -> type");
+  assertEquals(generic.resultKind, "rewrite");
+});
+
+Deno.test("contract fn rewrite validates context and rewrite-only type spelling", async () => {
+  await assertThrowsCompile(
+    `fn bad() -> rewrite { 0 }`,
+    "rewrite.not_runtime_type",
+  );
+  await assertThrowsCompile(
+    `let x: rewrite = 0;`,
+    "rewrite.not_runtime_type",
+  );
+  await assertThrowsCompile(
+    `type fn Bad() -> rewrite { i32 }`,
+    "rewrite.only_contract_fn",
+  );
+  await assertThrowsCompile(
+    `fn bad() -> i32 { @assume(\\f -> f, \\f -> f) }`,
+    "rewrite.assume_context",
+  );
+  await assertThrowsCompile(
+    `contract fn bad(x: i32) -> rewrite { @assume(\\f -> f, \\f -> f) }`,
+    "rewrite.param_must_be_const",
+  );
+  await assertThrowsCompile(
+    `pub contract fn bad() -> rewrite { @assume(\\f -> f, \\f -> f) }`,
+    "rewrite.public",
+  );
+  await assertThrowsCompile(
+    `contract fn bad() -> rewrite { @assume(\\x -> M::pure(x), \\x -> g(x)) }`,
+    "rewrite.assume_rhs_unknown",
+  );
+  await assertThrowsCompile(
+    `contract fn bad() -> rewrite { @assume(\\x -> x, \\y -> y) }`,
+    "rewrite.assume_template_params",
+  );
+  await assertThrowsCompile(
+    `
+    fn inc(x: i32) -> i32 { x + 1 }
+    contract fn bad() -> rewrite { @assume(\\x -> inc(x), \\x -> true) }
+    `,
+    "rewrite.assume_result_type",
+  );
+  const wat = await watFromSource(`
+    contract fn A::id() -> rewrite { @assume(\\x -> x, \\x -> x) }
+    pub fn main() -> i32 { 1 }
+  `);
+  assert(!wat.includes("A::id"));
+});
+
+Deno.test("concrete assumed rewrites remove matching calls when enabled", async () => {
+  const source = `
+    type fn A() -> type { struct({value: i32}) }
+    fn A::zero() -> i32 { 0 }
+    fn A::bind(x: i32, f: fn(i32) -> i32) -> i32 { f(x) }
+    contract fn A::bind_left_zero() -> rewrite {
+      @assume(\\f -> A::bind(A::zero(), f), \\f -> A::zero())
+    }
+    fn inc(x: i32) -> i32 { x + 1 }
+    pub fn main() -> i32 { A::bind(A::zero(), inc) }
+  `;
+  const checked = await checkSource(source);
+
+  const withoutAssumptions = optimizeProgram(checked.program);
+  assertEquals(countCalls(withoutAssumptions).get("A::bind"), 1);
+
+  const trace: import("../src/trace.ts").CompileTraceEvent[] = [];
+  const withAssumptions = optimizeProgram(checked.program, { assumeRewrites: true, trace });
+  const calls = countCalls(withAssumptions);
+  assertEquals(calls.get("A::bind") ?? 0, 0);
+  assertEquals(calls.get("A::zero"), 1);
+  assert(
+    trace.some((event) =>
+      event.name === "rewrite.assume" &&
+      event.counters?.action === "assume_rewrite" &&
+      event.counters?.target === "main" &&
+      event.counters?.reason === "A::bind_left_zero"
+    ),
+  );
+  assertEquals(findFn(withAssumptions, "main")?.body.expr, {
+    kind: "call",
+    callee: { kind: "var", name: "A::zero" },
+    args: [],
+  });
+});
+
+Deno.test("generic assumed rewrites instantiate from proof constants", async () => {
+  const source = `
+    type fn A() -> type { struct({value: i32}) }
+    type fn MonadZero(m: type fn(a: type) -> type) -> type { m }
+    fn A::zero() -> i32 { 0 }
+    fn A::bind(x: i32, f: fn(i32) -> i32) -> i32 { f(x) }
+    contract fn MonadZero::bind_left_zero(
+      const M: type fn(a: type) -> type
+    ) -> rewrite {
+      const proof = MonadZero(M);
+      @assume(\\f -> M::bind(M::zero(), f), \\f -> M::zero())
+    }
+    fn inc(x: i32) -> i32 { x + 1 }
+    pub fn main() -> i32 {
+      const proof = MonadZero(A);
+      A::bind(A::zero(), inc)
+    }
+  `;
+  const checked = await checkSource(source);
+  const withAssumptions = optimizeProgram(checked.program, { assumeRewrites: true });
+
+  const calls = countCalls(withAssumptions);
+  assertEquals(calls.get("A::bind") ?? 0, 0);
+  assertEquals(findFn(withAssumptions, "main")?.body.expr, {
+    kind: "call",
+    callee: { kind: "var", name: "A::zero" },
+    args: [],
+  });
+});
+
+Deno.test("generic assumed rewrites instantiate from do strategy proofs", async () => {
+  const source = `
+    type fn A() -> type { struct({value: i32}) }
+    type fn MonadZero(m: type fn(a: type) -> type) -> type { m }
+    fn A::zero() -> i32 { 0 }
+    fn A::bind(x: i32, f: fn(i32) -> i32) -> i32 { f(x) }
+    contract fn MonadZero::bind_left_zero(
+      const M: type fn(a: type) -> type
+    ) -> rewrite {
+      const proof = MonadZero(M);
+      @assume(\\f -> M::bind(M::zero(), f), \\f -> M::zero())
+    }
+    fn inc(x: i32) -> i32 { x + 1 }
+    pub fn main() -> i32 {
+      do @monad(MonadZero(A)) {
+        A::bind(A::zero(), inc)
+      }
+    }
+  `;
+  const checked = await checkSource(source);
+  const withAssumptions = optimizeProgram(checked.program, { assumeRewrites: true });
+
+  const calls = countCalls(withAssumptions);
+  assertEquals(calls.get("A::bind") ?? 0, 0);
+  assertEquals(findFn(withAssumptions, "main")?.body.expr?.kind, "block");
+});
+
+Deno.test("generic law rewrites require matching lawful proof", async () => {
+  const source = `
+    type fn LawfulFunctor(t: type fn(a: type) -> type) -> type { t }
+    fn identity(x: a) -> a { x }
+    contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = LawfulFunctor(T);
+      @assume(\\x -> T::map(identity, x), \\x -> x)
+    }
+    fn use_law(x: t(a)) -> t(a) {
+      const proof = LawfulFunctor(t);
+      t::map(identity, x)
+    }
+  `;
+  const checked = await checkSource(source);
+
+  const withAssumptions = optimizeProgram(checked.program, { assumeRewrites: true });
+  assertEquals(findFn(withAssumptions, "use_law")?.body.expr, { kind: "var", name: "x" });
+
+  const noProof = await checkSource(source.replace("      const proof = LawfulFunctor(t);\n", ""));
+  const noProofOptimized = optimizeProgram(noProof.program, { assumeRewrites: true });
+  const noProofExpr = findFn(noProofOptimized, "use_law")?.body.expr;
+  assertEquals(
+    noProofExpr?.kind === "call" ? noProofExpr.callee : undefined,
+    { kind: "var", name: "t::map" },
+  );
+});
+
+Deno.test("generic law rewrites instantiate from const proof parameters", async () => {
+  const checked = await checkSource(`
+    type fn Box(a: type) -> type { let Box = {value: a}; struct(Box) }
+    type fn LawfulFunctor(t: type fn(a: type) -> type) -> type { t }
+    fn identity(x: a) -> a { x }
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) { Box {value: f(v.value)} }
+    contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = LawfulFunctor(T);
+      @assume(\\x -> T::map(identity, x), \\x -> x)
+    }
+    fn use_law(const _proof: LawfulFunctor(Box), x: Box(i32)) -> Box(i32) {
+      Box::map(identity, x)
+    }
+  `);
+  const optimized = optimizeProgram(checked.program, { assumeRewrites: true });
+  const useLaw = findFn(optimized, "use_law");
+  assertEquals(useLaw?.body.expr, { kind: "var", name: "x" });
+});
+
+Deno.test("lawful monad proof activates inherited functor law rewrites", async () => {
+  const checked = await checkSource(`
+    type fn LawfulFunctor(t: type fn(a: type) -> type) -> type { t }
+    type fn LawfulApplicative(t: type fn(a: type) -> type) -> type { t }
+    type fn LawfulMonad(t: type fn(a: type) -> type) -> type { t }
+    fn identity(x: a) -> a { x }
+    contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = LawfulFunctor(T);
+      @assume(\\x -> T::map(identity, x), \\x -> x)
+    }
+    fn use_law(x: t(a)) -> t(a) {
+      const proof = LawfulMonad(t);
+      t::map(identity, x)
+    }
+  `);
+  const optimized = optimizeProgram(checked.program, { assumeRewrites: true });
+  assertEquals(findFn(optimized, "use_law")?.body.expr, { kind: "var", name: "x" });
+});
+
+Deno.test("lawful monad proof activates inherited applicative law rewrites", async () => {
+  const checked = await checkSource(`
+    type fn LawfulApplicative(t: type fn(a: type) -> type) -> type { t }
+    type fn LawfulMonad(t: type fn(a: type) -> type) -> type { t }
+    contract fn LawfulApplicative::apply_pure(
+      const T: type fn(a: type) -> type
+    ) -> rewrite {
+      const proof = LawfulApplicative(T);
+      @assume(\\(f, x) -> T::apply(T::pure(f), x), \\(f, x) -> T::map(f, x))
+    }
+    fn use_law(const f: fn(x: a) -> b, x: t(a)) -> t(b) {
+      const proof = LawfulMonad(t);
+      t::apply(t::pure(f), x)
+    }
+  `);
+  const optimized = optimizeProgram(checked.program, { assumeRewrites: true });
+  assertEquals(findFn(optimized, "use_law")?.body.expr, {
+    kind: "call",
+    callee: { kind: "var", name: "t::map" },
+    args: [{ kind: "var", name: "f" }, { kind: "var", name: "x" }],
+  });
+});
+
+Deno.test("lawful monad rewrites remove pure bind calls on both sides", async () => {
+  const checked = await checkSource(`
+    type fn LawfulMonad(t: type fn(a: type) -> type) -> type { t }
+    contract fn LawfulMonad::bind_pure_left(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = LawfulMonad(T);
+      @assume(\\(x, f) -> T::bind(T::pure(x), f), \\(x, f) -> f(x))
+    }
+    contract fn LawfulMonad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = LawfulMonad(T);
+      @assume(\\m -> T::bind(m, T::pure), \\m -> m)
+    }
+    fn left(x: a, const f: fn(x: a) -> t(b)) -> t(b) {
+      const proof = LawfulMonad(t);
+      t::bind(t::pure(x), f)
+    }
+    fn right(m: t(a)) -> t(a) {
+      const proof = LawfulMonad(t);
+      t::bind(m, t::pure)
+    }
+  `);
+  const optimized = optimizeProgram(checked.program, { assumeRewrites: true });
+  assertEquals(findFn(optimized, "left")?.body.expr, {
+    kind: "call",
+    callee: { kind: "var", name: "f" },
+    args: [{ kind: "var", name: "x" }],
+  });
+  assertEquals(findFn(optimized, "right")?.body.expr, { kind: "var", name: "m" });
+});
+
+Deno.test("lawful monoid rewrites remove empty append calls on both sides", async () => {
+  const checked = await checkSource(`
+    type fn Point() -> type { let Point = {x: i32}; struct(Point) }
+    type fn LawfulMonoid(t: type) -> type { t }
+    fn Point::empty() -> Point { Point {x: 0} }
+    fn Point::append(a: Point, b: Point) -> Point { Point {x: a.x + b.x} }
+    contract fn LawfulMonoid::append_empty_left(const T: type) -> rewrite {
+      const proof = LawfulMonoid(T);
+      @assume(\\x -> T::append(T::empty(), x), \\x -> x)
+    }
+    contract fn LawfulMonoid::append_empty_right(const T: type) -> rewrite {
+      const proof = LawfulMonoid(T);
+      @assume(\\x -> T::append(x, T::empty()), \\x -> x)
+    }
+    pub fn main(x: Point) -> Point {
+      const proof = LawfulMonoid(Point);
+      let left = Point::append(Point::empty(), x);
+      Point::append(left, Point::empty())
+    }
+  `);
+  const optimized = optimizeProgram(checked.program, { assumeRewrites: true });
+  assertEquals(countCalls(optimized).get("Point::append") ?? 0, 0);
+  const main = findFn(optimized, "main");
+  const left = main?.body.statements.find((stmt) => stmt.kind === "let" && stmt.name === "left");
+  assertEquals(left?.kind === "let" ? left.value : undefined, { kind: "var", name: "x" });
+  assertEquals(main?.body.expr, { kind: "var", name: "left" });
+});
+
+Deno.test("prelude lawful functor rewrite works through namespaced imports", async () => {
+  const checked = await checkSource(
+    `
+    const fun = @import("prelude.function");
+
+    fn use_law(x: t(a)) -> t(a) {
+      const proof = fun.LawfulFunctor(t);
+      t::map(fun.identity, x)
+    }
+    `,
+    { resolveModule: resolveProjectModule },
+  );
+  const optimized = optimizeProgram(checked.program, { assumeRewrites: true });
+  assertEquals(findFn(optimized, "use_law")?.body.expr, { kind: "var", name: "x" });
+});
+
 async function assertThrowsCompile(
   source: string,
   code: string,

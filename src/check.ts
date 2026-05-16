@@ -207,6 +207,8 @@ function checkProgramInternal(
   );
   let fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
   let functions = new Set(fnDecls.map((decl) => decl.name));
+  recordPhase("checkRewriteDecls", () => checkRewriteDecls(program, diagnostics));
+  recordPhase("checkRewriteTypeMisuse", () => checkRewriteTypeMisuse(program, diagnostics));
   recordPhase(
     "checkPrimitiveDecls",
     () => checkPrimitiveDecls(fnDecls, diagnostics, pluginRegistry),
@@ -441,7 +443,7 @@ function countProgramCallExpressions(program: Program): number {
     for (const child of exprChildValues(expr)) visit(child);
   };
   for (const decl of program.declarations) {
-    if (decl.kind === "fn") visit(decl.body);
+    if (decl.kind === "fn" || decl.kind === "contract") visit(decl.body);
     else if (decl.kind === "const" || decl.kind === "let") visit(decl.value);
   }
   return total;
@@ -481,6 +483,9 @@ function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]
     } else if (decl.kind === "let" || decl.kind === "const") {
       checkType(decl.type, "owned", decl);
       checkExpr(decl.value);
+    } else if (decl.kind === "contract") {
+      for (const param of decl.params) checkType(param.type, "param", param);
+      checkExpr(decl.body);
     } else {
       for (const stmt of decl.body.statements) checkType(renderTypeExpr(stmt.value), "owned", stmt);
       if (decl.body.expr) checkType(renderTypeExpr(decl.body.expr), "owned", decl);
@@ -553,6 +558,7 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
   };
   for (const decl of program.declarations) {
     if (decl.kind === "fn") decl.body = lowerExpr(decl.body) as BlockExpr;
+    else if (decl.kind === "contract") decl.body = lowerExpr(decl.body) as BlockExpr;
     else if (decl.kind === "let" || decl.kind === "const") decl.value = lowerExpr(decl.value);
   }
 }
@@ -570,7 +576,8 @@ function lowerDoExpression(
     });
     return { kind: "literal", literalKind: "number", value: "0", span: expr.span };
   }
-  const effect = renderTypeExpr(expr.strategy.effect);
+  const proofEffect = renderTypeExpr(expr.strategy.effect);
+  const effect = doRuntimeEffectName(expr.strategy.effect) ?? proofEffect;
   const strategy = expr.strategy.name;
   if (strategy !== "monad" && strategy !== "applicative") {
     diagnostics.push({
@@ -596,11 +603,36 @@ function lowerDoExpression(
         message: "@applicative do with multiple <- bindings requires function-valued effects",
         span: expr.span,
       });
-      return monadicDo(effect, loweredStatements, finalExpr);
+      return withDoStrategyProof(
+        expr.strategy.effect,
+        monadicDo(effect, loweredStatements, finalExpr),
+      );
     }
-    return applicativeDo(effect, loweredStatements, finalExpr);
+    return withDoStrategyProof(
+      expr.strategy.effect,
+      applicativeDo(effect, loweredStatements, finalExpr),
+    );
   }
-  return monadicDo(effect, loweredStatements, finalExpr);
+  return withDoStrategyProof(expr.strategy.effect, monadicDo(effect, loweredStatements, finalExpr));
+}
+
+function doRuntimeEffectName(effect: TypeExpr): string | undefined {
+  if (effect.kind !== "type_call" || effect.args.length !== 1) return undefined;
+  const [arg] = effect.args;
+  return arg ? renderTypeExpr(arg) : undefined;
+}
+
+function withDoStrategyProof(effect: TypeExpr, expr: Expr): Expr {
+  if (effect.kind !== "type_call" || effect.args.length !== 1) return expr;
+  return {
+    kind: "block",
+    statements: [{
+      kind: "proof_const",
+      name: "__do_strategy_proof",
+      value: effect,
+    }],
+    expr,
+  };
 }
 
 function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
@@ -760,6 +792,247 @@ function constEnvKey(env: Map<string, ConstValue>): string {
   return [...env].sort(([left], [right]) => left.localeCompare(right))
     .map(([name, value]) => `${name}=${constValueKey(value)}`)
     .join("\0");
+}
+
+function checkRewriteDecls(program: Program, diagnostics: Diagnostic[]) {
+  const knownNames = new Set(program.declarations.map((decl) => decl.name));
+  const functions = new Map(
+    program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn").map((decl) => [
+      decl.name,
+      decl,
+    ]),
+  );
+  const constructorTypes = new Map(
+    program.declarations.flatMap((decl) =>
+      decl.kind === "type" && decl.normalized?.kind === "product"
+        ? [[decl.normalized.constructor, decl] as const]
+        : []
+    ),
+  );
+  for (const decl of program.declarations) {
+    if (decl.kind !== "contract") continue;
+    for (const param of decl.params) {
+      if (!param.const) {
+        diagnostics.push(diagnosticAt(
+          "rewrite.param_must_be_const",
+          `contract fn rewrite parameter ${param.name} must be const`,
+          param,
+        ));
+      }
+    }
+    const assume = rewriteAssumeCall(decl.body.expr);
+    if (decl.body.statements.some((stmt) => stmt.kind !== "proof_const") || !assume) {
+      diagnostics.push(diagnosticAt(
+        "rewrite.body",
+        "contract fn ... -> rewrite body must end with @assume(lhs_template, rhs_template) and only const proof statements",
+        decl.body,
+      ));
+      continue;
+    }
+    if (assume.args.length !== 2) {
+      diagnostics.push(diagnosticAt(
+        "rewrite.assume_arity",
+        "@assume requires exactly two const-function templates",
+        assume,
+      ));
+      continue;
+    }
+    const [left, right] = assume.args;
+    if (left?.kind !== "const_fn" || right?.kind !== "const_fn") {
+      diagnostics.push(diagnosticAt(
+        "rewrite.assume_template",
+        "@assume arguments must be const-function templates",
+        assume,
+      ));
+      continue;
+    }
+    if (left.params.length !== right.params.length) {
+      diagnostics.push(diagnosticAt(
+        "rewrite.assume_template_arity",
+        "@assume templates must have the same arity",
+        assume,
+      ));
+      continue;
+    }
+    for (let index = 0; index < left.params.length; index++) {
+      if (left.params[index] !== right.params[index]) {
+        diagnostics.push(diagnosticAt(
+          "rewrite.assume_template_params",
+          "@assume template parameters must align by position",
+          assume,
+        ));
+        break;
+      }
+    }
+    checkRewriteTemplateMetavariables(left, right, knownNames, diagnostics, assume);
+    const leftType = inferRuntimeType(left.body, new Map(), functions, constructorTypes);
+    const rightType = inferRuntimeType(right.body, new Map(), functions, constructorTypes);
+    if (leftType && rightType && !rewriteResultTypesCompatible(leftType, rightType)) {
+      diagnostics.push(diagnosticAt(
+        "rewrite.assume_result_type",
+        `@assume templates must have compatible result types, got ${leftType} and ${rightType}`,
+        assume,
+      ));
+    }
+  }
+}
+
+function rewriteResultTypesCompatible(left: string, right: string): boolean {
+  if (left === right) return true;
+  const scalarTypes = new Set(["bool", "i32", "u32", "i64", "u64", "f32", "f64"]);
+  if (scalarTypes.has(left) || scalarTypes.has(right)) return false;
+  return runtimeValueTypeAssignable(left, right);
+}
+
+function rewriteAssumeCall(expr: Expr | undefined): Extract<Expr, { kind: "call" }> | undefined {
+  return expr?.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "@assume"
+    ? expr
+    : undefined;
+}
+
+function checkRewriteTemplateMetavariables(
+  left: Extract<Expr, { kind: "const_fn" }>,
+  right: Extract<Expr, { kind: "const_fn" }>,
+  knownNames: Set<string>,
+  diagnostics: Diagnostic[],
+  spanLike: { span?: Span; nameSpan?: Span },
+) {
+  const params = new Set(left.params);
+  const leftNames = rewriteTemplateFreeNames(left.body, params);
+  const rightNames = rewriteTemplateFreeNames(right.body, params);
+  for (const name of rightNames) {
+    if (leftNames.has(name) || knownNames.has(name) || name.includes(".") || name.includes("::")) {
+      continue;
+    }
+    diagnostics.push(diagnosticAt(
+      "rewrite.assume_rhs_unknown",
+      `@assume RHS references unknown template value ${name}`,
+      spanLike,
+    ));
+  }
+}
+
+function rewriteTemplateFreeNames(expr: Expr, params: Set<string>): Set<string> {
+  const names = new Set<string>();
+  const visit = (item: Expr | undefined) => {
+    if (!item) return;
+    switch (item.kind) {
+      case "var":
+        if (!params.has(item.name)) names.add(item.name);
+        return;
+      case "call":
+        visit(item.callee);
+        item.args.forEach(visit);
+        return;
+      case "const_fn": {
+        const scoped = new Set([...params, ...item.params]);
+        for (const name of rewriteTemplateFreeNames(item.body, scoped)) names.add(name);
+        return;
+      }
+      case "index":
+        visit(item.target);
+        visit(item.index);
+        return;
+      case "binary":
+        visit(item.left);
+        visit(item.right);
+        return;
+      case "pipe_bind":
+        visit(item.value);
+        visit(item.body);
+        return;
+      case "match":
+        visit(item.value);
+        item.arms.forEach((arm) => visit(arm.value));
+        return;
+      case "shape":
+      case "product_constructor":
+        item.slots.forEach((slot) => {
+          visit(slot.index);
+          visit(slot.value);
+        });
+        return;
+      case "static_for_slots":
+        visit(item.value);
+        if (item.source.kind === "range") {
+          visit(item.source.start);
+          visit(item.source.end);
+        } else {
+          visit(item.source.shape);
+        }
+        return;
+      case "field":
+        visit(item.value);
+        visit(item.key);
+        return;
+      case "range":
+        visit(item.start);
+        visit(item.end);
+        return;
+      case "block":
+      case "do":
+      case "literal":
+      case "placeholder":
+        return;
+    }
+  };
+  visit(expr);
+  return names;
+}
+
+function checkRewriteTypeMisuse(program: Program, diagnostics: Diagnostic[]) {
+  const checkTypeText = (
+    type: string | undefined,
+    spanLike: { span?: Span; nameSpan?: Span } | undefined,
+  ) => {
+    if (!type) return;
+    if (/\brewrite\b/.test(type)) {
+      diagnostics.push(diagnosticAt(
+        "rewrite.not_runtime_type",
+        "rewrite is not a runtime type; use contract fn ... -> rewrite",
+        spanLike,
+      ));
+    }
+  };
+  const checkBlock = (block: BlockExpr) => {
+    for (const stmt of block.statements) {
+      if (stmt.kind === "let") checkTypeText(stmt.type, stmt);
+      if (stmt.kind === "let" || stmt.kind === "destructure_let") checkExpr(stmt.value);
+    }
+    if (block.expr) checkExpr(block.expr);
+  };
+  const checkExpr = (expr: Expr) => {
+    if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "@assume") {
+      diagnostics.push(diagnosticAt(
+        "rewrite.assume_context",
+        "@assume is only valid inside a contract fn ... -> rewrite body",
+        expr,
+      ));
+    }
+    if (expr.kind === "block") {
+      checkBlock(expr);
+      return;
+    }
+    for (const child of exprChildValues(expr)) checkExpr(child);
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      checkTypeText(decl.returnType, decl);
+      for (const param of decl.params) checkTypeText(param.type, param);
+      checkBlock(decl.body);
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      checkTypeText(decl.type, decl);
+      checkExpr(decl.value);
+    } else if (decl.kind === "contract") {
+      for (const param of decl.params) checkTypeText(param.type, param);
+    } else if (decl.kind === "type" && decl.resultKind === "rewrite") {
+      diagnostics.push(diagnosticAt(
+        "rewrite.only_contract_fn",
+        "rewrite is only valid as a contract fn result kind",
+        decl,
+      ));
+    }
+  }
 }
 
 function checkPrimitiveDecls(
@@ -1156,6 +1429,8 @@ function lowerCollectorLiterals(
       decl.body = lowerExpr(decl.body, decl.returnType) as Extract<Expr, { kind: "block" }>;
     } else if (decl.kind === "let" || decl.kind === "const") {
       decl.value = lowerExpr(decl.value, decl.type);
+    } else if (decl.kind === "contract") {
+      decl.body = lowerExpr(decl.body, undefined) as Extract<Expr, { kind: "block" }>;
     }
   }
 }

@@ -42,7 +42,17 @@ export interface TextDocument {
 
 export interface IndexedSymbol {
   name: string;
-  kind: "fn" | "const" | "let" | "type" | "param" | "local" | "import" | "member" | "variant";
+  kind:
+    | "fn"
+    | "contract"
+    | "const"
+    | "let"
+    | "type"
+    | "param"
+    | "local"
+    | "import"
+    | "member"
+    | "variant";
   uri: string;
   range: Range;
   selectionRange: Range;
@@ -556,7 +566,7 @@ export function completionsAt(result: AnalysisResult, position: Position): Compl
 export function documentSymbols(result: AnalysisResult): DocumentSymbol[] {
   return result.symbols
     .filter((item) =>
-      ["fn", "const", "let", "type", "import", "member", "variant"].includes(item.kind)
+      ["fn", "contract", "const", "let", "type", "import", "member", "variant"].includes(item.kind)
     )
     .filter((item) => !item.container || item.kind === "member" || item.kind === "variant")
     .map((item) => ({
@@ -705,7 +715,9 @@ export function workspaceSymbols(results: AnalysisResult[], query = ""): SymbolI
   return results.flatMap((result) => result.symbols)
     .filter((symbol) => !needle || symbol.name.toLowerCase().includes(needle))
     .filter((symbol) =>
-      ["fn", "const", "let", "type", "import", "member", "variant"].includes(symbol.kind)
+      ["fn", "contract", "const", "let", "type", "import", "member", "variant"].includes(
+        symbol.kind,
+      )
     )
     .map((symbol) => ({
       name: symbol.name,
@@ -1061,7 +1073,7 @@ function symbolForDecl(
     detail: detailForDecl(decl, program, topLevelTypes),
   };
   const extra: IndexedSymbol[] = [];
-  if (decl.kind === "fn") {
+  if (decl.kind === "fn" || decl.kind === "contract") {
     const localTypes = new Map(topLevelTypes);
     for (const param of decl.params) localTypes.set(param.name, param.type);
     for (const param of decl.params) {
@@ -1581,6 +1593,11 @@ function detailForDecl(
   if (decl.kind === "type") {
     return `type fn ${decl.name}(${
       decl.params.map((param) => `${param.name}: ${param.kind}`).join(", ")
+    }) -> ${decl.resultKind}`;
+  }
+  if (decl.kind === "contract") {
+    return `contract fn ${decl.name}(${
+      decl.params.map((param) => `${param.name}: ${param.type}`).join(", ")
     }) -> ${decl.resultKind}`;
   }
   const type = decl.type ?? expressionTypeFromProgram(decl.value, program, localTypes);
@@ -2390,12 +2407,12 @@ function checkedAstHoverAt(
     }
   }
   for (const decl of result.program.declarations) {
-    if (decl.kind === "fn") {
+    if (decl.kind === "fn" || decl.kind === "contract") {
       add(
         decl.nameSpan ?? decl.span,
         decl.name,
         detailForDecl(decl, result.program),
-        "fn",
+        decl.kind,
         decl.doc,
       );
       for (const param of decl.params) {
@@ -3132,7 +3149,7 @@ function dedupeEdits(edits: TextEdit[]): TextEdit[] {
 }
 
 function semanticTokenType(kind: IndexedSymbol["kind"]): number {
-  return kind === "fn"
+  return kind === "fn" || kind === "contract"
     ? 0
     : kind === "type"
     ? 1
@@ -3205,7 +3222,7 @@ function findNameRange(
 }
 
 function completionKind(kind: IndexedSymbol["kind"]): number {
-  return kind === "fn"
+  return kind === "fn" || kind === "contract"
     ? 3
     : kind === "type"
     ? 7

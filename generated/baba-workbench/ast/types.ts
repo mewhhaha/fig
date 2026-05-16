@@ -6,148 +6,7 @@ export interface SyntaxNodeLike {
   childForFieldName?(name: string): SyntaxNodeLike | null;
 }
 
-export type AstNode =
-  | ProgramAstNode
-  | FieldNameAstNode
-  | DeclAstNode
-  | TypeFnDeclAstNode
-  | TypeBlockAstNode
-  | TypeBlockItemAstNode
-  | TypeLetDeclAstNode
-  | TypeExprAstNode
-  | TypeMatchAstNode
-  | TypeArmAstNode
-  | TypePatternAstNode
-  | TypeBinaryAstNode
-  | TypeCallAstNode
-  | TypePrimaryAstNode
-  | TypeOperatorDescriptorAstNode
-  | TypeOperatorTargetAstNode
-  | TypeAssociatedTailAstNode
-  | TypeQualifiedTailAstNode
-  | TypeBuilderNameAstNode
-  | StaticBuiltinAstNode
-  | TypeMemberAstNode
-  | TypeInlineMemberAstNode
-  | TypeExprArgsAstNode
-  | FnDeclAstNode
-  | FnTailAstNode
-  | BranchHintAstNode
-  | FnNameAstNode
-  | FnSigAstNode
-  | ConstDeclAstNode
-  | ImportBindingListAstNode
-  | ImportBindingItemsAstNode
-  | ImportBindingTailAstNode
-  | ConstValueAstNode
-  | TopLetDeclAstNode
-  | TopLetTailAstNode
-  | BlockAstNode
-  | BlockStmtAstNode
-  | BlockLetDeclAstNode
-  | BlockLetTailAstNode
-  | BlockProofConstDeclAstNode
-  | ExprAstNode
-  | DoExprAstNode
-  | DoStrategyAstNode
-  | DoBlockAstNode
-  | DoBlockItemAstNode
-  | DoBindStmtAstNode
-  | ConstFnAstNode
-  | ConstFnParamsAstNode
-  | ConstFnParamListAstNode
-  | PipeBindAstNode
-  | PipeBindAtomAstNode
-  | IfExprAstNode
-  | MatchExprAstNode
-  | ArmAstNode
-  | PipeBindNameAstNode
-  | BinaryAstNode
-  | CallAstNode
-  | PrimaryAstNode
-  | PlaceholderAstNode
-  | ProductConstructorTailAstNode
-  | ParenExprAstNode
-  | ShapeValueAstNode
-  | ShapeValueItemsAstNode
-  | RangeAstNode
-  | ShapeValueTailAstNode
-  | ShapeValueSlotAstNode
-  | PunnedShapeValueSlotAstNode
-  | ShapeValueSlotKeyAstNode
-  | SpreadSlotAstNode
-  | SlotPositionAstNode
-  | CollectionValueAstNode
-  | CollectionValueItemsAstNode
-  | CollectionValueTailAstNode
-  | CollectionSpreadSlotAstNode
-  | CollectionOverrideSlotAstNode
-  | CollectionExprAstNode
-  | CollectionPipeBindAstNode
-  | CollectionPipeBindAtomAstNode
-  | CollectionBinaryAstNode
-  | TupleValueAstNode
-  | TupleValueItemsAstNode
-  | TupleValueTailAstNode
-  | TupleSpreadSlotAstNode
-  | TupleOverrideSlotAstNode
-  | TupleValueRepeatAstNode
-  | PatternAstNode
-  | PatternIdentAstNode
-  | PatternArgsAstNode
-  | TuplePatternAstNode
-  | TuplePatternItemsAstNode
-  | TuplePatternTailAstNode
-  | ParamsAstNode
-  | ParamAstNode
-  | ParamTailAstNode
-  | ArgsAstNode
-  | TypeAstNode
-  | TypeUnionAstNode
-  | TypeAtomAstNode
-  | FnTypeAstNode
-  | TypeArgsAstNode
-  | TypeParamsDeclAstNode
-  | TypeParamDeclAstNode
-  | TypeParamKindAstNode
-  | TypeKindTailAstNode
-  | TypeConstructorTailAstNode
-  | TypeResultSigAstNode
-  | TypeResultKindAstNode
-  | TypeAnnAstNode
-  | ReturnSigAstNode
-  | EffectRowAstNode
-  | ShapeTypeAstNode
-  | ShapeTypeBodyAstNode
-  | ShapeTypeTailAstNode
-  | ShapeSlotAstNode
-  | ShapeSlotKeyAstNode
-  | ShapeSlotBodyAstNode
-  | TupleTypeAstNode
-  | TupleTypeBodyAstNode
-  | TupleTypeTailAstNode
-  | TupleTypeMoreAstNode
-  | TupleTypeRepeatAstNode
-  | TypeShapeAstNode
-  | TypeShapeBodyAstNode
-  | TypeShapeTailAstNode
-  | TypeShapeSlotAstNode
-  | TypeShapeSlotBodyAstNode
-  | TypeShapeAnonSlotBodyAstNode
-  | TypeTupleAstNode
-  | TypeTupleBodyAstNode
-  | TypeTupleTailAstNode
-  | TypeTupleMoreAstNode
-  | TypeTupleRepeatAstNode
-  | TypeNonFnExprAstNode
-  | TypeShapeRepeatAstNode
-  | TypeRepeatCountAstNode
-  | VisibilityAstNode
-  | LiteralAstNode
-  | BoolAstNode
-  | OpAstNode
-  | OpNoCollectionCloseAstNode
-  | TypeOpAstNode;
+export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeAssociatedTailAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | ContractFnDeclAstNode | ContractReturnSigAstNode | ContractResultKindAstNode | BranchHintAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ImportBindingListAstNode | ImportBindingItemsAstNode | ImportBindingTailAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | DoExprAstNode | DoStrategyAstNode | DoBlockAstNode | DoBlockItemAstNode | DoBindStmtAstNode | ConstFnAstNode | ConstFnParamsAstNode | ConstFnParamListAstNode | PipeBindAstNode | PipeBindAtomAstNode | IfExprAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | PunnedShapeValueSlotAstNode | ShapeValueSlotKeyAstNode | SpreadSlotAstNode | SlotPositionAstNode | CollectionValueAstNode | CollectionValueItemsAstNode | CollectionValueTailAstNode | CollectionSpreadSlotAstNode | CollectionOverrideSlotAstNode | CollectionExprAstNode | CollectionPipeBindAstNode | CollectionPipeBindAtomAstNode | CollectionBinaryAstNode | TupleValueAstNode | TupleValueItemsAstNode | TupleValueTailAstNode | TupleSpreadSlotAstNode | TupleOverrideSlotAstNode | TupleValueRepeatAstNode | PatternAstNode | PatternIdentAstNode | PatternArgsAstNode | TuplePatternAstNode | TuplePatternItemsAstNode | TuplePatternTailAstNode | ParamsAstNode | ParamAstNode | ConstTypeFnParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | TypeUnionAstNode | TypeAtomAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotKeyAstNode | ShapeSlotBodyAstNode | TupleTypeAstNode | TupleTypeBodyAstNode | TupleTypeTailAstNode | TupleTypeMoreAstNode | TupleTypeRepeatAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeTupleAstNode | TypeTupleBodyAstNode | TypeTupleTailAstNode | TypeTupleMoreAstNode | TypeTupleRepeatAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | TypeRepeatCountAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | OpNoCollectionCloseAstNode | TypeOpAstNode;
 
 export interface ProgramAstNode {
   kind: "Program";
@@ -320,6 +179,27 @@ export interface FnDeclAstNode {
 export interface FnTailAstNode {
   kind: "FnTail";
   type: "FnTail";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ContractFnDeclAstNode {
+  kind: "ContractFnDecl";
+  type: "ContractFnDecl";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ContractReturnSigAstNode {
+  kind: "ContractReturnSig";
+  type: "ContractReturnSig";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ContractResultKindAstNode {
+  kind: "ContractResultKind";
+  type: "ContractResultKind";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -796,6 +676,13 @@ export interface ParamsAstNode {
 export interface ParamAstNode {
   kind: "Param";
   type: "Param";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ConstTypeFnParamAstNode {
+  kind: "ConstTypeFnParam";
+  type: "ConstTypeFnParam";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }

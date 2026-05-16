@@ -3,10 +3,12 @@ import type {
   Declaration,
   Expr,
   FnDecl,
+  Param,
   ParamPattern,
   Program,
   Statement,
   StaticForSource,
+  TypeExpr,
 } from "./core_ast.ts";
 import { patternBindingNames, patternBindsName } from "./patterns.ts";
 import {
@@ -17,6 +19,7 @@ import {
   renderRefinedI32Domain,
   scalarFactsFromI32Range,
 } from "./refined_scalar.ts";
+import { type CompileTraceSink, traceInstant } from "./trace.ts";
 
 export type OptMode = "debug" | "release";
 
@@ -55,6 +58,8 @@ export interface OptimizeProfile {
 export interface OptimizeOptions {
   optMode?: OptMode;
   profile?: OptimizeProfileName | OptimizeProfile;
+  assumeRewrites?: boolean;
+  trace?: CompileTraceSink;
 }
 
 interface OptimizerConfig {
@@ -408,6 +413,7 @@ export function optimizeProgram(program: Program, options: OptimizeOptions = {})
   if (config.rewriteUnusedPrivateParams && lowerTailRecurrenceClauseGroups(optimized, config)) {
     runOptimizePasses(optimized, config);
   }
+  if (options.assumeRewrites) applyAssumeRewrites(optimized, options);
   if (config.rewriteUnusedPrivateParams) rewriteUnusedPrivateParams(optimized);
   return optimized;
 }
@@ -443,6 +449,593 @@ function resolveOptimizeProfile(options: OptimizeOptions = {}): OptimizeProfile 
   return options.optMode === "release"
     ? OPTIMIZE_PROFILES.release_balanced
     : OPTIMIZE_PROFILES.debug;
+}
+
+interface RewriteTemplate {
+  params: string[];
+  body: Expr;
+}
+
+interface RewriteFact {
+  source: string;
+  owner?: string;
+  generic?: {
+    contract: string;
+    typeParam: string;
+  };
+  left: RewriteTemplate;
+  right: RewriteTemplate;
+}
+
+interface RewriteApplyContext {
+  trace?: OptimizeOptions["trace"];
+  target?: string;
+}
+
+function applyAssumeRewrites(program: Program, options: OptimizeOptions): Program {
+  const facts = collectRewriteFacts(program);
+  if (!facts.length) return program;
+  program.declarations = program.declarations.map((decl) => {
+    if (decl.kind === "fn") {
+      return {
+        ...decl,
+        body: assumeRewriteBlock(decl.body, facts, decl.params, {
+          trace: options.trace,
+          target: decl.name,
+        }),
+      };
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      return {
+        ...decl,
+        value: assumeRewriteExpr(decl.value, facts, {
+          trace: options.trace,
+          target: decl.name,
+        }),
+      };
+    }
+    return decl;
+  });
+  return program;
+}
+
+function collectRewriteFacts(program: Program): RewriteFact[] {
+  return program.declarations.flatMap((decl): RewriteFact[] => {
+    if (decl.kind !== "contract" || decl.resultKind !== "rewrite") return [];
+    const assume = decl.body.expr;
+    if (
+      assume?.kind !== "call" || assume.callee.kind !== "var" || assume.callee.name !== "@assume"
+    ) {
+      return [];
+    }
+    const [left, right] = assume.args;
+    if (
+      left?.kind !== "const_fn" || right?.kind !== "const_fn" ||
+      left.params.length !== right.params.length
+    ) return [];
+    const generic = genericRewriteBinding(decl);
+    return [{
+      source: decl.name,
+      ...(decl.memberOf ? { owner: decl.memberOf.owner } : {}),
+      ...(generic ? { generic } : {}),
+      left: { params: left.params, body: left.body },
+      right: { params: right.params, body: right.body },
+    }];
+  });
+}
+
+function genericRewriteBinding(
+  decl: Extract<Program["declarations"][number], { kind: "contract"; resultKind: "rewrite" }>,
+): RewriteFact["generic"] | undefined {
+  if (decl.params.length !== 1) return undefined;
+  const typeParam = decl.params[0]?.name;
+  if (!typeParam) return undefined;
+  for (const stmt of decl.body.statements) {
+    if (stmt.kind !== "proof_const") continue;
+    const proof = typeCallParts(stmt.value);
+    if (proof?.args.length === 1 && proof.args[0] === typeParam) {
+      return { contract: proof.callee, typeParam };
+    }
+  }
+  return undefined;
+}
+
+function typeCallParts(expr: TypeExpr): { callee: string; args: string[] } | undefined {
+  if (expr.kind !== "type_call" || expr.callee.kind !== "type_ref") return undefined;
+  const args = expr.args.flatMap(typeExprKey);
+  return args.length === expr.args.length ? { callee: expr.callee.name, args } : undefined;
+}
+
+function typeExprKey(expr: TypeExpr): string[] {
+  switch (expr.kind) {
+    case "type_ref":
+      return [expr.name];
+    case "type_call": {
+      const callee = typeExprKey(expr.callee)[0];
+      const args = expr.args.flatMap(typeExprKey);
+      return callee && args.length === expr.args.length ? [`${callee}(${args.join(", ")})`] : [];
+    }
+    default:
+      return [];
+  }
+}
+
+function assumeRewriteBlock(
+  block: BlockExpr,
+  facts: RewriteFact[],
+  params: Param[] = [],
+  context: RewriteApplyContext = {},
+): BlockExpr {
+  const activeFacts = instantiateGenericRewriteFacts(block, facts, params);
+  return {
+    ...block,
+    statements: block.statements.map((stmt) =>
+      stmt.kind === "let" || stmt.kind === "destructure_let"
+        ? { ...stmt, value: assumeRewriteExpr(stmt.value, activeFacts, context) } as Statement
+        : stmt
+    ),
+    expr: block.expr ? assumeRewriteExpr(block.expr, activeFacts, context) : undefined,
+  };
+}
+
+function instantiateGenericRewriteFacts(
+  block: BlockExpr,
+  facts: RewriteFact[],
+  params: Param[],
+): RewriteFact[] {
+  const instantiated: RewriteFact[] = [];
+  for (const param of params) {
+    if (!param.const || !param.type) continue;
+    const proof = proofTypeParts(param.type);
+    if (!proof || proof.args.length !== 1) continue;
+    instantiateProofRewriteFacts(facts, proof, instantiated);
+  }
+  for (const stmt of block.statements) {
+    if (stmt.kind !== "proof_const") continue;
+    const proof = typeCallParts(stmt.value);
+    if (!proof || proof.args.length !== 1) continue;
+    instantiateProofRewriteFacts(facts, proof, instantiated);
+  }
+  return rewriteFactsWithInstantiations(facts, instantiated);
+}
+
+function proofTypeParts(source: string): { callee: string; args: string[] } | undefined {
+  const trimmed = source.trim();
+  const open = trimmed.indexOf("(");
+  if (open < 0 || !trimmed.endsWith(")")) return undefined;
+  const callee = trimmed.slice(0, open).trim();
+  const inner = trimmed.slice(open + 1, -1).trim();
+  if (!callee || !inner) return undefined;
+  return { callee, args: [inner] };
+}
+
+function instantiateProofRewriteFacts(
+  facts: RewriteFact[],
+  proof: { callee: string; args: string[] },
+  instantiated: RewriteFact[],
+) {
+  const contracts = impliedContracts(proof.callee);
+  for (const fact of facts) {
+    if (!fact.generic || !contracts.has(contractBaseName(fact.generic.contract))) continue;
+    instantiated.push(instantiateGenericRewriteFact(fact, proof.args[0]!));
+  }
+}
+
+function rewriteFactsWithInstantiations(
+  facts: RewriteFact[],
+  instantiated: RewriteFact[],
+): RewriteFact[] {
+  return instantiated.length ? [...facts.filter((fact) => !fact.generic), ...instantiated] : facts;
+}
+
+function instantiateGenericRewriteFactsFromProof(
+  facts: RewriteFact[],
+  proof: { callee: string; args: string[] } | undefined,
+): RewriteFact[] {
+  if (!proof || proof.args.length !== 1) return facts;
+  const instantiated: RewriteFact[] = [];
+  instantiateProofRewriteFacts(facts, proof, instantiated);
+  return rewriteFactsWithInstantiations(facts, instantiated);
+}
+
+function impliedContracts(contract: string): Set<string> {
+  const base = contractBaseName(contract);
+  const result = new Set([base]);
+  const visit = (name: string) => {
+    for (const implied of LAWFUL_CONTRACT_IMPLICATIONS.get(name) ?? []) {
+      if (result.has(implied)) continue;
+      result.add(implied);
+      visit(implied);
+    }
+  };
+  visit(base);
+  return result;
+}
+
+function contractBaseName(name: string): string {
+  return name.split(".").at(-1) ?? name;
+}
+
+const LAWFUL_CONTRACT_IMPLICATIONS = new Map<string, string[]>([
+  ["LawfulMonad", ["LawfulApplicative"]],
+  ["LawfulApplicative", ["LawfulFunctor"]],
+  ["LawfulMonoid", ["LawfulSemigroup"]],
+]);
+
+function instantiateGenericRewriteFact(fact: RewriteFact, concrete: string): RewriteFact {
+  const typeParam = fact.generic!.typeParam;
+  return {
+    source: `${fact.source}<${concrete}>`,
+    owner: concrete,
+    left: {
+      params: fact.left.params,
+      body: substituteTypeConstructorRefs(fact.left.body, typeParam, concrete),
+    },
+    right: {
+      params: fact.right.params,
+      body: substituteTypeConstructorRefs(fact.right.body, typeParam, concrete),
+    },
+  };
+}
+
+function substituteTypeConstructorRefs(expr: Expr, typeParam: string, concrete: string): Expr {
+  if (expr.kind === "var") {
+    return {
+      ...expr,
+      name: expr.name === typeParam
+        ? concrete
+        : expr.name.startsWith(`${typeParam}::`)
+        ? `${concrete}${expr.name.slice(typeParam.length)}`
+        : expr.name.startsWith(`${typeParam}.`)
+        ? `${concrete}${expr.name.slice(typeParam.length)}`
+        : expr.name,
+    };
+  }
+  switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: substituteTypeConstructorRefs(expr.body, typeParam, concrete) };
+    case "call":
+      return {
+        ...expr,
+        callee: substituteTypeConstructorRefs(expr.callee, typeParam, concrete),
+        args: expr.args.map((arg) => substituteTypeConstructorRefs(arg, typeParam, concrete)),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: substituteTypeConstructorRefs(expr.target, typeParam, concrete),
+        index: substituteTypeConstructorRefs(expr.index, typeParam, concrete),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: substituteTypeConstructorRefs(expr.left, typeParam, concrete),
+        right: substituteTypeConstructorRefs(expr.right, typeParam, concrete),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: substituteTypeConstructorRefs(expr.value, typeParam, concrete),
+        body: substituteTypeConstructorRefs(expr.body, typeParam, concrete),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: substituteTypeConstructorRefs(expr.value, typeParam, concrete),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: substituteTypeConstructorRefs(arm.value, typeParam, concrete),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          value: substituteTypeConstructorRefs(slot.value, typeParam, concrete),
+        })),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: expr.source.kind === "range"
+          ? {
+            ...expr.source,
+            start: substituteTypeConstructorRefs(expr.source.start, typeParam, concrete),
+            end: substituteTypeConstructorRefs(expr.source.end, typeParam, concrete),
+          }
+          : {
+            ...expr.source,
+            shape: substituteTypeConstructorRefs(expr.source.shape, typeParam, concrete),
+          },
+        value: substituteTypeConstructorRefs(expr.value, typeParam, concrete),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: substituteTypeConstructorRefs(expr.value, typeParam, concrete),
+        key: substituteTypeConstructorRefs(expr.key, typeParam, concrete),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: substituteTypeConstructorRefs(expr.start, typeParam, concrete),
+        end: substituteTypeConstructorRefs(expr.end, typeParam, concrete),
+      };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? {
+              ...stmt,
+              value: substituteTypeConstructorRefs(stmt.value, typeParam, concrete),
+            } as Statement
+            : stmt
+        ),
+        expr: expr.expr ? substituteTypeConstructorRefs(expr.expr, typeParam, concrete) : undefined,
+      };
+    case "do":
+    case "literal":
+    case "placeholder":
+      return expr;
+  }
+}
+
+function assumeRewriteExpr(
+  expr: Expr,
+  facts: RewriteFact[],
+  context: RewriteApplyContext = {},
+): Expr {
+  const rewrittenChildren = assumeRewriteExprChildren(expr, facts, context);
+  for (const fact of facts) {
+    const bindings = new Map<string, Expr>();
+    if (
+      matchRewriteTemplate(fact.left.body, rewrittenChildren, new Set(fact.left.params), bindings)
+    ) {
+      traceInstant(context.trace, "rewrite.assume", {
+        action: "assume_rewrite",
+        target: context.target,
+        reason: fact.source,
+      });
+      return assumeRewriteExpr(
+        substituteRewriteTemplate(fact.right.body, bindings),
+        facts,
+        context,
+      );
+    }
+  }
+  return rewrittenChildren;
+}
+
+function assumeRewriteExprChildren(
+  expr: Expr,
+  facts: RewriteFact[],
+  context: RewriteApplyContext,
+): Expr {
+  switch (expr.kind) {
+    case "do": {
+      const scopedFacts = instantiateGenericRewriteFactsFromProof(
+        facts,
+        typeCallParts(expr.strategy.effect),
+      );
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? { ...stmt, value: assumeRewriteExpr(stmt.value, scopedFacts, context) }
+            : stmt
+        ),
+        expr: expr.expr ? assumeRewriteExpr(expr.expr, scopedFacts, context) : undefined,
+      };
+    }
+    case "const_fn":
+      return { ...expr, body: assumeRewriteExpr(expr.body, facts, context) };
+    case "call":
+      return {
+        ...expr,
+        callee: assumeRewriteExpr(expr.callee, facts, context),
+        args: expr.args.map((arg) => assumeRewriteExpr(arg, facts, context)),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: assumeRewriteExpr(expr.target, facts, context),
+        index: assumeRewriteExpr(expr.index, facts, context),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: assumeRewriteExpr(expr.left, facts, context),
+        right: assumeRewriteExpr(expr.right, facts, context),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: assumeRewriteExpr(expr.value, facts, context),
+        body: assumeRewriteExpr(expr.body, facts, context),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: assumeRewriteExpr(expr.value, facts, context),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: assumeRewriteExpr(arm.value, facts, context),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          value: assumeRewriteExpr(slot.value, facts, context),
+        })),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: expr.source.kind === "range"
+          ? {
+            ...expr.source,
+            start: assumeRewriteExpr(expr.source.start, facts, context),
+            end: assumeRewriteExpr(expr.source.end, facts, context),
+          }
+          : { ...expr.source, shape: assumeRewriteExpr(expr.source.shape, facts, context) },
+        value: assumeRewriteExpr(expr.value, facts, context),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: assumeRewriteExpr(expr.value, facts, context),
+        key: assumeRewriteExpr(expr.key, facts, context),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: assumeRewriteExpr(expr.start, facts, context),
+        end: assumeRewriteExpr(expr.end, facts, context),
+      };
+    case "block":
+      return assumeRewriteBlock(expr, facts, [], context);
+    case "literal":
+    case "placeholder":
+    case "var":
+      return expr;
+  }
+}
+
+function matchRewriteTemplate(
+  pattern: Expr,
+  actual: Expr,
+  params: Set<string>,
+  bindings: Map<string, Expr>,
+): boolean {
+  if (pattern.kind === "var" && params.has(pattern.name)) {
+    const existing = bindings.get(pattern.name);
+    if (!existing) {
+      bindings.set(pattern.name, actual);
+      return true;
+    }
+    return stableExprKey(existing) === stableExprKey(actual);
+  }
+  if (pattern.kind !== actual.kind) return false;
+  switch (pattern.kind) {
+    case "literal":
+      return actual.kind === "literal" && pattern.value === actual.value &&
+        pattern.literalKind === actual.literalKind;
+    case "var":
+      return actual.kind === "var" && pattern.name === actual.name;
+    case "placeholder":
+      return actual.kind === "placeholder";
+    case "call":
+      return actual.kind === "call" &&
+        matchRewriteTemplate(pattern.callee, actual.callee, params, bindings) &&
+        pattern.args.length === actual.args.length &&
+        pattern.args.every((arg, index) =>
+          matchRewriteTemplate(arg, actual.args[index]!, params, bindings)
+        );
+    case "index":
+      return actual.kind === "index" &&
+        matchRewriteTemplate(pattern.target, actual.target, params, bindings) &&
+        matchRewriteTemplate(pattern.index, actual.index, params, bindings);
+    case "binary":
+      return actual.kind === "binary" && pattern.op === actual.op &&
+        matchRewriteTemplate(pattern.left, actual.left, params, bindings) &&
+        matchRewriteTemplate(pattern.right, actual.right, params, bindings);
+    default:
+      return stableExprKey(pattern) === stableExprKey(actual);
+  }
+}
+
+function substituteRewriteTemplate(expr: Expr, bindings: Map<string, Expr>): Expr {
+  if (expr.kind === "var") return structuredClone(bindings.get(expr.name) ?? expr) as Expr;
+  switch (expr.kind) {
+    case "const_fn":
+      return { ...expr, body: substituteRewriteTemplate(expr.body, bindings) };
+    case "call":
+      return {
+        ...expr,
+        callee: substituteRewriteTemplate(expr.callee, bindings),
+        args: expr.args.map((arg) => substituteRewriteTemplate(arg, bindings)),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: substituteRewriteTemplate(expr.target, bindings),
+        index: substituteRewriteTemplate(expr.index, bindings),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: substituteRewriteTemplate(expr.left, bindings),
+        right: substituteRewriteTemplate(expr.right, bindings),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: substituteRewriteTemplate(expr.value, bindings),
+        body: substituteRewriteTemplate(expr.body, bindings),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: substituteRewriteTemplate(expr.value, bindings),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: substituteRewriteTemplate(arm.value, bindings),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          value: substituteRewriteTemplate(slot.value, bindings),
+        })),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: expr.source.kind === "range"
+          ? {
+            ...expr.source,
+            start: substituteRewriteTemplate(expr.source.start, bindings),
+            end: substituteRewriteTemplate(expr.source.end, bindings),
+          }
+          : { ...expr.source, shape: substituteRewriteTemplate(expr.source.shape, bindings) },
+        value: substituteRewriteTemplate(expr.value, bindings),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: substituteRewriteTemplate(expr.value, bindings),
+        key: substituteRewriteTemplate(expr.key, bindings),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: substituteRewriteTemplate(expr.start, bindings),
+        end: substituteRewriteTemplate(expr.end, bindings),
+      };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map((stmt) =>
+          stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? { ...stmt, value: substituteRewriteTemplate(stmt.value, bindings) } as Statement
+            : stmt
+        ),
+        expr: expr.expr ? substituteRewriteTemplate(expr.expr, bindings) : undefined,
+      };
+    case "literal":
+    case "placeholder":
+    case "do":
+      return expr;
+  }
 }
 
 function functionMap(program: Program): Map<string, FnDecl> {

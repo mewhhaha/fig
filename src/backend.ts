@@ -215,6 +215,7 @@ export interface BackendOptions extends CompilerPluginOptions {
   optMode?: OptMode;
   profile?: OptimizeProfileName | OptimizeProfile;
   branchHints?: boolean;
+  assumeRewrites?: boolean;
 }
 
 const EXPLICIT_MEMORY: BackendMemory = {
@@ -322,7 +323,11 @@ function backendFixedArrayPlanning(
   const optMode = options.optMode ?? "debug";
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
-  const optimized = optimizeProgram(program, { optMode, profile: options.profile });
+  const optimized = optimizeProgram(program, {
+    optMode,
+    profile: options.profile,
+    assumeRewrites: options.assumeRewrites,
+  });
   const layouts = createLayoutEnv(optimized);
   const imports = optimized.imports.map((item) => importAsFn(item));
   const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
@@ -402,7 +407,11 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
   const optMode = options.optMode ?? "debug";
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
-  const optimized = optimizeProgram(program, { optMode, profile: options.profile });
+  const optimized = optimizeProgram(program, {
+    optMode,
+    profile: options.profile,
+    assumeRewrites: options.assumeRewrites,
+  });
   const layouts = createLayoutEnv(optimized);
   const imports = optimized.imports.map((item) => importAsFn(item));
   const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
