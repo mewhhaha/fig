@@ -84,6 +84,12 @@ interface Row {
   compile_import_ms?: string;
   compile_check_ms?: string;
   compile_backend_ms?: string;
+  compile_optimize_ms?: string;
+  compile_backend_layout_ms?: string;
+  compile_backend_lower_ms?: string;
+  compile_backend_cleanup_ms?: string;
+  compile_total_with_wat_ms?: string;
+  compile_total_wasm_only_ms?: string;
   compile_total_ms?: string;
   wat_bytes?: number;
   wasm_bytes?: number;
@@ -684,6 +690,12 @@ function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
     "compile_import_ms",
     "compile_check_ms",
     "compile_backend_ms",
+    "compile_optimize_ms",
+    "compile_backend_layout_ms",
+    "compile_backend_lower_ms",
+    "compile_backend_cleanup_ms",
+    "compile_total_with_wat_ms",
+    "compile_total_wasm_only_ms",
     "compile_total_ms",
     "wat_bytes",
     "wasm_bytes",
@@ -739,6 +751,10 @@ async function benchFig(scenario: FigScenario, calls: number): Promise<Row> {
       compileImportMs: artifact.timings.importMs,
       compileCheckMs: artifact.timings.checkMs,
       compileBackendMs: artifact.timings.backendMs,
+      compileOptimizeMs: artifact.timings.optimizeMs,
+      compileBackendLayoutMs: artifact.timings.backendLayoutMs,
+      compileBackendLowerMs: artifact.timings.backendLowerMs,
+      compileBackendCleanupMs: artifact.timings.backendCleanupMs,
       compileWatMs: artifact.timings.watMs,
       compileWasmMs: artifact.timings.wasmMs,
     },
@@ -803,6 +819,10 @@ function row(
     compileImportMs: number;
     compileCheckMs: number;
     compileBackendMs: number;
+    compileOptimizeMs: number;
+    compileBackendLayoutMs: number;
+    compileBackendLowerMs: number;
+    compileBackendCleanupMs: number;
     compileWatMs: number;
     compileWasmMs: number;
   },
@@ -829,8 +849,20 @@ function row(
         compile_import_ms: compile.compileImportMs.toFixed(3),
         compile_check_ms: compile.compileCheckMs.toFixed(3),
         compile_backend_ms: compile.compileBackendMs.toFixed(3),
+        compile_optimize_ms: compile.compileOptimizeMs.toFixed(3),
+        compile_backend_layout_ms: compile.compileBackendLayoutMs.toFixed(3),
+        compile_backend_lower_ms: compile.compileBackendLowerMs.toFixed(3),
+        compile_backend_cleanup_ms: compile.compileBackendCleanupMs.toFixed(3),
         compile_wat_ms: compile.compileWatMs.toFixed(3),
         compile_wasm_ms: compile.compileWasmMs.toFixed(3),
+        compile_total_with_wat_ms: (
+          compile.compileParseMs + compile.compileImportMs + compile.compileCheckMs +
+          compile.compileBackendMs + compile.compileWatMs + compile.compileWasmMs
+        ).toFixed(3),
+        compile_total_wasm_only_ms: (
+          compile.compileParseMs + compile.compileImportMs + compile.compileCheckMs +
+          compile.compileBackendMs + compile.compileWasmMs
+        ).toFixed(3),
         compile_total_ms: (
           compile.compileParseMs + compile.compileImportMs + compile.compileCheckMs +
           compile.compileBackendMs + compile.compileWatMs + compile.compileWasmMs

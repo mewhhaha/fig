@@ -1,5 +1,6 @@
 import {
   compileArtifactsFromSource,
+  type CompileTraceEvent,
   createCompileCache,
   OPTIMIZE_PROFILES,
   type OptimizeProfileName,
@@ -521,16 +522,29 @@ for (const scenario of scenarios) {
   let compileImportMs = 0;
   let compileCheckMs = 0;
   let compileBackendMs = 0;
+  let compileOptimizeMs = 0;
+  let compileBackendLayoutMs = 0;
+  let compileBackendLowerMs = 0;
+  let compileBackendCleanupMs = 0;
   let compileWatMs = 0;
   let compileWasmMs = 0;
+  let compileTrace: CompileTraceEvent[] = [];
   try {
-    const artifact = await compileArtifactsFromSource(scenario.source, compileOptions);
+    compileTrace = [];
+    const artifact = await compileArtifactsFromSource(scenario.source, {
+      ...compileOptions,
+      compileTrace,
+    });
     wat = artifact.wat;
     wasm = artifact.wasm;
     compileParseMs = artifact.timings.parseMs;
     compileImportMs = artifact.timings.importMs;
     compileCheckMs = artifact.timings.checkMs;
     compileBackendMs = artifact.timings.backendMs;
+    compileOptimizeMs = artifact.timings.optimizeMs;
+    compileBackendLayoutMs = artifact.timings.backendLayoutMs;
+    compileBackendLowerMs = artifact.timings.backendLowerMs;
+    compileBackendCleanupMs = artifact.timings.backendCleanupMs;
     compileWatMs = artifact.timings.watMs;
     compileWasmMs = artifact.timings.wasmMs;
   } catch (error) {
@@ -558,8 +572,22 @@ for (const scenario of scenarios) {
     compile_import_ms: compileImportMs.toFixed(3),
     compile_check_ms: compileCheckMs.toFixed(3),
     compile_backend_ms: compileBackendMs.toFixed(3),
+    compile_optimize_ms: compileOptimizeMs.toFixed(3),
+    compile_backend_layout_ms: compileBackendLayoutMs.toFixed(3),
+    compile_backend_lower_ms: compileBackendLowerMs.toFixed(3),
+    compile_backend_cleanup_ms: compileBackendCleanupMs.toFixed(3),
+    slowest_optimizer_phase: slowestOptimizerPhase(compileTrace),
+    optimizer_passes: optimizerPasses(compileTrace),
+    optimizer_touched_functions: optimizerTouchedFunctions(compileTrace),
     compile_wat_ms: compileWatMs.toFixed(3),
     compile_wasm_ms: compileWasmMs.toFixed(3),
+    compile_total_with_wat_ms: (
+      compileParseMs + compileImportMs + compileCheckMs + compileBackendMs + compileWatMs +
+      compileWasmMs
+    ).toFixed(3),
+    compile_total_wasm_only_ms: (
+      compileParseMs + compileImportMs + compileCheckMs + compileBackendMs + compileWasmMs
+    ).toFixed(3),
     compile_total_ms: (
       compileParseMs + compileImportMs + compileCheckMs + compileBackendMs + compileWatMs +
       compileWasmMs
@@ -735,6 +763,31 @@ function recursiveCallCount(wat: string): number {
     recursive += count(body, new RegExp(`\\breturn_call \\$${escapeRegExp(name)}\\b`, "g"));
   }
   return recursive;
+}
+
+function slowestOptimizerPhase(trace: CompileTraceEvent[]): string {
+  const phase = trace
+    .filter((event) => event.name.startsWith("opt."))
+    .toSorted((left, right) => right.durationMs - left.durationMs)[0];
+  return phase ? `${phase.name}:${phase.durationMs.toFixed(3)}ms` : "";
+}
+
+function optimizerPasses(trace: CompileTraceEvent[]): number {
+  const passes = new Set<number>();
+  for (const event of trace) {
+    const pass = event.counters?.pass;
+    if (typeof pass === "number") passes.add(pass);
+  }
+  return passes.size;
+}
+
+function optimizerTouchedFunctions(trace: CompileTraceEvent[]): number {
+  return trace
+    .filter((event) => event.name.endsWith(".optimizeDecls"))
+    .reduce((max, event) => {
+      const count = event.counters?.changedFunctions;
+      return typeof count === "number" ? Math.max(max, count) : max;
+    }, 0);
 }
 
 function escapeRegExp(value: string): string {

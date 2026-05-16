@@ -24,39 +24,62 @@ Run:
 
 ```bash
 deno run --allow-read scripts/bench_memory_model.ts 100000
-deno run --allow-read scripts/bench_const_params.ts --sizes=10,100,500,1000 --iterations=25
-deno run --allow-read scripts/bench_const_params.ts --sizes=200 --iterations=3
+deno run --allow-read scripts/bench_range_fold_compile.ts
+deno run --allow-read scripts/bench_const_params.ts --sizes=10,100,200,500,1000 --iterations=3
 deno run --allow-read scripts/bench_tail_recursion.ts
 deno run --allow-read scripts/bench_matmul_simd.ts 100000
 ```
 
 The memory-model benchmark completed and passed all size/shape gates. The run uses one shared
-compile cache across scenarios for parsed/resolved source imports. Compile phase columns come from
-one parsed/imported/checked program; backend lowering runs once, then WAT and Wasm are rendered and
-encoded from the same lowered backend module. Selected rows:
+compile cache across scenarios for parsed source imports, keyed by module source text so changed
+module contents do not reuse stale parses. Aliased and destructured source imports are pruned before
+qualification when local references or explicit bindings identify a smaller imported root set.
+Compile phase columns come from one parsed/imported/checked program; backend lowering runs once,
+then WAT and Wasm are rendered and encoded from the same lowered backend module. Backend timing is
+also split into release optimization, backend layout/planning, function lowering, and backend
+cleanup. The benchmark output also reports `compile_total_with_wat_ms` and
+`compile_total_wasm_only_ms`; the selected table's `Total ms` column is the WAT-including total used
+for shape-gated benchmark runs. Selected rows:
 
-| Scenario                   |  Calls |  ns/call | Parse ms | Import ms | Check ms | Backend ms | WAT ms | Wasm ms | Total ms | WAT bytes | Wasm bytes | Loops | Recursive calls | SIMD ops |
-| -------------------------- | -----: | -------: | -------: | --------: | -------: | ---------: | -----: | ------: | -------: | --------: | ---------: | ----: | --------------: | -------: |
-| `scalar_reuse_nway`        | 100000 |     34.8 |    3.032 |     0.573 |    8.290 |      6.807 |  0.245 |   0.451 |   19.397 |       151 |         44 |     0 |               0 |        0 |
-| `tail_product_loop_1k`     |   5000 |    289.5 |    1.015 |     0.111 |    1.094 |      6.399 |  0.088 |   0.131 |    8.838 |      1269 |        109 |     1 |               0 |        0 |
-| `inline_array_builder_map` |  25000 |     21.7 |    0.912 |    36.243 |    9.663 |     20.863 |  0.015 |   0.064 |   67.762 |       183 |         47 |     0 |               0 |        0 |
-| `compact_filter_collect`   |  50000 |     49.5 |    0.756 |    77.669 |    6.833 |    112.505 |  0.594 |   0.738 |  199.095 |     22856 |       1731 |     2 |               0 |        0 |
-| `fixed_collection_update`  |  25000 |     14.1 |    0.393 |     5.537 |    2.412 |      5.429 |  0.013 |   0.029 |   13.812 |        91 |         38 |     0 |               0 |        0 |
-| `path_grid_score_16`       |  12500 |    181.4 |    0.361 |     0.051 |    0.313 |      2.146 |  0.034 |   0.077 |    2.982 |      1227 |        113 |     1 |               0 |        0 |
-| `range_fold_1k`            |   5000 |    257.8 |    0.239 |     1.752 |    0.868 |      4.694 |  0.026 |   0.041 |    7.619 |      1265 |        116 |     1 |               0 |        0 |
-| `fannkuch_redux_7`         |    100 | 106803.1 |    4.226 |     5.140 |    3.306 |     27.140 |  0.231 |   0.349 |   40.391 |     21989 |       1146 |     5 |               0 |        0 |
-| `mat4_dot1`                | 100000 |     14.2 |    0.925 |     0.088 |    0.426 |      1.910 |  0.021 |   0.121 |    3.491 |       853 |        145 |     0 |               0 |       14 |
-| `mat4_full`                | 100000 |     86.1 |    1.956 |     0.170 |    0.711 |     12.157 |  0.126 |   0.109 |   15.229 |      3814 |        426 |     0 |               0 |       38 |
+| Scenario                   |  Calls |  ns/call | Parse ms | Import ms | Check ms | Backend ms | Optimize ms | Layout ms | Lower ms | Cleanup ms | WAT ms | Wasm ms | Total ms | WAT bytes | Wasm bytes | Loops | Recursive calls | SIMD ops |
+| -------------------------- | -----: | -------: | -------: | --------: | -------: | ---------: | ----------: | --------: | -------: | ---------: | -----: | ------: | -------: | --------: | ---------: | ----: | --------------: | -------: |
+| `scalar_reuse_nway`        | 100000 |     34.7 |    3.566 |     0.772 |    8.956 |      7.634 |       4.168 |     0.906 |    2.200 |      0.198 |  0.240 |   0.507 |   21.676 |       151 |         44 |     0 |               0 |        0 |
+| `tail_product_loop_1k`     |   5000 |    333.4 |    1.407 |     0.152 |    1.261 |      7.395 |       1.790 |     1.002 |    4.511 |      0.076 |  0.106 |   0.168 |   10.489 |      1269 |        109 |     1 |               0 |        0 |
+| `inline_array_builder_map` |  25000 |     28.4 |    1.450 |    38.363 |   10.615 |     12.786 |       3.554 |     1.207 |    7.522 |      0.483 |  0.023 |   0.081 |   63.317 |       183 |         47 |     0 |               0 |        0 |
+| `compact_filter_collect`   |  50000 |     75.0 |    1.319 |    51.836 |    7.328 |     25.777 |       9.460 |     1.218 |   14.913 |      0.162 |  0.975 |   1.577 |   88.811 |     22856 |       1731 |     2 |               0 |        0 |
+| `fixed_collection_update`  |  25000 |     30.5 |    0.511 |     5.163 |    2.402 |      3.519 |       1.865 |     0.264 |    1.322 |      0.059 |  0.011 |   0.037 |   11.644 |        91 |         38 |     0 |               0 |        0 |
+| `path_grid_score_16`       |  12500 |    180.1 |    0.540 |     0.097 |    0.395 |      1.954 |       0.743 |     0.089 |    1.099 |      0.014 |  0.023 |   0.044 |    3.053 |      1227 |        113 |     1 |               0 |        0 |
+| `range_fold_1k`            |   5000 |    249.0 |    0.290 |     2.246 |    0.794 |      2.280 |       1.256 |     0.119 |    0.882 |      0.016 |  0.026 |   0.041 |    5.678 |      2507 |        122 |     1 |               0 |        0 |
+| `fannkuch_redux_7`         |    100 | 129123.7 |    6.902 |     4.806 |    3.644 |     28.227 |       5.782 |     2.146 |   20.202 |      0.083 |  0.266 |   0.501 |   44.347 |     21989 |       1146 |     5 |               0 |        0 |
+| `mat4_dot1`                | 100000 |     12.9 |    0.619 |     0.064 |    0.303 |      1.221 |       0.553 |     0.043 |    0.606 |      0.012 |  0.030 |   0.123 |    2.360 |       853 |        145 |     0 |               0 |       14 |
+| `mat4_full`                | 100000 |     83.1 |    2.884 |     0.184 |    0.792 |      7.150 |       5.763 |     0.087 |    1.253 |      0.038 |  0.045 |   0.106 |   11.161 |      3814 |        426 |     0 |               0 |       38 |
 
 The same memory-model benchmark also passed all gates with `--profile=release_fast_compile`.
 Selected compile-time comparison against the balanced release profile:
 
-| Scenario                   | Balanced Backend ms | Balanced Total ms | Fast Backend ms | Fast Total ms | Fast WAT bytes | Fast Wasm bytes |
-| -------------------------- | ------------------: | ----------------: | --------------: | ------------: | -------------: | --------------: |
-| `compact_filter_collect`   |             112.505 |           199.095 |          85.010 |       171.393 |          22856 |            1731 |
-| `fixed_collection_update`  |               5.429 |            13.812 |           3.972 |        12.378 |             91 |              38 |
-| `fannkuch_redux_7`         |              27.140 |            40.391 |          24.465 |        38.259 |          21989 |            1146 |
-| `mat4_full`                |              12.157 |            15.229 |           6.795 |        10.642 |           3814 |             426 |
+| Scenario                  | Balanced Backend ms | Balanced Total ms | Fast Backend ms | Fast Total ms | Fast WAT bytes | Fast Wasm bytes |
+| ------------------------- | ------------------: | ----------------: | --------------: | ------------: | -------------: | --------------: |
+| `compact_filter_collect`  |              25.777 |            88.811 |          28.181 |       105.060 |          22856 |            1731 |
+| `fixed_collection_update` |               3.519 |            11.644 |           2.775 |        11.940 |             91 |              38 |
+| `fannkuch_redux_7`        |              28.227 |            44.347 |          27.501 |        45.359 |          21989 |            1146 |
+| `mat4_full`               |               7.150 |            11.161 |           7.767 |        12.106 |           3814 |             426 |
+
+Focused range-fold compile shape from:
+
+```bash
+deno run --allow-read scripts/bench_range_fold_compile.ts
+```
+
+This uses one shared compile cache, so the final repeated prelude row is the warm balanced result.
+The optimized WAT keeps one loop, zero recursive calls, and zero remaining function calls.
+
+| Scenario                          | Profile                | Optimize ms | Total Wasm-only ms | WAT bytes | Wasm bytes | Loops | Recursive calls | Function calls | Optimizer passes | Touched fns | Slowest optimizer phase                             |
+| --------------------------------- | ---------------------- | ----------: | -----------------: | --------: | ---------: | ----: | --------------: | -------------: | ---------------: | ----------: | --------------------------------------------------- |
+| `direct_loop`                     | `release_balanced`     |       4.782 |             26.998 |       700 |         82 |     1 |               0 |              0 |                2 |           2 | `opt.expandFiniteStaticRecurrences.initial:1.699ms` |
+| `user_wrapper_fold`               | `release_balanced`     |       2.372 |              7.991 |       770 |         82 |     1 |               0 |              0 |                2 |           5 | `opt.pass.0.optimizeDecls:0.734ms`                  |
+| `prelude_range_fold`              | `release_balanced`     |       2.155 |             13.681 |      2507 |        122 |     1 |               0 |              0 |                1 |           5 | `opt.pass.0.optimizeDecls:0.550ms`                  |
+| `prelude_range_fold_fast_compile` | `release_fast_compile` |       1.203 |              5.918 |      2507 |        122 |     1 |               0 |              0 |                1 |           5 | `opt.pass.0.optimizeDecls:0.416ms`                  |
+| `prelude_range_fold_balanced`     | `release_balanced`     |       1.058 |              4.464 |      2507 |        122 |     1 |               0 |              0 |                1 |           5 | `opt.pass.0.optimizeDecls:0.367ms`                  |
 
 Focused compile-time scaling from:
 
@@ -64,19 +87,20 @@ Focused compile-time scaling from:
 deno run --allow-read scripts/bench_const_params.ts --sizes=10,100,200,500,1000 --iterations=3
 ```
 
-| Calls | Direct avg ms | Runtime-dict avg ms | Const-param avg ms | Slowest traced check phase at const-param | Const-param specialization summary                                                             |
-| ----: | ------------: | ------------------: | -----------------: | ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
-|    10 |         2.166 |               1.695 |              1.480 | `checkFn loop:0.101ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
-|   100 |        17.236 |              22.625 |             24.581 | `checkFn loop:1.380ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
-|   200 |        50.665 |              76.411 |             78.425 | `checkFn loop:4.192ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
-|   500 |       285.776 |             439.795 |            435.986 | `checkFn loop:17.992ms`                   | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
-|  1000 |      1081.818 |            1690.625 |           1694.981 | `checkFn loop:66.324ms`                   | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+| Calls | Direct avg ms | Runtime-dict avg ms | Const-param avg ms | Slowest parse phase at const-param | Slowest check phase at const-param | Const-param specialization summary                                                             |
+| ----: | ------------: | ------------------: | -----------------: | ---------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------- |
+|    10 |         2.836 |               1.843 |              2.011 | `parse.syntax:0.795ms`             | `checkFn loop:0.112ms`             | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+|   100 |         6.576 |               7.580 |              7.052 | `parse.syntax:2.072ms`             | `checkFn loop:0.381ms`             | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+|   200 |         7.815 |              11.119 |              9.027 | `parse.syntax:4.396ms`             | `checkFn loop:0.861ms`             | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+|   500 |        20.395 |              23.582 |             24.837 | `parse.syntax:12.706ms`            | `checkFn loop:2.671ms`             | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
+|  1000 |        37.369 |              42.317 |             43.744 | `parse.syntax:15.980ms`            | `checkFn loop:2.766ms`             | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
 
-The repeated-call benchmark now completes through 1000 calls without timeout. Doubling 100 to 200 is
-well below the old ~7x cliff, and the checker trace shows the remaining wall time is not dominated
-by specialization. The generated specialization count stays stable in the traced benchmark, and the
-focused regression test covers the 100 repeated const-param call shape with one generated wrapper,
-one specialization cache miss, and cache hits growing with repeated calls.
+The repeated-call benchmark now completes through 1000 calls without timeout. The primitive `+`
+chain is balanced after operator resolution, so the checker loop is no longer the visible 1000-call
+bottleneck; parse syntax/lowering is now the larger remaining traced cost. The generated
+specialization count stays stable in the traced benchmark, and the focused regression test covers
+the 100 repeated const-param call shape with one generated wrapper, one specialization cache miss,
+and cache hits growing with repeated calls.
 
 The current memory-model run also passed the compact-filter WAT gate: `compact_filter_collect`
 compiled to 22856 WAT bytes and 1731 Wasm bytes, under the 30000-byte WAT limit.
@@ -107,11 +131,11 @@ SIMD matmul at 100000 iterations:
 deno run --allow-read --allow-write --allow-run scripts/bench_memory_model_compare.ts 20000000
 ```
 
-Current status: the release-gated command above did not complete on the 2026-05-15 local rerun. It
-stopped before timing rows because `compact_filter_collect` exceeded the comparison harness WAT-size
-gate: expected `<= 30000B`, got `120331B`. The saved 2026-05-14 20M-iteration comparison remains
-below for historical tracking; that run had 16 of 17 rows at or under 1.2x native Rust. The
-remaining over-target row was `fannkuch_redux_7`.
+Current status: the release-gated command above completed on the 2026-05-16 local rerun. The
+comparison harness compiles an internal `bench` wrapper around each Fig scenario, so its Fig compile
+totals are not identical to the memory-model table above. The current comparison has 12 of 17 rows
+at or under 1.2x native Rust. The over-target rows are `compact_filter_collect`,
+`collision_aabb_64`, `path_grid_score_16`, `cpu_raycaster_64`, and `range_fold_1k`.
 
 The Rust comparison is compiled by the benchmark harness with:
 
@@ -119,29 +143,29 @@ The Rust comparison is compiled by the benchmark harness with:
 rustc -C opt-level=3 -C target-cpu=native
 ```
 
-## Saved Rust Comparison Results
+## Latest Rust Comparison Results
 
-Timed rows from the saved 2026-05-14 run:
+Timed rows from the 2026-05-16 run:
 
 | Scenario                         |    Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes |    Checksum |
 | -------------------------------- | -------: | ----------: | -----------: | -------: | -------------------: | -------------: | ----------: |
-| `scalar_reuse_nway`              | 20000000 |         0.8 |          0.7 |     1.14 |               25.105 |            103 | -1323389440 |
-| `product_shadow_update`          | 20000000 |         0.8 |          1.9 |     0.42 |               11.233 |            103 |  1805788928 |
-| `tail_product_loop_1k`           |  1000000 |       257.6 |        397.5 |     0.65 |               12.533 |            191 | -2011173632 |
-| `inline_array_builder_map`       |  5000000 |         0.8 |         19.2 |     0.04 |              201.836 |            100 |    95000000 |
-| `compact_filter_collect`         | 10000000 |         2.4 |         14.2 |     0.17 |              936.584 |            582 |    20000000 |
-| `alias_snapshot_update`          | 20000000 |         2.5 |          9.3 |     0.27 |               12.057 |            149 | -1569178368 |
-| `fixed_collection_update`        |  5000000 |         1.1 |          2.9 |     0.38 |              159.733 |            100 |   175000000 |
-| `fixed_collection_spread_update` |  5000000 |         0.2 |          2.1 |     0.10 |              148.650 |            100 |   175000000 |
-| `collision_aabb_64`              |  2500000 |        59.6 |         57.4 |     1.04 |               11.417 |            249 |    22500000 |
-| `path_grid_score_16`             |  2500000 |       176.7 |        154.5 |     1.14 |                7.642 |            180 |  -939934592 |
-| `cpu_raycaster_64`               |  2500000 |       256.5 |        225.1 |     1.14 |               17.139 |            469 |  1539681120 |
-| `range_fold_1k`                  |  1000000 |       228.2 |        249.0 |     0.92 |              908.774 |            169 |  1283793664 |
-| `monadic_do_id_chain`            | 20000000 |         0.8 |          1.1 |     0.73 |               10.558 |            113 |  1225788928 |
-| `applicative_do_id_map`          | 20000000 |         0.8 |          0.9 |     0.89 |                5.539 |            110 |  1245788928 |
-| `fannkuch_redux_7`               |    20000 |    116748.1 |      95371.5 |     1.22 |              235.892 |           1210 |   456320000 |
-| `mat4_dot1`                      | 20000000 |         0.7 |          2.2 |     0.32 |                5.738 |            102 |  1800000000 |
-| `mat4_full`                      | 20000000 |        13.6 |         25.9 |     0.53 |               37.160 |            899 |    95752192 |
+| `scalar_reuse_nway`              | 20000000 |         0.8 |          0.6 |     1.33 |               28.904 |            103 | -1323389440 |
+| `product_shadow_update`          | 20000000 |         0.8 |          1.9 |     0.42 |               10.241 |            103 |  1805788928 |
+| `tail_product_loop_1k`           |  1000000 |       233.1 |        434.9 |     0.54 |                9.020 |            191 | -2011173632 |
+| `inline_array_builder_map`       |  5000000 |         0.7 |         20.1 |     0.03 |               58.201 |            100 |    95000000 |
+| `compact_filter_collect`         | 10000000 |        19.6 |         13.7 |     1.43 |               89.313 |           1745 |    20000000 |
+| `alias_snapshot_update`          | 20000000 |         2.5 |          9.0 |     0.28 |               12.647 |            149 | -1569178368 |
+| `fixed_collection_update`        |  5000000 |         0.7 |          2.8 |     0.25 |               12.606 |            100 |   175000000 |
+| `fixed_collection_spread_update` |  5000000 |         0.3 |          2.0 |     0.15 |                8.163 |            100 |   175000000 |
+| `collision_aabb_64`              |  2500000 |       106.3 |         52.2 |     2.04 |                7.321 |            364 |    22500000 |
+| `path_grid_score_16`             |  2500000 |       300.3 |        158.7 |     1.89 |                5.039 |            245 |  -939934592 |
+| `cpu_raycaster_64`               |  2500000 |       644.4 |        218.4 |     2.95 |               10.039 |            761 |  1539681120 |
+| `range_fold_1k`                  |  1000000 |       504.0 |        248.5 |     2.03 |                9.930 |            256 |  1283793664 |
+| `monadic_do_id_chain`            | 20000000 |         0.7 |          1.1 |     0.64 |                7.491 |            113 |  1225788928 |
+| `applicative_do_id_map`          | 20000000 |         0.7 |          0.9 |     0.78 |                3.829 |            110 |  1245788928 |
+| `fannkuch_redux_7`               |    20000 |    108510.3 |      90094.1 |     1.20 |               39.885 |           1218 |   456320000 |
+| `mat4_dot1`                      | 20000000 |         0.7 |          2.0 |     0.35 |                3.800 |            102 |  1800000000 |
+| `mat4_full`                      | 20000000 |        13.9 |         25.4 |     0.55 |               17.765 |            899 |    95752192 |
 
 ## Fannkuch Lowering Investigation
 

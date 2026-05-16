@@ -3,14 +3,21 @@ import type { SyntaxNodeLike } from "../generated/baba-workbench/ast/types.ts";
 import type { Program } from "./core_ast.ts";
 import { fail, type Span } from "./diagnostics.ts";
 import { lowerProgram } from "./lower.ts";
+import { type CompileTraceSink, programTraceCounters, traceSync } from "./trace.ts";
 
 export interface ParseOptions {
   sourceId?: string;
+  trace?: CompileTraceSink;
 }
 
 export async function parse(source: string, options: ParseOptions = {}): Promise<Program> {
   const lines = new SourceLineMap(source);
-  const result = parseSyntax(source);
+  const result = traceSync(
+    options.trace,
+    "parse.syntax",
+    () => parseSyntax(source),
+    () => ({ sourceBytes: source.length }),
+  );
   if (!result.ok || !result.tree) {
     const diagnostic = result.diagnostics[0];
     fail(
@@ -21,14 +28,34 @@ export async function parse(source: string, options: ParseOptions = {}): Promise
         : undefined,
     );
   }
-  return lowerProgram(adaptNode(source, result.tree, lines), docResolver(source), options.sourceId);
+  const tree = result.tree;
+  const adapted = traceSync(
+    options.trace,
+    "parse.adapt",
+    () => adaptNode(source, tree, lines),
+    () => ({ sourceBytes: source.length }),
+  );
+  const docs = traceSync(
+    options.trace,
+    "parse.docs",
+    () => source.includes("///") ? docResolver(source) : () => undefined,
+    () => ({ hasDocs: source.includes("///") }),
+  );
+  return traceSync(
+    options.trace,
+    "parse.lower",
+    () => lowerProgram(adapted, docs, options.sourceId),
+    programTraceCounters,
+  );
 }
 
 function adaptNode(source: string, node: ParseNode, lines: SourceLineMap): SyntaxNodeLike {
   if (node.kind === "rule") {
     return {
       type: node.name,
-      text: source.slice(node.span.start, node.span.end),
+      get text() {
+        return source.slice(node.span.start, node.span.end);
+      },
       startIndex: node.span.start,
       endIndex: node.span.end,
       startPosition: lines.position(node.span.start),

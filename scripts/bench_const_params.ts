@@ -1,5 +1,10 @@
 import type { Expr, Program } from "../src/core_ast.ts";
-import { checkSource, type CheckTrace, optimizeProgram } from "../src/mod.ts";
+import {
+  checkSource,
+  type CheckTrace,
+  type CompileTraceEvent,
+  optimizeProgram,
+} from "../src/mod.ts";
 
 const sizes = stringArg("--sizes")
   ?.split(",")
@@ -15,11 +20,14 @@ for (const size of sizes) {
     const samples = [];
     let program: Program | undefined;
     let trace: CheckTrace | undefined;
+    let compileTrace: CompileTraceEvent[] = [];
     for (let i = 0; i < iterations; i++) {
       const start = performance.now();
-      const checked = await checkSource(source, { trace: true });
+      const sampleCompileTrace: CompileTraceEvent[] = [];
+      const checked = await checkSource(source, { trace: true, compileTrace: sampleCompileTrace });
       program = checked.program;
       trace = checked.trace;
+      compileTrace = sampleCompileTrace;
       samples.push(performance.now() - start);
     }
     const counts = countCalls(program!);
@@ -40,6 +48,7 @@ for (const size of sizes) {
       optimized_direct_calls: optimizedCounts.get("map_box") ?? 0,
       optimized_runtime_dict_calls: optimizedCounts.get("dict.map") ?? 0,
       optimized_wrapper_calls: optimizedCounts.get("mapped__box_functor") ?? 0,
+      slowest_parse_phase: slowestCompilePhase(compileTrace),
       slowest_check_phase: slowestPhase(trace),
       specialization: specializationSummary(trace),
     });
@@ -133,6 +142,13 @@ function countGeneratedDirectCalls(program: Program): number {
     total += counts.get("map_box") ?? 0;
   }
   return total;
+}
+
+function slowestCompilePhase(trace: CompileTraceEvent[]): string {
+  const phase = trace
+    .filter((event) => event.name.startsWith("parse."))
+    .toSorted((left, right) => right.durationMs - left.durationMs)[0];
+  return phase ? `${phase.name}:${phase.durationMs.toFixed(3)}ms` : "";
 }
 
 function slowestPhase(trace: CheckTrace | undefined): string {

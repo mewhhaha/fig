@@ -322,7 +322,8 @@ Deno.test("range prelude fold matches user self-tail-recursive loop shape", asyn
     "";
   const userFold = wat.match(/\(func \$user_fold_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(wat, "loop");
-  assertStringIncludes(preludeFold, "loop");
+  if (preludeFold) assertStringIncludes(preludeFold, "loop");
+  assert(!wat.includes("call $range_RangeIter__fold_loop__add"));
   assert(!userFold.includes("call $user_fold_loop"));
   assert(!preludeFold.includes("call $range_RangeIter__fold_loop__add"));
 

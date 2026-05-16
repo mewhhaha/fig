@@ -1,13 +1,14 @@
 import { parse } from "./parser.ts";
 import { checkProgram, checkProgramForAnalysis, type CheckTrace } from "./check.ts";
 import {
-  backendModuleToWasm,
-  backendModuleToWat,
   type BackendOptions,
-  compileBackendModule,
   emitWasm,
   emitWat,
+  lowerProgramToBackendArtifact,
+  lowerProgramToBackendModule,
   summarizeBackendLayoutDecisions,
+  wasmFromBackendModule,
+  watFromBackendModule,
 } from "./backend.ts";
 import {
   type OptimizationPlan,
@@ -36,6 +37,7 @@ import type {
 import { CompileError, type Diagnostic } from "./diagnostics.ts";
 import { copyAstMetadata, hideAstMetadata } from "./ast_meta.ts";
 import type { CompilerPluginOptions } from "./plugins.ts";
+import type { CompileTraceSink } from "./trace.ts";
 
 export interface ModuleSource {
   text: string;
@@ -45,7 +47,8 @@ export interface ModuleSource {
 export interface CheckSourceOptions extends CompilerPluginOptions {
   sourceId?: string;
   pruneImports?: boolean;
-  trace?: boolean;
+  trace?: boolean | CompileTraceSink;
+  compileTrace?: CompileTraceSink;
   cache?: CompileCache;
   resolveModule?: (
     moduleName: string,
@@ -53,6 +56,10 @@ export interface CheckSourceOptions extends CompilerPluginOptions {
 }
 
 export interface CompileSourceOptions extends CheckSourceOptions, BackendOptions {}
+
+export interface CompileArtifactsOptions extends CompileSourceOptions {
+  includeWat?: boolean;
+}
 
 export interface CompileCache {
   parsedModules: Map<string, Program>;
@@ -73,6 +80,10 @@ export interface CompileArtifactTimings {
   importMs: number;
   checkMs: number;
   backendMs: number;
+  optimizeMs: number;
+  backendLayoutMs: number;
+  backendLowerMs: number;
+  backendCleanupMs: number;
   watRenderMs: number;
   wasmEncodeMs: number;
   watMs: number;
@@ -80,7 +91,7 @@ export interface CompileArtifactTimings {
 }
 
 export interface CompileArtifactsResult {
-  wat: string;
+  wat?: string;
   wasm: Uint8Array<ArrayBuffer>;
   checked: ReturnType<typeof checkProgram>;
   timings: CompileArtifactTimings;
@@ -88,8 +99,16 @@ export interface CompileArtifactsResult {
   importTrace?: ImportTrace;
 }
 
+export interface CompileArtifactsWithWatResult extends CompileArtifactsResult {
+  wat: string;
+}
+
 export interface ImportTrace {
   phases: ImportPhaseTrace[];
+}
+
+interface ImportTraceState extends ImportTrace {
+  compileTrace?: CompileTraceSink;
 }
 
 export interface ImportPhaseTrace {
@@ -99,24 +118,37 @@ export interface ImportPhaseTrace {
   cacheHit?: boolean;
   declarationCount?: number;
   keptDeclarationCount?: number;
+  typeCount?: number;
+  fnCount?: number;
+  contractCount?: number;
+  sourceImportCount?: number;
   referenceCount?: number;
 }
 
 export async function checkSource(source: string, options: CheckSourceOptions = {}) {
-  const program = await parse(source, { sourceId: options.sourceId });
-  if (!options.resolveModule) return checkProgram(program, options);
+  const trace = compileTraceSink(options);
+  const program = await parse(source, {
+    sourceId: options.sourceId,
+    trace,
+  });
+  if (!options.resolveModule) return checkProgram(program, checkOptions(options));
   return checkProgram(
     await resolveSourceImports(program, {
       resolveModule: options.resolveModule,
       pruneImports: options.pruneImports,
       cache: options.cache,
+      importTrace: trace ? { phases: [], compileTrace: trace } : undefined,
     }),
-    options,
+    checkOptions(options),
   );
 }
 
 export async function checkSourceForAnalysis(source: string, options: CheckSourceOptions = {}) {
-  const program = await parse(source, { sourceId: options.sourceId });
+  const trace = compileTraceSink(options);
+  const program = await parse(source, {
+    sourceId: options.sourceId,
+    trace,
+  });
   return await checkParsedSourceForAnalysis(program, options);
 }
 
@@ -124,14 +156,16 @@ export async function checkParsedSourceForAnalysis(
   program: Program,
   options: CheckSourceOptions = {},
 ) {
-  if (!options.resolveModule) return checkProgramForAnalysis(program, options);
+  if (!options.resolveModule) return checkProgramForAnalysis(program, checkOptions(options));
+  const trace = compileTraceSink(options);
   return checkProgramForAnalysis(
     await resolveSourceImports(program, {
       resolveModule: options.resolveModule,
       pruneImports: options.pruneImports,
       cache: options.cache,
+      importTrace: trace ? { phases: [], compileTrace: trace } : undefined,
     }),
-    options,
+    checkOptions(options),
   );
 }
 
@@ -149,17 +183,45 @@ export async function wasmFromSource(
   return emitWasm((await checkSource(source, options)).program, options);
 }
 
-export async function compileArtifactsFromSource(
+export async function compileWasmFromSource(
   source: string,
   options: CompileSourceOptions = {},
+): Promise<Uint8Array<ArrayBuffer>> {
+  return (await compileArtifactsFromSource(source, { ...options, includeWat: false })).wasm;
+}
+
+export function compileArtifactsFromSource(
+  source: string,
+  options?: CompileArtifactsOptions & { includeWat?: true },
+): Promise<CompileArtifactsWithWatResult>;
+export function compileArtifactsFromSource(
+  source: string,
+  options: CompileArtifactsOptions & { includeWat: false },
+): Promise<CompileArtifactsResult>;
+export function compileArtifactsFromSource(
+  source: string,
+  options: CompileArtifactsOptions = {},
 ): Promise<CompileArtifactsResult> {
+  return compileArtifactsFromSourceImpl(source, options);
+}
+
+async function compileArtifactsFromSourceImpl(
+  source: string,
+  options: CompileArtifactsOptions = {},
+): Promise<CompileArtifactsResult> {
+  const trace = compileTraceSink(options);
   const parseStart = performance.now();
-  const parsed = await parse(source, { sourceId: options.sourceId });
+  const parsed = await parse(source, {
+    sourceId: options.sourceId,
+    trace,
+  });
   const parseMs = performance.now() - parseStart;
 
   let program = parsed;
   let importMs = 0;
-  const importTrace: ImportTrace | undefined = options.trace ? { phases: [] } : undefined;
+  const importTrace: ImportTraceState | undefined = options.trace || trace
+    ? { phases: [], compileTrace: trace }
+    : undefined;
   if (options.resolveModule) {
     const importStart = performance.now();
     program = await resolveSourceImports(parsed, {
@@ -172,25 +234,33 @@ export async function compileArtifactsFromSource(
   }
 
   const checkStart = performance.now();
-  const checked = checkProgram(program, options);
+  const checked = checkProgram(program, checkOptions(options));
   const checkMs = performance.now() - checkStart;
 
   const backendStart = performance.now();
-  const backend = compileBackendModule(checked.program, options);
+  const loweredBackend = lowerProgramToBackendArtifact(checked.program, {
+    ...options,
+    compileTrace: trace,
+  });
   const backendMs = performance.now() - backendStart;
+  const backend = loweredBackend.module;
 
-  const watStart = performance.now();
-  const wat = backendModuleToWat(backend);
-  const watRenderMs = performance.now() - watStart;
+  let wat: string | undefined;
+  let watRenderMs = 0;
+  if (options.includeWat !== false) {
+    const watStart = performance.now();
+    wat = watFromBackendModule(backend);
+    watRenderMs = performance.now() - watStart;
+  }
 
   const wasmStart = performance.now();
-  const wasm = backendModuleToWasm(backend, {
+  const wasm = wasmFromBackendModule(backend, {
     debugNames: (options.optMode ?? "debug") === "debug",
   });
   const wasmEncodeMs = performance.now() - wasmStart;
 
   return {
-    wat,
+    ...(wat !== undefined ? { wat } : {}),
     wasm,
     checked,
     timings: {
@@ -198,6 +268,10 @@ export async function compileArtifactsFromSource(
       importMs,
       checkMs,
       backendMs,
+      optimizeMs: loweredBackend.timings.optimizeMs,
+      backendLayoutMs: loweredBackend.timings.layoutMs,
+      backendLowerMs: loweredBackend.timings.lowerMs,
+      backendCleanupMs: loweredBackend.timings.cleanupMs,
       watRenderMs,
       wasmEncodeMs,
       watMs: watRenderMs,
@@ -206,6 +280,15 @@ export async function compileArtifactsFromSource(
     trace: checked.trace,
     importTrace,
   };
+}
+
+function compileTraceSink(options: CheckSourceOptions): CompileTraceSink | undefined {
+  if (options.compileTrace) return options.compileTrace;
+  return typeof options.trace === "boolean" ? undefined : options.trace;
+}
+
+function checkOptions(options: CheckSourceOptions): CheckSourceOptions & { trace?: boolean } {
+  return { ...options, trace: options.trace === true };
 }
 
 export async function explainOptimization(
@@ -246,7 +329,13 @@ export {
   backendModuleToWasm,
   backendModuleToWat,
   type BackendOptions,
+  type BackendPhaseTimings,
   compileBackendModule,
+  type LoweredBackendArtifact,
+  lowerProgramToBackendArtifact,
+  lowerProgramToBackendModule,
+  wasmFromBackendModule,
+  watFromBackendModule,
 } from "./backend.ts";
 export {
   type AbstractFunctionFacts,
@@ -275,6 +364,7 @@ export {
 } from "./optimize.ts";
 export { CompileError, formatDiagnostic } from "./diagnostics.ts";
 export { type CheckPhaseTrace, type CheckProgramOptions, type CheckTrace } from "./check.ts";
+export { type CompileTraceEvent, type CompileTraceSink, formatCompileTraceEvent } from "./trace.ts";
 export {
   COMPILER_PLUGIN_API_VERSION,
   type CompilerAnnotationBuiltin,
@@ -299,26 +389,19 @@ async function resolveSourceImports(
       CheckSourceOptions,
       "cache" | "pruneImports"
     >
-    & { importTrace?: ImportTrace },
+    & { importTrace?: ImportTraceState },
 ): Promise<Program> {
   const diagnostics: Diagnostic[] = [];
   const visiting: string[] = [];
   const resolved = new Map<string, Program>();
   const sharedCache = options.cache;
+  const pruneSourceKeys = new WeakMap<Program, string>();
 
   async function load(
     moduleName: string,
     requestedAt?: SourceImport,
   ): Promise<Program | undefined> {
     if (resolved.has(moduleName)) return resolved.get(moduleName);
-    const resolvedCacheKey = resolvedModuleCacheKey(moduleName, options.pruneImports === true);
-    const cachedResolved = sharedCache?.resolvedModules.get(resolvedCacheKey);
-    if (cachedResolved) {
-      const cloned = cloneProgram(cachedResolved);
-      resolved.set(moduleName, cloned);
-      recordImportCacheHit(options.importTrace, "merge child imports", moduleName, cloned);
-      return cloned;
-    }
     const cycleStart = visiting.indexOf(moduleName);
     if (cycleStart >= 0) {
       diagnostics.push({
@@ -330,7 +413,7 @@ async function resolveSourceImports(
     visiting.push(moduleName);
     const source = await traceImportPhase(
       options.importTrace,
-      "resolve module",
+      "import.resolve.root",
       { moduleName },
       () => options.resolveModule(moduleName),
     );
@@ -343,22 +426,42 @@ async function resolveSourceImports(
       visiting.pop();
       return undefined;
     }
-    const cachedParsed = sharedCache?.parsedModules.get(moduleName);
+    const sourceKey = moduleSourceCacheKey(moduleName, source);
+    const parsedCacheKey = `parsed\0${sourceKey}`;
+    const cachedParsed = sharedCache?.parsedModules.get(parsedCacheKey);
     const parsed = cachedParsed ? cloneProgram(cachedParsed) : await traceImportPhase(
       options.importTrace,
-      "parse module",
+      "import.parse.module",
       { moduleName },
       () => parseModuleSource(source, moduleName),
+      importProgramCounters,
     );
-    if (cachedParsed) recordImportCacheHit(options.importTrace, "parse module", moduleName, parsed);
-    if (!cachedParsed) sharedCache?.parsedModules.set(moduleName, cloneProgram(parsed));
+    if (cachedParsed) {
+      recordImportCacheHit(options.importTrace, "import.parse.module", moduleName, parsed);
+    }
+    if (!cachedParsed) sharedCache?.parsedModules.set(parsedCacheKey, cloneProgram(parsed));
+    const resolvedCacheKey = resolvedModuleCacheKey(sourceKey, options.pruneImports === true);
+    const cachedResolved = parsed.sourceImports?.length
+      ? undefined
+      : sharedCache?.resolvedModules.get(resolvedCacheKey);
+    if (cachedResolved) {
+      const cloned = cloneProgram(cachedResolved);
+      resolved.set(moduleName, cloned);
+      pruneSourceKeys.set(cloned, resolvedCacheKey);
+      visiting.pop();
+      recordImportCacheHit(options.importTrace, "import.merge.module", moduleName, cloned);
+      return cloned;
+    }
     const merged = await traceImportPhase(
       options.importTrace,
-      "merge child imports",
-      { moduleName, declarationCount: parsed.declarations.length },
+      "import.merge.module",
+      { moduleName, ...importProgramCounters(parsed) },
       () => mergeImports(parsed),
     );
-    sharedCache?.resolvedModules.set(resolvedCacheKey, cloneProgram(merged));
+    if (!parsed.sourceImports?.length) {
+      sharedCache?.resolvedModules.set(resolvedCacheKey, cloneProgram(merged));
+      pruneSourceKeys.set(merged, resolvedCacheKey);
+    }
     resolved.set(moduleName, merged);
     visiting.pop();
     return merged;
@@ -423,6 +526,10 @@ async function resolveSourceImports(
       program,
       diagnostics,
       { pruneImports: options.pruneImports === true, importTrace: options.importTrace },
+      {
+        prunedImports: sharedCache?.prunedImports,
+        sourceKey: (program) => pruneSourceKeys.get(program),
+      },
     );
   }
 
@@ -437,12 +544,16 @@ function mergePrograms(
   destructuredImports: { alias: string; sourceImport: SourceImport; program: Program }[],
   program: Program,
   diagnostics: Diagnostic[],
-  options: { pruneImports: boolean; importTrace?: ImportTrace },
+  options: { pruneImports: boolean; importTrace?: ImportTraceState },
+  cache?: {
+    prunedImports?: Map<string, Program>;
+    sourceKey(program: Program): string | undefined;
+  },
 ): Program {
-  const importedDecls = imports.flatMap((item) => item.declarations);
+  const importedDecls = imports.flatMap((item) => item.declarations).map(markImportedDeclaration);
   const aliasedDecls = traceImportPhaseSync(
     options.importTrace,
-    "qualify declarations",
+    "import.qualify.imports",
     {
       declarationCount: aliasedImports.reduce(
         (sum, item) => sum + item.program.declarations.length,
@@ -450,13 +561,23 @@ function mergePrograms(
       ),
     },
     () =>
-      aliasedImports.flatMap(({ alias, program }) =>
-        qualifyImportedDeclarations(program.declarations, alias)
-      ),
+      aliasedImports.flatMap(({ alias, program: importedProgram }) => {
+        const prunedProgram = options.pruneImports
+          ? pruneAliasedImportedProgram(
+            importedProgram,
+            program.declarations,
+            alias,
+            options.importTrace,
+            cache,
+          )
+          : importedProgram;
+        return qualifyImportedDeclarations(prunedProgram.declarations, alias);
+      }),
+    (decls) => ({ keptDeclarationCount: decls.length }),
   );
   const destructuredDecls = traceImportPhaseSync(
     options.importTrace,
-    "destructure imports",
+    "import.destructure.imports",
     {
       declarationCount: destructuredImports.reduce(
         (sum, item) => sum + item.program.declarations.length,
@@ -465,7 +586,15 @@ function mergePrograms(
     },
     () =>
       destructuredImports.flatMap((item) =>
-        destructureImportedDeclarations(item.sourceImport, item.program, item.alias, diagnostics)
+        destructureImportedDeclarations(
+          item.sourceImport,
+          item.program,
+          item.alias,
+          diagnostics,
+          options.pruneImports,
+          options.importTrace,
+          cache,
+        )
       ),
   );
   const localNames = new Set(program.declarations.map(declarationName));
@@ -493,7 +622,7 @@ function mergePrograms(
     if (!previous) seenImported.set(name, decl);
     declarations.push(decl);
   }
-  declarations.push(...program.declarations);
+  declarations.push(...program.declarations.map(markRootDeclaration));
   const slicedDeclarations = options.pruneImports
     ? pruneUnusedImportedDeclarations(
       declarations,
@@ -514,14 +643,100 @@ function mergePrograms(
   });
 }
 
+function pruneAliasedImportedProgram(
+  importedProgram: Program,
+  localDeclarations: Declaration[],
+  alias: string,
+  importTrace?: ImportTraceState,
+  cache?: {
+    prunedImports?: Map<string, Program>;
+    sourceKey(program: Program): string | undefined;
+  },
+): Program {
+  const roots = traceImportPhaseSync(
+    importTrace,
+    "import.prune.alias_roots",
+    {
+      moduleName: importedProgram.moduleName,
+      declarationCount: importedProgram.declarations.length,
+    },
+    () => aliasReferenceRoots(importedProgram.declarations, localDeclarations, alias),
+    (result) => ({ referenceCount: result.size }),
+  );
+  return pruneImportedProgram(importedProgram, roots, importTrace, cache);
+}
+
+function pruneImportedProgram(
+  importedProgram: Program,
+  roots: Set<string>,
+  importTrace?: ImportTraceState,
+  cache?: {
+    prunedImports?: Map<string, Program>;
+    sourceKey(program: Program): string | undefined;
+  },
+): Program {
+  if (!roots.size) return { ...importedProgram, declarations: [] };
+  const sourceKey = cache?.sourceKey(importedProgram);
+  const cacheKey = sourceKey ? prunedImportCacheKey(sourceKey, roots) : undefined;
+  const cached = cacheKey ? cache?.prunedImports?.get(cacheKey) : undefined;
+  if (cached) {
+    const cloned = cloneProgram(cached);
+    recordImportCacheHit(
+      importTrace,
+      "import.prune.finish",
+      importedProgram.moduleName ?? "",
+      cloned,
+    );
+    return cloned;
+  }
+  const declarations = pruneUnusedImportedDeclarations(
+    importedProgram.declarations,
+    roots,
+    importTrace,
+  );
+  const pruned = { ...importedProgram, declarations };
+  if (cacheKey) cache?.prunedImports?.set(cacheKey, cloneProgram(pruned));
+  traceImportPhaseSync(
+    importTrace,
+    "import.prune.finish",
+    {
+      moduleName: importedProgram.moduleName,
+      declarationCount: importedProgram.declarations.length,
+      keptDeclarationCount: declarations.length,
+    },
+    () => undefined,
+  );
+  return pruned;
+}
+
+function aliasReferenceRoots(
+  importedDeclarations: Declaration[],
+  localDeclarations: Declaration[],
+  alias: string,
+): Set<string> {
+  const qualifiedNames = new Set(
+    importedDeclarations
+      .flatMap(collectDeclarationNames)
+      .map((name) => qualifyName(name, alias)),
+  );
+  const nameIndex = createDeclarationNameIndex(qualifiedNames);
+  const roots = new Set<string>();
+  for (const decl of localDeclarations) {
+    for (const ref of referencedDeclarationNames(decl, nameIndex)) {
+      if (ref.startsWith(`${alias}.`)) roots.add(ref.slice(alias.length + 1));
+    }
+  }
+  return roots;
+}
+
 function pruneUnusedImportedDeclarations(
   declarations: Declaration[],
   localNames: Set<string>,
-  importTrace?: ImportTrace,
+  importTrace?: ImportTraceState,
 ): Declaration[] {
   const { byName, ownerByName, nameIndex } = traceImportPhaseSync(
     importTrace,
-    "collect declaration names",
+    "import.prune.collect_names",
     { declarationCount: declarations.length },
     () => {
       const byName = new Map<string, Declaration[]>();
@@ -541,15 +756,18 @@ function pruneUnusedImportedDeclarations(
   const keep = new Set<string>(localNames);
   const work = [...localNames];
   let referenceCount = 0;
+  let referenceMs = 0;
   traceImportPhaseSync(
     importTrace,
-    "prune worklist",
+    "import.prune.worklist",
     { declarationCount: declarations.length },
     () => {
       while (work.length) {
         const name = work.pop()!;
         for (const decl of byName.get(name) ?? []) {
+          const referenceStart = performance.now();
           const refs = referencedDeclarationNames(decl, nameIndex);
+          referenceMs += performance.now() - referenceStart;
           referenceCount += refs.size;
           for (const ref of refs) {
             const owner = ownerByName.get(ref) ?? ref;
@@ -569,6 +787,13 @@ function pruneUnusedImportedDeclarations(
     },
     () => ({ keptDeclarationCount: keep.size, referenceCount }),
   );
+  recordImportPhase(importTrace, {
+    name: "import.prune.references",
+    ms: referenceMs,
+    declarationCount: declarations.length,
+    keptDeclarationCount: keep.size,
+    referenceCount,
+  });
   return declarations.filter((decl) => localNames.has(decl.name) || keep.has(decl.name));
 }
 
@@ -832,24 +1057,38 @@ function destructureImportedDeclarations(
   program: Program,
   alias: string,
   diagnostics: Diagnostic[],
+  pruneImports: boolean,
+  importTrace?: ImportTraceState,
+  cache?: {
+    prunedImports?: Map<string, Program>;
+    sourceKey(program: Program): string | undefined;
+  },
 ): Declaration[] {
   const bindings = sourceImport.bindings ?? [];
-  const names = new Set(program.declarations.flatMap(collectDeclarationNames));
-  const hiddenDecls = qualifyImportedDeclarations(program.declarations, alias).map(markPrivate);
-  const selected: Declaration[] = [];
-  const seenBindings = new Set<string>();
+  const bindingNames = new Set(bindings.map((binding) => binding.name));
   for (const binding of bindings) {
-    if (seenBindings.has(binding.name)) continue;
-    seenBindings.add(binding.name);
-    const decl = program.declarations.find((item) => declarationName(item) === binding.name);
-    if (!decl) {
+    if (!program.declarations.some((item) => declarationName(item) === binding.name)) {
       diagnostics.push({
         code: "module.missing_binding",
         message: `module ${sourceImport.module} has no declaration named ${binding.name}`,
         span: binding.nameSpan ?? binding.span,
       });
-      continue;
     }
+  }
+  const prunedProgram = pruneImports
+    ? pruneImportedProgram(program, bindingNames, importTrace, cache)
+    : program;
+  const names = new Set(prunedProgram.declarations.flatMap(collectDeclarationNames));
+  const hiddenDecls = qualifyImportedDeclarations(prunedProgram.declarations, alias).map(
+    markPrivate,
+  );
+  const selected: Declaration[] = [];
+  const seenBindings = new Set<string>();
+  for (const binding of bindings) {
+    if (seenBindings.has(binding.name)) continue;
+    seenBindings.add(binding.name);
+    const decl = prunedProgram.declarations.find((item) => declarationName(item) === binding.name);
+    if (!decl) continue;
     selected.push(
       unqualifiedSelectedDeclaration(qualifyDeclaration(decl, alias, names), binding.name),
     );
@@ -868,7 +1107,9 @@ function nextHiddenImportAlias(reservedNames: Set<string>, start: number): strin
 }
 
 function unqualifiedSelectedDeclaration(decl: Declaration, name: string): Declaration {
-  if (decl.kind === "fn") return withMeta(decl, { ...decl, name });
+  if (decl.kind === "fn") {
+    return withMeta(decl, { ...decl, name, imported: true, rootPublic: false });
+  }
   if (decl.kind === "type") return withMeta(decl, { ...decl, name });
   return withMeta(decl, { ...decl, name });
 }
@@ -876,6 +1117,22 @@ function unqualifiedSelectedDeclaration(decl: Declaration, name: string): Declar
 function markPrivate(decl: Declaration): Declaration {
   if (decl.kind === "fn" || decl.kind === "type") {
     return withMeta(decl, { ...decl, public: false });
+  }
+  return decl;
+}
+
+function markImportedDeclaration(decl: Declaration): Declaration {
+  if (decl.kind === "fn") return withMeta(decl, { ...decl, imported: true, rootPublic: false });
+  return decl;
+}
+
+function markRootDeclaration(decl: Declaration): Declaration {
+  if (decl.kind === "fn") {
+    return withMeta(decl, {
+      ...decl,
+      imported: false,
+      rootPublic: decl.public === true,
+    });
   }
   return decl;
 }
@@ -889,8 +1146,27 @@ async function parseModuleSource(
     : await parse(source.text, { sourceId: source.sourceId ?? moduleName });
 }
 
-function resolvedModuleCacheKey(moduleName: string, pruneImports: boolean): string {
-  return `${pruneImports ? "pruned" : "full"}\0${moduleName}`;
+function moduleSourceCacheKey(moduleName: string, source: string | ModuleSource): string {
+  const sourceId = typeof source === "string" ? moduleName : source.sourceId ?? moduleName;
+  const text = typeof source === "string" ? source : source.text;
+  return `${sourceId}\0${text.length}\0${hashString(text)}`;
+}
+
+function resolvedModuleCacheKey(sourceKey: string, pruneImports: boolean): string {
+  return `${pruneImports ? "pruned" : "full"}\0${sourceKey}`;
+}
+
+function prunedImportCacheKey(sourceKey: string, roots: Set<string>): string {
+  return `pruned_import\0${sourceKey}\0${[...roots].sort().join("\0")}`;
+}
+
+function hashString(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function cloneProgram(program: Program): Program {
@@ -917,35 +1193,41 @@ function restoreAstMetadata(target: unknown, source: unknown, seen = new WeakSet
 }
 
 function recordImportCacheHit(
-  trace: ImportTrace | undefined,
+  trace: ImportTraceState | undefined,
   name: string,
   moduleName: string,
   program: Program,
 ) {
-  trace?.phases.push({
+  recordImportPhase(trace, {
     name,
     ms: 0,
     moduleName,
     cacheHit: true,
-    declarationCount: program.declarations.length,
+    ...importProgramCounters(program),
   });
 }
 
 async function traceImportPhase<t>(
-  trace: ImportTrace | undefined,
+  trace: ImportTraceState | undefined,
   name: string,
   detail: Omit<ImportPhaseTrace, "name" | "ms">,
   fn: () => Promise<t> | t,
+  after?: (result: t) => Omit<ImportPhaseTrace, "name" | "ms">,
 ): Promise<t> {
   if (!trace) return await fn();
   const start = performance.now();
   const result = await fn();
-  trace.phases.push({ name, ms: performance.now() - start, ...detail });
+  recordImportPhase(trace, {
+    name,
+    ms: performance.now() - start,
+    ...detail,
+    ...(after?.(result) ?? {}),
+  });
   return result;
 }
 
 function traceImportPhaseSync<t>(
-  trace: ImportTrace | undefined,
+  trace: ImportTraceState | undefined,
   name: string,
   detail: Omit<ImportPhaseTrace, "name" | "ms">,
   fn: () => t,
@@ -954,13 +1236,62 @@ function traceImportPhaseSync<t>(
   if (!trace) return fn();
   const start = performance.now();
   const result = fn();
-  trace.phases.push({
+  recordImportPhase(trace, {
     name,
     ms: performance.now() - start,
     ...detail,
     ...(after?.(result) ?? {}),
   });
   return result;
+}
+
+function recordImportPhase(trace: ImportTraceState | undefined, phase: ImportPhaseTrace) {
+  if (!trace) return;
+  trace.phases.push(phase);
+  recordCompileTrace(trace.compileTrace, {
+    name: phase.name,
+    durationMs: phase.ms,
+    counters: importTraceCounters(phase),
+  });
+}
+
+function importTraceCounters(phase: ImportPhaseTrace) {
+  return {
+    moduleName: phase.moduleName,
+    cacheHit: phase.cacheHit,
+    declarationsIn: phase.declarationCount,
+    declarationsOut: phase.keptDeclarationCount,
+    typeCount: phase.typeCount,
+    fnCount: phase.fnCount,
+    contractCount: phase.contractCount,
+    sourceImportCount: phase.sourceImportCount,
+    referencedNameCount: phase.referenceCount,
+    keptNameCount: phase.keptDeclarationCount,
+  };
+}
+
+function importProgramCounters(program: Program) {
+  return {
+    declarationCount: program.declarations.length,
+    typeCount: program.declarations.filter((decl) => decl.kind === "type").length,
+    fnCount: program.declarations.filter((decl) => decl.kind === "fn").length,
+    contractCount: program.declarations.filter((decl) => decl.kind === "contract").length,
+    sourceImportCount: program.sourceImports?.length ?? 0,
+  };
+}
+
+function recordCompileTrace(
+  trace: CompileTraceSink | undefined,
+  event: {
+    name: string;
+    durationMs: number;
+    counters?: Record<string, string | number | boolean | undefined>;
+  },
+) {
+  if (!trace) return;
+  if (Array.isArray(trace)) trace.push(event);
+  else if (typeof trace === "function") trace(event);
+  else trace.onCompileTrace(event);
 }
 
 function declarationName(decl: Declaration): string {
@@ -989,6 +1320,8 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
   if (decl.kind === "fn") {
     return withMeta(decl, {
       ...decl,
+      imported: true,
+      rootPublic: false,
       name: qualifyName(decl.name, alias),
       memberOf: decl.memberOf
         ? {

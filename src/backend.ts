@@ -2,7 +2,6 @@ import type {
   BlockExpr,
   BranchHint,
   ConstDecl,
-  Declaration,
   Expr,
   FnDecl,
   Param,
@@ -12,6 +11,7 @@ import type {
   Statement,
   TypeDecl,
 } from "./core_ast.ts";
+import { runtimeProgramFromProgram } from "./check.ts";
 import { CompileError } from "./diagnostics.ts";
 import {
   type OptimizationDecision,
@@ -33,6 +33,7 @@ import {
   type CompilerPluginRegistry,
   createCompilerPluginRegistry,
 } from "./plugins.ts";
+import type { CompileTraceSink } from "./trace.ts";
 import {
   type I32Range,
   parseRefinedI32Type,
@@ -57,6 +58,18 @@ export interface BackendModule {
   memories: BackendMemory[];
   data: BackendData[];
   branchHints: boolean;
+}
+
+export interface BackendPhaseTimings {
+  optimizeMs: number;
+  layoutMs: number;
+  lowerMs: number;
+  cleanupMs: number;
+}
+
+export interface LoweredBackendArtifact {
+  module: BackendModule;
+  timings: BackendPhaseTimings;
 }
 
 interface BackendMemory {
@@ -217,6 +230,7 @@ export interface BackendOptions extends CompilerPluginOptions {
   profile?: OptimizeProfileName | OptimizeProfile;
   branchHints?: boolean;
   assumeRewrites?: boolean;
+  compileTrace?: CompileTraceSink;
 }
 
 const EXPLICIT_MEMORY: BackendMemory = {
@@ -238,15 +252,19 @@ const BRANCH_MEMORIES: BackendMemory[] = [
 
 const SIMD_DOT4_I32_HELPER = "__fig_dot4_i32";
 
+function isCurrentModulePublic(fn: FnDecl): boolean {
+  return fn.rootPublic ?? (fn.public && !fn.imported);
+}
+
 export function emitWat(program: Program, options: BackendOptions = {}): string {
-  return backendModuleToWat(compileBackendModule(program, options));
+  return watFromBackendModule(lowerProgramToBackendModule(program, options));
 }
 
 export function emitWasm(
   program: Program,
   options: BackendOptions = {},
 ): Uint8Array<ArrayBuffer> {
-  return backendModuleToWasm(compileBackendModule(program, options), {
+  return wasmFromBackendModule(lowerProgramToBackendModule(program, options), {
     debugNames: (options.optMode ?? "debug") === "debug",
   });
 }
@@ -328,8 +346,9 @@ function backendFixedArrayPlanning(
     optMode,
     profile: options.profile,
     assumeRewrites: options.assumeRewrites,
+    trace: options.compileTrace,
   });
-  const runtimeProgram = runtimeProgramView(optimized);
+  const runtimeProgram = runtimeProgramFromProgram(optimized);
   const layouts = createLayoutEnv(runtimeProgram);
   const imports = runtimeProgram.imports.map((item) => importAsFn(item));
   const runtimeFns = runtimeProgram.declarations.filter((decl): decl is FnDecl =>
@@ -398,19 +417,17 @@ function layoutDecision(
   };
 }
 
-function runtimeProgramView(program: Program): Program {
-  return {
-    ...program,
-    declarations: program.declarations.filter((
-      decl,
-    ): decl is Exclude<Declaration, { kind: "contract" }> => decl.kind !== "contract"),
-  };
-}
-
 export function compileBackendModule(
   program: Program,
   options: BackendOptions = {},
 ): BackendModule {
+  return lowerProgramToBackendArtifact(program, options).module;
+}
+
+export function lowerProgramToBackendArtifact(
+  program: Program,
+  options: BackendOptions = {},
+): LoweredBackendArtifact {
   const memoryModel = options.memoryModel ?? "branch";
   if (!isMemoryModel(memoryModel)) {
     throw new CompileError([{
@@ -421,12 +438,18 @@ export function compileBackendModule(
   const optMode = options.optMode ?? "debug";
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
+
+  const optimizeStart = performance.now();
   const optimized = optimizeProgram(program, {
     optMode,
     profile: options.profile,
     assumeRewrites: options.assumeRewrites,
+    trace: options.compileTrace,
   });
-  const runtimeProgram = runtimeProgramView(optimized);
+  const optimizeMs = performance.now() - optimizeStart;
+
+  const layoutStart = performance.now();
+  const runtimeProgram = runtimeProgramFromProgram(optimized);
   const layouts = createLayoutEnv(runtimeProgram);
   const imports = runtimeProgram.imports.map((item) => importAsFn(item));
   const runtimeFns = runtimeProgram.declarations.filter((decl): decl is FnDecl =>
@@ -477,12 +500,17 @@ export function compileBackendModule(
   ctx.scratchPlansByFunction = fixedArrayPlans.scratch;
   ctx.packedPlansByFunction = fixedArrayPlans.packed;
   ctx.localSlotPlansByFunction = fixedArrayPlans.localSlots;
+  const layoutMs = performance.now() - layoutStart;
 
+  const lowerStart = performance.now();
   const loweredFunctions = functions.map((fn) => lowerFunction(fn, ctx));
   let backendFunctions =
     loweredFunctions.some((fn) => instrsCallFunction(fn.body, SIMD_DOT4_I32_HELPER))
       ? [...loweredFunctions, simdDot4I32HelperFunction()]
       : loweredFunctions;
+  const lowerMs = performance.now() - lowerStart;
+
+  const cleanupStart = performance.now();
   if (optMode === "release") {
     backendFunctions = inlineTrivialConstBackendFunctions(backendFunctions);
   }
@@ -498,7 +526,7 @@ export function compileBackendModule(
       message: `temporal intrinsics are only available with --memory temporal`,
     }]);
   }
-  return {
+  const module = {
     imports: imports.map((fn) => ({
       name: fn.name,
       params: fn.params.flatMap((param) =>
@@ -516,6 +544,23 @@ export function compileBackendModule(
     data: [],
     branchHints: options.branchHints ?? optMode === "release",
   };
+  const cleanupMs = performance.now() - cleanupStart;
+  return {
+    module,
+    timings: {
+      optimizeMs,
+      layoutMs,
+      lowerMs,
+      cleanupMs,
+    },
+  };
+}
+
+export function lowerProgramToBackendModule(
+  program: Program,
+  options: BackendOptions = {},
+): BackendModule {
+  return lowerProgramToBackendArtifact(program, options).module;
 }
 
 function backendMemories(
@@ -744,7 +789,7 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
   ).map((item) => item.local);
   return {
     name: fn.name,
-    exportName: fn.public ? fn.name : undefined,
+    exportName: isCurrentModulePublic(fn) ? fn.name : undefined,
     params,
     results: flattenType(fn.returnType, ctx.layouts).map((slot) => slot.wat),
     locals,
@@ -794,11 +839,12 @@ function addOptimizedExportClones(
 ): FnDecl[] {
   const used = new Set(functions.map((fn) => fn.name));
   return functions.flatMap((fn) => {
-    if (!fn.public || !shouldClone(fn)) return [fn];
+    if (!isCurrentModulePublic(fn) || !shouldClone(fn)) return [fn];
     const cloneName = uniqueGeneratedFnName(`${fn.name}__optimized`, used);
     const clone: FnDecl = {
       ...fn,
       public: false,
+      rootPublic: false,
       name: cloneName,
       generated: true,
     };
@@ -889,7 +935,7 @@ function analyzeFixedArrayPlans(
     const scratchPlans = new Map<string, ScratchArrayPlan>();
     const packedPlans = new Map<string, PackedArrayPlan>();
     const localSlotPlans = new Map<string, LocalSlotArrayPlan>();
-    if (fn.public) {
+    if (isCurrentModulePublic(fn)) {
       scratchByFunction.set(fn.name, scratchPlans);
       packedByFunction.set(fn.name, packedPlans);
       localSlotByFunction.set(fn.name, localSlotPlans);
@@ -928,7 +974,7 @@ function analyzeFixedArrayPlans(
   while (transformedChanged) {
     transformedChanged = false;
     for (const fn of functions) {
-      if (fn.public) continue;
+      if (isCurrentModulePublic(fn)) continue;
       const scratchPlans = scratchByFunction.get(fn.name) ?? new Map<string, ScratchArrayPlan>();
       const packedPlans = packedByFunction.get(fn.name) ?? new Map<string, PackedArrayPlan>();
       const localSlotPlans = localSlotByFunction.get(fn.name) ??
@@ -968,7 +1014,7 @@ function analyzeFixedArrayPlans(
       for (const call of privateCallsInBlock(caller.body, ctx)) {
         if (call.callee.kind !== "var") continue;
         const callee = ctx.functions.get(call.callee.name);
-        if (!callee || callee.public) continue;
+        if (!callee || isCurrentModulePublic(callee)) continue;
         const dynamicReads = dynamicFixedArrayReadTargets(callee.body);
         if (!dynamicReads.size) continue;
         const calleeScratchPlans = scratchByFunction.get(callee.name) ??
@@ -1086,7 +1132,9 @@ function fixedArrayTransformerCall(
 ): { call: Extract<Expr, { kind: "call" }>; callee: FnDecl } | undefined {
   if (expr?.kind !== "call" || expr.callee.kind !== "var") return undefined;
   const callee = ctx.functions.get(expr.callee.name);
-  if (!callee || callee.public || !callee.returnType || callee.params.length === 0) {
+  if (
+    !callee || isCurrentModulePublic(callee) || !callee.returnType || callee.params.length === 0
+  ) {
     return undefined;
   }
   if (callee.params.some((param) => param.const)) return undefined;
@@ -1349,7 +1397,7 @@ function privateCallsInBlock(
   const visit = (expr: Expr) => {
     if (expr.kind === "call" && expr.callee.kind === "var") {
       const fn = ctx.functions.get(expr.callee.name);
-      if (fn && !fn.public) calls.push(expr);
+      if (fn && !isCurrentModulePublic(fn)) calls.push(expr);
     }
     switch (expr.kind) {
       case "block":
@@ -3575,7 +3623,9 @@ function privateFixedArrayTransformerExpr(
 ): boolean {
   if (expr.kind !== "call" || expr.callee.kind !== "var") return false;
   const callee = ctx.functions.get(expr.callee.name);
-  if (!callee || callee.public || !callee.returnType || callee.params.length === 0) return false;
+  if (
+    !callee || isCurrentModulePublic(callee) || !callee.returnType || callee.params.length === 0
+  ) return false;
   if (callee.params.some((param) => param.const)) return false;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return false;
   if (
@@ -6247,7 +6297,9 @@ function lowerPrivateProductCallInline(
   if (ctx.optMode !== "release" || expr.callee.kind !== "var") return undefined;
   if (!ctx.currentFn) return undefined;
   const callee = ctx.functions.get(expr.callee.name);
-  if (!callee || callee.public || callee.name === ctx.currentFn?.name) return undefined;
+  if (!callee || isCurrentModulePublic(callee) || callee.name === ctx.currentFn?.name) {
+    return undefined;
+  }
   if (isFixedArrayProtocolHelper(callee, ctx)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
@@ -6260,20 +6312,22 @@ function lowerPrivateProductCallInline(
   // Array-free product loops are cheaper as calls from private wrappers; inlining them creates
   // nested loop bodies without unlocking a backed fixed-array representation.
   if (
-    !ctx.currentFn.public && calleeTailCalls.hasDirectSelfCall &&
+    !isCurrentModulePublic(ctx.currentFn) && calleeTailCalls.hasDirectSelfCall &&
     !functionHasAnyFixedArrayPlan(callee.name, ctx)
   ) {
     return undefined;
   }
   if (
-    ctx.currentFn.public && calleeTailCalls.hasDirectSelfCall &&
+    isCurrentModulePublic(ctx.currentFn) && calleeTailCalls.hasDirectSelfCall &&
     (nonSelfCallSiteCount(callee.name, ctx) !== 1 ||
       hasNonSelfCalls(callee) ||
       functionHasAnyFixedArrayPlan(callee.name, ctx))
   ) {
     return undefined;
   }
-  if (ctx.currentFn.public && typeContainsInlineArray(callee.returnType, ctx)) return undefined;
+  if (isCurrentModulePublic(ctx.currentFn) && typeContainsInlineArray(callee.returnType, ctx)) {
+    return undefined;
+  }
   const scalarArgSubstitutions = new Map<string, Expr>();
   if (!calleeTailCalls.hasDirectSelfCall) {
     for (const [index, param] of callee.params.entries()) {
@@ -6589,7 +6643,9 @@ function lowerPrivateScalarTailLoopCallInline(
   if (ctx.optMode !== "release" || expr.callee.kind !== "var") return undefined;
   if (!ctx.currentFn) return undefined;
   const callee = ctx.functions.get(expr.callee.name);
-  if (!callee || callee.public || callee.name === ctx.currentFn.name) return undefined;
+  if (!callee || isCurrentModulePublic(callee) || callee.name === ctx.currentFn.name) {
+    return undefined;
+  }
   if (callee.effects.length || (callee.generated && !callee.generatedInlineable)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
@@ -6600,7 +6656,7 @@ function lowerPrivateScalarTailLoopCallInline(
   if (backendInlineBlockCost(callee.body) > SCALAR_TAIL_LOOP_BACKEND_INLINE_COST_BUDGET) {
     return undefined;
   }
-  if (ctx.currentFn.public) {
+  if (isCurrentModulePublic(ctx.currentFn)) {
     if (nonSelfCallSiteCount(callee.name, ctx) !== 1 || hasNonSelfCalls(callee)) return undefined;
     if (callee.params.some((param) => typeContainsInlineArray(param.type, ctx))) return undefined;
   } else if (privateNonSelfCallSiteCount(callee.name, ctx) !== 1) return undefined;
@@ -6780,8 +6836,8 @@ function lowerPrivateScalarTailLoopCallInline(
 
 function privateNonSelfCallSiteCount(name: string, ctx: LowerContext): number {
   let count = 0;
-  for (const fn of ctx.functions.values()) {
-    if (fn.public || fn.name === name) continue;
+  for (const fn of ctx.signatures.values()) {
+    if (isCurrentModulePublic(fn) || fn.name === name) continue;
     count += callCountInExpr(fn.body, name);
   }
   return count;
@@ -6789,7 +6845,7 @@ function privateNonSelfCallSiteCount(name: string, ctx: LowerContext): number {
 
 function nonSelfCallSiteCount(name: string, ctx: LowerContext): number {
   let count = 0;
-  for (const fn of ctx.functions.values()) {
+  for (const fn of ctx.signatures.values()) {
     if (fn.name === name) continue;
     count += callCountInExpr(fn.body, name);
   }
@@ -6817,7 +6873,9 @@ function lowerPrivateScalarCallInline(
   if (ctx.optMode !== "release" || expr.callee.kind !== "var") return undefined;
   if (!ctx.currentFn) return undefined;
   const callee = ctx.functions.get(expr.callee.name);
-  if (!callee || callee.public || callee.name === ctx.currentFn.name) return undefined;
+  if (!callee || isCurrentModulePublic(callee) || callee.name === ctx.currentFn.name) {
+    return undefined;
+  }
   if (callee.effects.length || (callee.generated && !callee.generatedInlineable)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
@@ -8345,7 +8403,9 @@ function packedPrefixShiftCallParts(
 ): PackedPrefixShiftCallParts | undefined {
   if (depth > 2 || expr.callee.kind !== "var") return undefined;
   const callee = ctx.functions.get(expr.callee.name);
-  if (!callee || callee.public || callee.params.some((param) => param.const)) return undefined;
+  if (!callee || isCurrentModulePublic(callee) || callee.params.some((param) => param.const)) {
+    return undefined;
+  }
   if (!callee.returnType) return undefined;
   const direct = packedPrefixShiftLoopPlan(callee, ctx);
   const argOffset = Math.max(0, expr.args.length - callee.params.length);
@@ -10416,8 +10476,8 @@ function removeUnreachablePrivateFunctions(functions: FnDecl[]): FnDecl[] {
     reachable.add(name);
     for (const called of calledFunctions(fn.body)) visit(called);
   };
-  for (const fn of functions) if (fn.public) visit(fn.name);
-  return functions.filter((fn) => fn.public || reachable.has(fn.name));
+  for (const fn of functions) if (isCurrentModulePublic(fn)) visit(fn.name);
+  return functions.filter((fn) => isCurrentModulePublic(fn) || reachable.has(fn.name));
 }
 
 function privateReturnProjectionPlans(
@@ -10426,7 +10486,7 @@ function privateReturnProjectionPlans(
 ): Map<string, ReturnProjectionPlan> {
   const privateProductFns = new Map(
     functions.filter((fn) =>
-      !fn.public && fn.returnType && flattenType(fn.returnType, layouts).length > 1
+      !isCurrentModulePublic(fn) && fn.returnType && flattenType(fn.returnType, layouts).length > 1
     ).map((fn) => [fn.name, fn]),
   );
   const candidates = new Map<string, { suffixes: Set<string>; full: boolean }>(
@@ -10774,6 +10834,10 @@ export function backendModuleToWat(module: BackendModule): string {
   return `(module\n${[...imports, ...memory, ...data, ...functions].join("\n")}\n)`;
 }
 
+export function watFromBackendModule(module: BackendModule): string {
+  return backendModuleToWat(module);
+}
+
 function watFunctionAliases(functions: BackendFunction[]): Map<string, string> {
   const aliases = new Map<string, string>();
   for (const fn of functions) {
@@ -11069,6 +11133,13 @@ export function backendModuleToWasm(
     section(bytes, 0, wasmNameSection(module, allFns));
   }
   return new Uint8Array(bytes) as Uint8Array<ArrayBuffer>;
+}
+
+export function wasmFromBackendModule(
+  module: BackendModule,
+  options: { debugNames?: boolean } = {},
+): Uint8Array<ArrayBuffer> {
+  return backendModuleToWasm(module, options);
 }
 
 function wasmNameSection(

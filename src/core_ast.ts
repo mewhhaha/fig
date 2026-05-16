@@ -51,6 +51,8 @@ export interface FnDecl extends AstNodeMeta {
   body: BlockExpr;
   generated?: boolean;
   generatedInlineable?: boolean;
+  imported?: boolean;
+  rootPublic?: boolean;
   primitiveId?: string;
   branchHint?: BranchHint;
 }

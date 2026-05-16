@@ -3,6 +3,8 @@ import {
   checkSource,
   compileArtifactsFromSource,
   COMPILER_PLUGIN_API_VERSION,
+  type CompileTraceEvent,
+  compileWasmFromSource,
   createCompileCache,
   createCompilerPluginRegistry,
   explainOptimization,
@@ -3580,6 +3582,36 @@ Deno.test("repeated const-param call specialization reuses one generated wrapper
   assert(constPass.visitedCalls >= calls);
 });
 
+Deno.test("long primitive addition chains are balanced after operator resolution", async () => {
+  const source = `
+    pub fn main() -> i32 {
+      ${Array.from({ length: 32 }, () => "1").join(" +\n      ")}
+    }
+  `;
+  const checked = await checkSource(source);
+  const main = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "main"
+  );
+  assert(main?.body.expr);
+  assert(maxBinaryDepth(main.body.expr, "+") <= 7);
+});
+
+Deno.test("long primitive boolean chains are balanced after operator resolution", async () => {
+  const source = `
+    pub fn main() -> bool {
+      ${
+    Array.from({ length: 32 }, (_, index) => index === 17 ? "false" : "true").join(" &&\n      ")
+  }
+    }
+  `;
+  const checked = await checkSource(source);
+  const main = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "main"
+  );
+  assert(main?.body.expr);
+  assert(maxBinaryDepth(main.body.expr, "&&") <= 7);
+});
+
 Deno.test("optimizes nested forwarding specializations transitively", async () => {
   const checked = await checkSource(`
     type fn Box() { let Box = {value: i32}; struct(Box) }
@@ -3964,7 +3996,17 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
     }
   `;
   const userSource = `
+    type fn Iter() {
+      let Iter = {start: i32, end: i32};
+      struct(Iter)
+    }
     fn add(acc: i32, x: i32) -> i32 { acc + x }
+    fn make_iter(start: i32, end: i32) -> Iter {
+      Iter {start: start, end: end}
+    }
+    fn fold(iter: Iter, init: i32) -> i32 {
+      my_fold_loop(iter.start, iter.end, init)
+    }
     fn my_fold_loop(i: i32, end: i32, acc: i32) -> i32 {
       match i < end {
         true => my_fold_loop(i + 1, end, add(acc, i)),
@@ -3972,7 +4014,7 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
       }
     }
     pub fn main(seed: i32) -> i32 {
-      my_fold_loop(seed - seed, 1000, 0)
+      fold(make_iter(seed - seed, 1000), 0)
     }
   `;
 
@@ -3986,7 +4028,7 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
 
   assert(
     preludePlan.decisions.some((decision) =>
-      decision.target.endsWith("RangeIter::fold_loop") &&
+      decision.target.includes("RangeIter") && decision.target.includes("fold_loop") &&
       decision.action === "recurrence.lower.tail_loop"
     ),
   );
@@ -4005,7 +4047,35 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
   assertStringIncludes(preludeWat, "loop");
   assertStringIncludes(userWat, "loop");
   assert(!preludeWat.includes("call $range.RangeIter::fold_loop"));
+  assert(!userWat.includes("call $make_iter"));
+  assert(!userWat.includes("call $fold"));
   assert(!userWat.includes("call $my_fold_loop"));
+});
+
+Deno.test("optimizer scope traces only reachable imported runtime helpers", async () => {
+  const compileTrace: CompileTraceEvent[] = [];
+  const source = `
+    const lib = @import("fixture.lib");
+    pub fn main() -> i32 { lib.used() }
+  `;
+  const moduleSource = [
+    "pub fn helper() -> i32 { 1 }",
+    "pub fn used() -> i32 { helper() }",
+    ...Array.from({ length: 12 }, (_, index) => `pub fn unused_${index}() -> i32 { ${index} }`),
+  ].join("\n");
+  const artifact = await compileArtifactsFromSource(source, {
+    resolveModule: (moduleName) => moduleName === "fixture.lib" ? moduleSource : undefined,
+    optMode: "release",
+    compileTrace,
+  });
+
+  const scope = compileTrace.find((event) => event.name === "opt.scope");
+  const optimizeDecls = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
+  assertEquals(scope?.counters?.reachableFunctions, 3);
+  assertEquals(optimizeDecls?.counters?.changedFunctions, 3);
+  const exports = WebAssembly.Module.exports(new WebAssembly.Module(artifact.wasm))
+    .map((item) => item.name);
+  assertEquals(exports, ["main"]);
 });
 
 Deno.test("optimizer extracts cheapest local equality candidates", async () => {
@@ -4339,14 +4409,20 @@ Deno.test("emits deterministic WAT and valid wasm32", async () => {
 });
 
 Deno.test("compileArtifactsFromSource emits WAT and Wasm from one checked source", async () => {
-  const artifact = await compileArtifactsFromSource(`pub fn main() -> i32 { 40 + 2 }`, {
-    optMode: "release",
-  });
+  const source = `pub fn main() -> i32 { 40 + 2 }`;
+  const options = { optMode: "release" as const };
+  const artifact = await compileArtifactsFromSource(source, options);
   assertStringIncludes(artifact.wat, "i32.const 42");
+  assertEquals(artifact.wat, await watFromSource(source, options));
+  assertEquals(artifact.wasm, await wasmFromSource(source, options));
   assert(artifact.wasm.byteLength > 0);
   assert(artifact.timings.parseMs >= 0);
   assert(artifact.timings.checkMs >= 0);
   assert(artifact.timings.backendMs >= 0);
+  assert(artifact.timings.optimizeMs >= 0);
+  assert(artifact.timings.backendLayoutMs >= 0);
+  assert(artifact.timings.backendLowerMs >= 0);
+  assert(artifact.timings.backendCleanupMs >= 0);
   assert(artifact.timings.watRenderMs >= 0);
   assert(artifact.timings.wasmEncodeMs >= 0);
   assert(artifact.timings.watMs >= 0);
@@ -4354,6 +4430,31 @@ Deno.test("compileArtifactsFromSource emits WAT and Wasm from one checked source
 
   const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
   assertEquals((instance.exports.main as () => number)(), 42);
+});
+
+Deno.test("compileWasmFromSource skips WAT rendering", async () => {
+  const source = `pub fn main() -> i32 { 40 + 2 }`;
+  const artifact = await compileArtifactsFromSource(source, {
+    includeWat: false,
+    optMode: "release",
+  });
+  assertEquals(artifact.wat, undefined);
+  assertEquals(artifact.timings.watMs, 0);
+  assertEquals(artifact.timings.watRenderMs, 0);
+  assertEquals(artifact.wasm, await compileWasmFromSource(source, { optMode: "release" }));
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 42);
+});
+
+Deno.test("checkSource emits parse subphase trace events", async () => {
+  const compileTrace: CompileTraceEvent[] = [];
+  await checkSource(`pub fn main() -> i32 { 1 }`, { compileTrace });
+  const events = new Map(compileTrace.map((event) => [event.name, event]));
+  assert(events.has("parse.syntax"));
+  assert(events.has("parse.adapt"));
+  assertEquals(events.get("parse.docs")?.counters?.hasDocs, false);
+  assert(events.has("parse.lower"));
 });
 
 Deno.test("compileArtifactsFromSource traces import phases", async () => {
@@ -4374,10 +4475,37 @@ Deno.test("compileArtifactsFromSource traces import phases", async () => {
     },
   );
   const phaseNames = new Set(artifact.importTrace?.phases.map((phase) => phase.name));
-  assert(phaseNames.has("parse module"));
-  assert(phaseNames.has("merge child imports"));
-  assert(phaseNames.has("collect declaration names"));
-  assert(phaseNames.has("prune worklist"));
+  assert(phaseNames.has("import.parse.module"));
+  assert(phaseNames.has("import.merge.module"));
+  assert(phaseNames.has("import.prune.collect_names"));
+  assert(phaseNames.has("import.prune.worklist"));
+  assert(phaseNames.has("import.prune.references"));
+});
+
+Deno.test("compile trace sink receives import phase events", async () => {
+  const compileTrace: CompileTraceEvent[] = [];
+  await checkSource(
+    `
+      const core = @import("prelude.core");
+      pub fn main(raw: i32) -> i32 {
+        match core.i32::try_domain(i32(0..4), raw) {
+          Some(i) => i,
+          None => 0,
+        }
+      }
+    `,
+    {
+      resolveModule: resolveProjectModule,
+      pruneImports: true,
+      compileTrace,
+    },
+  );
+  const importEvents = compileTrace.filter((event) => event.name.startsWith("import."));
+  assert(importEvents.some((event) => event.name === "import.parse.module"));
+  assert(importEvents.some((event) => event.name === "import.prune.worklist"));
+  assert(importEvents.some((event) => event.name === "import.prune.references"));
+  assert(importEvents.some((event) => typeof event.counters?.declarationsIn === "number"));
+  assert(importEvents.some((event) => typeof event.counters?.fnCount === "number"));
 });
 
 Deno.test("compileArtifactsFromSource reuses shared import cache", async () => {
@@ -4398,12 +4526,71 @@ Deno.test("compileArtifactsFromSource reuses shared import cache", async () => {
   `;
   await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
   const firstResolveCalls = resolveCalls;
+  const parsedCacheSize = cache.parsedModules.size;
+  const resolvedCacheSize = cache.resolvedModules.size;
   assert(firstResolveCalls > 0);
-  assert(cache.parsedModules.size > 0);
-  assert(cache.resolvedModules.size > 0);
+  assert(parsedCacheSize > 0);
+  assert(resolvedCacheSize > 0);
 
   await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
-  assertEquals(resolveCalls, firstResolveCalls);
+  assert(resolveCalls > firstResolveCalls);
+  assertEquals(cache.parsedModules.size, parsedCacheSize);
+  assertEquals(cache.resolvedModules.size, resolvedCacheSize);
+});
+
+Deno.test("compileArtifactsFromSource reuses cached pruned imports", async () => {
+  const cache = createCompileCache();
+  const source = `
+    const left = @import("fixture.lib");
+    const right = @import("fixture.lib");
+    pub fn main() -> i32 { left.used() + right.used() }
+  `;
+  const moduleSource = `
+    fn helper() -> i32 { 1 }
+    fn used() -> i32 { helper() }
+    fn unused() -> i32 { 99 }
+  `;
+  const artifact = await compileArtifactsFromSource(source, {
+    resolveModule: (moduleName) => moduleName === "fixture.lib" ? moduleSource : undefined,
+    pruneImports: true,
+    cache,
+    trace: true,
+  });
+  const cacheHit = artifact.importTrace?.phases.some((phase) =>
+    phase.name === "import.prune.finish" && phase.cacheHit
+  );
+  assertEquals(cache.prunedImports.size, 1);
+  assertEquals(cacheHit, true);
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+});
+
+Deno.test("compile cache invalidates parsed imports when module source changes", async () => {
+  const cache = createCompileCache();
+  let value = 1;
+  const resolveModule = (moduleName: string) =>
+    moduleName === "fixture.dynamic" ? `fn value() -> i32 { ${value} }` : undefined;
+  const source = `
+    const fixture = @import("fixture.dynamic");
+    pub fn main() -> i32 { fixture.value() }
+  `;
+  const first = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  let instance = new WebAssembly.Instance(new WebAssembly.Module(first.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+
+  value = 2;
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
 });
 
 Deno.test("release_fast_compile profile compiles with fewer optimizer passes", async () => {
@@ -4756,6 +4943,24 @@ Deno.test("contract fn rewrite declarations parse with associated names and cons
   assertEquals(generic.resultKind, "rewrite");
 });
 
+Deno.test("checkSource exposes contracts separately from runtime declarations", async () => {
+  const checked = await checkSource(`
+    contract fn add_zero_right() -> rewrite {
+      @assume(
+        \\x -> x + 0,
+        \\x -> x
+      )
+    }
+
+    pub fn main(x: i32) -> i32 { x + 0 }
+  `);
+
+  assert(checked.program.declarations.some((decl) => decl.kind === "contract"));
+  assert(!checked.runtimeProgram.declarations.some((decl) => decl.kind === "contract"));
+  assertEquals(checked.contracts.declarations.length, 1);
+  assertEquals(checked.contracts.byName.get("add_zero_right")?.name, "add_zero_right");
+});
+
 Deno.test("contract fn rewrite validates context and rewrite-only type spelling", async () => {
   await assertThrowsCompile(
     `fn bad() -> rewrite { 0 }`,
@@ -5087,6 +5292,11 @@ function findFns(program: Program, name: string): FnDecl[] {
   return program.declarations.filter((decl): decl is FnDecl =>
     decl.kind === "fn" && decl.name === name
   );
+}
+
+function maxBinaryDepth(expr: Expr, op: string): number {
+  if (expr.kind !== "binary" || expr.op !== op) return 0;
+  return 1 + Math.max(maxBinaryDepth(expr.left, op), maxBinaryDepth(expr.right, op));
 }
 
 function countCalls(

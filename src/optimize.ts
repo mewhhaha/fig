@@ -1,6 +1,7 @@
 import type {
   BlockExpr,
   Declaration,
+  DoStatement,
   Expr,
   FnDecl,
   Param,
@@ -19,7 +20,7 @@ import {
   renderRefinedI32Domain,
   scalarFactsFromI32Range,
 } from "./refined_scalar.ts";
-import { type CompileTraceSink, traceInstant } from "./trace.ts";
+import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
 
 export type OptMode = "debug" | "release";
 
@@ -69,6 +70,12 @@ interface OptimizerConfig {
   productInlineBudget: number;
   passes: number;
   rewriteUnusedPrivateParams: boolean;
+}
+
+export interface OptimizationScope {
+  runtimeRoots: Set<string>;
+  reachableFunctions: Set<string>;
+  reachableDeclarations: Set<string>;
 }
 
 export const OPTIMIZE_PROFILES: Record<OptimizeProfileName, OptimizeProfile> = {
@@ -427,34 +434,231 @@ export interface AbstractFunctionFacts {
 
 export function optimizeProgram(program: Program, options: OptimizeOptions = {}): Program {
   const config = optimizerConfig(options);
-  const optimized = structuredClone(program) as Program;
-  const expandedBeforeInline = config.rewriteUnusedPrivateParams &&
-    expandFiniteStaticRecurrences(optimized, config);
-  runOptimizePasses(optimized, config);
-  if (config.rewriteUnusedPrivateParams && expandFiniteStaticRecurrences(optimized, config)) {
-    runOptimizePasses(optimized, config);
-  } else if (expandedBeforeInline) {
-    runOptimizePasses(optimized, config);
+  const optimized = traceSync(
+    options.trace,
+    "opt.clone",
+    () => structuredClone(program) as Program,
+    (
+      result,
+    ) => optimizerTraceCounters(result),
+  );
+  const scope = traceSync(
+    options.trace,
+    "opt.scope",
+    () => buildOptimizationScope(optimized),
+    (result) => optimizerTraceCounters(optimized, result),
+  );
+  if (config.rewriteUnusedPrivateParams) {
+    traceSync(
+      options.trace,
+      "opt.inlinePureForwardingWrappers",
+      () => inlinePureForwardingWrappers(optimized, scope),
+      (changed) => optimizerTraceCounters(optimized, scope, { changedFunctions: changed ? 1 : 0 }),
+    );
+    traceSync(
+      options.trace,
+      "opt.expandFiniteStaticRecurrences.initial",
+      () => expandFiniteStaticRecurrences(optimized, config, scope),
+      (changed) => optimizerTraceCounters(optimized, scope, { changedFunctions: changed ? 1 : 0 }),
+    );
+    traceSync(
+      options.trace,
+      "opt.lowerTailRecurrenceClauseGroups",
+      () => lowerTailRecurrenceClauseGroups(optimized, config, scope),
+      (changed) => optimizerTraceCounters(optimized, scope, { changedFunctions: changed ? 1 : 0 }),
+    );
+    traceSync(
+      options.trace,
+      "opt.expandFiniteStaticRecurrences.second",
+      () => false,
+      () => optimizerTraceCounters(optimized, scope, { changedFunctions: 0 }),
+    );
   }
-  if (config.rewriteUnusedPrivateParams && lowerTailRecurrenceClauseGroups(optimized, config)) {
-    runOptimizePasses(optimized, config);
+  runOptimizePasses(optimized, config, scope, options.trace);
+  if (options.assumeRewrites) {
+    traceSync(
+      options.trace,
+      "opt.applyAssumeRewrites",
+      () => applyAssumeRewrites(optimized, options),
+      () => optimizerTraceCounters(optimized, scope),
+    );
   }
-  if (options.assumeRewrites) applyAssumeRewrites(optimized, options);
-  if (config.rewriteUnusedPrivateParams) rewriteUnusedPrivateParams(optimized);
+  if (config.rewriteUnusedPrivateParams) {
+    traceSync(
+      options.trace,
+      "opt.rewriteUnusedPrivateParams",
+      () => rewriteUnusedPrivateParams(optimized, scope),
+      () => optimizerTraceCounters(optimized, scope),
+    );
+  }
   return optimized;
 }
 
-function runOptimizePasses(program: Program, config: OptimizerConfig): void {
-  for (let pass = 0; pass < config.passes; pass++) {
-    const functions = functionMap(program);
-    const forwarding = forwardingWrappers(functions);
-    const summaries = functionSummaries(program, functions);
-    const plan = buildOptimizationPlan(program, config.profile, { functions, summaries });
-    const inlineable = inlineableFunctions(functions, plan);
-    program.declarations = program.declarations.map((decl) =>
-      optimizeDecl(decl, forwarding, inlineable, functions, config)
+function inlinePureForwardingWrappers(
+  program: Program,
+  scope: OptimizationScope,
+): boolean {
+  const functions = functionMap(program, scope);
+  const forwarding = forwardingWrappers(functions);
+  for (const [name] of forwarding) {
+    if (functions.get(name)?.generated) forwarding.delete(name);
+  }
+  if (!forwarding.size) return false;
+  let changed = false;
+  const rewriteBlock = (block: BlockExpr): BlockExpr => ({
+    ...block,
+    statements: block.statements.map((stmt) =>
+      stmt.kind === "proof_const" ? stmt : { ...stmt, value: rewriteExpr(stmt.value) }
+    ),
+    expr: block.expr ? rewriteExpr(block.expr) : undefined,
+  });
+  const rewriteExpr = (expr: Expr): Expr => {
+    switch (expr.kind) {
+      case "call": {
+        const callee = rewriteExpr(expr.callee);
+        const args = expr.args.map(rewriteExpr);
+        if (callee.kind !== "var") return { ...expr, callee, args };
+        const target = forwarding.get(callee.name);
+        if (!target) return { ...expr, callee, args };
+        changed = true;
+        return { ...expr, callee: { kind: "var", name: target }, args };
+      }
+      case "block":
+        return rewriteBlock(expr);
+      case "const_fn":
+        return { ...expr, body: rewriteExpr(expr.body) };
+      case "index":
+        return { ...expr, target: rewriteExpr(expr.target), index: rewriteExpr(expr.index) };
+      case "binary":
+        return { ...expr, left: rewriteExpr(expr.left), right: rewriteExpr(expr.right) };
+      case "pipe_bind":
+        return { ...expr, value: rewriteExpr(expr.value), body: rewriteExpr(expr.body) };
+      case "match":
+        return {
+          ...expr,
+          value: rewriteExpr(expr.value),
+          arms: expr.arms.map((arm) => ({ ...arm, value: rewriteExpr(arm.value) })),
+        };
+      case "shape":
+      case "product_constructor":
+        return {
+          ...expr,
+          slots: expr.slots.map((slot) => ({
+            ...slot,
+            index: slot.index ? rewriteExpr(slot.index) : undefined,
+            value: rewriteExpr(slot.value),
+          })),
+        };
+      case "static_for_slots":
+        return {
+          ...expr,
+          source: expr.source.kind === "range"
+            ? {
+              ...expr.source,
+              start: rewriteExpr(expr.source.start),
+              end: rewriteExpr(expr.source.end),
+            }
+            : { ...expr.source, shape: rewriteExpr(expr.source.shape) },
+          value: rewriteExpr(expr.value),
+        };
+      case "field":
+        return { ...expr, value: rewriteExpr(expr.value), key: rewriteExpr(expr.key) };
+      case "range":
+        return { ...expr, start: rewriteExpr(expr.start), end: rewriteExpr(expr.end) };
+      case "do":
+      case "literal":
+      case "var":
+      case "placeholder":
+        return expr;
+    }
+  };
+  program.declarations = program.declarations.map((decl) => {
+    if (decl.kind === "fn" && scope.reachableFunctions.has(decl.name)) {
+      return { ...decl, body: rewriteBlock(decl.body) };
+    }
+    if (
+      (decl.kind === "let" || decl.kind === "const") &&
+      scope.reachableDeclarations.has(decl.name)
+    ) {
+      return { ...decl, value: rewriteExpr(decl.value) };
+    }
+    return decl;
+  });
+  return changed;
+}
+
+function runOptimizePasses(
+  program: Program,
+  config: OptimizerConfig,
+  scope: OptimizationScope,
+  trace?: CompileTraceSink,
+): void {
+  const maxPasses = Math.min(config.passes, 2);
+  let previousInlineableNames: Set<string> | undefined;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    if (
+      pass > 0 && previousInlineableNames?.size &&
+      hasReachableGeneratedRecurrence(program, scope)
+    ) break;
+    const functions = traceSync(
+      trace,
+      `opt.pass.${pass}.functionMap`,
+      () => functionMap(program, scope),
+      (result) => optimizerTraceCounters(program, scope, { functions: result.size, pass }),
     );
-    foldAbstractFactsInProgram(program);
+    const forwarding = traceSync(
+      trace,
+      `opt.pass.${pass}.forwardingWrappers`,
+      () => forwardingWrappers(functions),
+      (result) => optimizerTraceCounters(program, scope, { changedFunctions: result.size, pass }),
+    );
+    const recurrences = summarizeRecurrences(program, scope);
+    const summaries = traceSync(
+      trace,
+      `opt.pass.${pass}.summaries`,
+      () => functionSummaries(program, functions, recurrences, scope),
+      (result) => optimizerTraceCounters(program, scope, { functions: result.size, pass }),
+    );
+    const plan = traceSync(
+      trace,
+      `opt.pass.${pass}.plan`,
+      () =>
+        buildOptimizationPlan(
+          program,
+          config.profile,
+          { functions, summaries, recurrences },
+          scope,
+        ),
+      (result) =>
+        optimizerTraceCounters(program, scope, {
+          changedFunctions: result.decisions.length,
+          pass,
+        }),
+    );
+    const inlineable = traceSync(
+      trace,
+      `opt.pass.${pass}.inlineable`,
+      () => inlineableFunctions(functions, plan),
+      (result) => optimizerTraceCounters(program, scope, { functions: result.size, pass }),
+    );
+    const inlineableNames = new Set(inlineable.keys());
+    previousInlineableNames = inlineableNames;
+    traceSync(
+      trace,
+      `opt.pass.${pass}.optimizeDecls`,
+      () => {
+        program.declarations = program.declarations.map((decl) =>
+          optimizeDecl(decl, forwarding, inlineable, functions, config, scope)
+        );
+      },
+      () => optimizerTraceCounters(program, scope, { pass }),
+    );
+    traceSync(
+      trace,
+      `opt.pass.${pass}.foldAbstractFacts`,
+      () => foldAbstractFactsInProgram(program, scope),
+      () => optimizerTraceCounters(program, scope, { pass }),
+    );
   }
 }
 
@@ -469,12 +673,186 @@ function optimizerConfig(options: OptimizeOptions): OptimizerConfig {
   };
 }
 
+function hasReachableGeneratedRecurrence(program: Program, scope: OptimizationScope): boolean {
+  const functions = functionMap(program, scope);
+  for (const recurrence of summarizeRecurrences(program, scope).values()) {
+    const dispatcher = functions.get(recurrence.fn);
+    if (dispatcher?.generated) return true;
+    if (recurrence.clauses.some((clause) => functions.get(clause.fn)?.generated)) return true;
+  }
+  return false;
+}
+
 function resolveOptimizeProfile(options: OptimizeOptions = {}): OptimizeProfile {
   if (typeof options.profile === "string") return OPTIMIZE_PROFILES[options.profile];
   if (options.profile) return options.profile;
   return options.optMode === "release"
     ? OPTIMIZE_PROFILES.release_balanced
     : OPTIMIZE_PROFILES.debug;
+}
+
+function isCurrentModulePublic(fn: FnDecl): boolean {
+  return fn.rootPublic ?? (fn.public && !fn.imported);
+}
+
+function optimizerTraceCounters(
+  program: Program,
+  scope?: OptimizationScope,
+  extra: Record<string, number | boolean | string | undefined> = {},
+): Record<string, number | boolean | string | undefined> {
+  const functions = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+  return {
+    declarations: program.declarations.length,
+    functions: functions.length,
+    generatedFunctions: functions.filter((decl) => decl.generated).length,
+    contracts: program.declarations.filter((decl) => decl.kind === "contract").length,
+    reachableFunctions: scope?.reachableFunctions.size,
+    changedFunctions: scope?.reachableFunctions.size,
+    ...extra,
+  };
+}
+
+export function buildOptimizationScope(program: Program): OptimizationScope {
+  const declarations = new Map(program.declarations.map((decl) => [decl.name, decl]));
+  const functions = new Map(
+    program.declarations
+      .filter((decl): decl is FnDecl => decl.kind === "fn")
+      .map((decl) => [decl.name, decl]),
+  );
+  for (const item of program.imports) {
+    functions.set(item.name, {
+      kind: "fn",
+      public: false,
+      imported: true,
+      rootPublic: false,
+      name: item.name,
+      params: [],
+      returnType: item.type,
+      effects: item.effects,
+      body: { kind: "block", statements: [] },
+      primitiveId: "capability",
+    });
+  }
+  const runtimeRoots = new Set(
+    [...functions.values()]
+      .filter((fn) => isCurrentModulePublic(fn) && !fn.primitiveId)
+      .map((fn) => fn.name),
+  );
+  const reachableFunctions = new Set<string>();
+  const reachableDeclarations = new Set<string>();
+  const queue = [...runtimeRoots];
+
+  const enqueue = (name: string | undefined) => {
+    if (!name || reachableDeclarations.has(name)) return;
+    queue.push(name);
+  };
+  const visitDeclReferences = (decl: Declaration | undefined) => {
+    if (!decl) return;
+    const refs = decl.kind === "fn"
+      ? referencedRuntimeNames(decl.body)
+      : decl.kind === "let" || decl.kind === "const"
+      ? referencedRuntimeNames(decl.value)
+      : [];
+    for (const ref of refs) {
+      if (functions.has(ref) || declarations.has(ref)) enqueue(ref);
+    }
+    if (decl.kind === "fn") {
+      for (const called of calledFunctionList(decl.body)) {
+        if (functions.has(called)) enqueue(called);
+      }
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      for (const called of calledFunctionList(decl.value)) {
+        if (functions.has(called)) enqueue(called);
+      }
+    }
+  };
+
+  while (queue.length) {
+    const name = queue.shift()!;
+    if (reachableDeclarations.has(name)) continue;
+    reachableDeclarations.add(name);
+    if (functions.has(name)) reachableFunctions.add(name);
+    visitDeclReferences(declarations.get(name));
+  }
+
+  return { runtimeRoots, reachableFunctions, reachableDeclarations };
+}
+
+function referencedRuntimeNames(expr: Expr | BlockExpr | undefined): string[] {
+  const names: string[] = [];
+  const visit = (item: Expr | BlockExpr | Statement | DoStatement | undefined) => {
+    if (!item) return;
+    switch (item.kind) {
+      case "var":
+        names.push(item.name);
+        return;
+      case "call":
+        visit(item.callee);
+        item.args.forEach(visit);
+        return;
+      case "index":
+        visit(item.target);
+        visit(item.index);
+        return;
+      case "binary":
+        visit(item.left);
+        visit(item.right);
+        return;
+      case "pipe_bind":
+        visit(item.value);
+        visit(item.body);
+        return;
+      case "match":
+        visit(item.value);
+        item.arms.forEach((arm) => visit(arm.value));
+        return;
+      case "shape":
+      case "product_constructor":
+        if (item.kind === "product_constructor") names.push(item.constructor);
+        item.slots.forEach((slot) => {
+          visit(slot.index);
+          visit(slot.value);
+        });
+        return;
+      case "static_for_slots":
+        if (item.source.kind === "range") {
+          visit(item.source.start);
+          visit(item.source.end);
+        } else visit(item.source.shape);
+        visit(item.value);
+        return;
+      case "field":
+        visit(item.value);
+        visit(item.key);
+        return;
+      case "range":
+        visit(item.start);
+        visit(item.end);
+        return;
+      case "block":
+        item.statements.forEach(visit);
+        visit(item.expr);
+        return;
+      case "let":
+      case "destructure_let":
+      case "do_bind":
+        visit(item.value);
+        return;
+      case "const_fn":
+        visit(item.body);
+        return;
+      case "do":
+        item.statements.forEach(visit);
+        visit(item.expr);
+        return;
+      case "proof_const":
+      case "literal":
+      case "placeholder":
+        return;
+    }
+  };
+  visit(expr);
+  return names;
 }
 
 interface RewriteTemplate {
@@ -1064,16 +1442,21 @@ function substituteRewriteTemplate(expr: Expr, bindings: Map<string, Expr>): Exp
   }
 }
 
-function functionMap(program: Program): Map<string, FnDecl> {
+function functionMap(program: Program, scope?: OptimizationScope): Map<string, FnDecl> {
   const functions = new Map(
     program.declarations
-      .filter((decl): decl is FnDecl => decl.kind === "fn")
+      .filter((decl): decl is FnDecl =>
+        decl.kind === "fn" && (!scope || scope.reachableFunctions.has(decl.name))
+      )
       .map((decl) => [decl.name, decl]),
   );
   for (const item of program.imports) {
+    if (scope && !scope.reachableFunctions.has(item.name)) continue;
     functions.set(item.name, {
       kind: "fn",
-      public: true,
+      public: false,
+      imported: true,
+      rootPublic: false,
       name: item.name,
       params: [],
       returnType: item.type,
@@ -1101,8 +1484,13 @@ export function summarizeOptimizationPlan(
   return buildOptimizationPlan(program, profile);
 }
 
-export function summarizeRecurrences(program: Program): Map<string, Recurrence> {
-  const declarations = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+export function summarizeRecurrences(
+  program: Program,
+  scope?: OptimizationScope,
+): Map<string, Recurrence> {
+  const declarations = program.declarations.filter((decl): decl is FnDecl =>
+    decl.kind === "fn" && (!scope || scope.reachableFunctions.has(decl.name))
+  );
   const byBase = new Map<string, FnDecl[]>();
   for (const fn of declarations) {
     if (fn.primitiveId) continue;
@@ -1172,10 +1560,12 @@ function buildOptimizationPlan(
     summaries?: Map<string, FunctionSummary>;
     recurrences?: Map<string, Recurrence>;
   } = {},
+  scope?: OptimizationScope,
 ): OptimizationPlan {
-  const functions = precomputed.functions ?? functionMap(program);
-  const recurrences = precomputed.recurrences ?? summarizeRecurrences(program);
-  const summaries = precomputed.summaries ?? functionSummaries(program, functions, recurrences);
+  const functions = precomputed.functions ?? functionMap(program, scope);
+  const recurrences = precomputed.recurrences ?? summarizeRecurrences(program, scope);
+  const summaries = precomputed.summaries ??
+    functionSummaries(program, functions, recurrences, scope);
   const recurrenceIndex = recurrenceSummariesByFunction(recurrences);
   const plans = new Map<string, FunctionPlan>();
   const decisions: OptimizationDecision[] = [];
@@ -1249,7 +1639,7 @@ function buildOptimizationPlan(
     });
   }
 
-  addDomainFoldDecisions(program, plans, decisions);
+  addDomainFoldDecisions(program, plans, decisions, scope);
 
   return {
     profile: profile.name,
@@ -1495,9 +1885,11 @@ function addDomainFoldDecisions(
   program: Program,
   plans: Map<string, FunctionPlan>,
   decisions: OptimizationDecision[],
+  scope?: OptimizationScope,
 ): void {
   for (const fn of program.declarations) {
     if (fn.kind !== "fn") continue;
+    if (scope && !scope.reachableFunctions.has(fn.name)) continue;
     const folds = foldableDomainBranchReasons(
       fn.body,
       new Map(
@@ -1601,9 +1993,20 @@ function exprChildrenForPlanning(expr: Expr): Expr[] {
   }
 }
 
-function expandFiniteStaticRecurrences(program: Program, config: OptimizerConfig): boolean {
-  const functions = functionMap(program);
-  const plan = buildOptimizationPlan(program, config.profile, { functions });
+function expandFiniteStaticRecurrences(
+  program: Program,
+  config: OptimizerConfig,
+  scope?: OptimizationScope,
+): boolean {
+  const functions = functionMap(program, scope);
+  const recurrenceSummaries = summarizeRecurrences(program, scope);
+  const summaries = functionSummaries(program, functions, recurrenceSummaries, scope);
+  const plan = buildOptimizationPlan(
+    program,
+    config.profile,
+    { functions, summaries, recurrences: recurrenceSummaries },
+    scope,
+  );
   const recurrences = [...plan.functions.values()]
     .flatMap((item) =>
       item.actions.filter((
@@ -1722,8 +2125,12 @@ function expandFiniteStaticRecurrences(program: Program, config: OptimizerConfig
   };
 
   program.declarations = program.declarations.map((decl) => {
-    if (decl.kind === "fn") return { ...decl, body: rewriteBlock(decl.body, new Map()) };
+    if (decl.kind === "fn") {
+      if (scope && !scope.reachableFunctions.has(decl.name)) return decl;
+      return { ...decl, body: rewriteBlock(decl.body, new Map()) };
+    }
     if (decl.kind === "let" || decl.kind === "const") {
+      if (scope && !scope.reachableDeclarations.has(decl.name)) return decl;
       return { ...decl, value: rewriteExpr(decl.value, new Map()) };
     }
     return decl;
@@ -1731,9 +2138,20 @@ function expandFiniteStaticRecurrences(program: Program, config: OptimizerConfig
   return changed;
 }
 
-function lowerTailRecurrenceClauseGroups(program: Program, config: OptimizerConfig): boolean {
-  const functions = functionMap(program);
-  const plan = buildOptimizationPlan(program, config.profile, { functions });
+function lowerTailRecurrenceClauseGroups(
+  program: Program,
+  config: OptimizerConfig,
+  scope?: OptimizationScope,
+): boolean {
+  const functions = functionMap(program, scope);
+  const recurrences = summarizeRecurrences(program, scope);
+  const summaries = functionSummaries(program, functions, recurrences, scope);
+  const plan = buildOptimizationPlan(
+    program,
+    config.profile,
+    { functions, summaries, recurrences },
+    scope,
+  );
   const replacements = new Map<string, FnDecl>();
   const remove = new Set<string>();
   for (const fnPlan of plan.functions.values()) {
@@ -2302,15 +2720,17 @@ function abstractNumberConstant(value: AbstractValue): number | undefined {
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
-function foldAbstractFactsInProgram(program: Program): void {
+function foldAbstractFactsInProgram(program: Program, scope?: OptimizationScope): void {
   program.declarations = program.declarations.map((decl): Declaration => {
     if (decl.kind === "fn") {
+      if (scope && !scope.reachableFunctions.has(decl.name)) return decl;
       const env = new Map(
         decl.params.map((param) => [param.name, abstractValueFromType(param.type)]),
       );
       return { ...decl, body: foldAbstractFactsInBlock(decl.body, env) };
     }
     if (decl.kind === "let" || decl.kind === "const") {
+      if (scope && !scope.reachableDeclarations.has(decl.name)) return decl;
       return { ...decl, value: foldAbstractFactsInExpr(decl.value, new Map()) };
     }
     return decl;
@@ -2463,8 +2883,9 @@ function functionSummaries(
   program: Program,
   functions: Map<string, FnDecl>,
   recurrences?: Map<string, Recurrence>,
+  scope?: OptimizationScope,
 ): Map<string, FunctionSummary> {
-  const callCounts = programCallCounts(program);
+  const callCounts = programCallCounts(program, scope);
   const recurrenceIndex = recurrences ? recurrenceSummariesByFunction(recurrences) : new Map();
   const summaries = new Map<string, FunctionSummary>();
   for (const fn of functions.values()) {
@@ -2477,7 +2898,7 @@ function functionSummaries(
     const recurrence = recurrenceIndex.get(fn.name);
     summaries.set(fn.name, {
       name: fn.name,
-      isPublic: fn.public,
+      isPublic: isCurrentModulePublic(fn),
       isPrimitive: Boolean(fn.primitiveId),
       isImported: imported,
       isPure: fn.effects.length === 0,
@@ -2568,10 +2989,11 @@ function stackBehavior(
   }
 }
 
-function programCallCounts(program: Program): Map<string, number> {
+function programCallCounts(program: Program, scope?: OptimizationScope): Map<string, number> {
   const counts = new Map<string, number>();
   const add = (name: string) => counts.set(name, (counts.get(name) ?? 0) + 1);
   for (const decl of program.declarations) {
+    if (scope && !scope.reachableDeclarations.has(decl.name)) continue;
     if (decl.kind === "fn") { for (const name of calledFunctionList(decl.body)) add(name); }
     if ((decl.kind === "let" || decl.kind === "const")) {
       for (const name of calledFunctionList(decl.value)) add(name);
@@ -2632,7 +3054,10 @@ function forwardingWrappers(functions: Map<string, FnDecl>): Map<string, string>
 }
 
 function directForwardingTarget(fn: FnDecl): string | undefined {
-  if (fn.public || fn.effects.length || fn.primitiveId || fn.body.statements.length !== 0) {
+  if (
+    isCurrentModulePublic(fn) || fn.effects.length || fn.primitiveId ||
+    fn.body.statements.length !== 0
+  ) {
     return undefined;
   }
   const expr = fn.body.expr;
@@ -2669,8 +3094,10 @@ function optimizeDecl(
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
   config: OptimizerConfig,
+  scope?: OptimizationScope,
 ): Declaration {
   if (decl.kind === "fn") {
+    if (scope && !scope.reachableFunctions.has(decl.name)) return decl;
     return {
       ...decl,
       body: optimizeBlock(decl.body, forwarding, inlineable, functions, {
@@ -2680,6 +3107,7 @@ function optimizeDecl(
     };
   }
   if (decl.kind === "let" || decl.kind === "const") {
+    if (scope && !scope.reachableDeclarations.has(decl.name)) return decl;
     return { ...decl, value: optimizeExpr(decl.value, forwarding, inlineable, functions, config) };
   }
   return decl;
@@ -3449,14 +3877,15 @@ function optimizeExpr(
   }
 }
 
-function rewriteUnusedPrivateParams(program: Program) {
-  const functions = functionMap(program);
+function rewriteUnusedPrivateParams(program: Program, scope?: OptimizationScope) {
+  const functions = functionMap(program, scope);
   const valueUses = functionValueUses(program, functions);
   const drops = new Map<string, Set<number>>();
   for (const fn of functions.values()) {
     if (
-      fn.public || fn.generated || fn.primitiveId || fn.params.some((param) => param.const) ||
-      valueUses.has(fn.name) || exprCallsFunction(fn.body, fn.name)
+      isCurrentModulePublic(fn) || fn.generated || fn.primitiveId ||
+      fn.params.some((param) => param.const) || valueUses.has(fn.name) ||
+      exprCallsFunction(fn.body, fn.name)
     ) {
       continue;
     }

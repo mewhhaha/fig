@@ -2,6 +2,8 @@ import type {
   BlockExpr,
   BranchHint,
   ConstDecl,
+  ContractDecl,
+  Declaration,
   DoStatement,
   Expr,
   FnDecl,
@@ -68,12 +70,19 @@ import { type ShaderManifestEntry, shaderManifestEntry, wgslShaderId } from "./w
 
 export interface CheckResult {
   program: Program;
+  runtimeProgram: Program;
+  contracts: ContractRegistry;
   shaderManifest: ShaderManifestEntry[];
   trace?: CheckTrace;
 }
 
 export interface AnalysisCheckResult extends CheckResult {
   diagnostics: Diagnostic[];
+}
+
+export interface ContractRegistry {
+  declarations: ContractDecl[];
+  byName: Map<string, ContractDecl>;
 }
 
 export interface CheckTrace {
@@ -144,7 +153,29 @@ function exprDiagnosticSpan(expr: Expr | undefined): Span | undefined {
 export function checkProgram(program: Program, options: CheckProgramOptions = {}): CheckResult {
   const result = checkProgramInternal(program, { recoverTypes: false, ...options });
   if (result.diagnostics.length) throw new CompileError(result.diagnostics);
-  return { program: result.program, shaderManifest: result.shaderManifest, trace: result.trace };
+  return {
+    program: result.program,
+    runtimeProgram: result.runtimeProgram,
+    contracts: result.contracts,
+    shaderManifest: result.shaderManifest,
+    trace: result.trace,
+  };
+}
+
+export function runtimeProgramFromProgram(program: Program): Program {
+  return {
+    ...program,
+    declarations: program.declarations.filter((
+      decl,
+    ): decl is Exclude<Declaration, { kind: "contract" }> => decl.kind !== "contract"),
+  };
+}
+
+function contractRegistryFromProgram(program: Program): ContractRegistry {
+  const declarations = program.declarations.filter((decl): decl is ContractDecl =>
+    decl.kind === "contract"
+  );
+  return { declarations, byName: new Map(declarations.map((decl) => [decl.name, decl])) };
 }
 
 export function checkProgramForAnalysis(
@@ -346,6 +377,10 @@ function checkProgramInternal(
     () => lowerResolvedOperators(program, typeDecls, fnDecls, diagnostics, memo),
   );
   recordPhase(
+    "balanceAssociativeBinaryChains",
+    () => balanceAssociativeBinaryChains(program, typeDecls),
+  );
+  recordPhase(
     "lowerCollectorLiterals",
     () => lowerCollectorLiterals(program, typeDecls, fnDecls, diagnostics),
   );
@@ -412,9 +447,146 @@ function checkProgramInternal(
   }
   return {
     program,
+    runtimeProgram: runtimeProgramFromProgram(program),
+    contracts: contractRegistryFromProgram(program),
     diagnostics,
     shaderManifest: [...shaderManifest.values()].sort((a, b) => a.id - b.id),
     trace,
+  };
+}
+
+function balanceAssociativeBinaryChains(program: Program, typeDecls: TypeDecl[]) {
+  const descriptorOps = new Set<string>();
+  for (const decl of typeDecls) {
+    if (decl.resultKind === "operator" && decl.normalized?.kind === "operator") {
+      descriptorOps.add(decl.normalized.descriptor.symbol);
+    }
+  }
+  const balanceableOps = new Set(["+", "*", "&&", "||"].filter((op) => !descriptorOps.has(op)));
+  if (!balanceableOps.size) return;
+
+  const lowerExpr = (expr: Expr): Expr => {
+    switch (expr.kind) {
+      case "const_fn":
+        return { ...expr, body: lowerExpr(expr.body) };
+      case "call":
+        return { ...expr, callee: lowerExpr(expr.callee), args: expr.args.map(lowerExpr) };
+      case "index":
+        return { ...expr, target: lowerExpr(expr.target), index: lowerExpr(expr.index) };
+      case "binary": {
+        if (balanceableOps.has(expr.op)) {
+          const leaves = collectBinaryChainLeaves(expr, expr.op, lowerExpr);
+          return leaves.length > 8
+            ? buildBalancedBinaryChain(expr.op, leaves)
+            : buildLeftBinaryChain(expr.op, leaves, expr);
+        }
+        return { ...expr, left: lowerExpr(expr.left), right: lowerExpr(expr.right) };
+      }
+      case "pipe_bind":
+        return { ...expr, value: lowerExpr(expr.value), body: lowerExpr(expr.body) };
+      case "match":
+        return {
+          ...expr,
+          value: lowerExpr(expr.value),
+          arms: expr.arms.map((arm) => ({ ...arm, value: lowerExpr(arm.value) })),
+        };
+      case "shape":
+      case "product_constructor":
+        return {
+          ...expr,
+          slots: expr.slots.map((slot) => ({
+            ...slot,
+            index: slot.index ? lowerExpr(slot.index) : undefined,
+            value: lowerExpr(slot.value),
+          })),
+        };
+      case "static_for_slots":
+        return {
+          ...expr,
+          source: expr.source.kind === "range"
+            ? {
+              kind: "range",
+              start: lowerExpr(expr.source.start),
+              end: lowerExpr(expr.source.end),
+            }
+            : { kind: "shape", shape: lowerExpr(expr.source.shape) },
+          value: lowerExpr(expr.value),
+        };
+      case "field":
+        return { ...expr, value: lowerExpr(expr.value), key: lowerExpr(expr.key) };
+      case "range":
+        return { ...expr, start: lowerExpr(expr.start), end: lowerExpr(expr.end) };
+      case "block":
+        return {
+          ...expr,
+          statements: expr.statements.map((stmt) =>
+            stmt.kind === "let" || stmt.kind === "destructure_let"
+              ? { ...stmt, value: lowerExpr(stmt.value) } as Statement
+              : stmt
+          ),
+          expr: expr.expr ? lowerExpr(expr.expr) : undefined,
+        };
+      case "do":
+      case "literal":
+      case "placeholder":
+      case "var":
+        return expr;
+    }
+  };
+
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") decl.body = lowerExpr(decl.body) as BlockExpr;
+    else if (decl.kind === "contract") decl.body = lowerExpr(decl.body) as BlockExpr;
+    else if (decl.kind === "let" || decl.kind === "const") decl.value = lowerExpr(decl.value);
+  }
+}
+
+function collectBinaryChainLeaves(
+  expr: Expr,
+  op: string,
+  lowerExpr: (expr: Expr) => Expr,
+): Expr[] {
+  if (expr.kind !== "binary" || expr.op !== op) return [lowerExpr(expr)];
+  return [
+    ...collectBinaryChainLeaves(expr.left, op, lowerExpr),
+    ...collectBinaryChainLeaves(expr.right, op, lowerExpr),
+  ];
+}
+
+function buildLeftBinaryChain(op: string, leaves: Expr[], fallback: Expr): Expr {
+  const [head, ...tail] = leaves;
+  if (!head) return fallback;
+  return tail.reduce<Expr>((left, right) => ({
+    kind: "binary",
+    op,
+    left,
+    right,
+    span: joinExprSpans(left, right),
+  }), head);
+}
+
+function buildBalancedBinaryChain(op: string, leaves: Expr[]): Expr {
+  if (leaves.length === 1) return leaves[0]!;
+  const mid = Math.floor(leaves.length / 2);
+  const left = buildBalancedBinaryChain(op, leaves.slice(0, mid));
+  const right = buildBalancedBinaryChain(op, leaves.slice(mid));
+  return {
+    kind: "binary",
+    op,
+    left,
+    right,
+    span: joinExprSpans(left, right),
+  };
+}
+
+function joinExprSpans(left: Expr, right: Expr): Span | undefined {
+  const leftSpan = exprDiagnosticSpan(left);
+  const rightSpan = exprDiagnosticSpan(right);
+  if (!leftSpan || !rightSpan) return leftSpan ?? rightSpan;
+  return {
+    ...leftSpan,
+    start: Math.min(leftSpan.start, rightSpan.start),
+    end: Math.max(leftSpan.end, rightSpan.end),
   };
 }
 
