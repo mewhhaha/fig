@@ -72,6 +72,10 @@ Deno.test("engine playground frame builds, ticks, and renders visible sprites", 
   });
   assertEquals((instance.exports.playground_world_len as () => number)(), 2);
   assertEquals((instance.exports.playground_probe as () => number)(), 8);
+  const frame = (instance.exports.main as () => number[])();
+  assertEquals(frame[0], 16);
+  assertEquals(frame[5], 2);
+  assertEquals(frame[48], 8);
 });
 
 Deno.test("capability imports are emitted in WAT and wasm", async () => {

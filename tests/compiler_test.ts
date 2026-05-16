@@ -1296,6 +1296,39 @@ Deno.test("ecs sparse world accepts non-three component storage", async () => {
   assert(world);
 });
 
+Deno.test("ecs dense world derives storage from component spec", async () => {
+  const source = `
+      const ecs = @import("engine.ecs");
+      type fn Transform2d() -> type { i32 }
+      type fn Velocity2d() -> type { i32 }
+      type fn Sprite2d() -> type { i32 }
+      const components = ecs.components({
+        transform: Transform2d,
+        velocity: Velocity2d,
+        sprite: Sprite2d
+      });
+      type fn GameWorld() -> type {
+        let GameWorld = @type_slots(ecs.World(7, components));
+        struct(GameWorld)
+      }
+      pub fn main() -> i32 {
+        let world: GameWorld = ecs.World::empty(7, components);
+        world.len
+      }
+    `;
+  const checked = await checkSource(source, { resolveModule: resolveProjectModule });
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(source, { resolveModule: resolveProjectModule }),
+    ),
+  );
+  assertEquals((instance.exports.main as () => number)(), 0);
+  const world = checked.program.declarations.find((decl) =>
+    decl.kind === "type" && decl.name === "GameWorld"
+  );
+  assert(world);
+});
+
 Deno.test("ecs component maps derive system input from reflected context", async () => {
   await checkSource(
     `

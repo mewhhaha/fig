@@ -208,6 +208,20 @@ type fn World(capacity: count, components: const) -> type {
   struct(World)
 }
 
+fn World::empty(
+  const capacity: count,
+  const spec: const
+) -> World(capacity, spec) {
+  @ecs_world_empty(capacity, spec)
+}
+
+fn empty_world(
+  const capacity: count,
+  const spec: const
+) -> World(capacity, spec) {
+  World::empty(capacity, spec)
+}
+
 type fn Read(component: type) -> type {
   component
 }

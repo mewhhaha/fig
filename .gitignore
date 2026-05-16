@@ -1,4 +1,5 @@
 helix/runtime/grammars/*.so
 tmp/
+examples/*.wasm
 generated/baba-workbench/src/
 generated/baba-workbench/tree-sitter-shovel.wasm

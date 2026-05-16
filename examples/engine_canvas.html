@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fig Engine Canvas</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background: #121416;
+        color: #e6edf3;
+        overflow: hidden;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-rows: 44px 1fr;
+        min-height: 100%;
+      }
+
+      .bar {
+        align-items: center;
+        background: #191d21;
+        border-bottom: 1px solid #30363d;
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        padding: 0 16px;
+      }
+
+      .title {
+        font-size: 14px;
+        font-weight: 650;
+        letter-spacing: 0;
+      }
+
+      .meters {
+        color: #9fb0c0;
+        display: flex;
+        font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        gap: 14px;
+      }
+
+      canvas {
+        background: #20262d;
+        display: block;
+        height: calc(100vh - 44px);
+        outline: none;
+        width: 100vw;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="bar">
+        <div class="title">Fig Engine Canvas</div>
+        <div class="meters" aria-live="polite">
+          <span id="axis">axis 0</span>
+          <span id="pressed">pressed 0</span>
+          <span id="frame">dt 16</span>
+        </div>
+      </header>
+      <canvas id="game" tabindex="0" width="960" height="540"></canvas>
+    </main>
+
+    <script type="module">
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const axisMeter = document.querySelector("#axis");
+      const pressedMeter = document.querySelector("#pressed");
+      const frameMeter = document.querySelector("#frame");
+
+      const keys = new Set();
+      const input = { axis: 0, pressed: 0, dt: 16 };
+      let wasmExports;
+      let lastFrame = performance.now();
+
+      const keyAxis = new Map([
+        ["ArrowLeft", -1],
+        ["KeyA", -1],
+        ["ArrowRight", 1],
+        ["KeyD", 1],
+      ]);
+
+      function refreshAxis() {
+        const left = keys.has("ArrowLeft") || keys.has("KeyA");
+        const right = keys.has("ArrowRight") || keys.has("KeyD");
+        input.axis = right && !left ? 1 : left && !right ? -1 : 0;
+      }
+
+      addEventListener("keydown", (event) => {
+        if (keyAxis.has(event.code) || event.code === "Space") event.preventDefault();
+        keys.add(event.code);
+        if (event.code === "Space") input.pressed = 1;
+        refreshAxis();
+      });
+
+      addEventListener("keyup", (event) => {
+        keys.delete(event.code);
+        if (event.code === "Space") input.pressed = 0;
+        refreshAxis();
+      });
+
+      canvas.addEventListener("pointerdown", (event) => {
+        canvas.setPointerCapture(event.pointerId);
+        input.pressed = 1;
+      });
+
+      canvas.addEventListener("pointerup", (event) => {
+        canvas.releasePointerCapture(event.pointerId);
+        input.pressed = 0;
+      });
+
+      canvas.addEventListener("pointermove", (event) => {
+        if (!(event.buttons & 1)) return;
+        const mid = canvas.getBoundingClientRect().left + canvas.clientWidth / 2;
+        input.axis = event.clientX >= mid ? 1 : -1;
+      });
+
+      function hostImports() {
+        return {
+          env: {
+            tick_millis: () => Math.max(1, Math.min(64, Math.round(input.dt))),
+            input_axis_x: () => input.axis,
+            input_pressed: () => input.pressed,
+          },
+        };
+      }
+
+      async function loadEngine() {
+        const response = await fetch(new URL("./engine_playground.wasm", import.meta.url));
+        if (!response.ok) throw new Error(`failed to load wasm: ${response.status}`);
+        const bytes = await response.arrayBuffer();
+        const { instance } = await WebAssembly.instantiate(bytes, hostImports());
+        return instance.exports;
+      }
+
+      function resizeCanvas() {
+        const ratio = Math.max(1, Math.min(devicePixelRatio || 1, 2));
+        const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
+        const height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+        return ratio;
+      }
+
+      function vertexAt(batch, index) {
+        const base = index * 6;
+        return {
+          x: batch[base],
+          y: batch[base + 1],
+          z: batch[base + 2],
+          color: batch[base + 5],
+        };
+      }
+
+      function colorFor(value) {
+        if (value === 1) return "#f97316";
+        if (value === 2) return "#0ea5e9";
+        if (value === 3) return "#22c55e";
+        const r = value & 255;
+        const g = (value >> 8) & 255;
+        const b = (value >> 16) & 255;
+        const a = ((value >> 24) & 255) / 255 || 1;
+        return `rgba(${r}, ${g}, ${b}, ${a})`;
+      }
+
+      function drawBackdrop() {
+        const ratio = resizeCanvas();
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+        const scale = Math.min(width / 96, height / 54);
+        const offsetX = Math.floor((width - 96 * scale) / 2);
+        const offsetY = Math.floor((height - 54 * scale) / 2);
+
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        ctx.fillStyle = "#20262d";
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.save();
+        ctx.translate(offsetX, offsetY);
+        ctx.scale(scale, scale);
+        ctx.fillStyle = "#182026";
+        ctx.fillRect(0, 0, 96, 54);
+        ctx.strokeStyle = "#31404a";
+        ctx.lineWidth = 0.2;
+        for (let x = 0; x <= 96; x += 8) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, 54);
+          ctx.stroke();
+        }
+        for (let y = 0; y <= 54; y += 8) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(96, y);
+          ctx.stroke();
+        }
+        ctx.restore();
+        return { offsetX, offsetY, scale };
+      }
+
+      function drawWorld(batch) {
+        const { offsetX, offsetY, scale } = drawBackdrop();
+        const len = batch[48] ?? 0;
+
+        ctx.save();
+        ctx.translate(offsetX, offsetY);
+        ctx.scale(scale, scale);
+        for (let i = 0; i < len; i += 4) {
+          const a = vertexAt(batch, i);
+          const c = vertexAt(batch, i + 2);
+          ctx.fillStyle = colorFor(a.color);
+          ctx.fillRect(a.x, a.y, c.x - a.x, c.y - a.y);
+          ctx.strokeStyle = "#11181d";
+          ctx.lineWidth = 0.35;
+          ctx.strokeRect(a.x, a.y, c.x - a.x, c.y - a.y);
+        }
+        ctx.restore();
+
+        axisMeter.textContent = `axis ${input.axis}`;
+        pressedMeter.textContent = `pressed ${input.pressed}`;
+        frameMeter.textContent = `dt ${Math.round(input.dt)}`;
+      }
+
+      function frame(now) {
+        input.dt = Math.max(1, Math.min(64, now - lastFrame));
+        lastFrame = now;
+        drawWorld(wasmExports.main());
+        requestAnimationFrame(frame);
+      }
+
+      drawBackdrop();
+
+      try {
+        wasmExports = await loadEngine();
+        canvas.focus();
+        drawWorld(wasmExports.main());
+        requestAnimationFrame((now) => {
+          lastFrame = now;
+          frame(now);
+        });
+      } catch (error) {
+        console.error(error);
+        frameMeter.textContent = "wasm missing";
+      }
+    </script>
+  </body>
+</html>

@@ -5335,6 +5335,13 @@ function specializeExpr(
         context.stats && (context.stats.visitedCalls += 1);
         const callee = specializeExpr(expr.callee, context, env);
         const args = expr.args.map((arg) => specializeExpr(arg, context, env));
+        if (
+          callee.kind === "var" &&
+          (callee.name === "World::empty" || callee.name.endsWith(".World::empty"))
+        ) {
+          const emptyWorld = expandEcsWorldEmpty(args, new Map(), context);
+          if (emptyWorld) return emptyWorld;
+        }
         const direct = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
         if (!direct?.params.some((param) => param.const)) return { ...expr, callee, args };
         return specializeConstParamCall(direct, args, context, callSiteSpan(expr)) ??
@@ -6710,6 +6717,17 @@ function substituteSpecializedExpr(
         const replacement = expandReplaceField(callArgs, staticValues, context);
         if (replacement) return replacement;
       }
+      if (callee.kind === "var" && callee.name === "@ecs_world_empty") {
+        const emptyWorld = expandEcsWorldEmpty(callArgs, staticValues, context);
+        if (emptyWorld) return emptyWorld;
+      }
+      if (
+        callee.kind === "var" &&
+        (callee.name === "World::empty" || callee.name.endsWith(".World::empty"))
+      ) {
+        const emptyWorld = expandEcsWorldEmpty(callArgs, staticValues, context);
+        if (emptyWorld) return emptyWorld;
+      }
       if (callee.kind === "var" && callee.name === "@empty") {
         const emptyType = renderTypeProofArg(callArgs[0]);
         const emptyExpr = emptyType ? emptyExprForType(emptyType, context) : undefined;
@@ -7174,6 +7192,82 @@ function expandReplaceField(
       }];
     }),
   };
+}
+
+function expandEcsWorldEmpty(
+  args: Expr[],
+  staticValues: Map<string, ConstValue>,
+  context: ConstSpecializationContext,
+): Expr | undefined {
+  if (args.length !== 2) return undefined;
+  const [capacityArg, specArg] = args;
+  const capacity = staticConstExprValue(capacityArg, staticValues, context);
+  const spec = staticConstExprValue(specArg, staticValues, context);
+  if (capacity?.kind !== "number" || spec?.kind !== "shape") return undefined;
+  const capacityExpr = constValueToExpr(capacity) ?? capacityArg;
+  const namespace = context.functions.has("ecs.batch_fill") ? "ecs." : "";
+  const batchFill = `${namespace}batch_fill`;
+  const batchIndex = `${namespace}BatchIndex`;
+  const componentSlots = spec.slots
+    .map((slot) => {
+      if (!slot.label || slot.value.kind !== "type") return undefined;
+      const componentType = slot.value.name;
+      const componentExpr: Expr = { kind: "var", name: componentType };
+      const defaultValue = emptyExprForType(componentType, context);
+      if (!defaultValue) return undefined;
+      return {
+        label: slot.label,
+        value: callExpr(batchFill, [
+          cloneExpr(capacityExpr),
+          componentExpr,
+          defaultValue,
+        ]),
+      };
+    });
+  if (componentSlots.some((slot) => !slot)) return undefined;
+  const constructor = inferEcsWorldConstructor(spec, context) ?? "World";
+  return {
+    kind: "product_constructor",
+    constructor,
+    slots: [
+      {
+        label: "entities",
+        value: callExpr(batchFill, [
+          cloneExpr(capacityExpr),
+          {
+            kind: "call",
+            callee: { kind: "var", name: batchIndex },
+            args: [cloneExpr(capacityExpr)],
+          },
+          { kind: "literal", literalKind: "number", value: "0" },
+        ]),
+      },
+      { label: "len", value: { kind: "literal", literalKind: "number", value: "0" } },
+      ...(componentSlots as { label: string; value: Expr }[]),
+    ],
+  };
+}
+
+function inferEcsWorldConstructor(
+  spec: Extract<ConstValue, { kind: "shape" }>,
+  context: ConstSpecializationContext,
+): string | undefined {
+  if (context.typeConstructors.has("World")) return "World";
+  const expected = new Set(["entities", "len"]);
+  for (const slot of spec.slots) {
+    if (slot.label) expected.add(slot.label);
+  }
+  const matches = [...context.typeConstructors.entries()].filter(([, decl]) => {
+    if (decl.normalized?.kind !== "product") return false;
+    const actual = new Set(
+      decl.normalized.shape.slots
+        .map((slot) => slot.label)
+        .filter((label): label is string => !!label),
+    );
+    if (actual.size !== expected.size) return false;
+    return [...expected].every((label) => actual.has(label));
+  });
+  return matches.length === 1 ? matches[0]![0] : undefined;
 }
 
 function expandReplaceFieldsWithEnv(

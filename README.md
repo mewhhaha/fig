@@ -151,3 +151,12 @@ deno run --allow-read --allow-write --allow-run scripts/bench_memory_model_compa
 That script benchmarks Fig/Wasm, JavaScript running in the current V8 runtime, and Rust compiled
 with `rustc -C opt-level=3 -C target-cpu=native`. Rust inputs are passed through `black_box` so the
 pure kernels do not disappear into compile-time constants.
+
+To compare the dense ECS batch primitives against a similar optimized Rust fixed-array kernel, run:
+
+```bash
+deno task bench:ecs-compare -- 100000
+```
+
+That benchmark fills a 128-entity position batch, maps it with a velocity, folds the moved positions
+into a checksum, and validates the Fig/Wasm and Rust checksums match.

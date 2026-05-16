@@ -31,6 +31,7 @@ const components = ecs.components({
 });
 
 type fn World() -> type {
+  let ExpectedWorld = @type_slots(ecs.World(32, components));
   let World = {
     entities: ecs.Batch(32, EntityId),
     len: i32,
@@ -38,6 +39,10 @@ type fn World() -> type {
     velocity: ecs.Batch(32, Velocity2d),
     sprite: ecs.Batch(32, Sprite2d)
   };
+  let WorldMatchesEcs = @require(
+    World == ExpectedWorld,
+    "engine playground World must match ecs.World"
+  );
   struct(World)
 }
 
@@ -48,15 +53,6 @@ type fn EntityId() -> type {
 type fn FrameInput() -> type {
   let FrameInput = {dt_ms: i32, axis_x: i32, pressed: i32};
   struct(FrameInput)
-}
-
-type fn RenderState() -> type {
-  let RenderState = {
-    len: i32,
-    transform: ecs.Batch(32, Transform2d),
-    sprite: ecs.Batch(32, Sprite2d)
-  };
-  struct(RenderState)
 }
 
 type fn RenderRow2d() -> type {
@@ -73,26 +69,17 @@ type fn RenderBatch() -> type {
   Geometry2dBatchI32(8)
 }
 
-type fn MovementQuery() -> type {
-  ecs.Query({
-    transform: ecs.Write(Transform2d),
-    velocity: ecs.Read(Velocity2d)
-  })
+type fn EntitySpawn2d() -> type {
+  let EntitySpawn2d = {
+    transform: Transform2d,
+    velocity: Velocity2d,
+    sprite: Sprite2d
+  };
+  struct(EntitySpawn2d)
 }
 
-type fn MovementRow() -> type {
-  ecs.QueryRowFor({
-    transform: ecs.Write(Transform2d),
-    velocity: ecs.Read(Velocity2d)
-  })
-}
-
-type fn SpriteQuery() -> type {
-  ecs.Query({sprite: ecs.Write(Sprite2d)})
-}
-
-type fn SpriteRow() -> type {
-  ecs.QueryRowFor({sprite: ecs.Write(Sprite2d)})
+fn empty_world() -> World {
+  ecs.World::empty(32, components)
 }
 
 fn read_frame_input() -> FrameInput !{time, event} {
@@ -103,36 +90,14 @@ fn read_frame_input() -> FrameInput !{time, event} {
   }
 }
 
-fn empty_world() -> World {
-  World {
-    entities: ecs.batch_fill(32, EntityId, 0),
-    len: 0,
-    transform: ecs.batch_fill(
-      32,
-      Transform2d,
-      Transform2d {x: 0, y: 0, z: 0}
-    ),
-    velocity: ecs.batch_fill(
-      32,
-      Velocity2d,
-      Velocity2d {x: 0, y: 0}
-    ),
-    sprite: ecs.batch_fill(
-      32,
-      Sprite2d,
-      Sprite2d {w: 0, h: 0, color: 0}
-    )
-  }
-}
-
 fn setup(world: World) -> World {
   do @monad(ecs.Command(World)) {
-    ecs.spawn({
+    spawn_entity({
       transform: Transform2d {x: 12, y: 8, z: 1},
       velocity: Velocity2d {x: 4, y: 0},
       sprite: Sprite2d {w: 16, h: 16, color: 1}
     });
-    ecs.spawn(
+    spawn_entity(
       {
         transform: Transform2d {x: 24, y: 8, z: 1},
         velocity: Velocity2d {x: 4, y: 0},
@@ -142,17 +107,42 @@ fn setup(world: World) -> World {
   }
 }
 
+fn spawn_entity(world: World, entity: EntitySpawn2d) -> World {
+  let id = world.len;
+  World {
+    entities: ecs.batch_set(world.entities, id, id),
+    len: world.len + 1,
+    transform: ecs.batch_set(
+      world.transform,
+      id,
+      entity.transform
+    ),
+    velocity: ecs.batch_set(
+      world.velocity,
+      id,
+      entity.velocity
+    ),
+    sprite: ecs.batch_set(world.sprite, id, entity.sprite)
+  }
+}
+
 fn movement_system(
-  mut: MovementQuery,
+  mut: ecs.Query({
+    transform: ecs.Write(Transform2d),
+    velocity: ecs.Read(Velocity2d)
+  }),
   input: ecs.Res(FrameInput)
 ) -> ecs.System {
   do @monad(ecs.System) {
-    let update = do @applicative(ecs.Query(MovementRow)) {
+    let update = do @applicative(ecs.Query(ecs.QueryRowFor({
+      transform: ecs.Write(Transform2d),
+      velocity: ecs.Read(Velocity2d)
+    }))) {
       row <- ecs.each(mut);
       pure({
         transform: Transform2d {
-          x: row.transform.x + row.velocity.x * input.dt_ms
-            / 16,
+          x: row.transform.x + row.velocity.x * input.axis_x
+            * input.dt_ms / 16,
           y: row.transform.y + row.velocity.y * input.dt_ms
             / 16,
           z: row.transform.z
@@ -164,11 +154,13 @@ fn movement_system(
 }
 
 fn sprite_animation_system(
-  mut: SpriteQuery,
+  mut: ecs.Query({sprite: ecs.Write(Sprite2d)}),
   input: ecs.Res(FrameInput)
 ) -> ecs.System {
   do @monad(ecs.System) {
-    let update = do @applicative(ecs.Query(SpriteRow)) {
+    let update = do @applicative(ecs.Query(ecs.QueryRowFor({
+      sprite: ecs.Write(Sprite2d)
+    }))) {
       row <- ecs.each(mut);
       pure({
         sprite: Sprite2d {
@@ -189,44 +181,49 @@ fn run_frame(world: World, input: FrameInput) -> World {
   }
 }
 
-fn render_row(
-  index: ecs.BatchIndex(32),
-  entity: EntityId,
-  state: RenderState
-) -> RenderRow2d {
-  RenderRow2d {
-    visible: index < state.len,
-    entity: entity,
-    transform: state.transform[index],
-    sprite: state.sprite[index]
-  }
-}
-
 fn render_system(world: World, input: FrameInput) -> RenderBatch {
   empty_render_batch()
     \batch -> append_render_row(
       batch,
-      render_row(
-        0,
-        world.entities[0],
-        RenderState {
-          len: world.len,
-          transform: world.transform,
-          sprite: world.sprite
+      RenderRow2d {
+        visible: 0 < world.len,
+        entity: world.entities[0],
+        transform: Transform2d {
+          x: world.transform[0].x + world.velocity[0].x
+            * input.axis_x
+            * input.dt_ms / 16,
+          y: world.transform[0].y + world.velocity[0].y
+            * input.axis_x
+            * input.dt_ms / 16,
+          z: world.transform[0].z
+        },
+        sprite: Sprite2d {
+          w: world.sprite[0].w,
+          h: world.sprite[0].h,
+          color: world.sprite[0].color + input.pressed
         }
-      )
+      }
     )
     \batch -> append_render_row(
       batch,
-      render_row(
-        1,
-        world.entities[1],
-        RenderState {
-          len: world.len,
-          transform: world.transform,
-          sprite: world.sprite
+      RenderRow2d {
+        visible: 1 < world.len,
+        entity: world.entities[1],
+        transform: Transform2d {
+          x: world.transform[1].x + world.velocity[1].x
+            * input.axis_x
+            * input.dt_ms / 16,
+          y: world.transform[1].y + world.velocity[1].y
+            * input.axis_x
+            * input.dt_ms / 16,
+          z: world.transform[1].z
+        },
+        sprite: Sprite2d {
+          w: world.sprite[1].w,
+          h: world.sprite[1].h,
+          color: world.sprite[1].color + input.pressed
         }
-      )
+      }
     )
 }
 
