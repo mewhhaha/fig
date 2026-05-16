@@ -3140,6 +3140,169 @@ Deno.test("models attached type members for static contracts", async () => {
   });
 });
 
+Deno.test("normalizes transparent contract annotations to runtime types", async () => {
+  const checked = await checkSource(`
+    type fn Box() -> type {
+      let Box = {value: i32};
+      struct(Box)
+    }
+    fn Box::eql(a: Box, b: Box) -> bool { a.value == b.value }
+    type fn Eq(t: type) -> type {
+      let Expected = fn(a: t, b: t) -> bool;
+      @require(@type_has_member(t, #eql), "Eq requires eql");
+      @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
+      t
+    }
+    fn same(a: Eq(Box), b: Box) -> bool { Box::eql(a, b) }
+    fn identity(value: Eq(Box)) -> Eq(Box) { value }
+    pub fn main() -> i32 {
+      let x: Eq(Box) = identity(Box {value: 1});
+      match same(x, Box {value: 1}) { true => x.value, false => 0 }
+    }
+  `);
+  const same = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "same"
+  );
+  assertEquals(same?.params[0]?.type, "Eq(Box)");
+
+  const identity = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "identity"
+  );
+  assertEquals(identity?.params[0]?.type, "Eq(Box)");
+  assertEquals(identity?.returnType, "Eq(Box)");
+
+  const main = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "main"
+  );
+  assertEquals(main?.body.statements[0]?.kind === "let" ? main.body.statements[0].type : "", "Box");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+        type fn Box() -> type {
+          let Box = {value: i32};
+          struct(Box)
+        }
+        fn Box::eql(a: Box, b: Box) -> bool { a.value == b.value }
+        type fn Eq(t: type) -> type {
+          let Expected = fn(a: t, b: t) -> bool;
+          @require(@type_has_member(t, #eql), "Eq requires eql");
+          @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
+          t
+        }
+        fn same(a: Eq(Box), b: Box) -> bool { Box::eql(a, b) }
+        fn identity(value: Eq(Box)) -> Eq(Box) { value }
+        pub fn main() -> i32 {
+          let x: Eq(Box) = identity(Box {value: 1});
+          match same(x, Box {value: 1}) { true => x.value, false => 0 }
+        }
+      `),
+    ),
+  );
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("transparent contract parameters infer generic member dispatch", async () => {
+  const source = `
+    type fn Box() -> type {
+      let Box = {value: i32};
+      struct(Box)
+    }
+    fn Box::append(a: Box, b: Box) -> Box {
+      Box {value: a.value + b.value}
+    }
+    type fn Semigroup(t: type) -> type {
+      let Expected = fn(a: t, b: t) -> t;
+      @require(@type_has_member(t, #append), "Semigroup requires append");
+      @require(@type_member_type(t, #append) == Expected, "Semigroup.append has wrong type");
+      t
+    }
+    fn append(a: Semigroup(t), b: t) -> t {
+      t::append(a, b)
+    }
+    pub fn main() -> i32 {
+      let out = append(Box {value: 1}, Box {value: 2});
+      out.value
+    }
+  `;
+  const checked = await checkSource(source);
+  const specialized = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name.startsWith("append__")
+  );
+  assertEquals(specialized?.params.map((param) => param.type), ["Box", "Box"]);
+  assertEquals(specialized?.body.expr, {
+    kind: "call",
+    callee: { kind: "var", name: "Box::append" },
+    args: [{ kind: "var", name: "a" }, { kind: "var", name: "b" }],
+  });
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as () => number)(), 3);
+
+  await assertThrowsCompile(
+    `
+      type fn Box() -> type {
+        let Box = {value: i32};
+        struct(Box)
+      }
+      fn Box::append(a: Box, b: Box) -> Box {
+        Box {value: a.value + b.value}
+      }
+      fn bad(a: t, b: t) -> t {
+        t::append(a, b)
+      }
+    `,
+    "type.member_requires_proof",
+  );
+});
+
+Deno.test("expected types specialize nullary generic constructors", async () => {
+  const source = `
+    type fn Option(a: type) -> type {
+      let None = {};
+      let Some = {value: a};
+      union(None, Some)
+    }
+    fn Option::zero() -> Option(a) { 0 }
+    fn Option::bind(value: Option(a), const f: fn(x: a) -> Option(b)) -> Option(b) {
+      match value { Some(inner) => f(inner), None => Option::zero() }
+    }
+    fn to_option(x: i32) -> Option(i32) { x }
+    pub fn main() -> i32 {
+      let direct: Option(i32) = Option::zero();
+      let bound = Option::bind(Option::zero(), to_option);
+      match direct {
+        None => match bound { None => 1, Some(value) => value },
+        Some(value) => value,
+      }
+    }
+  `;
+  const checked = await checkSource(source);
+  const zeroSpecializations = checked.program.declarations.filter((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name.startsWith("Option__zero__")
+  );
+  assert(zeroSpecializations.some((decl) => decl.returnType === "Option(i32)"));
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as () => number)(), 0);
+
+  await assertThrowsCompile(
+    `
+      type fn Option(a: type) -> type {
+        let None = {};
+        let Some = {value: a};
+        union(None, Some)
+      }
+      fn Option::zero() -> Option(a) { 0 }
+      pub fn main() -> i32 {
+        let x = Option::zero();
+        0
+      }
+    `,
+    "type.inferred_type_ambiguous",
+  );
+});
+
 Deno.test("reports attached type member contract failures", async () => {
   await assertThrowsCompile(
     `
@@ -5404,12 +5567,9 @@ Deno.test("generic law rewrites require matching lawful proof", async () => {
   const withAssumptions = optimizeProgram(checked.program, { assumeRewrites: true });
   assertEquals(findFn(withAssumptions, "use_law")?.body.expr, { kind: "var", name: "x" });
 
-  const noProof = await checkSource(source.replace("      const proof = LawfulFunctor(t);\n", ""));
-  const noProofOptimized = optimizeProgram(noProof.program, { assumeRewrites: true });
-  const noProofExpr = findFn(noProofOptimized, "use_law")?.body.expr;
-  assertEquals(
-    noProofExpr?.kind === "call" ? noProofExpr.callee : undefined,
-    { kind: "var", name: "t::map" },
+  await assertThrowsCompile(
+    source.replace("      const proof = LawfulFunctor(t);\n", ""),
+    "type.member_requires_proof",
   );
 });
 
@@ -5429,7 +5589,11 @@ Deno.test("generic law rewrites instantiate from const proof parameters", async 
   `);
   const optimized = optimizeProgram(checked.program, { assumeRewrites: true });
   const useLaw = findFn(optimized, "use_law");
-  assertEquals(useLaw?.body.expr, { kind: "var", name: "x" });
+  assert(
+    useLaw?.body.expr?.kind === "call" &&
+      useLaw.body.expr.callee.kind === "var" &&
+      useLaw.body.expr.callee.name.startsWith("Box__map__"),
+  );
 });
 
 Deno.test("lawful monad proof activates inherited functor law rewrites", async () => {

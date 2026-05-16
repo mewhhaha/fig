@@ -78,35 +78,52 @@ type fn Mapper(f: type fn(a: type) -> type) -> type {
 }
 ```
 
-Proof values passed as `const` parameters are evaluated at compile time and erased from runtime
-calls.
+When a contract type function validates a type and returns that same runtime type, annotations are
+transparent. The value has the returned runtime type, and the checker records the contract fact for
+attached-member calls:
+
+```fig
+fn same(a: Eq(t), b: t) -> bool {
+  t::eql(a, b)
+}
+```
+
+This is equivalent to saying `a` is a `t` value and `Eq(t)` is known inside the function. No runtime
+wrapper is introduced. Proof values passed as `const` parameters are still evaluated at compile time
+and erased from runtime calls.
 
 ## Type Function Patterns
 
 Use these patterns when choosing how to express static intent:
 
-| Intent                                              | Pattern                                                                                         |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Define a runtime data layout                        | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
-| Require behavior on a concrete type                 | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`. |
-| Call required behavior without runtime dictionaries | Pass `const _proof: contract(t)` and call the attached member as `t::member(...)`.              |
-| Abstract over a unary type constructor              | Accept `t: type fn(a: type) -> type`, use values as `t(a)`, and reflect members on `t`.         |
-| Choose dispatch from a type value                   | Pass the type as `const t` or `const t: type`; do not model types as runtime Values.            |
-| Specialize layout or counts                         | Pass static shape data as `const n: count`, `const a: type`, or another `const` parameter.      |
+| Intent                                         | Pattern                                                                                         |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Define a runtime data layout                   | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
+| Require behavior on a concrete type            | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`. |
+| Call required behavior carried by a value      | Annotate a value as `contract(t)` and call the attached member as `t::member(...)`.             |
+| Call required behavior without a carrier value | Pass `const _proof: contract(t)` as an explicit erased proof fallback.                          |
+| Abstract over a unary type constructor         | Accept `t: type fn(a: type) -> type`, use values as `t(a)`, and reflect members on `t`.         |
+| Choose dispatch from a type value              | Pass the type as `const t` or `const t: type`; do not model types as runtime Values.            |
+| Specialize layout or counts                    | Pass static shape data as `const n: count`, `const a: type`, or another `const` parameter.      |
 
 Prefer inference when ordinary value parameters already determine the type. Pass an explicit
 `const t` only when the function needs a type that is otherwise not pinned by a value argument, such
 as empty-value construction, explicit `pure(t, ...)` construction, or type-directed static dispatch.
 
 ```fig
-fn append(const t, const _proof: Semigroup(t), a: t, b: t) -> t {
+fn append(a: Semigroup(t), b: t) -> t {
   t::append(a, b)
 }
 
 fn fmap(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
   t::map(f, v)
 }
+
+fn empty(const t: type) -> Monoid(t) {
+  t::empty()
+}
 ```
 
-Const dictionaries are still useful for highly specialized static dispatch, but attached members
-plus erased proof parameters are the preferred default for typeclass-like APIs.
+Use contracted parameters when a value carries the type, contracted returns when constructing a
+value through a contract, local proof constants when a proof is needed only inside one body, and
+explicit `const` proof parameters when the caller must select or provide the proof.

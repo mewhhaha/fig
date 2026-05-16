@@ -4244,10 +4244,15 @@ function specializeInferredTypeCalls(
   const queued = new Set(queue.map((decl) => decl.name));
   for (let index = 0; index < queue.length; index++) {
     const decl = queue[index]!;
+    const reportAmbiguous = !decl.generated && !fnUsesInferredTypeVars(decl, consts);
     decl.body = specializeInferredBlock(
       decl.body,
       context,
       new Map(decl.params.map((param) => [param.name, param.type])),
+      !decl.generated && decl.returnType && !annotationHasInferredVars(decl.returnType)
+        ? decl.returnType
+        : undefined,
+      reportAmbiguous,
     );
     for (const generated of context.cache.values()) {
       if (!queued.has(generated.name)) {
@@ -4276,19 +4281,33 @@ function specializeInferredBlock(
     diagnosticSpan?: Span;
   },
   env = new Map<string, string>(),
+  expectedType?: string,
+  reportAmbiguous = true,
 ): Extract<Expr, { kind: "block" }> {
   const scoped = new Map(env);
   return {
     ...block,
     statements: block.statements.map((stmt) => {
       if (stmt.kind === "let") {
-        const value = specializeInferredExpr(stmt.value, context, scoped);
+        const value = specializeInferredExpr(
+          stmt.value,
+          context,
+          scoped,
+          stmt.type,
+          reportAmbiguous,
+        );
         const type = stmt.type ?? inferExprType(value, context, scoped);
         if (type) scoped.set(stmt.name, type);
         return { ...stmt, value };
       }
       if (stmt.kind === "destructure_let") {
-        const value = specializeInferredExpr(stmt.value, context, scoped);
+        const value = specializeInferredExpr(
+          stmt.value,
+          context,
+          scoped,
+          undefined,
+          reportAmbiguous,
+        );
         const type = inferExprType(value, context, scoped);
         const slotTypes = stmt.slotTypes ?? (type ? stmt.names.map(() => type) : undefined);
         if (slotTypes) {
@@ -4301,7 +4320,9 @@ function specializeInferredBlock(
       }
       return stmt;
     }),
-    expr: block.expr ? specializeInferredExpr(block.expr, context, scoped) : undefined,
+    expr: block.expr
+      ? specializeInferredExpr(block.expr, context, scoped, expectedType, reportAmbiguous)
+      : undefined,
   };
 }
 
@@ -4319,6 +4340,8 @@ function specializeInferredExpr(
     stats?: SpecializationTrace;
   },
   env = new Map<string, string>(),
+  expectedType?: string,
+  reportAmbiguous = true,
 ): Expr {
   switch (expr.kind) {
     case "do":
@@ -4332,10 +4355,20 @@ function specializeInferredExpr(
     case "call": {
       context.stats && (context.stats.visitedCalls += 1);
       const callee = specializeInferredExpr(expr.callee, context, env);
-      const args = expr.args.map((arg) => specializeInferredExpr(arg, context, env));
       const fn = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
+      const args = expr.args.map((arg) =>
+        specializeInferredExpr(arg, context, env, undefined, false)
+      );
       if (!fn || !fnUsesInferredTypeVars(fn, context.consts)) return { ...expr, callee, args };
-      return specializeInferredCall(fn, args, context, env, callSiteSpan(expr)) ??
+      return specializeInferredCall(
+        fn,
+        args,
+        context,
+        env,
+        callSiteSpan(expr),
+        expectedType,
+        reportAmbiguous,
+      ) ??
         { ...expr, callee, args };
     }
     case "index":
@@ -4359,7 +4392,7 @@ function specializeInferredExpr(
       return {
         ...expr,
         value,
-        body: specializeInferredExpr(expr.body, context, scoped),
+        body: specializeInferredExpr(expr.body, context, scoped, expectedType),
       };
     }
     case "match":
@@ -4368,7 +4401,7 @@ function specializeInferredExpr(
         value: specializeInferredExpr(expr.value, context, env),
         arms: expr.arms.map((arm) => ({
           ...arm,
-          value: specializeInferredExpr(arm.value, context, env),
+          value: specializeInferredExpr(arm.value, context, env, expectedType),
         })),
       };
     case "shape":
@@ -4407,7 +4440,7 @@ function specializeInferredExpr(
         key: specializeInferredExpr(expr.key, context, env),
       };
     case "block":
-      return specializeInferredBlock(expr, context, env);
+      return specializeInferredBlock(expr, context, env, expectedType, reportAmbiguous);
     case "literal":
     case "var":
     case "placeholder":
@@ -4454,6 +4487,8 @@ function specializeInferredCall(
   },
   env = new Map<string, string>(),
   diagnosticSpan?: Span,
+  expectedType?: string,
+  reportAmbiguous = true,
 ): Expr | undefined {
   const previousDiagnosticSpan = context.diagnosticSpan;
   if (diagnosticSpan) context.diagnosticSpan = diagnosticSpan;
@@ -4524,7 +4559,17 @@ function specializeInferredCall(
         }
       }
     });
-    if (![...collectTypeVars(fn, context.consts)].every((name) => types.has(name))) {
+    bindTypePattern(
+      fn.returnType,
+      expectedType ? runtimeSpecializedType(expectedType, context.types) : undefined,
+      types,
+      context.types,
+      context.consts,
+    );
+    const missingTypeVars = [...collectTypeVars(fn, context.consts)].filter((name) =>
+      !types.has(name)
+    );
+    if (missingTypeVars.length) {
       return undefined;
     }
     const key = `${fn.name}\0${[...types].map(([k, v]) => `${k}=${v}`).join("\0")}\0${
@@ -4536,18 +4581,18 @@ function specializeInferredCall(
     } else {
       context.stats && (context.stats.cacheMisses += 1);
     }
+    const staticNames = new Map<string, string>();
+    fn.params.forEach((param, index) => {
+      if (param.const && args[index]?.kind === "var") {
+        staticNames.set(param.name, (args[index] as Extract<Expr, { kind: "var" }>).name);
+      }
+    });
     if (!specialized) {
       const name = allocateSpecializationName(
         fn.name,
         [...types.values(), ...staticArgNames],
         context.usedNames,
       );
-      const staticNames = new Map<string, string>();
-      fn.params.forEach((param, index) => {
-        if (param.const && args[index]?.kind === "var") {
-          staticNames.set(param.name, (args[index] as Extract<Expr, { kind: "var" }>).name);
-        }
-      });
       const inferredBody = substituteInferredExpr(
         cloneExpr(fn.body),
         types,
@@ -4561,11 +4606,17 @@ function specializeInferredCall(
         name,
         params: fn.params.filter((param) => !param.const).map((param) => ({
           ...param,
-          type: substituteStaticNamesInType(substituteTypeVars(param.type, types), staticNames),
+          type: runtimeSpecializedRequiredType(
+            substituteStaticNamesInType(substituteTypeVars(param.type, types), staticNames),
+            context.types,
+          ),
         })),
-        returnType: fn.returnType
-          ? substituteStaticNamesInType(substituteTypeVars(fn.returnType, types), staticNames)
-          : undefined,
+        returnType: runtimeSpecializedType(
+          fn.returnType
+            ? substituteStaticNamesInType(substituteTypeVars(fn.returnType, types), staticNames)
+            : undefined,
+          context.types,
+        ),
         body: inferredBody,
         generated: true,
       };
@@ -4580,10 +4631,27 @@ function specializeInferredCall(
       context.functions.set(name, specialized);
       context.stats && (context.stats.generatedSpecializations += 1);
     }
+    const expectedArgs = args.map((arg, index) => {
+      const param = fn.params[index];
+      if (!param) return arg;
+      if (param.const) return arg;
+      const specializedType = substituteStaticNamesInType(
+        substituteTypeVars(param.type, types),
+        staticNames,
+      );
+      return specializeInferredExpr(
+        arg,
+        context,
+        env,
+        runtimeSpecializedType(specializedType, context.types),
+      );
+    });
     return {
       kind: "call",
       callee: { kind: "var", name: specialized.name },
-      args: omitConstArgs ? args : args.filter((_arg, index) => !fn.params[index]?.const),
+      args: omitConstArgs
+        ? expectedArgs
+        : expectedArgs.filter((_arg, index) => !fn.params[index]?.const),
     };
   } finally {
     context.diagnosticSpan = previousDiagnosticSpan;
@@ -4603,12 +4671,13 @@ function inferFromValuePattern(
   env = new Map<string, string>(),
 ) {
   const rendered = typeof pattern === "string" ? pattern : renderParamPattern(pattern);
+  const runtimePattern = transparentContractRuntimeType(rendered, context.types ?? []) ?? rendered;
   if (!arg) return;
   if (arg.kind === "product_constructor") {
     const decl = context.typeConstructors.get(arg.constructor);
     if (decl) {
       bindTypePattern(
-        rendered,
+        runtimePattern,
         renderConstructedType(decl, arg, context),
         types,
         context.types ?? [],
@@ -4618,12 +4687,12 @@ function inferFromValuePattern(
   }
   if (arg.kind === "literal") {
     const literalType = arg.inferredType ?? (arg.literalKind === "number" ? "i32" : undefined);
-    bindTypePattern(rendered, literalType, types, context.types ?? [], context.consts);
+    bindTypePattern(runtimePattern, literalType, types, context.types ?? [], context.consts);
     return;
   }
   if (arg.kind === "shape") {
     bindTypePattern(
-      rendered,
+      runtimePattern,
       inferExprType(arg, context, env),
       types,
       context.types ?? [],
@@ -4635,7 +4704,7 @@ function inferFromValuePattern(
     const directFn = context.functions.get(arg.name);
     if (directFn) inferFnTypeArgs(rendered, directFn, types, context.consts);
     bindTypePattern(
-      rendered,
+      runtimePattern,
       inferExprType(arg, context, env),
       types,
       context.types ?? [],
@@ -4644,12 +4713,20 @@ function inferFromValuePattern(
     return;
   }
   bindTypePattern(
-    rendered,
+    runtimePattern,
     inferExprType(arg, context, env),
     types,
     context.types ?? [],
     context.consts,
   );
+}
+
+function runtimeSpecializedType(type: string | undefined, types: TypeDecl[]): string | undefined {
+  return type ? transparentContractRuntimeType(type, types) ?? type : undefined;
+}
+
+function runtimeSpecializedRequiredType(type: string, types: TypeDecl[]): string {
+  return transparentContractRuntimeType(type, types) ?? type;
 }
 
 function renderConstructedType(
@@ -11302,6 +11379,34 @@ interface RuntimeCheckOptions {
   i32FactsCache?: WeakMap<Expr, ReturnType<typeof scalarFactsFromI32Range> | null>;
 }
 
+interface ProofFact {
+  source: string;
+  contract: string;
+  args: string[];
+}
+
+interface TypeFacts {
+  runtimeType: string;
+  proofFacts: ProofFact[];
+}
+
+interface SynthResult {
+  type?: string;
+  proofFacts: ProofFact[];
+  effects?: string[];
+}
+
+interface CheckContext {
+  env: Map<string, OwnershipBinding>;
+  capabilities: Map<string, string[]>;
+  effects: string[];
+  types: TypeDecl[];
+  functions: FnDecl[];
+  diagnostics: Diagnostic[];
+  options: RuntimeCheckOptions;
+  proofFacts: ProofFact[];
+}
+
 function checkFn(
   fn: FnDecl,
   capabilities: Map<string, string[]>,
@@ -11316,22 +11421,43 @@ function checkFn(
     fn.name.endsWith("ComponentStore.set")
   ) return;
   const env = new Map<string, OwnershipBinding>();
-  for (const param of fn.params) {
-    env.set(param.name, { moved: false, type: param.type });
-  }
   const runtimeOptions = {
     ...options,
     memo: options.memo,
     bindingTypeCache: new WeakMap<Expr, string | null>(),
     i32FactsCache: new WeakMap<Expr, ReturnType<typeof scalarFactsFromI32Range> | null>(),
   };
+  const ctx = checkContext(
+    env,
+    capabilities,
+    fn.effects,
+    diagnostics,
+    types,
+    functions,
+    runtimeOptions,
+  );
+  for (const param of fn.params) {
+    const normalized = normalizeExpectedType(param.type, ctx);
+    ctx.proofFacts.push(...(normalized?.proofFacts ?? []));
+    env.set(param.name, { moved: false, type: normalized?.runtimeType ?? param.type });
+  }
+  const returnType = normalizeExpectedType(fn.returnType, ctx);
+  ctx.proofFacts.push(...(returnType?.proofFacts ?? []));
+  checkTypeVariableMemberProofs(fn.body, ctx, [...ctx.proofFacts]);
+  if (!fnUsesInferredTypeVars(fn)) {
+    checkAmbiguousNullaryInferredCalls(
+      fn.body,
+      new Map(functions.map((item) => [item.name, item])),
+      diagnostics,
+    );
+  }
   checkBlock(
     fn.body,
     env,
     capabilities,
     fn.effects,
     diagnostics,
-    fn.returnType,
+    returnType?.runtimeType ?? fn.returnType,
     types,
     functions,
     runtimeOptions,
@@ -11456,18 +11582,30 @@ function checkStatement(
   options: RuntimeCheckOptions,
 ) {
   if (stmt.kind === "let") {
+    const ctx = checkContext(
+      env,
+      capabilities,
+      effects,
+      diagnostics,
+      types,
+      functions,
+      options,
+    );
+    const annotated = normalizeExpectedType(stmt.type, ctx);
     checkExpr(
       stmt.value,
       env,
       capabilities,
       effects,
       diagnostics,
-      stmt.type,
+      annotated?.runtimeType ?? stmt.type,
       types,
       functions,
       options,
     );
-    stmt.type ??= exprBindingType(stmt.value, env, types, functions, options);
+    stmt.type = annotated?.runtimeType ?? stmt.type ??
+      exprBindingType(stmt.value, env, types, functions, options);
+    ctx.proofFacts.push(...(annotated?.proofFacts ?? []));
     env.set(stmt.name, { moved: false, type: stmt.type });
     return;
   }
@@ -11604,6 +11742,377 @@ function checkExpr(
   types: TypeDecl[] = [],
   functions: FnDecl[] = [],
   options: RuntimeCheckOptions = { recoverTypes: false },
+): SynthResult {
+  const ctx = checkContext(
+    env,
+    capabilities,
+    effects,
+    diagnostics,
+    types,
+    functions,
+    options,
+  );
+  return checkExprAgainst(expr, normalizeExpectedType(expectedType, ctx), ctx);
+}
+
+function checkExprAgainst(
+  expr: Expr,
+  expected: TypeFacts | undefined,
+  ctx: CheckContext,
+): SynthResult {
+  checkExprImpl(
+    expr,
+    ctx.env,
+    ctx.capabilities,
+    ctx.effects,
+    ctx.diagnostics,
+    expected?.runtimeType,
+    ctx.types,
+    ctx.functions,
+    ctx.options,
+  );
+  if (expected) ctx.proofFacts.push(...expected.proofFacts);
+  return synthExpr(expr, ctx);
+}
+
+function synthExpr(expr: Expr, ctx: CheckContext): SynthResult {
+  return {
+    type: exprBindingTypeImpl(expr, ctx.env, ctx.types, ctx.functions, ctx.options),
+    proofFacts: [],
+  };
+}
+
+function normalizeExpectedType(
+  source: string | undefined,
+  ctx: CheckContext,
+): TypeFacts | undefined {
+  if (!source) return undefined;
+  const runtimeType = transparentContractRuntimeType(source, ctx.types) ?? source;
+  const base = typeNameOf(source.trim());
+  const recordsProof = typeCallArgsForBase(source.trim(), base) !== undefined &&
+    ctx.types.some((item) => item.name === base || terminalName(item.name) === terminalName(base));
+  return {
+    runtimeType,
+    proofFacts: recordsProof ? [proofFactFromTypeSource(source)] : [],
+  };
+}
+
+function transparentContractRuntimeType(source: string, types: TypeDecl[]): string | undefined {
+  const trimmed = source.trim();
+  const base = typeNameOf(trimmed);
+  const args = typeCallArgsForBase(trimmed, base);
+  if (args === undefined) return undefined;
+  const decl = types.find((item) =>
+    item.name === base || terminalName(item.name) === terminalName(base)
+  );
+  if (!decl || !typeDeclContainsContractCheck(decl, types)) return undefined;
+  const runtimeType = resolveAliasType(trimmed, types);
+  return runtimeType && runtimeType !== trimmed ? runtimeType : undefined;
+}
+
+function typeDeclContainsContractCheck(
+  decl: TypeDecl,
+  types: TypeDecl[],
+  seen = new Set<string>(),
+): boolean {
+  if (seen.has(decl.name)) return false;
+  seen.add(decl.name);
+  for (const clause of decl.clauses ?? [decl]) {
+    const exprs = [
+      ...clause.body.statements.map((stmt) => stmt.value),
+      ...(clause.body.expr ? [clause.body.expr] : []),
+    ];
+    for (const expr of exprs) {
+      if (typeExprContainsContractCheck(expr, types, seen)) return true;
+    }
+  }
+  return false;
+}
+
+function typeExprContainsContractCheck(
+  expr: TypeExpr,
+  types: TypeDecl[],
+  seen: Set<string>,
+): boolean {
+  if (expr.kind === "type_call") {
+    if (expr.callee.kind === "type_static_ref" && expr.callee.name === "require") return true;
+    if (
+      expr.callee.kind === "type_ref" &&
+      typeDeclContainsContractCheckForName(expr.callee.name, types, seen)
+    ) {
+      return true;
+    }
+    return typeExprContainsContractCheck(expr.callee, types, seen) ||
+      expr.args.some((arg) => typeExprContainsContractCheck(arg, types, seen));
+  }
+  if (expr.kind === "type_shape") {
+    return expr.shape.slots.some((slot) => typeExprContainsContractCheck(slot.type, types, seen));
+  }
+  if (expr.kind === "type_match") {
+    return typeExprContainsContractCheck(expr.value, types, seen) ||
+      expr.arms.some((arm) => typeExprContainsContractCheck(arm.value, types, seen));
+  }
+  if (expr.kind === "type_binary") {
+    return typeExprContainsContractCheck(expr.left, types, seen) ||
+      typeExprContainsContractCheck(expr.right, types, seen);
+  }
+  if (expr.kind === "type_fn") {
+    return parseAnnotationTypeCalls(expr.source).some((call) =>
+      typeExprContainsContractCheck(call, types, seen)
+    );
+  }
+  return false;
+}
+
+function typeDeclContainsContractCheckForName(
+  name: string,
+  types: TypeDecl[],
+  seen: Set<string>,
+): boolean {
+  const decl = types.find((item) =>
+    item.name === name || terminalName(item.name) === terminalName(name)
+  );
+  return decl ? typeDeclContainsContractCheck(decl, types, seen) : false;
+}
+
+function proofFactFromTypeSource(source: string): ProofFact {
+  const trimmed = source.trim();
+  const base = typeNameOf(trimmed);
+  const args = typeCallArgsForBase(trimmed, base);
+  return {
+    source: trimmed,
+    contract: terminalName(base),
+    args: args === undefined ? [] : splitTypeArgs(args).map((arg) => arg.trim()),
+  };
+}
+
+function checkTypeVariableMemberProofs(
+  block: Extract<Expr, { kind: "block" }>,
+  ctx: CheckContext,
+  initialProofs: ProofFact[],
+) {
+  const visitBlock = (item: Extract<Expr, { kind: "block" }>, proofs: ProofFact[]) => {
+    const active = [...proofs];
+    for (const stmt of item.statements) {
+      if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+        visitExpr(stmt.value, active);
+      }
+      if (stmt.kind === "let") {
+        active.push(...(normalizeExpectedType(stmt.type, ctx)?.proofFacts ?? []));
+      } else if (stmt.kind === "proof_const") {
+        active.push(...(normalizeExpectedType(renderTypeExpr(stmt.value), ctx)?.proofFacts ?? []));
+      }
+    }
+    if (item.expr) visitExpr(item.expr, active);
+  };
+  const visitExpr = (expr: Expr | undefined, proofs: ProofFact[]) => {
+    if (!expr) return;
+    switch (expr.kind) {
+      case "var": {
+        const member = expr.name.match(/^([a-z][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)$/);
+        if (
+          member &&
+          !proofFactsGuaranteeMember(member[1]!, member[2]!, proofs, ctx.types)
+        ) {
+          ctx.diagnostics.push(diagnosticAt(
+            "type.member_requires_proof",
+            `type variable ${member[1]}::${member[2]} requires a contract proof in scope`,
+            expr,
+          ));
+        }
+        return;
+      }
+      case "block":
+        visitBlock(expr, proofs);
+        return;
+      case "const_fn":
+        visitExpr(expr.body, proofs);
+        return;
+      case "call":
+        visitExpr(expr.callee, proofs);
+        for (const arg of expr.args) visitExpr(arg, proofs);
+        return;
+      case "index":
+        visitExpr(expr.target, proofs);
+        visitExpr(expr.index, proofs);
+        return;
+      case "binary":
+        visitExpr(expr.left, proofs);
+        visitExpr(expr.right, proofs);
+        return;
+      case "pipe_bind":
+        visitExpr(expr.value, proofs);
+        visitExpr(expr.body, proofs);
+        return;
+      case "match":
+        visitExpr(expr.value, proofs);
+        for (const arm of expr.arms) visitExpr(arm.value, proofs);
+        return;
+      case "shape":
+      case "product_constructor":
+        for (const slot of expr.slots) {
+          if (slot.index) visitExpr(slot.index, proofs);
+          visitExpr(slot.value, proofs);
+        }
+        return;
+      case "static_for_slots":
+        if (expr.source.kind === "range") {
+          visitExpr(expr.source.start, proofs);
+          visitExpr(expr.source.end, proofs);
+        } else {
+          visitExpr(expr.source.shape, proofs);
+        }
+        visitExpr(expr.value, proofs);
+        return;
+      case "field":
+        visitExpr(expr.value, proofs);
+        visitExpr(expr.key, proofs);
+        return;
+      case "range":
+        visitExpr(expr.start, proofs);
+        visitExpr(expr.end, proofs);
+        return;
+      case "do":
+        for (const stmt of expr.statements) {
+          if (stmt.kind !== "proof_const" && "value" in stmt) visitExpr(stmt.value, proofs);
+        }
+        visitExpr(expr.expr, proofs);
+        return;
+      case "literal":
+      case "placeholder":
+        return;
+    }
+  };
+  visitBlock(block, initialProofs);
+}
+
+function proofFactsGuaranteeMember(
+  receiver: string,
+  member: string,
+  proofs: ProofFact[],
+  types: TypeDecl[],
+): boolean {
+  for (const proof of proofs) {
+    const decl = types.find((item) =>
+      item.name === proof.contract || terminalName(item.name) === terminalName(proof.contract)
+    );
+    if (!decl) continue;
+    const requiredMembers = typeDeclRequiredMembers(decl);
+    if (!requiredMembers.length && proof.args.includes(receiver)) return true;
+    for (const required of requiredMembers) {
+      const index = decl.params.findIndex((param) => param.name === required.paramName);
+      if (required.member === member && index >= 0 && proof.args[index] === receiver) return true;
+    }
+  }
+  return false;
+}
+
+function typeDeclRequiredMembers(decl: TypeDecl): { paramName: string; member: string }[] {
+  const required: { paramName: string; member: string }[] = [];
+  const visit = (expr: TypeExpr | undefined) => {
+    if (!expr) return;
+    if (
+      expr.kind === "type_call" &&
+      expr.callee.kind === "type_static_ref" &&
+      expr.callee.name === "type_has_member"
+    ) {
+      const [target, member] = expr.args;
+      if (target?.kind === "type_ref" && member?.kind === "type_literal") {
+        required.push({ paramName: target.name, member: member.value });
+      }
+    }
+    switch (expr.kind) {
+      case "type_call":
+        visit(expr.callee);
+        for (const arg of expr.args) visit(arg);
+        return;
+      case "type_shape":
+        for (const slot of expr.shape.slots) visit(slot.type);
+        return;
+      case "type_match":
+        visit(expr.value);
+        for (const arm of expr.arms) visit(arm.value);
+        return;
+      case "type_binary":
+        visit(expr.left);
+        visit(expr.right);
+        return;
+      case "type_fn":
+        for (const call of parseAnnotationTypeCalls(expr.source)) visit(call);
+        return;
+      case "type_ref":
+      case "type_static_ref":
+      case "type_operator":
+      case "type_bool":
+      case "type_number":
+      case "type_char":
+      case "type_string":
+      case "type_literal":
+        return;
+    }
+  };
+  for (const clause of decl.clauses ?? [decl]) {
+    for (const stmt of clause.body.statements) visit(stmt.value);
+    visit(clause.body.expr);
+  }
+  return required;
+}
+
+function checkAmbiguousNullaryInferredCalls(
+  block: Extract<Expr, { kind: "block" }>,
+  functions: Map<string, FnDecl>,
+  diagnostics: Diagnostic[],
+) {
+  const visit = (expr: Expr | undefined) => {
+    if (!expr) return;
+    if (expr.kind === "call" && expr.callee.kind === "var") {
+      const fn = functions.get(expr.callee.name);
+      if (
+        fn &&
+        !fn.generated &&
+        fnUsesInferredTypeVars(fn) &&
+        fn.params.length === 0
+      ) {
+        const missing = [...collectTypeVars(fn)][0] ?? "type";
+        diagnostics.push(diagnosticAt(
+          "type.inferred_type_ambiguous",
+          `cannot infer ${missing} for ${fn.name} without an expected type`,
+          expr,
+        ));
+      }
+    }
+    for (const child of exprChildren(expr)) visit(child);
+  };
+  visit(block);
+}
+
+function checkContext(
+  env: Map<string, OwnershipBinding>,
+  capabilities: Map<string, string[]>,
+  effects: string[],
+  diagnostics: Diagnostic[],
+  types: TypeDecl[],
+  functions: FnDecl[],
+  options: RuntimeCheckOptions,
+  proofFacts: ProofFact[] = [],
+): CheckContext {
+  return { env, capabilities, effects, diagnostics, types, functions, options, proofFacts };
+}
+
+function typeFactsForRuntimeType(type: string | undefined): TypeFacts | undefined {
+  return type ? { runtimeType: type, proofFacts: [] } : undefined;
+}
+
+function checkExprImpl(
+  expr: Expr,
+  env: Map<string, OwnershipBinding>,
+  capabilities: Map<string, string[]>,
+  effects: string[],
+  diagnostics: Diagnostic[],
+  expectedType?: string,
+  types: TypeDecl[] = [],
+  functions: FnDecl[] = [],
+  options: RuntimeCheckOptions = { recoverTypes: false },
 ) {
   switch (expr.kind) {
     case "const_fn":
@@ -11672,7 +12181,19 @@ function checkExpr(
         : undefined;
       for (let index = 0; index < expr.args.length; index++) {
         const arg = expr.args[index];
-        const expected = fn?.params[index]?.type ?? calleeSignature?.params[index];
+        const rawExpected = fn?.params[index]?.type ?? calleeSignature?.params[index];
+        const expected = normalizeExpectedType(
+          rawExpected,
+          checkContext(
+            env,
+            capabilities,
+            effects,
+            diagnostics,
+            types,
+            functions,
+            options,
+          ),
+        )?.runtimeType ?? rawExpected;
         checkExpr(
           arg,
           env,
@@ -12054,6 +12575,28 @@ function borrowedCallArgIndexes(
 }
 
 function exprBindingType(
+  expr: Expr,
+  env: Map<string, OwnershipBinding>,
+  types: TypeDecl[],
+  functions: FnDecl[],
+  options: boolean | RuntimeCheckOptions = false,
+): string | undefined {
+  const runtimeOptions = typeof options === "boolean" ? { recoverTypes: options } : options;
+  return synthExpr(
+    expr,
+    checkContext(
+      env,
+      new Map(),
+      [],
+      [],
+      types,
+      functions,
+      runtimeOptions,
+    ),
+  ).type;
+}
+
+function exprBindingTypeImpl(
   expr: Expr,
   env: Map<string, OwnershipBinding>,
   types: TypeDecl[],
