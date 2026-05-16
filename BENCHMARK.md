@@ -167,6 +167,24 @@ Timed rows from the 2026-05-16 run:
 | `mat4_dot1`                      | 20000000 |         0.7 |          2.0 |     0.35 |                3.800 |            102 |  1800000000 |
 | `mat4_full`                      | 20000000 |        13.9 |         25.4 |     0.55 |               17.765 |            899 |    95752192 |
 
+## ECS Rust Comparison
+
+Focused ECS comparison from:
+
+```bash
+deno run --allow-read --allow-write --allow-run scripts/bench_ecs_compare.ts 100000
+```
+
+This benchmark compares the Fig ECS batch helpers compiled to Wasm against a native Rust kernel with
+the same dense 128-element position/velocity update and fold shape. Unlike the internal-loop rows
+above, the current Fig ECS harness calls exported `main(seed)` from a JavaScript host loop for each
+iteration. That makes the row useful for regression tracking, but it includes Wasm host-call
+overhead and should not be read as an internal-loop kernel-only number.
+
+| Scenario                    |  Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes |              Checksum |
+| --------------------------- | -----: | ----------: | -----------: | -------: | -------------------: | -------------: | --------------------: |
+| `dense_batch_move_fold_128` | 100000 |       998.3 |         84.2 |    11.86 |              841.063 |          17051 | `976545792/976545792` |
+
 ## Fannkuch Lowering Investigation
 
 Run:
