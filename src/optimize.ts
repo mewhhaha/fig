@@ -25,6 +25,7 @@ export type OptMode = "debug" | "release";
 
 export type OptimizeProfileName =
   | "debug"
+  | "release_fast_compile"
   | "release_size"
   | "release_speed"
   | "release_balanced";
@@ -94,6 +95,31 @@ export const OPTIMIZE_PROFILES: Record<OptimizeProfileName, OptimizeProfile> = {
     abstract: {
       maxPasses: 0,
       maxLocalEqualityCandidates: 0,
+    },
+  },
+  release_fast_compile: {
+    name: "release_fast_compile",
+    inline: {
+      scalarBudget: 18,
+      productBudget: 12,
+      generatedMultiplier: 2,
+      allowPublicWrapperInlining: false,
+    },
+    recurrence: {
+      unfoldMaxCardinality: 8,
+      unfoldMaxAstGrowth: 96,
+      loopLowerMinCardinality: 9,
+      allowNonTailFiniteUnfold: true,
+    },
+    layout: {
+      inlineArrayFlatMaxSlots: 4,
+      packedBitMaxWidth: 64,
+      scratchMinSlots: 8,
+      preferPackedWhenDynamic: true,
+    },
+    abstract: {
+      maxPasses: 2,
+      maxLocalEqualityCandidates: 32,
     },
   },
   release_size: {

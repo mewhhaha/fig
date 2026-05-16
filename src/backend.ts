@@ -51,7 +51,7 @@ import {
 } from "./refined_scalar.ts";
 import { wgslShaderId } from "./wgsl.ts";
 
-interface BackendModule {
+export interface BackendModule {
   imports: BackendImport[];
   functions: BackendFunction[];
   memories: BackendMemory[];
@@ -239,14 +239,14 @@ const BRANCH_MEMORIES: BackendMemory[] = [
 const SIMD_DOT4_I32_HELPER = "__fig_dot4_i32";
 
 export function emitWat(program: Program, options: BackendOptions = {}): string {
-  return backendModuleToWat(lowerBackendModule(program, options));
+  return backendModuleToWat(compileBackendModule(program, options));
 }
 
 export function emitWasm(
   program: Program,
   options: BackendOptions = {},
 ): Uint8Array<ArrayBuffer> {
-  return backendModuleToWasm(lowerBackendModule(program, options), {
+  return backendModuleToWasm(compileBackendModule(program, options), {
     debugNames: (options.optMode ?? "debug") === "debug",
   });
 }
@@ -407,7 +407,10 @@ function runtimeProgramView(program: Program): Program {
   };
 }
 
-function lowerBackendModule(program: Program, options: BackendOptions = {}): BackendModule {
+export function compileBackendModule(
+  program: Program,
+  options: BackendOptions = {},
+): BackendModule {
   const memoryModel = options.memoryModel ?? "branch";
   if (!isMemoryModel(memoryModel)) {
     throw new CompileError([{
@@ -9579,13 +9582,15 @@ function lowerRefinedDomainTryMatch(
   expectedType?: string,
 ): Instr[] | undefined {
   if (value.kind !== "call" || value.callee.kind !== "var") return undefined;
-  if (!isRefinedDomainTryCallee(value.callee.name)) return undefined;
+  const calleeName = refinedDomainTryCalleeName(value.callee.name, ctx.functions);
+  if (!calleeName) return undefined;
   const checked = value.args.at(-1);
   if (!checked) return undefined;
-  const callee = ctx.functions.get(value.callee.name);
+  const callee = ctx.functions.get(calleeName);
   const payloadType = optionPayloadType(callee?.returnType);
   const resolvedPayload = resolveAlias(payloadType, ctx.layouts) ?? payloadType;
-  const payloadFact = scalarFactsFromRefinedI32Type(resolvedPayload);
+  const payloadFact = scalarFactsFromRefinedI32Type(resolvedPayload) ??
+    scalarFactsFromRefinedI32Type(refinedDomainTypeArg(value.args.at(0), ctx.layouts));
   if (!payloadFact) return undefined;
   const someArm = arms.find((arm) =>
     arm.pattern.kind === "constructor" && arm.pattern.name === "Some"
@@ -9646,9 +9651,27 @@ function isRefinedDomainTryCallee(name: string): boolean {
     name.endsWith("i32::try_domain") || name.includes("i32__try_domain__");
 }
 
+function refinedDomainTryCalleeName(
+  name: string,
+  functions: ReadonlyMap<string, FnDecl>,
+): string | undefined {
+  if (isRefinedDomainTryCallee(name)) return name;
+  const split = name.lastIndexOf(".");
+  if (split <= 0) return undefined;
+  const attachedName = `${name.slice(0, split)}::${name.slice(split + 1)}`;
+  return isRefinedDomainTryCallee(attachedName) && functions.has(attachedName)
+    ? attachedName
+    : undefined;
+}
+
 function optionPayloadType(type: string | undefined): string | undefined {
   const args = type ? typeCallArgs(type, "Option") : undefined;
   return args === undefined ? undefined : splitTypeArgs(args)[0]?.trim();
+}
+
+function refinedDomainTypeArg(expr: Expr | undefined, layouts: LayoutEnv): string | undefined {
+  if (expr?.kind !== "var") return undefined;
+  return resolveAlias(expr.name, layouts) ?? expr.name;
 }
 
 function refinedI32MembershipTest(
@@ -10742,12 +10765,31 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
   return calls;
 }
 
-function backendModuleToWat(module: BackendModule): string {
+export function backendModuleToWat(module: BackendModule): string {
+  const functionAliases = watFunctionAliases(module.functions);
   const imports = module.imports.map((item) => emitImportWat(item));
   const memory = module.memories.map((item) => emitMemoryWat(item));
   const data = module.data.map((item) => emitDataWat(item));
-  const functions = module.functions.map((fn) => emitFunctionWat(fn));
+  const functions = module.functions.map((fn) => emitFunctionWat(fn, functionAliases));
   return `(module\n${[...imports, ...memory, ...data, ...functions].join("\n")}\n)`;
+}
+
+function watFunctionAliases(functions: BackendFunction[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const fn of functions) {
+    if (!isGeneratedWatHelper(fn)) continue;
+    aliases.set(fn.name, `f${aliases.size}`);
+  }
+  return aliases;
+}
+
+function isGeneratedWatHelper(fn: BackendFunction): boolean {
+  if (fn.exportName) return false;
+  return fn.name.startsWith("__inl_array_") ||
+    fn.name.startsWith("array.") ||
+    fn.name.startsWith("array_") ||
+    fn.name.startsWith("layout.") ||
+    fn.name.startsWith("layout_");
 }
 
 function emitMemoryWat(item: BackendMemory): string {
@@ -10769,26 +10811,38 @@ function emitImportWat(item: BackendImport): string {
   return `  ${signature})`;
 }
 
-function emitFunctionWat(fn: BackendFunction): string {
+function emitFunctionWat(
+  fn: BackendFunction,
+  functionAliases: ReadonlyMap<string, string>,
+): string {
   const lines: string[] = [];
-  const localAliases = watLocalAliases(fn.locals);
+  const localAliases = watLocalAliases(fn);
   const exportPart = fn.exportName ? ` (export "${fn.exportName}")` : "";
   const signature = [
-    `(func $${watName(fn.name)}${exportPart}`,
-    ...fn.params.map((param) => `(param $${watName(param.name)} ${param.type})`),
+    `(func $${watFunctionName(fn.name, functionAliases)}${exportPart}`,
+    ...fn.params.map((param) => `(param $${watLocalName(param.name, localAliases)} ${param.type})`),
     ...fn.results.map((result) => `(result ${result})`),
   ].join(" ");
   lines.push(`  ${signature}`);
   lines.push(...emitLocalDeclsWat(fn.locals, localAliases));
-  lines.push(...emitInstrsWat(fn.body, 4, localAliases));
+  lines.push(...emitInstrsWat(fn.body, 4, localAliases, functionAliases));
   lines.push("  )");
   return lines.join("\n");
 }
 
-function watLocalAliases(locals: BackendFunction["locals"]): Map<string, string> {
+function watFunctionName(name: string, aliases: ReadonlyMap<string, string>): string {
+  return aliases.get(name) ?? watName(name);
+}
+
+function watLocalAliases(fn: BackendFunction): Map<string, string> {
   const aliases = new Map<string, string>();
+  const generated = isGeneratedWatHelper(fn);
+  const locals = generated ? [...fn.params, ...fn.locals] : fn.locals;
   for (const local of locals) {
-    if (!/^(__inl_array_Iter|__slot_tmp)/.test(local.name)) continue;
+    if (!generated && !/^(__inl_array_Iter|__slot_tmp)/.test(local.name)) {
+      continue;
+    }
+    if (aliases.has(local.name)) continue;
     aliases.set(local.name, `l${aliases.size}`);
   }
   return aliases;
@@ -10818,14 +10872,16 @@ function emitInstrsWat(
   instrs: Instr[],
   indent: number,
   localAliases: ReadonlyMap<string, string> = new Map(),
+  functionAliases: ReadonlyMap<string, string> = new Map(),
 ): string[] {
-  return instrs.flatMap((instr) => emitInstrWat(instr, indent, localAliases));
+  return instrs.flatMap((instr) => emitInstrWat(instr, indent, localAliases, functionAliases));
 }
 
 function emitInstrWat(
   instr: Instr,
   indent: number,
   localAliases: ReadonlyMap<string, string>,
+  functionAliases: ReadonlyMap<string, string>,
 ): string[] {
   const prefix = spaces(indent);
   switch (instr.op) {
@@ -10838,9 +10894,9 @@ function emitInstrWat(
     case "local.tee":
       return [`${prefix}local.tee $${watLocalName(instr.name, localAliases)}`];
     case "call":
-      return [`${prefix}call $${watName(instr.name)}`];
+      return [`${prefix}call $${watFunctionName(instr.name, functionAliases)}`];
     case "return_call":
-      return [`${prefix}return_call $${watName(instr.name)}`];
+      return [`${prefix}return_call $${watFunctionName(instr.name, functionAliases)}`];
     case "select":
       return [`${prefix}select`];
     case "binary":
@@ -10880,21 +10936,21 @@ function emitInstrWat(
         `${prefix}if${branchHintWat(instr.branchHint)}${
           instr.results.map((result) => ` (result ${result})`).join("")
         }`,
-        ...emitInstrsWat(instr.thenBody, indent + 2, localAliases),
+        ...emitInstrsWat(instr.thenBody, indent + 2, localAliases, functionAliases),
         `${prefix}else`,
-        ...emitInstrsWat(instr.elseBody, indent + 2, localAliases),
+        ...emitInstrsWat(instr.elseBody, indent + 2, localAliases, functionAliases),
         `${prefix}end`,
       ];
     case "block":
       return [
         `${prefix}block${(instr.results ?? []).map((result) => ` (result ${result})`).join("")}`,
-        ...emitInstrsWat(instr.body, indent + 2, localAliases),
+        ...emitInstrsWat(instr.body, indent + 2, localAliases, functionAliases),
         `${prefix}end`,
       ];
     case "loop":
       return [
         `${prefix}loop${(instr.results ?? []).map((result) => ` (result ${result})`).join("")}`,
-        ...emitInstrsWat(instr.body, indent + 2, localAliases),
+        ...emitInstrsWat(instr.body, indent + 2, localAliases, functionAliases),
         `${prefix}end`,
       ];
     case "br":
@@ -10913,7 +10969,7 @@ function watMemidx(memory: string | undefined): string {
   return memory && memory !== "memory" ? ` (memory $${watName(memory)})` : "";
 }
 
-function backendModuleToWasm(
+export function backendModuleToWasm(
   module: BackendModule,
   options: { debugNames?: boolean } = {},
 ): Uint8Array<ArrayBuffer> {

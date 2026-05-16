@@ -1,4 +1,9 @@
-import { compileArtifactsFromSource } from "../src/mod.ts";
+import {
+  compileArtifactsFromSource,
+  createCompileCache,
+  OPTIMIZE_PROFILES,
+  type OptimizeProfileName,
+} from "../src/mod.ts";
 
 interface FigScenario {
   name: ScenarioName;
@@ -78,6 +83,7 @@ interface Row {
   compile_parse_ms?: string;
   compile_import_ms?: string;
   compile_check_ms?: string;
+  compile_backend_ms?: string;
   compile_total_ms?: string;
   wat_bytes?: number;
   wasm_bytes?: number;
@@ -92,7 +98,8 @@ interface Row {
   fixed_array_representation_local_slots?: number;
 }
 
-const iterations = Number(Deno.args.find((arg) => arg !== "--") ?? 100_000);
+const cliPositionals = positionalArgs();
+const iterations = Number(cliPositionals[0] ?? 100_000);
 const fannkuchReduxSource = await Deno.readTextFile("examples/perf_fannkuch_redux.fig");
 const simdMat4Source = await Deno.readTextFile("examples/perf_matmul_simd.fig");
 const simdDot1Source = `
@@ -120,12 +127,39 @@ const resolveModule = async (moduleName: string) => {
   }
 };
 
+const compileCache = createCompileCache();
+const profile = parseProfile();
 const compileOptions = {
   resolveModule,
+  cache: compileCache,
   memoryModel: "branch" as const,
   optMode: "release" as const,
+  profile,
   pruneImports: true,
 };
+
+function parseProfile(): OptimizeProfileName | undefined {
+  const eq = Deno.args.find((arg) => arg.startsWith("--profile="));
+  const value = eq ? eq.slice("--profile=".length) : Deno.args[Deno.args.indexOf("--profile") + 1];
+  if (!value || Deno.args.indexOf("--profile") < 0 && !eq) return undefined;
+  if (value in OPTIMIZE_PROFILES) return value as OptimizeProfileName;
+  throw new Error(`unknown optimizer profile ${value}`);
+}
+
+function positionalArgs(): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < Deno.args.length; index++) {
+    const arg = Deno.args[index];
+    if (arg === "--") continue;
+    if (arg === "--profile") {
+      index++;
+      continue;
+    }
+    if (arg.startsWith("--profile=")) continue;
+    if (!arg.startsWith("--")) values.push(arg);
+  }
+  return values;
+}
 
 const scalarFlatShape: ShapeExpectation = {
   module: {
@@ -649,6 +683,7 @@ function printBenchmarkTables(rows: Row[], scenarioOrder: ScenarioName[]) {
     "compile_parse_ms",
     "compile_import_ms",
     "compile_check_ms",
+    "compile_backend_ms",
     "compile_total_ms",
     "wat_bytes",
     "wasm_bytes",
@@ -703,6 +738,7 @@ async function benchFig(scenario: FigScenario, calls: number): Promise<Row> {
       compileParseMs: artifact.timings.parseMs,
       compileImportMs: artifact.timings.importMs,
       compileCheckMs: artifact.timings.checkMs,
+      compileBackendMs: artifact.timings.backendMs,
       compileWatMs: artifact.timings.watMs,
       compileWasmMs: artifact.timings.wasmMs,
     },
@@ -766,6 +802,7 @@ function row(
     compileParseMs: number;
     compileImportMs: number;
     compileCheckMs: number;
+    compileBackendMs: number;
     compileWatMs: number;
     compileWasmMs: number;
   },
@@ -791,11 +828,12 @@ function row(
         compile_parse_ms: compile.compileParseMs.toFixed(3),
         compile_import_ms: compile.compileImportMs.toFixed(3),
         compile_check_ms: compile.compileCheckMs.toFixed(3),
+        compile_backend_ms: compile.compileBackendMs.toFixed(3),
         compile_wat_ms: compile.compileWatMs.toFixed(3),
         compile_wasm_ms: compile.compileWasmMs.toFixed(3),
         compile_total_ms: (
           compile.compileParseMs + compile.compileImportMs + compile.compileCheckMs +
-          compile.compileWatMs + compile.compileWasmMs
+          compile.compileBackendMs + compile.compileWatMs + compile.compileWasmMs
         ).toFixed(3),
       }
       : {}),

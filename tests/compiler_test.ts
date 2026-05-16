@@ -3,8 +3,10 @@ import {
   checkSource,
   compileArtifactsFromSource,
   COMPILER_PLUGIN_API_VERSION,
+  createCompileCache,
   createCompilerPluginRegistry,
   explainOptimization,
+  OPTIMIZE_PROFILES,
   optimizeProgram,
   parse,
   summarizeAbstractValues,
@@ -4344,11 +4346,77 @@ Deno.test("compileArtifactsFromSource emits WAT and Wasm from one checked source
   assert(artifact.wasm.byteLength > 0);
   assert(artifact.timings.parseMs >= 0);
   assert(artifact.timings.checkMs >= 0);
+  assert(artifact.timings.backendMs >= 0);
+  assert(artifact.timings.watRenderMs >= 0);
+  assert(artifact.timings.wasmEncodeMs >= 0);
   assert(artifact.timings.watMs >= 0);
   assert(artifact.timings.wasmMs >= 0);
 
   const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
   assertEquals((instance.exports.main as () => number)(), 42);
+});
+
+Deno.test("compileArtifactsFromSource traces import phases", async () => {
+  const artifact = await compileArtifactsFromSource(
+    `
+      const core = @import("prelude.core");
+      pub fn main(raw: i32) -> i32 {
+        match core.i32::try_domain(i32(0..4), raw) {
+          Some(i) => i,
+          None => 0,
+        }
+      }
+    `,
+    {
+      resolveModule: resolveProjectModule,
+      pruneImports: true,
+      trace: true,
+    },
+  );
+  const phaseNames = new Set(artifact.importTrace?.phases.map((phase) => phase.name));
+  assert(phaseNames.has("parse module"));
+  assert(phaseNames.has("merge child imports"));
+  assert(phaseNames.has("collect declaration names"));
+  assert(phaseNames.has("prune worklist"));
+});
+
+Deno.test("compileArtifactsFromSource reuses shared import cache", async () => {
+  const cache = createCompileCache();
+  let resolveCalls = 0;
+  const resolveModule = async (moduleName: string) => {
+    resolveCalls++;
+    return await resolveProjectModule(moduleName);
+  };
+  const source = `
+    const core = @import("prelude.core");
+    pub fn main(raw: i32) -> i32 {
+      match core.i32::try_domain(i32(0..4), raw) {
+        Some(i) => i,
+        None => 0,
+      }
+    }
+  `;
+  await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
+  const firstResolveCalls = resolveCalls;
+  assert(firstResolveCalls > 0);
+  assert(cache.parsedModules.size > 0);
+  assert(cache.resolvedModules.size > 0);
+
+  await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
+  assertEquals(resolveCalls, firstResolveCalls);
+});
+
+Deno.test("release_fast_compile profile compiles with fewer optimizer passes", async () => {
+  assert(OPTIMIZE_PROFILES.release_fast_compile.abstract.maxPasses <= 2);
+  const artifact = await compileArtifactsFromSource(
+    `
+      fn inc(x: i32) -> i32 { x + 1 }
+      pub fn main(seed: i32) -> i32 { inc(seed) + inc(2) }
+    `,
+    { optMode: "release", profile: "release_fast_compile" },
+  );
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as (seed: number) => number)(40), 44);
 });
 
 Deno.test("defaults unsuffixed integer literals in i32 contexts", async () => {

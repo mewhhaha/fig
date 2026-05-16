@@ -1,7 +1,7 @@
 import { checkSource, formatSource, wasmFromSource, watFromSource } from "./mod.ts";
 import { CompileError, formatDiagnostic } from "./diagnostics.ts";
 import type { MemoryModel } from "./backend.ts";
-import type { OptMode } from "./optimize.ts";
+import { OPTIMIZE_PROFILES, type OptimizeProfileName, type OptMode } from "./optimize.ts";
 
 const [cmd, ...args] = Deno.args;
 
@@ -61,6 +61,7 @@ try {
       resolveModule: moduleResolver(file),
       memoryModel: parseMemoryModel(rest),
       optMode: parseOptMode(rest),
+      profile: parseOptimizeProfile(rest),
       branchHints: parseBranchHints(rest),
     };
     console.log(await watFromSource(source, options));
@@ -71,6 +72,7 @@ try {
       resolveModule: moduleResolver(file),
       memoryModel: parseMemoryModel(rest),
       optMode: parseOptMode(rest),
+      profile: parseOptimizeProfile(rest),
       branchHints: parseBranchHints(rest),
     };
     const outFlag = rest.indexOf("--out");
@@ -93,6 +95,7 @@ try {
       resolveModule: moduleResolver(file),
       memoryModel: parseMemoryModel(rest),
       optMode: parseOptMode(rest),
+      profile: parseOptimizeProfile(rest),
       branchHints: parseBranchHints(rest),
     };
     const wasm = await wasmFromSource(source, options);
@@ -117,7 +120,7 @@ try {
 
 function usage(): never {
   console.error(
-    "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--release] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]",
+    "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--release|--release-fast-compile] [--profile name] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]",
   );
   Deno.exit(2);
 }
@@ -135,7 +138,18 @@ function parseOptMode(args: string[]): OptMode {
     usage();
   }
   if (args.some((arg) => arg.startsWith("--release="))) usage();
-  return args.includes("--release") ? "release" : "debug";
+  return args.includes("--release") || args.includes("--release-fast-compile")
+    ? "release"
+    : "debug";
+}
+
+function parseOptimizeProfile(args: string[]): OptimizeProfileName | undefined {
+  if (args.includes("--release-fast-compile")) return "release_fast_compile";
+  const eq = args.find((arg) => arg.startsWith("--profile="));
+  const value = eq ? eq.slice("--profile=".length) : args[args.indexOf("--profile") + 1];
+  if (!value || args.indexOf("--profile") < 0 && !eq) return undefined;
+  if (value in OPTIMIZE_PROFILES) return value as OptimizeProfileName;
+  usage();
 }
 
 function parseBranchHints(args: string[]): boolean | undefined {

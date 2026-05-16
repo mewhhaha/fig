@@ -1,4 +1,9 @@
-import { compileArtifactsFromSource } from "../src/mod.ts";
+import {
+  compileArtifactsFromSource,
+  createCompileCache,
+  OPTIMIZE_PROFILES,
+  type OptimizeProfileName,
+} from "../src/mod.ts";
 
 interface Scenario {
   name: string;
@@ -45,7 +50,9 @@ interface ShapeExpectation {
 
 type PartialShapeExpectation = Partial<Record<keyof WatShape, { min?: number; max?: number }>>;
 
-const iterations = Number(Deno.args.find((arg) => arg !== "--") ?? 100_000);
+const cliPositionals = positionalArgs();
+const iterations = Number(cliPositionals[0] ?? 100_000);
+const profile = parseProfile();
 const fannkuchReduxSource = await Deno.readTextFile("examples/perf_fannkuch_redux.fig");
 
 const resolveModule = async (moduleName: string) => {
@@ -56,12 +63,38 @@ const resolveModule = async (moduleName: string) => {
   }
 };
 
+const compileCache = createCompileCache();
 const compileOptions = {
   resolveModule,
+  cache: compileCache,
   memoryModel: "branch" as const,
   optMode: "release" as const,
+  profile,
   pruneImports: true,
 };
+
+function parseProfile(): OptimizeProfileName | undefined {
+  const eq = Deno.args.find((arg) => arg.startsWith("--profile="));
+  const value = eq ? eq.slice("--profile=".length) : Deno.args[Deno.args.indexOf("--profile") + 1];
+  if (!value || Deno.args.indexOf("--profile") < 0 && !eq) return undefined;
+  if (value in OPTIMIZE_PROFILES) return value as OptimizeProfileName;
+  throw new Error(`unknown optimizer profile ${value}`);
+}
+
+function positionalArgs(): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < Deno.args.length; index++) {
+    const arg = Deno.args[index];
+    if (arg === "--") continue;
+    if (arg === "--profile") {
+      index++;
+      continue;
+    }
+    if (arg.startsWith("--profile=")) continue;
+    if (!arg.startsWith("--")) values.push(arg);
+  }
+  return values;
+}
 
 const simdDot1Source = `
   type fn InlineArray(n: count, a: type) -> type {
@@ -487,6 +520,7 @@ for (const scenario of scenarios) {
   let compileParseMs = 0;
   let compileImportMs = 0;
   let compileCheckMs = 0;
+  let compileBackendMs = 0;
   let compileWatMs = 0;
   let compileWasmMs = 0;
   try {
@@ -496,6 +530,7 @@ for (const scenario of scenarios) {
     compileParseMs = artifact.timings.parseMs;
     compileImportMs = artifact.timings.importMs;
     compileCheckMs = artifact.timings.checkMs;
+    compileBackendMs = artifact.timings.backendMs;
     compileWatMs = artifact.timings.watMs;
     compileWasmMs = artifact.timings.wasmMs;
   } catch (error) {
@@ -522,10 +557,12 @@ for (const scenario of scenarios) {
     compile_parse_ms: compileParseMs.toFixed(3),
     compile_import_ms: compileImportMs.toFixed(3),
     compile_check_ms: compileCheckMs.toFixed(3),
+    compile_backend_ms: compileBackendMs.toFixed(3),
     compile_wat_ms: compileWatMs.toFixed(3),
     compile_wasm_ms: compileWasmMs.toFixed(3),
     compile_total_ms: (
-      compileParseMs + compileImportMs + compileCheckMs + compileWatMs + compileWasmMs
+      compileParseMs + compileImportMs + compileCheckMs + compileBackendMs + compileWatMs +
+      compileWasmMs
     ).toFixed(3),
     wat_bytes: wat.length,
     wasm_bytes: wasm.byteLength,

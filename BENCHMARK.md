@@ -13,7 +13,7 @@ table includes Fig internal-loop rows and native Rust rows.
 
 ## Environment
 
-- Date: 2026-05-15
+- Date: 2026-05-16
 - OS: Linux 7.0.5-1-cachyos x86_64
 - Deno: 2.7.14, V8 14.7.173.20-rusty, TypeScript 5.9.2
 - Rust: rustc 1.96.0-nightly (3645249d7 2026-03-16)
@@ -30,22 +30,33 @@ deno run --allow-read scripts/bench_tail_recursion.ts
 deno run --allow-read scripts/bench_matmul_simd.ts 100000
 ```
 
-The memory-model benchmark completed and passed all size/shape gates. Compile phase columns come
-from one parsed/imported/checked program; WAT and Wasm are then emitted from that checked program.
-Selected rows:
+The memory-model benchmark completed and passed all size/shape gates. The run uses one shared
+compile cache across scenarios for parsed/resolved source imports. Compile phase columns come from
+one parsed/imported/checked program; backend lowering runs once, then WAT and Wasm are rendered and
+encoded from the same lowered backend module. Selected rows:
 
-| Scenario                   |  Calls |  ns/call | Parse ms | Import ms | Check ms | WAT ms | Wasm ms | Total ms | WAT bytes | Wasm bytes | Loops | Recursive calls | SIMD ops |
-| -------------------------- | -----: | -------: | -------: | --------: | -------: | -----: | ------: | -------: | --------: | ---------: | ----: | --------------: | -------: |
-| `scalar_reuse_nway`        | 100000 |     33.4 |    2.761 |     0.441 |    3.921 |  5.875 |   1.090 |   14.087 |       151 |         44 |     0 |               0 |        0 |
-| `tail_product_loop_1k`     |   5000 |    296.1 |    1.062 |     0.153 |    0.998 |  6.093 |   2.007 |   10.312 |      1349 |        109 |     1 |               0 |        0 |
-| `inline_array_builder_map` |  25000 |     17.5 |    0.898 |    71.387 |    6.334 |  9.962 |   6.035 |   94.616 |       183 |         47 |     0 |               0 |        0 |
-| `compact_filter_collect`   |  50000 |     80.1 |    0.894 |   621.400 |    5.626 | 89.345 |  75.890 |  793.155 |    118326 |       4573 |     0 |               0 |        0 |
-| `fixed_collection_update`  |  25000 |     14.2 |    0.454 |    62.031 |    2.444 |  3.745 |   4.641 |   73.315 |        91 |         38 |     0 |               0 |        0 |
-| `path_grid_score_16`       |  12500 |    195.5 |    0.801 |     0.123 |    0.453 |  2.439 |   2.156 |    5.973 |      1275 |        113 |     1 |               0 |        0 |
-| `range_fold_1k`            |   5000 |    267.0 |    0.364 |     3.253 |    0.924 |  3.800 |   2.680 |   11.020 |       581 |         87 |     1 |               0 |        0 |
-| `fannkuch_redux_7`         |    100 | 116534.9 |   11.190 |    70.480 |    3.908 | 33.565 |  18.463 |  137.605 |     22881 |       1146 |     5 |               0 |        0 |
-| `mat4_dot1`                | 100000 |     18.6 |    0.743 |     0.064 |    0.370 |  1.483 |   1.444 |    4.104 |       853 |        145 |     0 |               0 |       14 |
-| `mat4_full`                | 100000 |     95.6 |    4.632 |     0.151 |    1.172 | 13.714 |  11.391 |   31.060 |      3933 |        426 |     0 |               0 |       38 |
+| Scenario                   |  Calls |  ns/call | Parse ms | Import ms | Check ms | Backend ms | WAT ms | Wasm ms | Total ms | WAT bytes | Wasm bytes | Loops | Recursive calls | SIMD ops |
+| -------------------------- | -----: | -------: | -------: | --------: | -------: | ---------: | -----: | ------: | -------: | --------: | ---------: | ----: | --------------: | -------: |
+| `scalar_reuse_nway`        | 100000 |     34.8 |    3.032 |     0.573 |    8.290 |      6.807 |  0.245 |   0.451 |   19.397 |       151 |         44 |     0 |               0 |        0 |
+| `tail_product_loop_1k`     |   5000 |    289.5 |    1.015 |     0.111 |    1.094 |      6.399 |  0.088 |   0.131 |    8.838 |      1269 |        109 |     1 |               0 |        0 |
+| `inline_array_builder_map` |  25000 |     21.7 |    0.912 |    36.243 |    9.663 |     20.863 |  0.015 |   0.064 |   67.762 |       183 |         47 |     0 |               0 |        0 |
+| `compact_filter_collect`   |  50000 |     49.5 |    0.756 |    77.669 |    6.833 |    112.505 |  0.594 |   0.738 |  199.095 |     22856 |       1731 |     2 |               0 |        0 |
+| `fixed_collection_update`  |  25000 |     14.1 |    0.393 |     5.537 |    2.412 |      5.429 |  0.013 |   0.029 |   13.812 |        91 |         38 |     0 |               0 |        0 |
+| `path_grid_score_16`       |  12500 |    181.4 |    0.361 |     0.051 |    0.313 |      2.146 |  0.034 |   0.077 |    2.982 |      1227 |        113 |     1 |               0 |        0 |
+| `range_fold_1k`            |   5000 |    257.8 |    0.239 |     1.752 |    0.868 |      4.694 |  0.026 |   0.041 |    7.619 |      1265 |        116 |     1 |               0 |        0 |
+| `fannkuch_redux_7`         |    100 | 106803.1 |    4.226 |     5.140 |    3.306 |     27.140 |  0.231 |   0.349 |   40.391 |     21989 |       1146 |     5 |               0 |        0 |
+| `mat4_dot1`                | 100000 |     14.2 |    0.925 |     0.088 |    0.426 |      1.910 |  0.021 |   0.121 |    3.491 |       853 |        145 |     0 |               0 |       14 |
+| `mat4_full`                | 100000 |     86.1 |    1.956 |     0.170 |    0.711 |     12.157 |  0.126 |   0.109 |   15.229 |      3814 |        426 |     0 |               0 |       38 |
+
+The same memory-model benchmark also passed all gates with `--profile=release_fast_compile`.
+Selected compile-time comparison against the balanced release profile:
+
+| Scenario                   | Balanced Backend ms | Balanced Total ms | Fast Backend ms | Fast Total ms | Fast WAT bytes | Fast Wasm bytes |
+| -------------------------- | ------------------: | ----------------: | --------------: | ------------: | -------------: | --------------: |
+| `compact_filter_collect`   |             112.505 |           199.095 |          85.010 |       171.393 |          22856 |            1731 |
+| `fixed_collection_update`  |               5.429 |            13.812 |           3.972 |        12.378 |             91 |              38 |
+| `fannkuch_redux_7`         |              27.140 |            40.391 |          24.465 |        38.259 |          21989 |            1146 |
+| `mat4_full`                |              12.157 |            15.229 |           6.795 |        10.642 |           3814 |             426 |
 
 Focused compile-time scaling from:
 
@@ -53,8 +64,8 @@ Focused compile-time scaling from:
 deno run --allow-read scripts/bench_const_params.ts --sizes=10,100,200,500,1000 --iterations=3
 ```
 
-| Calls | Direct avg ms | Runtime-dict avg ms | Const-param avg ms | Slowest traced check phase at const-param | Const-param specialization summary |
-| ----: | ------------: | ------------------: | -----------------: | ----------------------------------------- | ---------------------------------- |
+| Calls | Direct avg ms | Runtime-dict avg ms | Const-param avg ms | Slowest traced check phase at const-param | Const-param specialization summary                                                             |
+| ----: | ------------: | ------------------: | -----------------: | ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
 |    10 |         2.166 |               1.695 |              1.480 | `checkFn loop:0.101ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
 |   100 |        17.236 |              22.625 |             24.581 | `checkFn loop:1.380ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
 |   200 |        50.665 |              76.411 |             78.425 | `checkFn loop:4.192ms`                    | `inferred #1 v1/g0/h0/m0; const #1 v0/g0/h0/m0; inferred #2 v1/g0/h0/m0; const #2 v0/g0/h0/m0` |
@@ -68,7 +79,7 @@ focused regression test covers the 100 repeated const-param call shape with one 
 one specialization cache miss, and cache hits growing with repeated calls.
 
 The current memory-model run also passed the compact-filter WAT gate: `compact_filter_collect`
-compiled to 25363 WAT bytes and 1483 Wasm bytes, under the 30000-byte WAT limit.
+compiled to 22856 WAT bytes and 1731 Wasm bytes, under the 30000-byte WAT limit.
 
 Tail-recursion benchmark medians:
 
