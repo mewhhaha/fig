@@ -5,20 +5,20 @@
 (Primary (StaticBuiltin (LowerIdent) @function.builtin))
 (TypePrimary (StaticBuiltin (LowerIdent) @function.builtin))
 (TypeAtom (LowerIdent) @type.parameter)
-(TypeFnDecl (PascalIdent) @type.definition)
+(TypeFnDecl (PascalIdent) @type)
 (ConstDecl (LowerIdent) @constant)
 (ImportBindingItems (LowerIdent) @constant)
-(ImportBindingItems (PascalIdent) @type.definition)
-(ConstDecl (FieldName) @constant)
+(ImportBindingItems (PascalIdent) @type)
+(ConstDecl (FieldName (LowerIdent) @constant))
 (Param (PatternIdent (LowerIdent) @variable.parameter))
 (Param (PatternIdent (PascalIdent) @constructor))
-(Param (FieldName) @variable.parameter)
+(Param (FieldName (LowerIdent) @variable.parameter))
 (ConstFnParams (LowerIdent) @variable.parameter)
 (BlockLetDecl (LowerIdent) @variable)
-(BlockLetDecl (FieldName) @variable)
+(BlockLetDecl (FieldName (LowerIdent) @variable))
 (BlockLetTail (LowerIdent) @variable)
 (TopLetDecl (LowerIdent) @variable)
-(TopLetDecl (FieldName) @variable)
+(TopLetDecl (FieldName (LowerIdent) @variable))
 (TypeShapeSlot (ShapeSlotKey (LowerIdent) @variable.other.member))
 (ShapeSlot (ShapeSlotKey (LowerIdent) @variable.other.member))
 (Call "." (LowerIdent) @variable.other.member)
@@ -66,6 +66,7 @@
 ";" @punctuation.delimiter
 "<$>" @operator
 "<*>" @operator
+"<-" @operator
 "<=" @operator
 "<>" @operator
 "=" @operator
@@ -82,8 +83,14 @@
 "||" @operator
 "}" @punctuation.bracket
 (fenced_text) @string.special
-(CollectionOpen) @constant
-(CollectionClose) @constant
 (Char) @constant
 (LiteralType) @constant
-(DoBindName) @constant
+(DoStrategy (StaticBuiltin) @keyword.directive)
+(BranchHint) @keyword.directive
+(DoBindStmt (LowerIdent) @variable)
+(CollectionValue (CollectionOpen) @punctuation.bracket)
+(CollectionValueItems (CollectionClose) @punctuation.bracket)
+(CollectionValueTail (CollectionClose) @punctuation.bracket)
+(Op (CollectionOpen) @operator)
+(Op (CollectionClose) @operator)
+(OpNoCollectionClose (CollectionOpen) @operator)

@@ -221,6 +221,24 @@ type fn Query(access: const) -> type {
   struct(Query)
 }
 
+fn Query::pure(value: value_t) -> Query(value_t) {
+  value
+}
+
+fn Query::map(
+  const step: fn(value: value_t) -> Query(next_t),
+  value: Query(value_t)
+) -> Query(next_t) {
+  step(value)
+}
+
+fn Query::bind(
+  value: Query(value_t),
+  const step: fn(value: value_t) -> Query(next_t)
+) -> Query(next_t) {
+  step(value)
+}
+
 type fn Res(resource: type) -> type {
   resource
 }
@@ -230,18 +248,29 @@ type fn System() -> type {
   struct(System)
 }
 
-type fn Command(world: type) -> type {
-  world
+fn System::pure(value: value_t) -> System {
+  {}
 }
 
-fn Command::pure(value: world_t) -> Command(world_t) {
+fn System::bind(
+  value: System,
+  const step: fn(value: System) -> System
+) -> System {
+  step(value)
+}
+
+type fn Command(value: type) -> type {
+  value
+}
+
+fn Command::pure(value: value_t) -> Command(value_t) {
   value
 }
 
 fn Command::bind(
-  value: Command(world_t),
-  const step: fn(value: world_t) -> Command(world_t)
-) -> Command(world_t) {
+  value: Command(value_t),
+  const step: fn(value: value_t) -> Command(value_t)
+) -> Command(value_t) {
   step(value)
 }
 
@@ -264,7 +293,7 @@ fn each(query: Query(access)) -> QueryRowFor(access) {
   @empty(QueryRowFor(access))
 }
 
-fn write(values: writes) -> System {
+fn system(query: Query(writes)) -> System {
   {}
 }
 

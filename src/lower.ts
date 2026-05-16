@@ -965,7 +965,7 @@ function lowerDoBind(node: Node): DoStatement {
   return {
     kind: "do_bind",
     ...spanOnly(node),
-    name: first(node, "DoBindName").text.replace(/<-\s*$/, "").trim(),
+    name: first(node, "LowerIdent").text,
     value: lowerExpr(first(node, "Expr")),
   };
 }

@@ -674,25 +674,35 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
       decl.name
     ),
   );
-  const lowerExpr = (expr: Expr): Expr => {
+  const lowerExpr = (expr: Expr, env: Map<string, string> = new Map()): Expr => {
     switch (expr.kind) {
       case "do":
-        return lowerDoExpression(expr, diagnostics, lowerExpr, functionNames);
+        return lowerDoExpression(
+          expr,
+          diagnostics,
+          (child) => lowerExpr(child, env),
+          functionNames,
+          env,
+        );
       case "const_fn":
-        return { ...expr, body: lowerExpr(expr.body) };
+        return { ...expr, body: lowerExpr(expr.body, env) };
       case "call":
-        return { ...expr, callee: lowerExpr(expr.callee), args: expr.args.map(lowerExpr) };
+        return {
+          ...expr,
+          callee: lowerExpr(expr.callee, env),
+          args: expr.args.map((arg) => lowerExpr(arg, env)),
+        };
       case "index":
-        return { ...expr, target: lowerExpr(expr.target), index: lowerExpr(expr.index) };
+        return { ...expr, target: lowerExpr(expr.target, env), index: lowerExpr(expr.index, env) };
       case "binary":
-        return { ...expr, left: lowerExpr(expr.left), right: lowerExpr(expr.right) };
+        return { ...expr, left: lowerExpr(expr.left, env), right: lowerExpr(expr.right, env) };
       case "pipe_bind":
-        return { ...expr, value: lowerExpr(expr.value), body: lowerExpr(expr.body) };
+        return { ...expr, value: lowerExpr(expr.value, env), body: lowerExpr(expr.body, env) };
       case "match":
         return {
           ...expr,
-          value: lowerExpr(expr.value),
-          arms: expr.arms.map((arm) => ({ ...arm, value: lowerExpr(arm.value) })),
+          value: lowerExpr(expr.value, env),
+          arms: expr.arms.map((arm) => ({ ...arm, value: lowerExpr(arm.value, env) })),
         };
       case "shape":
       case "product_constructor":
@@ -700,8 +710,8 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
           ...expr,
           slots: expr.slots.map((slot) => ({
             ...slot,
-            index: slot.index ? lowerExpr(slot.index) : undefined,
-            value: lowerExpr(slot.value),
+            index: slot.index ? lowerExpr(slot.index, env) : undefined,
+            value: lowerExpr(slot.value, env),
           })),
         };
       case "static_for_slots":
@@ -710,26 +720,35 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
           source: expr.source.kind === "range"
             ? {
               kind: "range",
-              start: lowerExpr(expr.source.start),
-              end: lowerExpr(expr.source.end),
+              start: lowerExpr(expr.source.start, env),
+              end: lowerExpr(expr.source.end, env),
             }
-            : { kind: "shape", shape: lowerExpr(expr.source.shape) },
-          value: lowerExpr(expr.value),
+            : { kind: "shape", shape: lowerExpr(expr.source.shape, env) },
+          value: lowerExpr(expr.value, env),
         };
       case "field":
-        return { ...expr, value: lowerExpr(expr.value), key: lowerExpr(expr.key) };
+        return { ...expr, value: lowerExpr(expr.value, env), key: lowerExpr(expr.key, env) };
       case "range":
-        return { ...expr, start: lowerExpr(expr.start), end: lowerExpr(expr.end) };
-      case "block":
+        return { ...expr, start: lowerExpr(expr.start, env), end: lowerExpr(expr.end, env) };
+      case "block": {
+        const scoped = new Map(env);
+        const statements = expr.statements.map((stmt) => {
+          if (stmt.kind === "let") {
+            const value = lowerExpr(stmt.value, scoped);
+            if (stmt.type) scoped.set(stmt.name, stmt.type);
+            return { ...stmt, value } as Statement;
+          }
+          if (stmt.kind === "destructure_let") {
+            return { ...stmt, value: lowerExpr(stmt.value, scoped) } as Statement;
+          }
+          return stmt;
+        });
         return {
           ...expr,
-          statements: expr.statements.map((stmt) =>
-            stmt.kind === "let" || stmt.kind === "destructure_let"
-              ? { ...stmt, value: lowerExpr(stmt.value) } as Statement
-              : stmt
-          ),
-          expr: expr.expr ? lowerExpr(expr.expr) : undefined,
+          statements,
+          expr: expr.expr ? lowerExpr(expr.expr, scoped) : undefined,
         };
+      }
       case "literal":
       case "placeholder":
       case "var":
@@ -737,9 +756,23 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
     }
   };
   for (const decl of program.declarations) {
-    if (decl.kind === "fn") decl.body = lowerExpr(decl.body) as BlockExpr;
-    else if (decl.kind === "contract") decl.body = lowerExpr(decl.body) as BlockExpr;
-    else if (decl.kind === "let" || decl.kind === "const") decl.value = lowerExpr(decl.value);
+    if (decl.kind === "fn") {
+      decl.body = lowerExpr(
+        decl.body,
+        new Map(
+          decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
+        ),
+      ) as BlockExpr;
+    } else if (decl.kind === "contract") {
+      decl.body = lowerExpr(
+        decl.body,
+        new Map(
+          decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
+        ),
+      ) as BlockExpr;
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      decl.value = lowerExpr(decl.value);
+    }
   }
 }
 
@@ -748,6 +781,7 @@ function lowerDoExpression(
   diagnostics: Diagnostic[],
   lowerExpr: (expr: Expr) => Expr,
   functionNames?: Set<string>,
+  env: Map<string, string> = new Map(),
 ): Expr {
   const proofEffect = renderTypeExpr(expr.strategy.effect);
   const effect = doRuntimeEffectName(expr.strategy.effect, expr.strategy.name, functionNames) ??
@@ -763,15 +797,46 @@ function lowerDoExpression(
       ? lowerExpr(expr.expr)
       : { kind: "literal", literalKind: "number", value: "0" };
   }
-  let loweredStatements = expr.statements.map((stmt) =>
-    stmt.kind === "do_bind"
-      ? { ...stmt, value: lowerExpr(stmt.value) }
-      : stmt.kind === "do_expr"
-      ? { ...stmt, value: lowerExpr(stmt.value) }
-      : stmt.kind === "let" || stmt.kind === "destructure_let"
-      ? { ...stmt, value: lowerExpr(stmt.value) }
-      : stmt
-  );
+  const lowerDoChild = (child: Expr, shadowed = new Set<string>()) =>
+    lowerExpr(rewriteDoEffectOperations(child, effect, shadowed));
+  let loweredStatements: DoStatement[] = [];
+  let shadowedDoNames = new Set<string>();
+  for (const stmt of expr.statements) {
+    if (stmt.kind === "do_bind") {
+      loweredStatements.push({ ...stmt, value: lowerDoChild(stmt.value, shadowedDoNames) });
+      shadowedDoNames = shadowNames(shadowedDoNames, [stmt.name]);
+    } else if (stmt.kind === "do_expr") {
+      loweredStatements.push({ ...stmt, value: lowerDoChild(stmt.value, shadowedDoNames) });
+    } else if (stmt.kind === "let") {
+      loweredStatements.push({ ...stmt, value: lowerDoChild(stmt.value, shadowedDoNames) });
+      shadowedDoNames = shadowNames(shadowedDoNames, [stmt.name]);
+    } else if (stmt.kind === "destructure_let") {
+      loweredStatements.push({ ...stmt, value: lowerDoChild(stmt.value, shadowedDoNames) });
+      shadowedDoNames = shadowNames(shadowedDoNames, stmt.names);
+    } else {
+      loweredStatements.push(stmt);
+    }
+  }
+  const state = stateDoContext(expr.strategy.effect, strategy, functionNames, env);
+  if (state) {
+    const finalIsEffectOperation = expr.expr && isDoEffectOperationCall(expr.expr, effect);
+    const stateStatements: DoStatement[] = expr.expr && !finalIsEffectOperation
+      ? [...loweredStatements, {
+        kind: "do_expr",
+        value: lowerDoChild(expr.expr, shadowedDoNames),
+        span: expr.expr.span,
+      }]
+      : loweredStatements;
+    return withDoStrategyProof(
+      expr.strategy.effect,
+      stateMonadicDo(
+        effect,
+        state.name,
+        stateStatements,
+        finalIsEffectOperation ? lowerDoChild(expr.expr!, shadowedDoNames) : undefined,
+      ),
+    );
+  }
   const trailingExprStmt = !expr.expr && loweredStatements.at(-1)?.kind === "do_expr"
     ? loweredStatements.at(-1) as Extract<DoStatement, { kind: "do_expr" }>
     : undefined;
@@ -786,7 +851,7 @@ function lowerDoExpression(
       return { kind: "literal", literalKind: "number", value: "0", span: expr.span };
     }
   }
-  const finalExpr = trailingExprStmt?.value ?? lowerExpr(expr.expr!);
+  const finalExpr = trailingExprStmt?.value ?? lowerDoChild(expr.expr!, shadowedDoNames);
   if (strategy === "applicative") {
     const binds = loweredStatements.filter((stmt) => stmt.kind === "do_bind");
     if (binds.length > 1) {
@@ -821,6 +886,201 @@ function doRuntimeEffectName(
   return arg ? renderTypeExpr(arg) : undefined;
 }
 
+function stateDoContext(
+  effect: TypeExpr,
+  strategy: string,
+  functionNames: Set<string> | undefined,
+  env: Map<string, string>,
+): { name: string; type: string } | undefined {
+  if (strategy !== "monad" || effect.kind !== "type_call" || effect.args.length !== 1) {
+    return undefined;
+  }
+  const effectName = renderTypeExpr(effect.callee);
+  if (!functionNames?.has(`${effectName}::bind`)) return undefined;
+  const stateType = effect.args[0] ? renderTypeExpr(effect.args[0]) : undefined;
+  if (!stateType) return undefined;
+  const matches = [...env.entries()].filter(([, type]) => type === stateType);
+  const namedWorld = matches.find(([name]) => name === "world");
+  const selected = namedWorld ?? (matches.length === 1 ? matches[0] : undefined);
+  return selected ? { name: selected[0], type: selected[1] } : undefined;
+}
+
+const DO_EFFECT_OPERATION_NAMES = new Set(["pure", "bind", "map", "apply"]);
+
+function rewriteDoEffectOperations(
+  expr: Expr,
+  effect: string,
+  shadowed = new Set<string>(),
+): Expr {
+  switch (expr.kind) {
+    case "var":
+      return isUnqualifiedDoEffectOperation(expr.name) && !shadowed.has(expr.name)
+        ? { ...expr, name: `${effect}::${expr.name}` }
+        : expr;
+    case "call":
+      return {
+        ...expr,
+        callee: rewriteDoEffectOperations(expr.callee, effect, shadowed),
+        args: expr.args.map((arg) => rewriteDoEffectOperations(arg, effect, shadowed)),
+      };
+    case "const_fn":
+      return {
+        ...expr,
+        body: rewriteDoEffectOperations(expr.body, effect, shadowNames(shadowed, expr.params)),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: rewriteDoEffectOperations(expr.value, effect, shadowed),
+        body: rewriteDoEffectOperations(expr.body, effect, shadowNames(shadowed, [expr.name])),
+      };
+    case "index":
+      return {
+        ...expr,
+        target: rewriteDoEffectOperations(expr.target, effect, shadowed),
+        index: rewriteDoEffectOperations(expr.index, effect, shadowed),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: rewriteDoEffectOperations(expr.left, effect, shadowed),
+        right: rewriteDoEffectOperations(expr.right, effect, shadowed),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: rewriteDoEffectOperations(expr.value, effect, shadowed),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: rewriteDoEffectOperations(
+            arm.value,
+            effect,
+            shadowNames(shadowed, patternBindingNames(arm.pattern)),
+          ),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          index: slot.index ? rewriteDoEffectOperations(slot.index, effect, shadowed) : undefined,
+          value: rewriteDoEffectOperations(slot.value, effect, shadowed),
+        })),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: expr.source.kind === "range"
+          ? {
+            kind: "range",
+            start: rewriteDoEffectOperations(expr.source.start, effect, shadowed),
+            end: rewriteDoEffectOperations(expr.source.end, effect, shadowed),
+          }
+          : {
+            kind: "shape",
+            shape: rewriteDoEffectOperations(expr.source.shape, effect, shadowed),
+          },
+        value: rewriteDoEffectOperations(
+          expr.value,
+          effect,
+          shadowNames(
+            shadowed,
+            [expr.iterator, expr.valueIterator].filter((name): name is string => !!name),
+          ),
+        ),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: rewriteDoEffectOperations(expr.value, effect, shadowed),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: rewriteDoEffectOperations(expr.start, effect, shadowed),
+        end: rewriteDoEffectOperations(expr.end, effect, shadowed),
+      };
+    case "block": {
+      let scoped = new Set(shadowed);
+      const statements = expr.statements.map((stmt) => {
+        if (stmt.kind === "let") {
+          const value = rewriteDoEffectOperations(stmt.value, effect, scoped);
+          scoped = shadowNames(scoped, [stmt.name]);
+          return { ...stmt, value } as Statement;
+        }
+        if (stmt.kind === "destructure_let") {
+          const value = rewriteDoEffectOperations(stmt.value, effect, scoped);
+          scoped = shadowNames(scoped, stmt.names);
+          return { ...stmt, value } as Statement;
+        }
+        return stmt;
+      });
+      return {
+        ...expr,
+        statements,
+        expr: expr.expr ? rewriteDoEffectOperations(expr.expr, effect, scoped) : undefined,
+      };
+    }
+    case "do":
+    case "literal":
+    case "placeholder":
+      return expr;
+  }
+}
+
+function isDoEffectOperationCall(expr: Expr, effect: string): boolean {
+  if (expr.kind !== "call" || expr.callee.kind !== "var") return false;
+  const name = expr.callee.name;
+  if (isUnqualifiedDoEffectOperation(name)) return true;
+  return name.startsWith(`${effect}::`) &&
+    DO_EFFECT_OPERATION_NAMES.has(name.slice(effect.length + 2));
+}
+
+function isUnqualifiedDoEffectOperation(name: string): boolean {
+  return !name.includes("::") && !name.includes(".") && DO_EFFECT_OPERATION_NAMES.has(name);
+}
+
+function shadowNames(shadowed: Set<string>, names: string[]): Set<string> {
+  const next = new Set(shadowed);
+  for (const name of names) next.add(name);
+  return next;
+}
+
+function stateMonadicDo(
+  effect: string,
+  stateName: string,
+  statements: DoStatement[],
+  finalExpr: Expr | undefined,
+  depth = 0,
+): Expr {
+  const [head, ...tail] = statements;
+  if (!head) return callExpr(`${effect}::pure`, [finalExpr ?? { kind: "var", name: stateName }]);
+  if (head.kind === "do_bind" || head.kind === "do_expr") {
+    const nextStateName = head.kind === "do_bind" ? head.name : `__state${depth}`;
+    return {
+      kind: "pipe_bind",
+      value: injectStateArgument(head.value, stateName),
+      name: nextStateName,
+      body: stateMonadicDo(effect, nextStateName, tail, finalExpr, depth + 1),
+    };
+  }
+  return {
+    kind: "block",
+    statements: [head],
+    expr: stateMonadicDo(effect, stateName, tail, finalExpr, depth),
+  };
+}
+
+function injectStateArgument(expr: Expr, stateName: string): Expr {
+  if (expr.kind !== "call") return expr;
+  return {
+    ...expr,
+    args: [{ kind: "var", name: stateName }, ...expr.args],
+  };
+}
+
 function withDoStrategyProof(effect: TypeExpr, expr: Expr): Expr {
   if (effect.kind !== "type_call" || effect.args.length !== 1) return expr;
   return {
@@ -836,7 +1096,7 @@ function withDoStrategyProof(effect: TypeExpr, expr: Expr): Expr {
 
 function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
   const [head, ...tail] = statements;
-  if (!head) return callExpr(`${effect}::pure`, [finalExpr]);
+  if (!head) return finalExpr;
   if (head.kind === "do_bind") {
     return callExpr(`${effect}::bind`, [
       head.value,
@@ -864,7 +1124,7 @@ function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): 
 
 function applicativeDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
   const [head, ...tail] = statements;
-  if (!head) return callExpr(`${effect}::pure`, [finalExpr]);
+  if (!head) return finalExpr;
   if (head.kind === "do_bind") {
     return callExpr(`${effect}::map`, [
       {

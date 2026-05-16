@@ -2696,7 +2696,7 @@ Deno.test("do monad lowers through generated capturing const functions", async (
         x <- a();
         let k = x + 1;
         y <- b(k);
-        x + y
+        pure(x + y)
       }
     }
   `,
@@ -2741,7 +2741,7 @@ Deno.test("do monad expression statements lower like bind-right", async () => {
       do @monad(Id) {
         action(1);
         y <- action(2);
-        y
+        pure(y)
       }
     }
   `,
@@ -2770,7 +2770,7 @@ Deno.test("do monad parameterized effect dispatches through outer type function"
       do @monad(State(i32)) {
         action(1);
         y <- action(2);
-        y
+        pure(y)
       }
     }
   `,
@@ -2779,6 +2779,35 @@ Deno.test("do monad parameterized effect dispatches through outer type function"
     ),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 3);
+});
+
+Deno.test("do monad parameterized state threads in-scope state implicitly", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn State(state: type) -> type { state }
+    fn State::pure(value: state) -> State(state) { value }
+    fn State::bind(
+      value: State(state),
+      const step: fn(value: state) -> State(state)
+    ) -> State(state) {
+      step(value)
+    }
+    fn bump(state: i32, amount: i32) -> State(i32) { state + amount }
+    fn run_state(state: i32) -> State(i32) {
+      do @monad(State(i32)) {
+        bump(2);
+        bump(3);
+      }
+    }
+    pub fn main() -> i32 { run_state(10) }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 15);
 });
 
 Deno.test("do applicative supports query-style bind then final expression", async () => {
@@ -2793,7 +2822,7 @@ Deno.test("do applicative supports query-style bind then final expression", asyn
     pub fn main() -> i32 {
       do @applicative(Query) {
         row <- each(4);
-        row + 1
+        pure(row + 1)
       }
     }
   `,

@@ -24,8 +24,27 @@ for (const file of bundle.files) {
       .replace("(TypePrimary (LowerIdent) @type)\n", "")
       .replace("(TypePrimary (PascalIdent) @type.parameter)\n", "")
       .replace("(TypeFnDecl (LowerIdent) @type.definition)\n", "")
+      .replace("(TypeFnDecl (PascalIdent) @type.definition)", "(TypeFnDecl (PascalIdent) @type)")
       .replace("(TypeLetDecl (PascalIdent) @type)\n", "")
-      .replace("(BlockProofConstDecl (PascalIdent) @type)\n", "");
+      .replace("(BlockProofConstDecl (PascalIdent) @type)\n", "")
+      .replace(
+        "(ImportBindingItems (PascalIdent) @type.definition)",
+        "(ImportBindingItems (PascalIdent) @type)",
+      )
+      .replace("(CollectionOpen) @constant\n", "")
+      .replace("(CollectionClose) @constant\n", "")
+      .replace("(DoBindName) @constant\n", "");
+    content += [
+      "(DoStrategy (StaticBuiltin) @keyword.directive)",
+      "(BranchHint) @keyword.directive",
+      "(DoBindStmt (LowerIdent) @variable)",
+      "(CollectionValue (CollectionOpen) @punctuation.bracket)",
+      "(CollectionValueItems (CollectionClose) @punctuation.bracket)",
+      "(CollectionValueTail (CollectionClose) @punctuation.bracket)",
+      "(Op (CollectionOpen) @operator)",
+      "(Op (CollectionClose) @operator)",
+      "(OpNoCollectionClose (CollectionOpen) @operator)",
+    ].join("\n") + "\n";
   }
   await Deno.writeTextFile(path, content);
 }

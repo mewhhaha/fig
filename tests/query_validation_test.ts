@@ -122,7 +122,7 @@ const { map4_i32, Geometry2dI32 } = @import("prelude.array_static");
   }));
 
   assertEquals(
-    captures.filter((capture) => capture.name === "type.definition").map((capture) => capture.text),
+    captures.filter((capture) => capture.name === "type").map((capture) => capture.text),
     ["Hello", "Geometry2dI32"],
   );
   assertEquals(
@@ -154,6 +154,65 @@ Deno.test("highlight query captures type identifiers inside union types", async 
     captures.filter((capture) => capture.name === "type.parameter").map((capture) => capture.text),
     ["left", "right", "result", "left"],
   );
+});
+
+Deno.test("highlight query separates do bind arrows and comparison operators", async () => {
+  await Parser.init();
+  const language = await Language.load(parserUrl.pathname);
+  const parser = new Parser();
+  parser.setLanguage(language);
+  const source = `
+fn main(a: i32, b: i32) -> i32 {
+  do @monad(Id) {
+    row <- each(4);
+    if a < b { 1 } else { 2 }
+  }
+}
+`;
+  const tree = parser.parse(source);
+  if (!tree) throw new Error("failed to parse do highlight smoke source");
+  const query = new Query(language, await Deno.readTextFile(new URL("highlights.scm", queriesUrl)));
+
+  const captures = query.captures(tree.rootNode).map((capture) => ({
+    name: capture.name,
+    text: capture.node.text,
+  }));
+
+  assertEquals(
+    captures.some(({ name, text }) => name === "keyword.directive" && text === "@monad"),
+    true,
+  );
+  assertEquals(captures.some(({ name, text }) => name === "variable" && text === "row"), true);
+  assertEquals(captures.some(({ name, text }) => name === "operator" && text === "<-"), true);
+  assertEquals(captures.some(({ name, text }) => name === "operator" && text === "<"), true);
+  assertEquals(captures.some(({ name, text }) => name === "constant" && text.includes("<")), false);
+});
+
+Deno.test("highlight query distinguishes collection delimiters from comparison operators", async () => {
+  await Parser.init();
+  const language = await Language.load(parserUrl.pathname);
+  const parser = new Parser();
+  parser.setLanguage(language);
+  const source = `fn list() -> [i32, i32] { <1, 2> }`;
+  const tree = parser.parse(source);
+  if (!tree) throw new Error("failed to parse collection highlight smoke source");
+  const query = new Query(language, await Deno.readTextFile(new URL("highlights.scm", queriesUrl)));
+
+  const captures = query.captures(tree.rootNode).map((capture) => ({
+    name: capture.name,
+    text: capture.node.text,
+  }));
+
+  assertEquals(
+    captures.filter(({ name, text }) => name === "punctuation.bracket" && text === "<").length,
+    1,
+  );
+  assertEquals(
+    captures.filter(({ name, text }) => name === "punctuation.bracket" && text === ">").length,
+    1,
+  );
+  assertEquals(captures.some(({ name, text }) => name === "constant" && text === "<"), false);
+  assertEquals(captures.some(({ name, text }) => name === "constant" && text === ">"), false);
 });
 
 function extractNamedNodeReferences(query: string): string[] {

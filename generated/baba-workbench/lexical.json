@@ -33,6 +33,7 @@
     "{}",
     "&&",
     "^^",
+    "<-",
     "<=",
     "<>",
     "==",
@@ -101,10 +102,6 @@
     {
       "name": "TypeRepeatPrefix",
       "pattern": "([a-z_][a-z0-9_]*|[A-Z][A-Za-z0-9]*|[0-9]+)\\*(\\s*[0-9]+\\*)*"
-    },
-    {
-      "name": "DoBindName",
-      "pattern": "[a-z_][a-z0-9_]*[ \\t\\r\\n]*<-"
     },
     {
       "name": "LowerIdent",

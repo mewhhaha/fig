@@ -9,14 +9,6 @@ const tick_millis: fn() -> i32 !{time} = @capability("tick_millis");
 const input_axis_x: fn() -> i32 !{event} = @capability("input_axis_x");
 const input_pressed: fn() -> i32 !{event} = @capability("input_pressed");
 
-type fn Read(component: type) -> type {
-  ecs.Read(component)
-}
-
-type fn Write(component: type) -> type {
-  ecs.Write(component)
-}
-
 type fn Transform2d() -> type {
   let Transform2d = {x: i32, y: i32, z: i32};
   struct(Transform2d)
@@ -58,43 +50,6 @@ type fn FrameInput() -> type {
   struct(FrameInput)
 }
 
-type fn Command(world: type) -> type {
-  ecs.Command(world)
-}
-
-fn Command::pure(value: World) -> Command(World) {
-  value
-}
-
-fn Command::bind(
-  value: Command(World),
-  const step: fn(value: World) -> Command(World)
-) -> Command(World) {
-  step(value)
-}
-
-type fn Query(value: type) -> type {
-  value
-}
-
-fn Query::pure(value: value_t) -> Query(value_t) {
-  value
-}
-
-fn Query::map(
-  const step: fn(value: value_t) -> Query(next_t),
-  value: Query(value_t)
-) -> Query(next_t) {
-  step(value)
-}
-
-fn Query::bind(
-  value: Query(value_t),
-  const step: fn(value: value_t) -> Query(next_t)
-) -> Query(next_t) {
-  step(value)
-}
-
 type fn RenderState() -> type {
   let RenderState = {
     len: i32,
@@ -116,6 +71,28 @@ type fn RenderRow2d() -> type {
 
 type fn RenderBatch() -> type {
   Geometry2dBatchI32(8)
+}
+
+type fn MovementQuery() -> type {
+  ecs.Query({
+    transform: ecs.Write(Transform2d),
+    velocity: ecs.Read(Velocity2d)
+  })
+}
+
+type fn MovementRow() -> type {
+  ecs.QueryRowFor({
+    transform: ecs.Write(Transform2d),
+    velocity: ecs.Read(Velocity2d)
+  })
+}
+
+type fn SpriteQuery() -> type {
+  ecs.Query({sprite: ecs.Write(Sprite2d)})
+}
+
+type fn SpriteRow() -> type {
+  ecs.QueryRowFor({sprite: ecs.Write(Sprite2d)})
 }
 
 fn read_frame_input() -> FrameInput !{time, event} {
@@ -149,17 +126,13 @@ fn empty_world() -> World {
 }
 
 fn setup(world: World) -> World {
-  do @monad(Command(World)) {
-    first <- ecs.spawn(
-      world,
-      {
-        transform: Transform2d {x: 12, y: 8, z: 1},
-        velocity: Velocity2d {x: 4, y: 0},
-        sprite: Sprite2d {w: 16, h: 16, color: 1}
-      }
-    );
+  do @monad(ecs.Command(World)) {
+    ecs.spawn({
+      transform: Transform2d {x: 12, y: 8, z: 1},
+      velocity: Velocity2d {x: 4, y: 0},
+      sprite: Sprite2d {w: 16, h: 16, color: 1}
+    });
     ecs.spawn(
-      first,
       {
         transform: Transform2d {x: 24, y: 8, z: 1},
         velocity: Velocity2d {x: 4, y: 0},
@@ -170,46 +143,49 @@ fn setup(world: World) -> World {
 }
 
 fn movement_system(
-  mut: ecs.Query({
-    transform: Write(Transform2d),
-    velocity: Read(Velocity2d)
-  }),
+  mut: MovementQuery,
   input: ecs.Res(FrameInput)
 ) -> ecs.System {
-  do @applicative(Query) {
-    row <- ecs.each(mut);
-    ecs.write({
-      transform: Transform2d {
-        x: row.transform.x + row.velocity.x * input.dt_ms
-          / 16,
-        y: row.transform.y + row.velocity.y * input.dt_ms
-          / 16,
-        z: row.transform.z
-      }
-    })
+  do @monad(ecs.System) {
+    let update = do @applicative(ecs.Query(MovementRow)) {
+      row <- ecs.each(mut);
+      pure({
+        transform: Transform2d {
+          x: row.transform.x + row.velocity.x * input.dt_ms
+            / 16,
+          y: row.transform.y + row.velocity.y * input.dt_ms
+            / 16,
+          z: row.transform.z
+        }
+      })
+    };
+    pure(update)
   }
 }
 
 fn sprite_animation_system(
-  mut: ecs.Query({sprite: Write(Sprite2d)}),
+  mut: SpriteQuery,
   input: ecs.Res(FrameInput)
 ) -> ecs.System {
-  do @applicative(Query) {
-    row <- ecs.each(mut);
-    ecs.write({
-      sprite: Sprite2d {
-        w: row.sprite.w,
-        h: row.sprite.h,
-        color: row.sprite.color + input.pressed
-      }
-    })
+  do @monad(ecs.System) {
+    let update = do @applicative(ecs.Query(SpriteRow)) {
+      row <- ecs.each(mut);
+      pure({
+        sprite: Sprite2d {
+          w: row.sprite.w,
+          h: row.sprite.h,
+          color: row.sprite.color + input.pressed
+        }
+      })
+    };
+    pure(update)
   }
 }
 
 fn run_frame(world: World, input: FrameInput) -> World {
-  do @monad(Command(World)) {
-    moved <- ecs.run(world, input, movement_system);
-    ecs.run(moved, input, sprite_animation_system)
+  do @monad(ecs.Command(World)) {
+    ecs.run(input, movement_system);
+    ecs.run(input, sprite_animation_system);
   }
 }
 
@@ -227,9 +203,9 @@ fn render_row(
 }
 
 fn render_system(world: World, input: FrameInput) -> RenderBatch {
-  append_render_row(
-    append_render_row(
-      empty_render_batch(),
+  empty_render_batch()
+    \batch -> append_render_row(
+      batch,
       render_row(
         0,
         world.entities[0],
@@ -239,17 +215,19 @@ fn render_system(world: World, input: FrameInput) -> RenderBatch {
           sprite: world.sprite
         }
       )
-    ),
-    render_row(
-      1,
-      world.entities[1],
-      RenderState {
-        len: world.len,
-        transform: world.transform,
-        sprite: world.sprite
-      }
     )
-  )
+    \batch -> append_render_row(
+      batch,
+      render_row(
+        1,
+        world.entities[1],
+        RenderState {
+          len: world.len,
+          transform: world.transform,
+          sprite: world.sprite
+        }
+      )
+    )
 }
 
 fn empty_render_batch() -> RenderBatch {
