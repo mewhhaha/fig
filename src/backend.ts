@@ -2,6 +2,7 @@ import type {
   BlockExpr,
   BranchHint,
   ConstDecl,
+  Declaration,
   Expr,
   FnDecl,
   Param,
@@ -328,14 +329,15 @@ function backendFixedArrayPlanning(
     profile: options.profile,
     assumeRewrites: options.assumeRewrites,
   });
-  const layouts = createLayoutEnv(optimized);
-  const imports = optimized.imports.map((item) => importAsFn(item));
-  const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
+  const runtimeProgram = runtimeProgramView(optimized);
+  const layouts = createLayoutEnv(runtimeProgram);
+  const imports = runtimeProgram.imports.map((item) => importAsFn(item));
+  const runtimeFns = runtimeProgram.declarations.filter((decl): decl is FnDecl =>
     decl.kind === "fn" && !decl.primitiveId && !isIntrinsicWrapper(decl, pluginRegistry) &&
     !decl.params.some((param) => param.const) &&
     Boolean(decl.returnType)
   );
-  const sourceFns = optimized.declarations.filter((decl): decl is FnDecl =>
+  const sourceFns = runtimeProgram.declarations.filter((decl): decl is FnDecl =>
     decl.kind === "fn" && Boolean(decl.returnType)
   );
   const returnProjectionPlans = privateReturnProjectionPlans(runtimeFns, layouts);
@@ -350,7 +352,7 @@ function backendFixedArrayPlanning(
       fn,
     ])),
     signatures: new Map([...imports, ...projectedRuntimeFns].map((fn) => [fn.name, fn])),
-    intrinsicIdsByName: intrinsicIdsByFunctionName(optimized.declarations, pluginRegistry),
+    intrinsicIdsByName: intrinsicIdsByFunctionName(runtimeProgram.declarations, pluginRegistry),
     pluginRegistry,
     returnProjectionPlans,
     tempIndex: 0,
@@ -396,6 +398,15 @@ function layoutDecision(
   };
 }
 
+function runtimeProgramView(program: Program): Program {
+  return {
+    ...program,
+    declarations: program.declarations.filter((
+      decl,
+    ): decl is Exclude<Declaration, { kind: "contract" }> => decl.kind !== "contract"),
+  };
+}
+
 function lowerBackendModule(program: Program, options: BackendOptions = {}): BackendModule {
   const memoryModel = options.memoryModel ?? "branch";
   if (!isMemoryModel(memoryModel)) {
@@ -412,14 +423,15 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
     profile: options.profile,
     assumeRewrites: options.assumeRewrites,
   });
-  const layouts = createLayoutEnv(optimized);
-  const imports = optimized.imports.map((item) => importAsFn(item));
-  const runtimeFns = optimized.declarations.filter((decl): decl is FnDecl =>
+  const runtimeProgram = runtimeProgramView(optimized);
+  const layouts = createLayoutEnv(runtimeProgram);
+  const imports = runtimeProgram.imports.map((item) => importAsFn(item));
+  const runtimeFns = runtimeProgram.declarations.filter((decl): decl is FnDecl =>
     decl.kind === "fn" && !decl.primitiveId && !isIntrinsicWrapper(decl, pluginRegistry) &&
     !decl.params.some((param) => param.const) &&
     Boolean(decl.returnType)
   );
-  const sourceFns = optimized.declarations.filter((decl): decl is FnDecl =>
+  const sourceFns = runtimeProgram.declarations.filter((decl): decl is FnDecl =>
     decl.kind === "fn" && Boolean(decl.returnType)
   );
   const returnProjectionPlans = privateReturnProjectionPlans(runtimeFns, layouts);
@@ -434,7 +446,7 @@ function lowerBackendModule(program: Program, options: BackendOptions = {}): Bac
       fn,
     ])),
     signatures: new Map([...imports, ...projectedRuntimeFns].map((fn) => [fn.name, fn])),
-    intrinsicIdsByName: intrinsicIdsByFunctionName(optimized.declarations, pluginRegistry),
+    intrinsicIdsByName: intrinsicIdsByFunctionName(runtimeProgram.declarations, pluginRegistry),
     pluginRegistry,
     returnProjectionPlans,
     tempIndex: 0,

@@ -1,7 +1,7 @@
 # Fig Syntax
 
-Fig source files use the `.fig` extension. a program is a sequence of `type fn`, `const`, `fn`,
-`pub fn`, and top-level `let` declarations.
+Fig source files use the `.fig` extension. a program is a sequence of `type fn`, `contract fn`,
+`const`, `fn`, `pub fn`, and top-level `let` declarations.
 
 ## Names
 
@@ -10,8 +10,40 @@ capabilities, imports, primitive type names, and type functions. PascalCase iden
 `[a-Z][a-Za-z0-9]*` and are used for product constructors, union variants, and type-level local
 shape bindings.
 
-Qualified names use dots, for example `Option.map`, `Point::eql`, or `Geometry.Layout.vertex2d_i32`.
-Literal tags begin with `#`, for example `#field`, `#Some`, and `#infixl`.
+Qualified names use `.` for namespace/module qualification and `::` for attached members or
+associated contracts, for example `prelude.option.Option`, `Point::eql`, or
+`Geometry.Layout::vertex2d_i32`. Literal tags begin with `#`, for example `#field`, `#Some`, and
+`#infixl`.
+
+## Contract Rewrites
+
+Compiler-facing rewrite facts use `contract fn ... -> rewrite`. This is the only rewrite declaration
+form; ordinary `fn ... -> rewrite`, `type fn ... -> rewrite`, and `rewrite` type annotations are
+rejected.
+
+```fig
+contract fn Option::bind_left_zero() -> rewrite {
+  @assume(
+    \f -> Option::bind(Option::zero(), f),
+    \f -> Option::zero()
+  )
+}
+
+contract fn MonadZero::bind_left_zero(
+  const M: type fn(a: type) -> type
+) -> rewrite {
+  const proof = MonadZero(M);
+
+  @assume(
+    \f -> M::bind(M::zero(), f),
+    \f -> M::zero()
+  )
+}
+```
+
+`@assume(lhs_template, rhs_template)` is valid only as the final expression of a
+`contract fn ... -> rewrite` body. Contract rewrite parameters must be `const`; proof constants may
+appear before the final `@assume`.
 
 ## Doc Comments
 
@@ -111,7 +143,7 @@ fn add(a: i32, b: i32) -> i32 { a + b }
 pub fn main() -> i32 { add(40, 2) }
 ```
 
-Attached member functions use dotted names and are visible to type reflection:
+Attached member functions use `::` names and are visible to type reflection:
 
 ```fig
 fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }

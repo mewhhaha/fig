@@ -89,7 +89,7 @@ Use these patterns when choosing how to express static intent:
 | --------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | Define a runtime data layout                        | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
 | Require behavior on a concrete type                 | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`. |
-| Call required behavior without runtime dictionaries | Pass `const _proof: contract(t)` and call the attached member as `t.member(...)`.               |
+| Call required behavior without runtime dictionaries | Pass `const _proof: contract(t)` and call the attached member as `t::member(...)`.              |
 | Abstract over a unary type constructor              | Accept `t: type fn(a: type) -> type`, use values as `t(a)`, and reflect members on `t`.         |
 | Choose dispatch from a type value                   | Pass the type as `const t` or `const t: type`; do not model types as runtime Values.            |
 | Specialize layout or counts                         | Pass static shape data as `const n: count`, `const a: type`, or another `const` parameter.      |

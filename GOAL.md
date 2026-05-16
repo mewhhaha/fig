@@ -1,217 +1,286 @@
-The next thing to do should be:
+The repo has already moved further than the previous discussion: `contract fn` exists in the grammar, `ContractDecl` exists in the AST, `contract fn` lowering is implemented, `::` is the associated-name syntax, and checker tracing/memoization exists. The next simplification work should be about **removing overlapping concepts and tightening phase boundaries**, not adding more surface forms.
 
-# Fix the repeated-call compile-time scaling cliff with trace-guided checker memoization
+## Highest-value simplifications
 
-The repo has already landed the pieces we previously wanted: import pruning, one-pass artifact compilation, optimization profiles, `OptimizationPlan`, `explainOptimization`, backend layout decisions, plan/WAT consistency tests, and checker phase tracing. So the next step is not another planning layer. It is to use the new tracing to remove the worst remaining compile-time cliff.
+### 1. Keep `contract fn ... -> rewrite`, and stop adding alternate rewrite syntaxes
 
-## Current state
+Current grammar already has:
 
-`BENCHMARK.md` says `range_fold_1k` is fixed: it is now about **11 ms total compile** with `pruneImports: true`, down from the old ~900 ms range-fold issue. The remaining clear compile-time problem is `bench_const_params`: 10 repeated calls compile in ~1.6–2 ms, 100 calls compile in ~137–143 ms, 200 calls compile in ~998–1028 ms, and 500/1000 did not finish within the 180s timeout. 
-
-The repo now has exactly the instrumentation needed to attack this. `CheckTrace` records phase time, function count, generated function count, call expression count, diagnostics, and specialization stats.  The checker now records phases around the repeated specialization/member-resolution pipeline, including `resolveAttachedMemberCalls` and both inferred/const specialization passes.
-
-`bench_const_params.ts` now runs `checkSource(source, { trace: true })` and prints `slowest_check_phase` plus specialization counts like visited calls, generated specializations, cache hits, and cache misses. 
-
-So the next goal is now measurable.
-
-## Goal
-
-Make repeated structural code compile near-linearly.
-
-Concrete target:
-
-```txt
-deno run --allow-read scripts/bench_const_params.ts --sizes=10,100,200,500,1000 --iterations=3
+```ebnf
+ContractFnDecl = Visibility? "contract" "fn" FnName "(" Params? ")" ContractReturnSig Block ;
+ContractReturnSig = "->" ContractResultKind ;
+ContractResultKind = "rewrite" ;
 ```
 
-should complete without timeout, and doubling from 100 to 200 should not grow by ~7x.
+and declarations now include `ContractDecl`.
 
-I would define success as:
-
-```txt
-200 calls: no longer near 1s
-500 calls: completes comfortably
-1000 calls: completes without timeout
-specialization cache stats explain remaining work
-```
-
-## Why this is the right next task
-
-`compact_filter_collect` is also a problem: it currently emits about **118 KB WAT** and takes about **793 ms total compile**, and the comparison harness failed because WAT exceeded the 30 KB gate. 
-
-But the repeated-call cliff is more fundamental. It affects direct calls, runtime-dict calls, and const-param calls, so it points to general checker/expression traversal behavior rather than one prelude pipeline. `bench_const_params.ts` generates repeated expressions like:
+So I would commit to this as the only rewrite declaration form:
 
 ```fig
-map_box(Box {value: 1}).value
-mapped(box_functor, Box {value: 1}).value
-```
-
-and measures direct, runtime dictionary, and const-param variants. 
-
-Fixing that will improve more programs than just the compact iterator case.
-
-## Plan
-
-### 1. Run the trace and update the benchmark note
-
-Run:
-
-```bash
-deno run --allow-read scripts/bench_const_params.ts --sizes=10,100,200 --iterations=3
-```
-
-Record for each mode:
-
-```txt
-slowest_check_phase
-specialization visited/generated/hits/misses
-function count
-generated function count
-call expression count
-```
-
-The benchmark script already prints the slowest phase and specialization summary. 
-
-This tells whether the cliff is mostly:
-
-```txt
-checkFn loop
-specializeConstParamCalls
-specializeInferredTypeCalls
-resolveAttachedMemberCalls
-lowerProductConstructors
-```
-
-### 2. Add a reusable check cache context
-
-Right now `checkProgramInternal` orchestrates a lot of repeated whole-program passes. The next step should not be a huge worklist rewrite yet. Start by adding a shared checker cache:
-
-```ts
-interface CheckMemo {
-  typeMatches: Map<string, boolean>;
-  runtimeType: Map<string, string | undefined>;
-  exprBindingType: Map<string, string | undefined>;
-  staticConstValue: Map<string, ConstValue | undefined>;
-  callCheck: Map<string, CallCheckMemo>;
+contract fn Option::bind_left_zero() -> rewrite {
+  @assume(
+    \f -> Option::bind(Option::zero(), f),
+    \f -> Option::zero()
+  )
 }
 ```
 
-Thread it through the expensive checker/type functions first, not everywhere.
-
-Start with safe pure caches:
-
-```txt
-typeMatches(expected, actual)
-runtimeTypePatternMatches(expected, actual)
-inferRuntimeType(expr, env signature)
-staticConstExprValue(expr, static values signature)
-```
-
-These functions are repeatedly asked the same questions in repeated-call programs.
-
-### 3. Add structural keys for repeated pure expressions
-
-For expression-level caching, use conservative keys. Do not cache everything.
-
-A good first key:
-
-```ts
-type ExprKey =
-  | literal(value, kind)
-  | var(name, knownTypeOrConstVersion)
-  | call(calleeName, argKeys, expectedType)
-  | productConstructor(constructor, slotKeys)
-  | field(valueKey, keyKey)
-  | binary(op, leftKey, rightKey)
-```
-
-Only cache if:
-
-```txt
-expression is pure
-no placeholder
-no effectful capability call
-no unresolved generic local
-environment key is stable
-```
-
-For the benchmark, this should catch hundreds of identical expressions:
+Do **not** also support:
 
 ```fig
-Box {value: 1}
-map_box(Box {value: 1}).value
-mapped(box_functor, Box {value: 1}).value
+rewrite fn ...
+fn ... -> rewrite
+type fn ... -> rewrite
+@assume_rewrite(...)
+law fn ...
 ```
 
-### 4. Specialization cache stats should become actionable
+That is the main simplification. `contract fn` is broad enough for future compiler-facing facts, but `-> rewrite` keeps the current meaning precise.
 
-The trace already records specialization stats.  Use them to decide which path is bad:
+### 2. Remove `rewrite` from ordinary type positions unless it is truly needed
 
-If there are many cache misses for the same logical specialization, fix canonical specialization keys.
+The grammar currently has both:
 
-If there are many cache hits but the pass is still slow, reduce repeated traversal.
+```ebnf
+ContractResultKind = "rewrite"
+TypeResultKind = "type" | "struct" | "union" | "operator" | "rewrite"
+TypeAtom = "type" | "const" | "rewrite" | ...
+```
 
-If generated function count grows with repeated identical calls, fix specialization reuse.
 
-If generated function count is stable but check time explodes, memoize expression/type checking.
 
-### 5. Add a scaling regression test
-
-Add a test that does not require huge sizes, maybe 50 and 100 calls, and asserts structural outputs rather than exact timing:
+That makes `rewrite` look like a normal type or type-function result. If the intended surface is `contract fn ... -> rewrite`, simplify:
 
 ```txt
-generated specialization count remains constant
-checked direct calls scale with source calls only
-specialization misses stay small
+Allowed:
+  contract fn X::rule(...) -> rewrite { ... }
+
+Rejected:
+  fn f() -> rewrite { ... }
+  type fn T() -> rewrite { ... }
+  let x: rewrite = ...
+  fn f(x: rewrite) -> i32 { ... }
 ```
 
-Then keep timing in `bench_const_params.ts`.
+Keep `rewrite` only as `ContractResultKind` for now. This avoids accidental phase confusion.
 
-Example acceptance:
+### 3. Make `.` vs `::` strict
+
+Docs now say qualified names use dots for namespaces and `::` for attached members, with examples like `Option.map`, `Point::eql`, and `Geometry.Layout.vertex2d_i32`. Attached member functions are shown as `fn Point::eql(...)`. 
+
+Simplify the rule:
 
 ```txt
-100 repeated const-param calls:
-  generated mapped__box_functor count == 1
-  specializeConstParamCalls cache misses <= small constant
-  cache hits grows with repeated calls
+.   = module / namespace qualification
+::  = associated member or associated contract
 ```
 
-### 6. Only after that, move to a dirty worklist
+So prefer:
 
-Once memoization is in place, the next bigger improvement is replacing this repeated full-pipeline shape:
+```fig
+std.array.Layout::lane4_i32
+Option::bind
+Point::eql
+contract fn Option::bind_left_zero() -> rewrite { ... }
+```
+
+and gradually remove or deprecate member-like `Option.map` examples unless they are truly namespace paths. The lowering already treats `::` specially and records `memberOf`. 
+
+### 4. Keep contracts as extension declarations, not type-body contents
+
+The current split is good:
+
+```fig
+type fn Option(a: type) -> union { ... }
+
+fn Option::pure(...) -> Option(a) { ... }
+fn Option::bind(...) -> Option(b) { ... }
+
+contract fn Option::bind_left_zero() -> rewrite { ... }
+```
+
+This is simpler than embedding rewrite/law blocks inside `type fn` bodies. Type functions define layout/contracts; associated functions define behavior; contract functions define compiler-facing facts.
+
+This also matches the existing design where attached members are ordinary functions visible to reflection, and type functions can require them with `@type_has_member` / `@type_member_type`.
+
+### 5. Do not make `@assume` a general static builtin
+
+If `@assume(...)` is only valid in `contract fn ... -> rewrite`, treat it as a **contract-body form**, not a general-purpose static builtin.
+
+That gives a clean rule:
 
 ```txt
-resolveAttachedMemberCalls
-specializeInferredTypeCalls
-resolveAttachedMemberCalls
-specializeConstParamCalls
-resolveAttachedMemberCalls
-specializeInferredTypeCalls
-resolveAttachedMemberCalls
-specializeConstParamCalls
-resolveAttachedMemberCalls
+@require(...)  -> type/contract checking
+@assume(...)   -> only inside contract fn returning rewrite
 ```
 
-with a dirty worklist. The current phase trace makes this visible.
+This prevents people from writing `@assume(...)` in type functions or runtime expressions and expecting optimizer behavior.
 
-But I would not start with the worklist. Memoization is smaller, safer, and likely enough to prove where the cliff is.
+### 6. Collapse the reflection surface, or at least group it
 
-## Deliverable
+The plugin registry now lists many `type_*` builtins: member target, function reflection, scalar reflection, layout reflection, inline-array reflection, variant/niche reflection, and more. 
 
-Make this the next milestone:
+That is powerful, but it is getting wide. Two simplification options:
+
+**Option A: keep the current builtins but document them fully.**
+Right now `builtins.md` still documents the older smaller set, so docs and compiler surface are out of sync.
+
+**Option B: add grouped reflection values and reduce one-off APIs later.**
+
+For example:
+
+```fig
+@type_members(t)
+@type_layout(t)
+@type_scalar(t)
+@type_fn(t)
+@type_variants(t)
+```
+
+instead of:
+
+```fig
+@type_scalar_min
+@type_scalar_max
+@type_scalar_bit_width
+@type_scalar_signed
+@type_scalar_domain
+...
+```
+
+I would do A first for stability, then consider B if the reflection API becomes hard to maintain.
+
+## Codebase simplifications
+
+### 1. Split contract handling out of `check.ts`
+
+`check.ts` now handles tracing, memoization, type functions, specialization, attached members, rewrites/contracts, function checking, operator lowering, collectors, and product constructors. It also now has `checkRewriteDecls` / `checkRewriteTypeMisuse` phases in the main pipeline.
+
+Extract:
 
 ```txt
-Milestone: repeated-call checker scaling
+src/contracts/
+  registry.ts
+  check.ts
+  assume.ts
+  facts.ts
+  instantiate.ts
 ```
 
-Deliver:
+Target API:
+
+```ts
+const contractRegistry = collectContracts(program);
+checkContracts(contractRegistry, ctx);
+const rewriteFacts = instantiateRewriteFacts(contractRegistry, proofEnv);
+```
+
+Then the main checker only orchestrates.
+
+### 2. Make contract declarations invisible to runtime passes
+
+`countProgramCallExpressions` already visits contract bodies, which is fine for trace, but backend/runtime phases should not even see contracts unless explicitly analyzing rewrite facts. 
+
+Simplify with a phase boundary:
 
 ```txt
-1. BENCHMARK.md updated with traced bench_const_params results.
-2. CheckMemo added for type/runtime/static/call facts.
-3. bench_const_params 500 and 1000 no longer time out.
-4. Specialization stats show stable generated specialization count.
-5. No WAT/runtime regression in memory-model benchmarks.
+source Program
+  -> checked Program + ContractRegistry
+  -> optimized runtime Program + RewriteFacts
+  -> backend
 ```
 
-This is the best next step because the repo now has enough explainability infrastructure; the remaining value is turning that into a concrete compile-time scaling fix.
+Do not keep asking runtime phases to remember to skip `decl.kind === "contract"`.
+
+### 3. Move `CheckMemo` into its own module
+
+`CheckMemo` now exists with caches for type matches, runtime type, expression binding type, static const values, and call checks. 
+
+Extract:
+
+```txt
+src/check/memo.ts
+```
+
+and expose targeted helpers:
+
+```ts
+memoizedTypeMatch(...)
+memoizedRuntimeType(...)
+memoizedStaticConst(...)
+memoizedCallCheck(...)
+```
+
+This keeps cache-key discipline centralized and prevents accidental unsafe caching.
+
+### 4. Stop adding new whole-program phases unless they have counters
+
+The checker pipeline is already phase traced, which is good.
+
+Rule:
+
+```txt
+Every new whole-program pass must have:
+  trace phase name
+  input/output counts
+  justification
+```
+
+This keeps the repeated-call compile cliff from reappearing.
+
+## Syntax simplification recommendations
+
+Use this final syntax set:
+
+```fig
+type fn Option(a: type) -> union { ... }      // type/layout/contract construction
+
+fn Option::bind(...) -> Option(b) { ... }     // associated runtime behavior
+
+contract fn Option::bind_left_zero() -> rewrite {
+  @assume(
+    \f -> Option::bind(Option::zero(), f),
+    \f -> Option::zero()
+  )
+}
+```
+
+And generic:
+
+```fig
+contract fn MonadZero::bind_left_zero(
+  const M: type fn(a: type) -> type
+) -> rewrite {
+  const proof = MonadZero(M);
+
+  @assume(
+    \f -> M::bind(M::zero(), f),
+    \f -> M::zero()
+  )
+}
+```
+
+Do not add a separate `law`, `rewrite fn`, `fn -> rewrite`, or `type fn -> rewrite` surface unless `contract fn` proves insufficient.
+
+## Suggested next concrete task
+
+Clean up the new contract/rewrite feature around a single model:
+
+```txt
+contract fn ... -> rewrite
+```
+
+Implementation checklist:
+
+```txt
+1. Remove or reject `rewrite` as an ordinary TypeAtom.
+2. Remove or reject `type fn ... -> rewrite` unless intentionally supported.
+3. Ensure ordinary `fn ... -> rewrite` is rejected.
+4. Document `contract fn ... -> rewrite`.
+5. Document `@assume` as contract-rewrite-only.
+6. Add examples for Option::bind_left_zero and MonadZero::bind_left_zero.
+7. Extract contract collection/checking into a small module.
+8. Ensure runtime/backend functions never receive ContractDecls.
+```
+
+That would simplify the language and compiler while preserving the new extensible rewrite direction.

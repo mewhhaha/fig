@@ -151,15 +151,15 @@ const scenarios: Scenario[] = [
         let Vec2 = {x: i32, y: i32};
         struct(Vec2)
       }
-      fn Vec2.translate(point: Vec2, dx: i32, dy: i32) -> Vec2 {
+      fn Vec2::translate(point: Vec2, dx: i32, dy: i32) -> Vec2 {
         Vec2 {x: point.x + dx, y: point.y + dy}
       }
-      fn Vec2.score(point: Vec2) -> i32 { point.x + point.y }
+      fn Vec2::score(point: Vec2) -> i32 { point.x + point.y }
       pub fn main(seed: i32) -> i32 {
         let point: Vec2 = Vec2 {x: seed + 1, y: 2};
-        let moved = Vec2.translate(point, 10, 0);
-        let moved = Vec2.translate(moved, 0, 20);
-        Vec2.score(point) + Vec2.score(moved)
+        let moved = Vec2::translate(point, 10, 0);
+        let moved = Vec2::translate(moved, 0, 20);
+        Vec2::score(point) + Vec2::score(moved)
       }
     `,
   },
@@ -205,8 +205,8 @@ const scenarios: Scenario[] = [
       fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
       fn inc(x: i32) -> i32 { x + 1 }
       pub fn main(seed: i32) -> i32 {
-        let xs = layout.InlineArray.tabulate(16, i32, make);
-        let ys = layout.InlineArray.map(16, i32, i32, xs, inc);
+        let xs = layout.InlineArray::tabulate(16, i32, make);
+        let ys = layout.InlineArray::map(16, i32, i32, xs, inc);
         ys[0] + ys[15] + seed - seed
       }
     `,
@@ -227,8 +227,8 @@ const scenarios: Scenario[] = [
       fn keep(x: i32) -> bool { x > 2 }
       pub fn main(seed: i32) -> i32 {
         let xs: array.layout.Lane4I32 = <1, 2, 3, 4>;
-        let out: array.CompactArray(4, i32) = array.Iter.collect(
-          array.Iter.map(array.Iter.filter(array.layout.InlineArray.Iter(xs), keep), inc)
+        let out: array.CompactArray(4, i32) = array.Iter::collect(
+          array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(xs), keep), inc)
         );
         out.len + seed - seed
       }
@@ -296,8 +296,8 @@ const scenarios: Scenario[] = [
       fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
       fn bump(x: i32) -> i32 { x + 3 }
       pub fn main(seed: i32) -> i32 {
-        let xs = layout.InlineArray.tabulate(16, i32, make);
-        let ys = layout.InlineArray.update(16, i32, xs, seed - seed + 7, bump);
+        let xs = layout.InlineArray::tabulate(16, i32, make);
+        let ys = layout.InlineArray::update(16, i32, xs, seed - seed + 7, bump);
         xs[7] + ys[7] + ys[15]
       }
     `,
@@ -417,7 +417,7 @@ const scenarios: Scenario[] = [
       const range = @import("prelude.range");
       fn add(acc: i32, x: i32) -> i32 { acc + x }
       pub fn main(seed: i32) -> i32 {
-        range.RangeIter.fold(range.RangeI32.Iter(seed - seed .. 1000), 0, add)
+        range.RangeIter::fold(range.RangeI32::Iter(seed - seed .. 1000), 0, add)
       }
     `,
   },

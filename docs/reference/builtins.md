@@ -40,6 +40,10 @@ rather than raw Wasm byte emission.
 
 `@require` emits a diagnostic when the first argument is not `true`.
 
+`@assume(lhs_template, rhs_template)` is not a general static builtin. It is a contract-body form
+accepted only as the final expression of `contract fn ... -> rewrite`, where both arguments must be
+matching const-function templates.
+
 ## Type Reflection
 
 These builtins take a type value as their first argument and run during type evaluation. Most also

@@ -115,7 +115,7 @@ export interface TypeDecl extends AstNodeMeta {
   clauses?: TypeDecl[];
 }
 
-export type TypeResultKind = "type" | "struct" | "union" | "operator" | "rewrite";
+export type TypeResultKind = "type" | "struct" | "union" | "operator";
 
 export type TypeParamKind =
   | "type"

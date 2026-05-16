@@ -284,9 +284,7 @@ function lowerTypeDecl(node: Node): TypeDecl {
 function lowerTypeResultKind(node: Node | undefined): TypeResultKind {
   if (!node) return "type";
   const kind = optional(node, "TypeResultKind")?.text.trim();
-  return kind === "struct" || kind === "union" || kind === "operator" || kind === "rewrite"
-    ? kind
-    : "type";
+  return kind === "struct" || kind === "union" || kind === "operator" ? kind : "type";
 }
 
 function lowerTypeParam(node: Node): TypeParam {

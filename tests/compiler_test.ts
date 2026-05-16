@@ -4691,15 +4691,15 @@ Deno.test("contract fn rewrite declarations parse with associated names and cons
 Deno.test("contract fn rewrite validates context and rewrite-only type spelling", async () => {
   await assertThrowsCompile(
     `fn bad() -> rewrite { 0 }`,
-    "rewrite.not_runtime_type",
+    "parse.syntax",
   );
   await assertThrowsCompile(
     `let x: rewrite = 0;`,
-    "rewrite.not_runtime_type",
+    "parse.syntax",
   );
   await assertThrowsCompile(
     `type fn Bad() -> rewrite { i32 }`,
-    "rewrite.only_contract_fn",
+    "parse.syntax",
   );
   await assertThrowsCompile(
     `fn bad() -> i32 { @assume(\\f -> f, \\f -> f) }`,
