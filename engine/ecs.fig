@@ -21,6 +21,10 @@ type fn EntityWorld(capacity: count, entity: type) -> type {
   struct(EntityWorld)
 }
 
+type fn BatchFillIter(capacity: count, component: type) -> type {
+  component
+}
+
 fn batch_capacity(
   const capacity: count,
   const component: type,
@@ -35,6 +39,14 @@ fn batch_fill(
   value: component
 ) -> Batch(capacity, component) {
   layout.InlineArray::fill(capacity, component, value)
+}
+
+fn batch_fill_iter(
+  const capacity: count,
+  const component: type,
+  value: component
+) -> BatchFillIter(capacity, component) {
+  value
 }
 
 fn batch_set(
@@ -136,6 +148,78 @@ fn batch_fold_loop(
       batch_next,
       step(acc_then, batch_item[i]),
       step
+    ),
+    Done => acc_else,
+  }
+}
+
+fn batch_iter_map_with_state_fold(
+  const capacity: count,
+  const component: type,
+  const mapped: type,
+  const state: type,
+  const accumulator: type,
+  iter: BatchFillIter(capacity, component),
+  state_value: state,
+  initial: accumulator,
+  const map_step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    state_value: state
+  ) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  batch_fill_iter_map_with_state_fold_loop(
+    capacity,
+    component,
+    mapped,
+    state,
+    accumulator,
+    layout.core.IndexCursor::start(capacity),
+    iter,
+    state_value,
+    initial,
+    map_step,
+    reduce_step
+  )
+}
+
+fn batch_fill_iter_map_with_state_fold_loop(
+  const capacity: count,
+  const component: type,
+  const mapped: type,
+  const state: type,
+  const accumulator: type,
+  cursor: layout.core.IndexCursor(capacity),
+  value: component,
+  state_value: state,
+  acc: accumulator,
+  const map_step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    state_value: state
+  ) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  let value_then = value;
+  let value_else = value;
+  let state_then = state_value;
+  let state_else = state_value;
+  let acc_then = acc;
+  let acc_else = acc;
+  match layout.core.IndexCursor::next(capacity, cursor) {
+    Yield(i, next) => batch_fill_iter_map_with_state_fold_loop(
+      capacity,
+      component,
+      mapped,
+      state,
+      accumulator,
+      next,
+      value_then,
+      state_then,
+      reduce_step(acc_then, map_step(i, value_then, state_then)),
+      map_step,
+      reduce_step
     ),
     Done => acc_else,
   }

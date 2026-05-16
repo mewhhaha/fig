@@ -176,14 +176,24 @@ deno run --allow-read --allow-write --allow-run scripts/bench_ecs_compare.ts 100
 ```
 
 This benchmark compares the Fig ECS batch helpers compiled to Wasm against a native Rust kernel with
-the same dense 128-element position/velocity update and fold shape. Unlike the internal-loop rows
-above, the current Fig ECS harness calls exported `main(seed)` from a JavaScript host loop for each
-iteration. That makes the row useful for regression tracking, but it includes Wasm host-call
-overhead and should not be read as an internal-loop kernel-only number.
+the same dense 128-element position/velocity update and fold shape. The Rust row uses the matching
+iterator `enumerate().fold(...)` shape. The materialized Fig row keeps the older
+`batch_fill -> batch_map_with_state -> batch_fold` source shape for regression tracking. The fused
+Fig rows use `batch_fill_iter -> batch_iter_map_with_state_fold`, which lets the checker specialize
+map and fold into one loop without building the intermediate batch.
 
-| Scenario                    |  Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes |              Checksum |
-| --------------------------- | -----: | ----------: | -----------: | -------: | -------------------: | -------------: | --------------------: |
-| `dense_batch_move_fold_128` | 100000 |       998.3 |         84.2 |    11.86 |              841.063 |          17051 | `976545792/976545792` |
+| Scenario                    | Runtime                             |  Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes | WAT ifs |              Checksum |
+| --------------------------- | ----------------------------------- | -----: | ----------: | -----------: | -------: | -------------------: | -------------: | ------: | --------------------: |
+| `dense_batch_move_fold_128` | `fig_wasm_host_loop_materialized`   | 100000 |      1050.6 |         87.9 |    11.95 |              846.439 |          17051 |     256 | `976545792/976545792` |
+| `dense_batch_move_fold_128` | `fig_wasm_host_loop_iter_fused`     | 100000 |        79.7 |         87.9 |     0.91 |               25.480 |            218 |       2 | `976545792/976545792` |
+| `dense_batch_move_fold_128` | `fig_wasm_internal_loop_iter_fused` | 100000 |        80.2 |         87.9 |     0.91 |               23.740 |            287 |       3 | `976545792/976545792` |
+
+The source-code issue was the materialized API shape: the old path forced a full 128-element filled
+batch, a mapped batch, and a fold over that batch, leaving 256 branch arms in WAT. The fused
+iterator helper keeps the same user-level computation but gives the compiler one explicit map-fold
+loop to specialize, cutting the focused kernel to one loop and a few branches. There is still
+optimizer work available, but this result shows the largest gap was the source API shape rather than
+raw Wasm backend throughput.
 
 ## Fannkuch Lowering Investigation
 

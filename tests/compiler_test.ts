@@ -1364,6 +1364,58 @@ Deno.test("ecs component maps derive system input from reflected context", async
   );
 });
 
+Deno.test("ecs fused fill iterator maps and folds without materialized batch", async () => {
+  const source = `
+      const ecs = @import("engine.ecs");
+
+      type fn Position() -> type {
+        let Position = {x: i32, y: i32};
+        struct(Position)
+      }
+
+      type fn Velocity() -> type {
+        let Velocity = {dx: i32, dy: i32};
+        struct(Velocity)
+      }
+
+      fn move_position(
+        index: ecs.BatchIndex(128),
+        item: Position,
+        velocity: Velocity
+      ) -> Position {
+        Position {
+          x: item.x + velocity.dx + index,
+          y: item.y + velocity.dy
+        }
+      }
+
+      fn score_position(acc: i32, item: Position) -> i32 {
+        acc + item.x + item.y
+      }
+
+      pub fn main(seed: i32) -> i32 {
+        ecs.batch_iter_map_with_state_fold(
+          ecs.batch_fill_iter(128, Position, Position {x: seed, y: seed + 1}),
+          Velocity {dx: 2, dy: 3},
+          0,
+          move_position,
+          score_position
+        )
+      }
+    `;
+  const artifact = await compileArtifactsFromSource(source, {
+    resolveModule: resolveProjectModule,
+    memoryModel: "branch",
+    optMode: "release",
+    pruneImports: true,
+  });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as (seed: number) => number)(0), 8_896);
+  assert(artifact.wasm.byteLength <= 512, artifact.wat);
+  assert([...artifact.wat.matchAll(/\bloop\b/g)].length >= 1, artifact.wat);
+  assert([...artifact.wat.matchAll(/\bif\b/g)].length <= 4, artifact.wat);
+});
+
 Deno.test.ignore("ecs sparse query rejects missing sparse component slots", async () => {
   await assertThrowsCompile(
     `
