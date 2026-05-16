@@ -285,7 +285,8 @@ export interface BlockExpr extends AstNodeMeta {
 export type Statement = LetDecl | DestructureLetDecl | ProofConstDecl;
 export type DoStatement =
   | Statement
-  | ({ kind: "do_bind"; name: string; value: Expr } & AstNodeMeta);
+  | ({ kind: "do_bind"; name: string; value: Expr } & AstNodeMeta)
+  | ({ kind: "do_expr"; value: Expr } & AstNodeMeta);
 
 export type StaticForSource =
   | { kind: "range"; start: Expr; end: Expr }
@@ -326,6 +327,7 @@ export type Expr =
     & {
       kind: "shape";
       syntax?: "record" | "collection";
+      inferredType?: string;
       slots: (
         & {
           doc?: string;

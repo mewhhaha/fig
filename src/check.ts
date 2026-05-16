@@ -669,10 +669,15 @@ function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]
 }
 
 function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
+  const functionNames = new Set(
+    program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn").map((decl) =>
+      decl.name
+    ),
+  );
   const lowerExpr = (expr: Expr): Expr => {
     switch (expr.kind) {
       case "do":
-        return lowerDoExpression(expr, diagnostics, lowerExpr);
+        return lowerDoExpression(expr, diagnostics, lowerExpr, functionNames);
       case "const_fn":
         return { ...expr, body: lowerExpr(expr.body) };
       case "call":
@@ -742,17 +747,11 @@ function lowerDoExpression(
   expr: Extract<Expr, { kind: "do" }>,
   diagnostics: Diagnostic[],
   lowerExpr: (expr: Expr) => Expr,
+  functionNames?: Set<string>,
 ): Expr {
-  if (!expr.expr) {
-    diagnostics.push({
-      code: "do.missing_final_expr",
-      message: "do block requires a final expression",
-      span: expr.span,
-    });
-    return { kind: "literal", literalKind: "number", value: "0", span: expr.span };
-  }
   const proofEffect = renderTypeExpr(expr.strategy.effect);
-  const effect = doRuntimeEffectName(expr.strategy.effect) ?? proofEffect;
+  const effect = doRuntimeEffectName(expr.strategy.effect, expr.strategy.name, functionNames) ??
+    proofEffect;
   const strategy = expr.strategy.name;
   if (strategy !== "monad" && strategy !== "applicative") {
     diagnostics.push({
@@ -760,16 +759,34 @@ function lowerDoExpression(
       message: `unknown do strategy @${strategy}`,
       span: expr.strategy.span,
     });
-    return lowerExpr(expr.expr);
+    return expr.expr
+      ? lowerExpr(expr.expr)
+      : { kind: "literal", literalKind: "number", value: "0" };
   }
-  const loweredStatements = expr.statements.map((stmt) =>
+  let loweredStatements = expr.statements.map((stmt) =>
     stmt.kind === "do_bind"
+      ? { ...stmt, value: lowerExpr(stmt.value) }
+      : stmt.kind === "do_expr"
       ? { ...stmt, value: lowerExpr(stmt.value) }
       : stmt.kind === "let" || stmt.kind === "destructure_let"
       ? { ...stmt, value: lowerExpr(stmt.value) }
       : stmt
   );
-  const finalExpr = lowerExpr(expr.expr);
+  const trailingExprStmt = !expr.expr && loweredStatements.at(-1)?.kind === "do_expr"
+    ? loweredStatements.at(-1) as Extract<DoStatement, { kind: "do_expr" }>
+    : undefined;
+  if (trailingExprStmt) loweredStatements = loweredStatements.slice(0, -1);
+  if (!expr.expr) {
+    if (!trailingExprStmt) {
+      diagnostics.push({
+        code: "do.missing_final_expr",
+        message: "do block requires a final expression",
+        span: expr.span,
+      });
+      return { kind: "literal", literalKind: "number", value: "0", span: expr.span };
+    }
+  }
+  const finalExpr = trailingExprStmt?.value ?? lowerExpr(expr.expr!);
   if (strategy === "applicative") {
     const binds = loweredStatements.filter((stmt) => stmt.kind === "do_bind");
     if (binds.length > 1) {
@@ -791,9 +808,16 @@ function lowerDoExpression(
   return withDoStrategyProof(expr.strategy.effect, monadicDo(effect, loweredStatements, finalExpr));
 }
 
-function doRuntimeEffectName(effect: TypeExpr): string | undefined {
+function doRuntimeEffectName(
+  effect: TypeExpr,
+  strategy: string,
+  functionNames?: Set<string>,
+): string | undefined {
   if (effect.kind !== "type_call" || effect.args.length !== 1) return undefined;
   const [arg] = effect.args;
+  const callee = renderTypeExpr(effect.callee);
+  const member = strategy === "applicative" ? "map" : "bind";
+  if (functionNames?.has(`${callee}::${member}`)) return callee;
   return arg ? renderTypeExpr(arg) : undefined;
 }
 
@@ -824,6 +848,17 @@ function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): 
       },
     ]);
   }
+  if (head.kind === "do_expr") {
+    return callExpr(`${effect}::bind`, [
+      head.value,
+      {
+        kind: "const_fn",
+        params: ["_"],
+        body: monadicDo(effect, tail, finalExpr),
+        allowCaptures: true,
+      },
+    ]);
+  }
   return { kind: "block", statements: [head], expr: monadicDo(effect, tail, finalExpr) };
 }
 
@@ -841,6 +876,17 @@ function applicativeDo(effect: string, statements: DoStatement[], finalExpr: Exp
       head.value,
     ]);
   }
+  if (head.kind === "do_expr") {
+    return callExpr(`${effect}::bind`, [
+      head.value,
+      {
+        kind: "const_fn",
+        params: ["_"],
+        body: applicativeDo(effect, tail, finalExpr),
+        allowCaptures: true,
+      },
+    ]);
+  }
   return { kind: "block", statements: [head], expr: applicativeDo(effect, tail, finalExpr) };
 }
 
@@ -853,7 +899,8 @@ function exprChildValues(expr: Expr): Expr[] {
     case "do":
       return [
         ...expr.statements.flatMap((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? [stmt.value]
             : []
         ),
@@ -4262,6 +4309,11 @@ function specializeInferredCall(
         body: inferredBody,
         generated: true,
       };
+      specialized.body = expandReplaceFieldsWithEnv(
+        specialized.body,
+        new Map(specialized.params.map((param) => [param.name, param.type])),
+        context.types,
+      ) as Extract<Expr, { kind: "block" }>;
       specialized.generatedInlineable = isInlineableGeneratedSpecializationSource(fn) &&
         !exprCallsFunction(specialized.body, specialized.name);
       context.cache.set(key, specialized);
@@ -4329,7 +4381,15 @@ function inferFromValuePattern(
       context.types ?? [],
       context.consts,
     );
+    return;
   }
+  bindTypePattern(
+    rendered,
+    inferExprType(arg, context, env),
+    types,
+    context.types ?? [],
+    context.consts,
+  );
 }
 
 function renderConstructedType(
@@ -4939,6 +4999,11 @@ function specializeConstParamCalls(
     memo: createCheckMemo(),
     constFnCaptures: new Map(),
     usedNames: new Set(program.declarations.map((decl) => "name" in decl ? decl.name : "")),
+    typeConstructors: new Map(
+      types.flatMap((decl) =>
+        decl.normalized?.kind === "product" ? [[decl.normalized.constructor, decl] as const] : []
+      ),
+    ),
     stats,
   };
   for (const decl of program.declarations) {
@@ -4979,7 +5044,8 @@ function specializeBlock(
   block.statements = block.statements.flatMap((stmt): Statement[] => {
     if (stmt.kind === "let") {
       stmt.value = specializeExpr(stmt.value, context, env);
-      if (stmt.type) env.set(stmt.name, stmt.type);
+      const type = stmt.type ?? inferExprType(stmt.value, context, env);
+      if (type) env.set(stmt.name, type);
     } else if (stmt.kind === "destructure_let") {
       stmt.value = specializeExpr(stmt.value, context, env);
     }
@@ -5107,6 +5173,7 @@ interface ConstSpecializationContext {
   functions: Map<string, FnDecl>;
   consts: Map<string, ConstValue>;
   types: TypeDecl[];
+  typeConstructors: Map<string, TypeDecl>;
   diagnostics: Diagnostic[];
   emitDiagnostics: boolean;
   addShader: (source: string) => ShaderManifestEntry;
@@ -5129,134 +5196,256 @@ function specializeConstParamCall(
   const previousDiagnosticSpan = context.diagnosticSpan;
   if (diagnosticSpan) context.diagnosticSpan = diagnosticSpan;
   try {
-    const staticValues = new Map<string, ConstValue>();
-    const staticArgNames = new Map<string, string>();
-    const inferredTypes = new Map<string, string>();
-    const constArgNames: string[] = [];
-    const runtimeArgs: Expr[] = [];
-    const captureParams: Param[] = [];
-    for (let index = 0; index < fn.params.length; index++) {
-      const param = fn.params[index];
-      const arg = args[index] ?? { kind: "var" as const, name: "<missing>" };
-      if (param.const) {
-        const expectedType = param.inferStaticType
-          ? undefined
-          : substituteConstParamType(param.type, staticValues, staticArgNames);
-        const staticArg = staticConstArgValue(arg, expectedType, context, outerStaticValues);
-        if (!staticArg) {
-          if (context.emitDiagnostics) {
-            context.diagnostics.push({
-              code: "const.static_param_arg",
-              message:
-                `const parameter ${param.name} on ${fn.name} requires a top-level const argument or matching type proof`,
-              span: arg.span ?? context.diagnosticSpan,
-            });
-          }
-          return undefined;
-        }
-        staticValues.set(param.name, staticArg.value);
-        const expectedForInference = substituteConstParamType(
-          param.type,
-          staticValues,
-          staticArgNames,
-        );
-        if (staticArg.value.kind === "fn") {
-          inferFnTypeArgs(
-            expectedForInference,
-            context.functions.get(staticArg.value.name),
-            inferredTypes,
-            context.consts,
-          );
-        } else if (arg.kind === "var" && context.functions.has(arg.name)) {
-          inferFnTypeArgs(
-            expectedForInference,
-            context.functions.get(arg.name),
-            inferredTypes,
-            context.consts,
-          );
-        }
-        if (!context.consts.has(staticArg.name)) {
-          staticValues.set(staticArg.name, staticArg.value);
-        }
-        staticArgNames.set(param.name, staticArg.name);
-        constArgNames.push(staticArg.name);
-        if (staticArg.value.kind === "fn") {
-          for (const capture of context.constFnCaptures.get(staticArg.value.name) ?? []) {
-            if (!captureParams.some((item) => item.name === capture.name)) {
-              captureParams.push(capture);
-            }
-          }
-        }
-      } else {
-        runtimeArgs.push(arg);
-      }
-    }
-    const key = `${fn.name}\0${constArgNames.join("\0")}\0${
-      [...inferredTypes].map(([name, type]) => `${name}=${type}`).join("\0")
-    }`;
-    let specialized = context.cache.get(key);
-    if (specialized) {
-      context.stats && (context.stats.cacheHits += 1);
-    } else {
-      context.stats && (context.stats.cacheMisses += 1);
-    }
-    if (!specialized) {
-      const specializedName = allocateSpecializationName(fn.name, constArgNames, context.usedNames);
-      specialized = {
-        kind: "fn",
-        public: false,
-        name: specializedName,
-        params: fn.params.filter((param) => !param.const).map((param) => ({
-          ...param,
-          type: substituteTypeVars(
-            substituteConstParamType(param.type, staticValues, staticArgNames),
-            inferredTypes,
-          ),
-        })).concat(captureParams),
-        returnType: fn.returnType
-          ? substituteTypeVars(
-            substituteConstParamType(fn.returnType, staticValues, staticArgNames),
-            inferredTypes,
-          )
-          : undefined,
-        effects: [...fn.effects],
-        body: substituteInferredExpr(
-          cloneExpr(fn.body),
-          inferredTypes,
-          new Map(),
-          new Map(),
-          context,
-        ) as Extract<Expr, { kind: "block" }>,
-        generated: true,
-        primitiveId: fn.primitiveId,
-      };
-      context.cache.set(key, specialized);
-      context.functions.set(specialized.name, specialized);
-      const previousRuntimeEnv = context.runtimeEnv;
-      context.runtimeEnv = new Map(specialized.params.map((param) => [param.name, param.type]));
-      try {
-        specialized.body = substituteSpecializedExpr(
-          specialized.body,
-          new Map(),
-          staticValues,
-          staticArgNames,
-          context,
-        ) as Extract<Expr, { kind: "block" }>;
-      } finally {
-        context.runtimeEnv = previousRuntimeEnv;
-      }
-      specialized.generatedInlineable = isInlineableGeneratedSpecializationSource(fn) &&
-        !exprCallsFunction(specialized.body, specialized.name);
-      context.stats && (context.stats.generatedSpecializations += 1);
-    }
-    return {
-      kind: "call",
-      callee: { kind: "var", name: specialized.name },
-      args: runtimeArgs.concat(captureParams.map((param) => ({ kind: "var", name: param.name }))),
-    };
+    const explicit = specializeConstParamCallAttempt(
+      fn,
+      args,
+      context,
+      outerStaticValues,
+      false,
+      false,
+    );
+    if (explicit) return explicit;
+    const inferred = specializeConstParamCallAttempt(
+      fn,
+      args,
+      context,
+      outerStaticValues,
+      true,
+      false,
+    );
+    if (inferred) return inferred;
+    return specializeConstParamCallAttempt(
+      fn,
+      args,
+      context,
+      outerStaticValues,
+      false,
+      true,
+    );
   } finally {
     context.diagnosticSpan = previousDiagnosticSpan;
   }
+}
+
+function specializeConstParamCallAttempt(
+  fn: FnDecl,
+  args: Expr[],
+  context: ConstSpecializationContext,
+  outerStaticValues: Map<string, ConstValue>,
+  omitLeadingConstArgs: boolean,
+  emitDiagnostics: boolean,
+): Expr | undefined {
+  const leadingConstCount = leadingConstParamCount(fn);
+  if (omitLeadingConstArgs) {
+    if (leadingConstCount === 0) return undefined;
+    if (args.length !== fn.params.length - leadingConstCount) return undefined;
+  }
+  const argsByParam = fn.params.map((param, index) => {
+    if (!omitLeadingConstArgs) return args[index];
+    if (index < leadingConstCount && param.const) return undefined;
+    return args[index - leadingConstCount];
+  });
+  const inferredStaticBindings = inferConstStaticBindings(fn, argsByParam, context);
+  const staticValues = new Map<string, ConstValue>();
+  const staticArgNames = new Map<string, string>();
+  const inferredTypes = new Map<string, string>();
+  const constArgNames: string[] = [];
+  const runtimeArgs: Expr[] = [];
+  const captureParams: Param[] = [];
+  for (let index = 0; index < fn.params.length; index++) {
+    const param = fn.params[index];
+    const arg = argsByParam[index];
+    if (param.const) {
+      const expectedType = param.inferStaticType
+        ? undefined
+        : substituteConstParamType(param.type, staticValues, staticArgNames);
+      const staticArg = arg
+        ? staticConstArgValue(arg, expectedType, context, outerStaticValues)
+        : omitLeadingConstArgs && index < leadingConstCount
+        ? inferredStaticArgValue(param, inferredStaticBindings, expectedType, context)
+        : undefined;
+      if (!staticArg) {
+        if (emitDiagnostics && context.emitDiagnostics) {
+          context.diagnostics.push({
+            code: "const.static_param_arg",
+            message:
+              `const parameter ${param.name} on ${fn.name} requires a top-level const argument or matching type proof`,
+            span: arg?.span ?? context.diagnosticSpan,
+          });
+        }
+        return undefined;
+      }
+      staticValues.set(param.name, staticArg.value);
+      const expectedForInference = substituteConstParamType(
+        param.type,
+        staticValues,
+        staticArgNames,
+      );
+      if (staticArg.value.kind === "fn") {
+        inferFnTypeArgs(
+          expectedForInference,
+          context.functions.get(staticArg.value.name),
+          inferredTypes,
+          context.consts,
+        );
+      } else if (arg?.kind === "var" && context.functions.has(arg.name)) {
+        inferFnTypeArgs(
+          expectedForInference,
+          context.functions.get(arg.name),
+          inferredTypes,
+          context.consts,
+        );
+      }
+      if (!context.consts.has(staticArg.name)) {
+        staticValues.set(staticArg.name, staticArg.value);
+      }
+      staticArgNames.set(param.name, staticArg.name);
+      constArgNames.push(staticArg.name);
+      if (staticArg.value.kind === "fn") {
+        for (const capture of context.constFnCaptures.get(staticArg.value.name) ?? []) {
+          if (!captureParams.some((item) => item.name === capture.name)) {
+            captureParams.push(capture);
+          }
+        }
+      }
+    } else {
+      if (!arg) return undefined;
+      runtimeArgs.push(arg);
+    }
+  }
+  const key = `${fn.name}\0${constArgNames.join("\0")}\0${
+    [...inferredTypes].map(([name, type]) => `${name}=${type}`).join("\0")
+  }`;
+  let specialized = context.cache.get(key);
+  if (specialized) {
+    context.stats && (context.stats.cacheHits += 1);
+  } else {
+    context.stats && (context.stats.cacheMisses += 1);
+  }
+  if (!specialized) {
+    const specializedName = allocateSpecializationName(fn.name, constArgNames, context.usedNames);
+    specialized = {
+      kind: "fn",
+      public: false,
+      name: specializedName,
+      params: fn.params.filter((param) => !param.const).map((param) => ({
+        ...param,
+        type: substituteTypeVars(
+          substituteConstParamType(param.type, staticValues, staticArgNames),
+          inferredTypes,
+        ),
+      })).concat(captureParams),
+      returnType: fn.returnType
+        ? substituteTypeVars(
+          substituteConstParamType(fn.returnType, staticValues, staticArgNames),
+          inferredTypes,
+        )
+        : undefined,
+      effects: [...fn.effects],
+      body: substituteInferredExpr(
+        cloneExpr(fn.body),
+        inferredTypes,
+        new Map(),
+        new Map(),
+        context,
+      ) as Extract<Expr, { kind: "block" }>,
+      generated: true,
+      primitiveId: fn.primitiveId,
+    };
+    context.cache.set(key, specialized);
+    context.functions.set(specialized.name, specialized);
+    const previousRuntimeEnv = context.runtimeEnv;
+    context.runtimeEnv = new Map(specialized.params.map((param) => [param.name, param.type]));
+    try {
+      specialized.body = substituteSpecializedExpr(
+        specialized.body,
+        new Map(),
+        staticValues,
+        staticArgNames,
+        context,
+      ) as Extract<Expr, { kind: "block" }>;
+    } finally {
+      context.runtimeEnv = previousRuntimeEnv;
+    }
+    specialized.generatedInlineable = isInlineableGeneratedSpecializationSource(fn) &&
+      !exprCallsFunction(specialized.body, specialized.name);
+    context.stats && (context.stats.generatedSpecializations += 1);
+  }
+  return {
+    kind: "call",
+    callee: { kind: "var", name: specialized.name },
+    args: runtimeArgs.concat(captureParams.map((param) => ({ kind: "var", name: param.name }))),
+  };
+}
+
+function leadingConstParamCount(fn: FnDecl): number {
+  let count = 0;
+  for (const param of fn.params) {
+    if (!param.const) break;
+    count++;
+  }
+  return count;
+}
+
+function inferConstStaticBindings(
+  fn: FnDecl,
+  argsByParam: (Expr | undefined)[],
+  context: ConstSpecializationContext,
+): Map<string, string> {
+  const bindings = new Map<string, string>();
+  const env = context.runtimeEnv ?? new Map<string, string>();
+  fn.params.forEach((param, index) => {
+    const arg = argsByParam[index];
+    if (!arg) return;
+    inferFromValuePattern(param.type, arg, bindings, context, env);
+    if (param.const && arg.kind === "var") {
+      const value = context.consts.get(arg.name);
+      if (value?.kind === "fn") {
+        inferFnTypeArgs(param.type, context.functions.get(value.name), bindings, context.consts);
+      }
+      const directFn = context.functions.get(arg.name);
+      if (directFn) inferFnTypeArgs(param.type, directFn, bindings, context.consts);
+    }
+  });
+  return bindings;
+}
+
+function inferredStaticArgValue(
+  param: Param,
+  bindings: Map<string, string>,
+  expectedType: string | undefined,
+  context: ConstSpecializationContext,
+): { name: string; value: ConstValue } | undefined {
+  const binding = bindings.get(param.name)?.trim();
+  if (!binding) return undefined;
+  const constValue = context.consts.get(binding);
+  if (constValue && (!expectedType || constValueMatchesExpectedType(constValue, expectedType))) {
+    return { name: binding, value: constValue };
+  }
+  const keyed = constValueFromKeyName(binding);
+  if (keyed && (!expectedType || constValueMatchesExpectedType(keyed, expectedType))) {
+    return { name: renderConstTypeArg(keyed), value: keyed };
+  }
+  if (/^-?[0-9]+$/.test(binding)) {
+    const value: ConstValue = { kind: "number", value: binding };
+    if (!expectedType || literalValueMatchesType(value, expectedType)) {
+      return { name: literalConstName(value), value };
+    }
+  }
+  if (context.functions.has(binding)) {
+    const value: ConstValue = { kind: "fn", name: binding };
+    if (!expectedType || constValueMatchesExpectedType(value, expectedType)) {
+      return { name: binding, value };
+    }
+  }
+  const knownTypeProof = isKnownTypeProof(binding, context.types) || /^[A-Z]/.test(binding);
+  if ((expectedType === "type" || !expectedType) && knownTypeProof) {
+    const value: ConstValue = { kind: "type", name: binding };
+    if (!expectedType || constValueMatchesExpectedType(value, expectedType)) {
+      return { name: binding, value };
+    }
+  }
+  return undefined;
 }
 
 function isInlineableGeneratedSpecializationSource(fn: FnDecl): boolean {
@@ -5271,7 +5460,8 @@ function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
   switch (expr.kind) {
     case "do":
       return expr.statements.some((stmt) =>
-        (stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let") &&
+        (stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+          stmt.kind === "destructure_let") &&
         exprCallsFunction(stmt.value, name)
       ) || exprCallsFunction(expr.expr, name);
     case "const_fn":
@@ -5667,7 +5857,8 @@ function exprRuntimeCaptures(expr: Expr): Set<string> {
   const captures = new Set<string>();
   const visit = (item: Expr, bound = new Set<string>()) => {
     if (item.kind === "var") {
-      if (!bound.has(item.name)) captures.add(item.name);
+      const rootName = item.name.split(".")[0] ?? item.name;
+      if (!bound.has(rootName)) captures.add(rootName);
       return;
     }
     if (item.kind === "const_fn") {
@@ -5729,7 +5920,8 @@ function replacePlaceholder(expr: Expr, replacement: Expr): Expr {
       return {
         ...expr,
         statements: expr.statements.map((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? { ...stmt, value: replacePlaceholder(stmt.value, replacement) }
             : stmt
         ),
@@ -5822,7 +6014,8 @@ function replaceNamedVar(expr: Expr, name: string, replacement: Expr): Expr {
       return {
         ...expr,
         statements: expr.statements.map((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? { ...stmt, value: replaceNamedVar(stmt.value, name, replacement) }
             : stmt
         ),
@@ -5948,7 +6141,8 @@ function exprChildren(expr: Expr): Expr[] {
     case "do":
       return [
         ...expr.statements.flatMap((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? [stmt.value]
             : []
         ),
@@ -6252,6 +6446,10 @@ function substituteSpecializedExpr(
           []
         : [];
       const callArgs = captured.length ? args.concat(captured) : args;
+      if (callee.kind === "var" && callee.name === "@replace_field") {
+        const replacement = expandReplaceField(callArgs, staticValues, context);
+        if (replacement) return replacement;
+      }
       if (callee.kind === "var" && callee.name === "@empty") {
         const emptyType = renderTypeProofArg(callArgs[0]);
         const emptyExpr = emptyType ? emptyExprForType(emptyType, context) : undefined;
@@ -6459,44 +6657,53 @@ function substituteSpecializedExpr(
       const scopedValues = new Map(values);
       const scopedStaticValues = new Map(staticValues);
       const scopedStaticArgNames = new Map(staticArgNames);
-      const statements: Statement[] = expr.statements.flatMap((stmt): Statement[] => {
-        if (stmt.kind === "proof_const") return [];
-        for (const name of boundNames(stmt)) {
-          scopedValues.delete(name);
-          scopedStaticValues.delete(name);
-          scopedStaticArgNames.delete(name);
-        }
-        const value = substituteSpecializedExpr(
-          stmt.value,
-          scopedValues,
-          scopedStaticValues,
-          scopedStaticArgNames,
-          context,
-        );
-        if (stmt.kind === "let") {
-          return [{
-            ...stmt,
-            type: stmt.type
-              ? substituteConstParamType(stmt.type, scopedStaticValues, scopedStaticArgNames)
-              : stmt.type,
-            value,
-          }];
-        }
-        return [{ ...stmt, value }];
-      });
-      return {
-        ...expr,
-        statements,
-        expr: expr.expr
-          ? substituteSpecializedExpr(
-            expr.expr,
+      const previousRuntimeEnv = context.runtimeEnv;
+      context.runtimeEnv = previousRuntimeEnv ? new Map(previousRuntimeEnv) : undefined;
+      try {
+        const statements: Statement[] = expr.statements.flatMap((stmt): Statement[] => {
+          if (stmt.kind === "proof_const") return [];
+          for (const name of boundNames(stmt)) {
+            scopedValues.delete(name);
+            scopedStaticValues.delete(name);
+            scopedStaticArgNames.delete(name);
+            context.runtimeEnv?.delete(name);
+          }
+          const value = substituteSpecializedExpr(
+            stmt.value,
             scopedValues,
             scopedStaticValues,
             scopedStaticArgNames,
             context,
-          )
-          : undefined,
-      };
+          );
+          if (stmt.kind === "let") {
+            const type = stmt.type
+              ? substituteConstParamType(stmt.type, scopedStaticValues, scopedStaticArgNames)
+              : inferExprType(
+                value,
+                context,
+                context.runtimeEnv ?? new Map(),
+              );
+            if (type) context.runtimeEnv?.set(stmt.name, type);
+            return [{ ...stmt, type: type ?? stmt.type, value }];
+          }
+          return [{ ...stmt, value }];
+        });
+        return {
+          ...expr,
+          statements,
+          expr: expr.expr
+            ? substituteSpecializedExpr(
+              expr.expr,
+              scopedValues,
+              scopedStaticValues,
+              scopedStaticArgNames,
+              context,
+            )
+            : undefined,
+        };
+      } finally {
+        context.runtimeEnv = previousRuntimeEnv;
+      }
     }
     case "literal":
     case "placeholder":
@@ -6674,6 +6881,200 @@ function staticLabelName(expr: Expr, staticValues: Map<string, ConstValue>): str
   if (expr.kind === "literal" && expr.literalKind === "string") return expr.value.slice(1, -1);
   if (expr.kind === "var") return literalName(staticValues.get(expr.name));
   return literalName(staticConstExprValue(expr, staticValues));
+}
+
+function expandReplaceField(
+  args: Expr[],
+  staticValues: Map<string, ConstValue>,
+  context: ConstSpecializationContext,
+): Expr | undefined {
+  if (args.length !== 3) return undefined;
+  const [source, key, value] = args;
+  const label = staticLabelName(key, staticValues);
+  if (!label || source.kind !== "var" || !context.runtimeEnv) return undefined;
+  const env = new Map(
+    [...context.runtimeEnv.entries()].map((
+      [name, type],
+    ): [string, OwnershipBinding] => [name, { type, moved: false }]),
+  );
+  const sourceType = projectedBindingType(source.name, env, context.types);
+  const resolvedType = resolveAliasType(sourceType, context.types) ?? sourceType;
+  const typeDecl = findTypeDecl(context.types, typeNameOf(resolvedType ?? ""));
+  if (typeDecl?.normalized?.kind !== "product") return undefined;
+  const slots = typeDecl.normalized.shape.slots;
+  if (!slots.some((slot) => slot.label === label)) return undefined;
+  return {
+    kind: "shape",
+    syntax: "record",
+    slots: slots.flatMap((slot) => {
+      if (!slot.label) return [];
+      return [{
+        label: slot.label,
+        value: slot.label === label ? value : { kind: "var", name: `${source.name}.${slot.label}` },
+      }];
+    }),
+  };
+}
+
+function expandReplaceFieldsWithEnv(
+  expr: Expr,
+  env: Map<string, string>,
+  types: TypeDecl[],
+): Expr {
+  if (expr.kind === "call") {
+    const callee = expandReplaceFieldsWithEnv(expr.callee, env, types);
+    const args = expr.args.map((arg) => expandReplaceFieldsWithEnv(arg, env, types));
+    if (callee.kind === "var" && callee.name === "@replace_field") {
+      return expandReplaceFieldWithEnv(args, env, types) ?? { ...expr, callee, args };
+    }
+    return { ...expr, callee, args };
+  }
+  if (expr.kind === "block") {
+    const scoped = new Map(env);
+    const statements = expr.statements.map((stmt) => {
+      if (stmt.kind !== "let" && stmt.kind !== "destructure_let") return stmt;
+      const value = expandReplaceFieldsWithEnv(stmt.value, scoped, types);
+      if (stmt.kind === "let") {
+        const type = stmt.type ?? exprBindingType(
+          value,
+          new Map([...scoped].map(([name, type]) => [
+            name,
+            { type, moved: false },
+          ])),
+          types,
+          [],
+        );
+        if (type) scoped.set(stmt.name, type);
+        return { ...stmt, type: type ?? stmt.type, value };
+      }
+      return { ...stmt, value };
+    });
+    return {
+      ...expr,
+      statements,
+      expr: expr.expr ? expandReplaceFieldsWithEnv(expr.expr, scoped, types) : undefined,
+    };
+  }
+  if (expr.kind === "const_fn") {
+    const scoped = new Map(env);
+    for (const param of expr.params) scoped.delete(param);
+    return { ...expr, body: expandReplaceFieldsWithEnv(expr.body, scoped, types) };
+  }
+  if (expr.kind === "pipe_bind") {
+    const value = expandReplaceFieldsWithEnv(expr.value, env, types);
+    const scoped = new Map(env);
+    const valueType = exprBindingType(
+      value,
+      new Map([...env].map(([name, type]) => [
+        name,
+        { type, moved: false },
+      ])),
+      types,
+      [],
+    );
+    if (valueType) scoped.set(expr.name, valueType);
+    return { ...expr, value, body: expandReplaceFieldsWithEnv(expr.body, scoped, types) };
+  }
+  if (expr.kind === "index") {
+    return {
+      ...expr,
+      target: expandReplaceFieldsWithEnv(expr.target, env, types),
+      index: expandReplaceFieldsWithEnv(expr.index, env, types),
+    };
+  }
+  if (expr.kind === "binary") {
+    return {
+      ...expr,
+      left: expandReplaceFieldsWithEnv(expr.left, env, types),
+      right: expandReplaceFieldsWithEnv(expr.right, env, types),
+    };
+  }
+  if (expr.kind === "match") {
+    return {
+      ...expr,
+      value: expandReplaceFieldsWithEnv(expr.value, env, types),
+      arms: expr.arms.map((arm) => ({
+        ...arm,
+        value: expandReplaceFieldsWithEnv(arm.value, env, types),
+      })),
+    };
+  }
+  if (expr.kind === "shape" || expr.kind === "product_constructor") {
+    return {
+      ...expr,
+      slots: expr.slots.map((slot) => ({
+        ...slot,
+        index: slot.index ? expandReplaceFieldsWithEnv(slot.index, env, types) : undefined,
+        value: expandReplaceFieldsWithEnv(slot.value, env, types),
+      })),
+    };
+  }
+  if (expr.kind === "field") {
+    return {
+      ...expr,
+      value: expandReplaceFieldsWithEnv(expr.value, env, types),
+      key: expandReplaceFieldsWithEnv(expr.key, env, types),
+    };
+  }
+  if (expr.kind === "range") {
+    return {
+      ...expr,
+      start: expandReplaceFieldsWithEnv(expr.start, env, types),
+      end: expandReplaceFieldsWithEnv(expr.end, env, types),
+    };
+  }
+  if (expr.kind === "static_for_slots") {
+    return {
+      ...expr,
+      source: expr.source.kind === "range"
+        ? {
+          kind: "range",
+          start: expandReplaceFieldsWithEnv(expr.source.start, env, types),
+          end: expandReplaceFieldsWithEnv(expr.source.end, env, types),
+        }
+        : {
+          kind: "shape",
+          shape: expandReplaceFieldsWithEnv(expr.source.shape, env, types),
+        },
+      value: expandReplaceFieldsWithEnv(expr.value, env, types),
+    };
+  }
+  return expr;
+}
+
+function expandReplaceFieldWithEnv(
+  args: Expr[],
+  env: Map<string, string>,
+  types: TypeDecl[],
+): Expr | undefined {
+  if (args.length !== 3) return undefined;
+  const [source, key, value] = args;
+  const label = exprLiteralLabel(key);
+  if (!label || source.kind !== "var") return undefined;
+  const sourceType = inferVarType(source.name, env, types);
+  const decl = sourceType ? resolveTypeDecl(sourceType, types) : undefined;
+  if (decl?.normalized?.kind !== "product") return undefined;
+  const slots = decl.normalized.shape.slots;
+  if (!slots.some((slot) => slot.label === label)) return undefined;
+  return {
+    kind: "shape",
+    syntax: "record",
+    inferredType: sourceType,
+    slots: slots.flatMap((slot) => {
+      if (!slot.label) return [];
+      return [{
+        label: slot.label,
+        value: slot.label === label ? value : { kind: "var", name: `${source.name}.${slot.label}` },
+      }];
+    }),
+  };
+}
+
+function exprLiteralLabel(expr: Expr | undefined): string | undefined {
+  if (expr?.kind !== "literal") return undefined;
+  if (expr.literalKind === "literalType") return expr.value.replace(/^#/, "");
+  if (expr.literalKind === "string") return expr.value;
+  return undefined;
 }
 
 function staticConstExprValue(
@@ -7990,6 +8391,9 @@ function lowerProductConstructors(
         }
         return {
           kind: "shape",
+          syntax: "record",
+          span: expr.span,
+          inferredType: product?.name,
           slots: expr.slots.map((slot) => ({ ...slot, value: lowerExpr(slot.value) })),
         };
       }
@@ -9644,7 +10048,7 @@ interface ParsedFnSignature {
 }
 
 function parseFnSignatureDetailed(source: string): ParsedFnSignature | undefined {
-  const match = source.trim().match(/^fn\((.*)\)\s*->\s*([^!]+?)(?:\s*!\s*\{(.*)\})?$/);
+  const match = source.trim().match(/^fn\(([\s\S]*)\)\s*->\s*([^!]+?)(?:\s*!\s*\{([\s\S]*)\})?$/);
   if (!match) return undefined;
   const params = match[1].trim()
     ? splitTypeArgs(match[1]).map((part) => {
@@ -10648,7 +11052,8 @@ function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
   switch (expr.kind) {
     case "do":
       return expr.statements.some((stmt) =>
-        (stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let") &&
+        (stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+          stmt.kind === "destructure_let") &&
         exprContainsStaticExpansion(stmt.value)
       ) || exprContainsStaticExpansion(expr.expr);
     case "const_fn":

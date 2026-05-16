@@ -1,8 +1,21 @@
-const geometry = @import("prelude.geometry2d");
-
+const ecs = @import("engine.ecs");
+const {
+  Geometry2dBatchI32,
+  append_geometry2d_batch,
+  emit_rect2d_batch,
+  empty_geometry2d_batch
+} = @import("prelude.geometry2d");
 const tick_millis: fn() -> i32 !{time} = @capability("tick_millis");
 const input_axis_x: fn() -> i32 !{event} = @capability("input_axis_x");
 const input_pressed: fn() -> i32 !{event} = @capability("input_pressed");
+
+type fn Read(component: type) -> type {
+  ecs.Read(component)
+}
+
+type fn Write(component: type) -> type {
+  ecs.Write(component)
+}
 
 type fn Transform2d() -> type {
   let Transform2d = {x: i32, y: i32, z: i32};
@@ -19,70 +32,276 @@ type fn Sprite2d() -> type {
   struct(Sprite2d)
 }
 
-type fn MovementEvents() -> type {
-  let MovementEvents = {dt_ms: i32, axis_x: i32, pressed: i32};
-  struct(MovementEvents)
-}
-
-fn move_transform(
+const components = ecs.components({
   transform: Transform2d,
   velocity: Velocity2d,
-  events: MovementEvents
-) -> Transform2d {
-  Transform2d {
-    x: transform.x + velocity.x * events.dt_ms / 16,
-    y: transform.y + velocity.y * events.dt_ms / 16,
-    z: transform.z,
+  sprite: Sprite2d
+});
+
+type fn World() -> type {
+  let World = {
+    entities: ecs.Batch(32, EntityId),
+    len: i32,
+    transform: ecs.Batch(32, Transform2d),
+    velocity: ecs.Batch(32, Velocity2d),
+    sprite: ecs.Batch(32, Sprite2d)
+  };
+  struct(World)
+}
+
+type fn EntityId() -> type {
+  ecs.BatchIndex(32)
+}
+
+type fn FrameInput() -> type {
+  let FrameInput = {dt_ms: i32, axis_x: i32, pressed: i32};
+  struct(FrameInput)
+}
+
+type fn Command(world: type) -> type {
+  ecs.Command(world)
+}
+
+fn Command::pure(value: World) -> Command(World) {
+  value
+}
+
+fn Command::bind(
+  value: Command(World),
+  const step: fn(value: World) -> Command(World)
+) -> Command(World) {
+  step(value)
+}
+
+type fn Query(value: type) -> type {
+  value
+}
+
+fn Query::pure(value: value_t) -> Query(value_t) {
+  value
+}
+
+fn Query::map(
+  const step: fn(value: value_t) -> Query(next_t),
+  value: Query(value_t)
+) -> Query(next_t) {
+  step(value)
+}
+
+fn Query::bind(
+  value: Query(value_t),
+  const step: fn(value: value_t) -> Query(next_t)
+) -> Query(next_t) {
+  step(value)
+}
+
+type fn RenderState() -> type {
+  let RenderState = {
+    len: i32,
+    transform: ecs.Batch(32, Transform2d),
+    sprite: ecs.Batch(32, Sprite2d)
+  };
+  struct(RenderState)
+}
+
+type fn RenderRow2d() -> type {
+  let RenderRow2d = {
+    visible: bool,
+    entity: EntityId,
+    transform: Transform2d,
+    sprite: Sprite2d
+  };
+  struct(RenderRow2d)
+}
+
+type fn RenderBatch() -> type {
+  Geometry2dBatchI32(8)
+}
+
+fn read_frame_input() -> FrameInput !{time, event} {
+  FrameInput {
+    dt_ms: tick_millis(),
+    axis_x: input_axis_x(),
+    pressed: input_pressed()
   }
 }
 
-fn render_box(transform: Transform2d, sprite: Sprite2d) -> geometry.Geometry2dBatch3I32 {
-  geometry.emit_rect2d_batch3(
-    transform.x,
-    transform.y,
-    sprite.w,
-    sprite.h,
-    transform.z,
-    sprite.color
+fn empty_world() -> World {
+  World {
+    entities: ecs.batch_fill(32, EntityId, 0),
+    len: 0,
+    transform: ecs.batch_fill(
+      32,
+      Transform2d,
+      Transform2d {x: 0, y: 0, z: 0}
+    ),
+    velocity: ecs.batch_fill(
+      32,
+      Velocity2d,
+      Velocity2d {x: 0, y: 0}
+    ),
+    sprite: ecs.batch_fill(
+      32,
+      Sprite2d,
+      Sprite2d {w: 0, h: 0, color: 0}
+    )
+  }
+}
+
+fn setup(world: World) -> World {
+  do @monad(Command(World)) {
+    first <- ecs.spawn(
+      world,
+      {
+        transform: Transform2d {x: 12, y: 8, z: 1},
+        velocity: Velocity2d {x: 4, y: 0},
+        sprite: Sprite2d {w: 16, h: 16, color: 1}
+      }
+    );
+    ecs.spawn(
+      first,
+      {
+        transform: Transform2d {x: 24, y: 8, z: 1},
+        velocity: Velocity2d {x: 4, y: 0},
+        sprite: Sprite2d {w: 16, h: 16, color: 2}
+      }
+    )
+  }
+}
+
+fn movement_system(
+  mut: ecs.Query({
+    transform: Write(Transform2d),
+    velocity: Read(Velocity2d)
+  }),
+  input: ecs.Res(FrameInput)
+) -> ecs.System {
+  do @applicative(Query) {
+    row <- ecs.each(mut);
+    ecs.write({
+      transform: Transform2d {
+        x: row.transform.x + row.velocity.x * input.dt_ms
+          / 16,
+        y: row.transform.y + row.velocity.y * input.dt_ms
+          / 16,
+        z: row.transform.z
+      }
+    })
+  }
+}
+
+fn sprite_animation_system(
+  mut: ecs.Query({sprite: Write(Sprite2d)}),
+  input: ecs.Res(FrameInput)
+) -> ecs.System {
+  do @applicative(Query) {
+    row <- ecs.each(mut);
+    ecs.write({
+      sprite: Sprite2d {
+        w: row.sprite.w,
+        h: row.sprite.h,
+        color: row.sprite.color + input.pressed
+      }
+    })
+  }
+}
+
+fn run_frame(world: World, input: FrameInput) -> World {
+  do @monad(Command(World)) {
+    moved <- ecs.run(world, input, movement_system);
+    ecs.run(moved, input, sprite_animation_system)
+  }
+}
+
+fn render_row(
+  index: ecs.BatchIndex(32),
+  entity: EntityId,
+  state: RenderState
+) -> RenderRow2d {
+  RenderRow2d {
+    visible: index < state.len,
+    entity: entity,
+    transform: state.transform[index],
+    sprite: state.sprite[index]
+  }
+}
+
+fn render_system(world: World, input: FrameInput) -> RenderBatch {
+  append_render_row(
+    append_render_row(
+      empty_render_batch(),
+      render_row(
+        0,
+        world.entities[0],
+        RenderState {
+          len: world.len,
+          transform: world.transform,
+          sprite: world.sprite
+        }
+      )
+    ),
+    render_row(
+      1,
+      world.entities[1],
+      RenderState {
+        len: world.len,
+        transform: world.transform,
+        sprite: world.sprite
+      }
+    )
   )
 }
 
-fn render_three(
-  first: geometry.Geometry2dBatch3I32,
-  second: geometry.Geometry2dBatch3I32,
-  third: geometry.Geometry2dBatch3I32
-) -> geometry.Geometry2dBatch3I32 {
-  let acc0 = geometry.empty_geometry2d_batch3();
-  let acc1 = geometry.append_geometry2d_batch3(acc0, first);
-  let acc2 = geometry.append_geometry2d_batch3(acc1, second);
-  let acc3 = geometry.append_geometry2d_batch3(acc2, third);
-  {vertices: acc3.vertices, vertex_count: 12}
+fn empty_render_batch() -> RenderBatch {
+  empty_geometry2d_batch(8)
 }
 
-fn run_frame() -> geometry.Geometry2dBatch3I32 !{time, event} {
-  let events: MovementEvents = MovementEvents {
-    dt_ms: tick_millis(),
-    axis_x: input_axis_x(),
-    pressed: input_pressed(),
-  };
-  let speed = 4 + events.pressed;
-  let velocity0 = Velocity2d {x: events.axis_x * speed, y: 0};
-  let velocity1 = Velocity2d {x: events.axis_x * speed, y: 0};
-  let transform0 = move_transform(Transform2d {x: 12, y: 8, z: 1}, velocity0, events);
-  let transform1 = move_transform(Transform2d {x: 24, y: 8, z: 1}, velocity1, events);
-  let transform2 = Transform2d {x: 40, y: 8, z: 1};
-  render_three(
-    render_box(transform0, Sprite2d {w: 16, h: 16, color: 1}),
-    render_box(transform1, Sprite2d {w: 16, h: 16, color: 2}),
-    render_box(transform2, Sprite2d {w: 16, h: 16, color: 3})
+fn emit_render_row(row: RenderRow2d) -> RenderBatch {
+  emit_rect2d_batch(
+    8,
+    row.transform.x,
+    row.transform.y,
+    row.sprite.w,
+    row.sprite.h,
+    row.transform.z,
+    row.sprite.color
   )
 }
 
-pub fn main() -> geometry.Geometry2dBatch3I32 !{time, event} {
-  run_frame()
+fn append_render_row(
+  acc: RenderBatch,
+  row: RenderRow2d
+) -> RenderBatch {
+  match row.visible {
+    true => append_geometry2d_batch(
+      acc,
+      emit_render_row(row)
+    ),
+    false => acc,
+  }
+}
+
+fn build_demo_world() -> World {
+  setup(empty_world())
+}
+
+fn run_demo_frame() -> RenderBatch !{time, event} {
+  let input = read_frame_input();
+  let world = build_demo_world();
+  let updated = run_frame(world, input);
+  render_system(updated, input)
+}
+
+pub fn main() -> RenderBatch !{time, event} {
+  run_demo_frame()
 }
 
 pub fn playground_probe() -> i32 !{time, event} {
-  let output = run_frame();
-  output.vertex_count
+  let output = run_demo_frame();
+  output.len
+}
+
+pub fn playground_world_len() -> i32 {
+  let world = build_demo_world();
+  world.len
 }

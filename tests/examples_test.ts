@@ -60,7 +60,7 @@ Deno.test("engine playground tick consumes time and event capabilities", async (
   );
 });
 
-Deno.test("engine playground frame seeds, ticks, and renders visible sprites", async () => {
+Deno.test("engine playground frame builds, ticks, and renders visible sprites", async () => {
   const source = await Deno.readTextFile("examples/engine_playground.fig");
   const module = new WebAssembly.Module(await wasmFromSource(source, { resolveModule }));
   const instance = new WebAssembly.Instance(module, {
@@ -70,7 +70,8 @@ Deno.test("engine playground frame seeds, ticks, and renders visible sprites", a
       input_pressed: () => 1,
     },
   });
-  assertEquals((instance.exports.playground_probe as () => number)(), 12);
+  assertEquals((instance.exports.playground_world_len as () => number)(), 2);
+  assertEquals((instance.exports.playground_probe as () => number)(), 8);
 });
 
 Deno.test("capability imports are emitted in WAT and wasm", async () => {

@@ -95,7 +95,7 @@ function lowerSourceImportConst(node: Node): SourceImport {
   const specifier = JSON.parse(match[1]);
   const bindingList = optional(node, "ImportBindingList");
   if (bindingList) {
-    const bindings = descendants(bindingList, "LowerIdent").map((nameNode) => ({
+    const bindings = identifierDescendants(bindingList).map((nameNode) => ({
       name: nameNode.text,
       ...meta(nameNode, nameNode),
     }));
@@ -970,6 +970,14 @@ function lowerDoBind(node: Node): DoStatement {
   };
 }
 
+function lowerDoExprStmt(node: Node): DoStatement {
+  return {
+    kind: "do_expr",
+    ...spanOnly(node),
+    value: lowerExpr(first(node, "Expr")),
+  };
+}
+
 function lowerIfArmBlock(node: Node): Expr {
   const block = lowerBlock(node);
   return block.statements.length === 0 && block.expr ? block.expr : block;
@@ -1063,17 +1071,36 @@ function lowerDoExpr(node: Node): Expr {
   const block = first(node, "DoBlock");
   const statements: DoStatement[] = [];
   let expr: Expr | undefined;
-  for (const child of named(block)) {
-    if (child.type === "DoBlockItem") {
-      const item = named(child)[0];
-      if (!item) continue;
-      if (item.type === "DoBindStmt") statements.push(lowerDoBind(item));
-      else if (item.type === "BlockLetDecl") statements.push(lowerLet(item));
-      else if (item.type === "BlockProofConstDecl") statements.push(lowerProofConst(item));
+  const collect = (child: Node) => {
+    if (child.type === "DoBindStmt") {
+      statements.push(lowerDoBind(child));
+    } else if (child.type === "DoExprOrFinal") {
+      const childExpr = first(child, "Expr");
+      const parts = named(child);
+      const hasSemicolon = parts.some((part) => part.text === ";");
+      if (hasSemicolon) {
+        statements.push({
+          kind: "do_expr",
+          ...spanOnly(childExpr),
+          value: lowerExpr(childExpr),
+        });
+        for (const nested of parts) {
+          if (nested !== childExpr && nested.text !== ";") collect(nested);
+        }
+      } else {
+        expr = lowerExpr(childExpr);
+      }
+    } else if (child.type === "BlockLetDecl") {
+      statements.push(lowerLet(child));
+    } else if (child.type === "BlockProofConstDecl") {
+      statements.push(lowerProofConst(child));
     } else if (child.type === "Expr") {
       expr = lowerExpr(child);
+    } else {
+      for (const nested of named(child)) collect(nested);
     }
-  }
+  };
+  for (const child of named(block)) collect(child);
   return {
     kind: "do",
     ...spanOnly(node),
@@ -1197,7 +1224,8 @@ function bindDollarPlaceholders(expr: Expr): Expr {
       return {
         ...expr,
         statements: expr.statements.map((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? { ...stmt, value: bindDollarPlaceholders(stmt.value) }
             : stmt
         ),

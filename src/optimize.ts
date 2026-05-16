@@ -1227,7 +1227,8 @@ function assumeRewriteExprChildren(
       return {
         ...expr,
         statements: expr.statements.map((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? { ...stmt, value: assumeRewriteExpr(stmt.value, scopedFacts, context) }
             : stmt
         ),
@@ -5066,7 +5067,10 @@ function directSelfCalls(
       return result;
     case "do":
       expr.statements.forEach((stmt) => {
-        if (stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let") {
+        if (
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+          stmt.kind === "destructure_let"
+        ) {
           add(directSelfCalls(stmt.value, name, false));
         }
       });
@@ -5698,7 +5702,7 @@ function usedNameCounts(block: BlockExpr): Map<string, number> {
           return;
         case "do":
           for (const stmt of item.statements) {
-            if (stmt.kind === "do_bind") {
+            if (stmt.kind === "do_bind" || stmt.kind === "do_expr") {
               visit(stmt.value);
               continue;
             }

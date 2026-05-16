@@ -409,3 +409,4 @@ function isIdentStart(char: string): boolean {
 function isIdentPart(char: string): boolean {
   return isIdentStart(char) || (char >= "0" && char <= "9");
 }
+

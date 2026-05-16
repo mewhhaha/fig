@@ -1265,25 +1265,70 @@ Deno.test("generic empty rejects unsupported sum values", async () => {
   );
 });
 
-Deno.test.ignore("ecs sparse query accepts canonical sparse worlds", async () => {
+Deno.test("ecs sparse world accepts non-three component storage", async () => {
   const checked = await checkSource(
     `
     const ecs = @import("engine.ecs");
     type fn Transform2d() -> type { i32 }
     type fn Velocity2d() -> type { i32 }
-    const components = {transform: Transform2d, velocity: Velocity2d};
-    const movement_query = {transform: Transform2d, velocity: Velocity2d};
-    type fn World() -> type { ecs.SparseWorld(3, components) }
+    type fn Sprite2d() -> type { i32 }
+    type fn Collider2d() -> type { i32 }
+    const transform = {capacity: 5, component: Transform2d};
+    const velocity = {capacity: 5, component: Velocity2d};
+    const sprite = {capacity: 5, component: Sprite2d};
+    const collider = {capacity: 5, component: Collider2d};
+    const components = {
+      transform: transform,
+      velocity: velocity,
+      sprite: sprite,
+      collider: collider
+    };
+    type fn World() -> type { ecs.SparseWorld(5, components) }
     pub fn main(world: World) -> World {
       world
     }
   `,
     { resolveModule: resolveProjectModule },
   );
-  const main = checked.program.declarations.find((decl): decl is FnDecl =>
-    decl.kind === "fn" && decl.name === "main"
+  const world = checked.program.declarations.find((decl) =>
+    decl.kind === "type" && decl.name === "World"
   );
-  assertStringIncludes(main?.params[0]?.type ?? "", "World");
+  assert(world);
+});
+
+Deno.test("ecs component maps derive system input from reflected context", async () => {
+  await checkSource(
+    `
+      const ecs = @import("engine.ecs");
+      type fn Position() -> type {
+        let Position = {x: i32};
+        struct(Position)
+      }
+      type fn GameWorld() -> type {
+        let GameWorld = {positions: ecs.Batch(2, Position)};
+        struct(GameWorld)
+      }
+      type fn FrameInput() -> type {
+        let FrameInput = {dt_ms: i32};
+        struct(FrameInput)
+      }
+      type fn Systems() -> type {
+        let Systems = {world: GameWorld, input: FrameInput};
+        struct(Systems)
+      }
+      fn step(
+        index: ecs.BatchIndex(2),
+        item: Position,
+        input: FrameInput
+      ) -> Position {
+        Position {x: item.x + input.dt_ms}
+      }
+      pub fn main(systems: Systems) -> Systems {
+        ecs.cmap_input(Systems, #positions, systems, step)
+      }
+    `,
+    { resolveModule: resolveProjectModule },
+  );
 });
 
 Deno.test.ignore("ecs sparse query rejects missing sparse component slots", async () => {
@@ -1361,15 +1406,15 @@ Deno.test.ignore("ecs fold infers read shape and skips omitted components", asyn
   assertEquals((instance.exports.main as () => number)(), 26);
 });
 
-Deno.test("qualified zero-argument calls stay calls after lowering", async () => {
+Deno.test("qualified generic batch calls stay calls after lowering", async () => {
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
       await wasmFromSource(
         `
       const geometry = @import("prelude.geometry2d");
       pub fn main() -> i32 {
-        let batch = Geometry.empty_geometry2d_batch3();
-        batch.vertex_count
+        let batch = Geometry.empty_geometry2d_batch(3);
+        batch.len
       }
     `,
         { resolveModule: resolveProjectModule },
@@ -1996,8 +2041,11 @@ Deno.test("destructured source imports select exact declarations", async () => {
   ]);
   const resolveModule = (specifier: string) => modules.get(specifier);
 
-  const parsed = await parse('const { map4_i32, } = @import("prelude.array");');
-  assertEquals(parsed.sourceImports?.[0].bindings?.map((binding) => binding.name), ["map4_i32"]);
+  const parsed = await parse('const { map4_i32, Lane4I32, } = @import("prelude.array");');
+  assertEquals(parsed.sourceImports?.[0].bindings?.map((binding) => binding.name), [
+    "map4_i32",
+    "Lane4I32",
+  ]);
 
   const checked = await checkSource(
     `
@@ -2680,6 +2728,82 @@ Deno.test("do monad lowers through generated capturing const functions", async (
   );
 });
 
+Deno.test("do monad expression statements lower like bind-right", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Id(a: type) -> type { a }
+    fn Id::pure(value: a) -> Id(a) { value }
+    fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }
+    fn action(seed: i32) -> Id(i32) { seed + 1 }
+    pub fn main() -> Id(i32) {
+      do @monad(Id) {
+        action(1);
+        y <- action(2);
+        y
+      }
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 3);
+});
+
+Deno.test("do monad parameterized effect dispatches through outer type function", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn State(state: type) -> type { state }
+    fn State::pure(value: state) -> State(state) { value }
+    fn State::bind(
+      value: State(state),
+      const step: fn(value: state) -> State(state)
+    ) -> State(state) {
+      step(value)
+    }
+    fn action(seed: i32) -> State(i32) { seed + 1 }
+    pub fn main() -> State(i32) {
+      do @monad(State(i32)) {
+        action(1);
+        y <- action(2);
+        y
+      }
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 3);
+});
+
+Deno.test("do applicative supports query-style bind then final expression", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Query(a: type) -> type { a }
+    fn Query::pure(value: a) -> Query(a) { value }
+    fn Query::map(const f: fn(x: a) -> Query(b), value: Query(a)) -> Query(b) { f(value) }
+    fn each(query: i32) -> Query(i32) { query }
+    pub fn main() -> i32 {
+      do @applicative(Query) {
+        row <- each(4);
+        row + 1
+      }
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 5);
+});
+
 Deno.test("product result destructuring binds local result slots", async () => {
   const wat = await watFromSource(
     `
@@ -3359,6 +3483,105 @@ Deno.test("infers unannotated const parameter static kinds", async () => {
   );
   assertEquals(specialized?.kind === "fn" ? specialized.params : undefined, [
     { name: "values", type: "ComponentValues(movement_reads)", const: undefined },
+  ]);
+});
+
+Deno.test("infers leading static parameters from value arguments", async () => {
+  const checked = await checkSource(`
+    type fn Index(capacity: count) -> type {
+      let Index = {value: i32};
+      struct(Index)
+    }
+    type fn Batch(capacity: count, component: type) -> type {
+      let Batch = {item: component};
+      struct(Batch)
+    }
+    type fn World(capacity: count, entity: type) -> type {
+      let World = {item: entity};
+      struct(World)
+    }
+    type fn Actor() -> type {
+      let Actor = {x: i32};
+      struct(Actor)
+    }
+    type fn FrameInput() -> type {
+      let FrameInput = {dt: i32};
+      struct(FrameInput)
+    }
+    type fn GeometryBatch() -> type {
+      let GeometryBatch = {count: i32};
+      struct(GeometryBatch)
+    }
+    fn world_from_batch(
+      const capacity: count,
+      const entity: type,
+      entities: Batch(capacity, entity)
+    ) -> World(capacity, entity) {
+      World {item: entities.item}
+    }
+    fn world_fold(
+      const capacity: count,
+      const entity: type,
+      const accumulator: type,
+      world: World(capacity, entity),
+      initial: accumulator,
+      const step: fn(acc: accumulator, item: entity) -> accumulator
+    ) -> accumulator {
+      step(initial, world.item)
+    }
+    fn world_map_with_state(
+      const capacity: count,
+      const entity: type,
+      const result: type,
+      const state: type,
+      world: World(capacity, entity),
+      state_value: state,
+      const step: fn(
+        index: Index(capacity),
+        item: entity,
+        state_value: state
+      ) -> result
+    ) -> World(capacity, result) {
+      World {item: step(Index {value: 0}, world.item, state_value)}
+    }
+    fn seed_actors() -> Batch(3, Actor) {
+      Batch {item: Actor {x: 1}}
+    }
+    fn seed_world() -> World(3, Actor) {
+      world_from_batch(seed_actors())
+    }
+    fn empty_geometry() -> GeometryBatch {
+      GeometryBatch {count: 0}
+    }
+    fn render_actor(acc: GeometryBatch, item: Actor) -> GeometryBatch {
+      GeometryBatch {count: acc.count + item.x}
+    }
+    fn tick_actor(index: Index(3), item: Actor, input: FrameInput) -> Actor {
+      Actor {x: item.x + input.dt + index.value}
+    }
+    pub fn main() -> GeometryBatch {
+      let world = seed_world();
+      let input = FrameInput {dt: 1};
+      let updated = world_map_with_state(world, input, tick_actor);
+      world_fold(updated, empty_geometry(), render_actor)
+    }
+  `);
+  const fromBatch = findFn(checked.program, "world_from_batch__3__Actor");
+  assertEquals(fromBatch?.kind === "fn" ? fromBatch.params : undefined, [
+    { name: "entities", type: "Batch(3, Actor)", const: undefined },
+  ]);
+  const map = findFn(
+    checked.program,
+    "world_map_with_state__3__Actor__Actor__FrameInput__tick_actor",
+  );
+  assertEquals(map?.kind === "fn" ? map.params : undefined, [
+    { name: "world", type: "World(3, Actor)", const: undefined },
+    { name: "state_value", type: "FrameInput", const: undefined },
+  ]);
+  const fold = findFn(checked.program, "world_fold__3__Actor__GeometryBatch__render_actor");
+  assertEquals(fold?.kind === "fn" ? fold.params : undefined, [
+    { name: "world", type: "World(3, Actor)", const: undefined },
+    { name: "initial", type: "GeometryBatch", const: undefined },
   ]);
 });
 

@@ -1,4 +1,5 @@
 const layout = @import("prelude.layout");
+const array = @import("prelude.array_static");
 
 type fn Vec2I32() -> type {
   let Vec2I32 = {x: i32, y: i32};
@@ -34,9 +35,12 @@ type fn Geometry2dI32() -> type {
   struct(Geometry2dI32)
 }
 
-type fn Geometry2dBatch3I32() -> type {
-  let Geometry2dBatch3I32 = {vertices: layout.InlineArray(12, Vertex2dI32), vertex_count: i32};
-  struct(Geometry2dBatch3I32)
+type fn Geometry2dBatchI32(capacity: count) -> type {
+  let Geometry2dBatchI32 = {
+    items: layout.InlineArray(capacity, Vertex2dI32),
+    len: i32
+  };
+  struct(Geometry2dBatchI32)
 }
 
 fn vec2(x: i32, y: i32) -> Vec2I32 {
@@ -48,7 +52,7 @@ fn vec3(x: i32, y: i32, z: i32) -> Vec3I32 {
 }
 
 fn rgba8(r: i32, g: i32, b: i32, a: i32) -> i32 {
-  r + (g * 256) + (b * 65536) + (a * 16777216)
+  r +(g * 256) +(b * 65536) +(a * 16777216)
 }
 
 fn vertex2d(pos: Vec3I32, uv: Vec2I32, color: i32) -> Vertex2dI32 {
@@ -59,87 +63,132 @@ fn vertex2d_zero() -> Vertex2dI32 {
   Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0}
 }
 
-
-
-
-fn quad2d_rect(x: i32, y: i32, w: i32, h: i32, z: i32, color: i32) -> Quad2dI32 {
+fn quad2d_rect(
+  x: i32,
+  y: i32,
+  w: i32,
+  h: i32,
+  z: i32,
+  color: i32
+) -> Quad2dI32 {
   let x0 = x;
-let x_for_w = x;
+  let x_for_w = x;
   let y0 = y;
-let y_for_h = y;
+  let y_for_h = y;
   let x_for_w_a = x_for_w;
-let x_for_w_b = x_for_w;
+  let x_for_w_b = x_for_w;
   let w_a = w;
-let w_b = w;
+  let w_b = w;
   let y_for_h_a = y_for_h;
-let y_for_h_b = y_for_h;
+  let y_for_h_b = y_for_h;
   let h_a = h;
-let h_b = h;
+  let h_b = h;
   let x00 = x0;
-let x03 = x0;
+  let x03 = x0;
   let x11 = x_for_w_a + w_a;
   let x12 = x_for_w_b + w_b;
   let y00 = y0;
-let y01 = y0;
+  let y01 = y0;
   let y12 = y_for_h_a + h_a;
   let y13 = y_for_h_b + h_b;
   let z01 = z;
-let z23 = z;
+  let z23 = z;
   let z0 = z01;
-let z1 = z01;
+  let z1 = z01;
   let z2 = z23;
-let z3 = z23;
+  let z3 = z23;
   let color01 = color;
-let color23 = color;
+  let color23 = color;
   let color0 = color01;
-let color1 = color01;
+  let color1 = color01;
   let color2 = color23;
-let color3 = color23;
-  <
-    vertex2d(vec3(x00, y00, z0), vec2(0, 0), color0),
-    vertex2d(vec3(x11, y01, z1), vec2(1, 0), color1),
-    vertex2d(vec3(x12, y12, z2), vec2(1, 1), color2),
-    vertex2d(vec3(x03, y13, z3), vec2(0, 1), color3)
-  >
+  let color3 = color23;
+  <vertex2d(vec3(x00, y00, z0), vec2(0, 0), color0), vertex2d(
+    vec3(x11, y01, z1),
+    vec2(1, 0),
+    color1
+  ), vertex2d(vec3(x12, y12, z2), vec2(1, 1), color2), vertex2d(
+    vec3(x03, y13, z3),
+    vec2(0, 1),
+    color3
+  )>
 }
 
-fn quad2d_translate(q: Quad2dI32, dx: i32, dy: i32, dz: i32) -> Quad2dI32 {
-  <
-    Vertex2dI32 {x: q[0].x + dx, y: q[0].y + dy, z: q[0].z + dz, u: q[0].u, v: q[0].v, rgba: q[0].rgba},
-    Vertex2dI32 {x: q[1].x + dx, y: q[1].y + dy, z: q[1].z + dz, u: q[1].u, v: q[1].v, rgba: q[1].rgba},
-    Vertex2dI32 {x: q[2].x + dx, y: q[2].y + dy, z: q[2].z + dz, u: q[2].u, v: q[2].v, rgba: q[2].rgba},
-    Vertex2dI32 {x: q[3].x + dx, y: q[3].y + dy, z: q[3].z + dz, u: q[3].u, v: q[3].v, rgba: q[3].rgba}
-  >
+fn quad2d_translate(
+  q: Quad2dI32,
+  dx: i32,
+  dy: i32,
+  dz: i32
+) -> Quad2dI32 {
+  <Vertex2dI32 {
+    x: q[0].x + dx,
+    y: q[0].y + dy,
+    z: q[0].z + dz,
+    u: q[0].u,
+    v: q[0].v,
+    rgba: q[0].rgba
+  }, Vertex2dI32 {
+    x: q[1].x + dx,
+    y: q[1].y + dy,
+    z: q[1].z + dz,
+    u: q[1].u,
+    v: q[1].v,
+    rgba: q[1].rgba
+  }, Vertex2dI32 {
+    x: q[2].x + dx,
+    y: q[2].y + dy,
+    z: q[2].z + dz,
+    u: q[2].u,
+    v: q[2].v,
+    rgba: q[2].rgba
+  }, Vertex2dI32 {
+    x: q[3].x + dx,
+    y: q[3].y + dy,
+    z: q[3].z + dz,
+    u: q[3].u,
+    v: q[3].v,
+    rgba: q[3].rgba
+  }>
 }
 
 fn emit_quad2d(q: Quad2dI32) -> Geometry2dI32 {
   Geometry2dI32 {vertices: q, vertex_count: 4}
 }
 
-fn emit_quad2d_batch3(q: Quad2dI32) -> Geometry2dBatch3I32 {
-  Geometry2dBatch3I32 {
-    vertices: <
-      q[0],
-      q[1],
-      q[2],
-      q[3],
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero()
-    >,
-    vertex_count: 4
-  }
+fn emit_quad2d_batch(
+  const capacity: count,
+  q: Quad2dI32
+) -> Geometry2dBatchI32(capacity) {
+  empty_geometry2d_batch(capacity)
+    \batch -> array.CompactArray::push(
+    capacity,
+    Vertex2dI32,
+    batch,
+    q[0]
+  )
+    \batch -> array.CompactArray::push(
+    capacity,
+    Vertex2dI32,
+    batch,
+    q[1]
+  )
+    \batch -> array.CompactArray::push(
+    capacity,
+    Vertex2dI32,
+    batch,
+    q[2]
+  )
+    \batch -> array.CompactArray::push(
+    capacity,
+    Vertex2dI32,
+    batch,
+    q[3]
+  )
 }
 
 fn empty_geometry2d() -> Geometry2dI32 {
   Geometry2dI32 {
-    vertices: <
-      Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0},
+    vertices: <Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0},
       Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0},
       Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0},
       Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0}
@@ -148,92 +197,95 @@ fn empty_geometry2d() -> Geometry2dI32 {
   }
 }
 
-fn empty_geometry2d_batch3() -> Geometry2dBatch3I32 {
-  Geometry2dBatch3I32 {
-    vertices: <
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero(),
-      vertex2d_zero()
-    >,
-    vertex_count: 0
-  }
+fn empty_geometry2d_batch(
+const capacity: count) -> Geometry2dBatchI32(capacity) {
+  array.CompactArray::empty(capacity, Vertex2dI32)
 }
 
-fn append_geometry2d(front: Geometry2dI32, back: Geometry2dI32) -> Geometry2dI32 {
+fn append_geometry2d(
+  front: Geometry2dI32,
+  back: Geometry2dI32
+) -> Geometry2dI32 {
   let front_for_vertices = front;
-let front_for_count = front;
+  let front_for_count = front;
   let back_for_vertices = back;
-let back_for_count = back;
-  let vertices: layout.InlineArray(12, Vertex2dI32) = match front_for_vertices.vertex_count == 0 {
+  let back_for_count = back;
+  let vertices: layout.InlineArray(12, Vertex2dI32) = match front_for_vertices.vertex_count
+    == 0 {
     true => back_for_vertices.vertices,
     false => front_for_vertices.vertices,
   };
-  Geometry2dI32 {vertices: vertices, vertex_count: front_for_count.vertex_count + back_for_count.vertex_count}
-}
-
-fn append_geometry2d_batch3(front: Geometry2dBatch3I32, back: Geometry2dBatch3I32) -> Geometry2dBatch3I32 {
-  let front_for_count = front;
-let front_for_vertices = front;
-  let back_for_count = back;
-let back_for_vertices = back;
-  let count = match front_for_count.vertex_count + back_for_count.vertex_count > 12 {
-    true => 12,
-    false => front_for_count.vertex_count + back_for_count.vertex_count,
-  };
-  Geometry2dBatch3I32 {
-    vertices: match front_for_vertices.vertex_count == 0 {
-      true => back_for_vertices.vertices,
-      false => match front_for_vertices.vertex_count == 4 {
-        true => <
-          front_for_vertices.vertices[0],
-          front_for_vertices.vertices[1],
-          front_for_vertices.vertices[2],
-          front_for_vertices.vertices[3],
-          back_for_vertices.vertices[0],
-          back_for_vertices.vertices[1],
-          back_for_vertices.vertices[2],
-          back_for_vertices.vertices[3],
-          vertex2d_zero(),
-          vertex2d_zero(),
-          vertex2d_zero(),
-          vertex2d_zero()
-        >,
-        false => match front_for_vertices.vertex_count == 8 {
-          true => <
-            front_for_vertices.vertices[0],
-            front_for_vertices.vertices[1],
-            front_for_vertices.vertices[2],
-            front_for_vertices.vertices[3],
-            front_for_vertices.vertices[4],
-            front_for_vertices.vertices[5],
-            front_for_vertices.vertices[6],
-            front_for_vertices.vertices[7],
-            back_for_vertices.vertices[0],
-            back_for_vertices.vertices[1],
-            back_for_vertices.vertices[2],
-            back_for_vertices.vertices[3]
-          >,
-          false => front_for_vertices.vertices,
-        },
-      },
-    },
-    vertex_count: count
+  Geometry2dI32 {
+    vertices: vertices,
+    vertex_count: front_for_count.vertex_count + back_for_count.vertex_count
   }
 }
 
-fn emit_rect2d(x: i32, y: i32, w: i32, h: i32, z: i32, color: i32) -> Geometry2dI32 {
+fn append_geometry2d_batch(
+  const capacity: count,
+  front: Geometry2dBatchI32(capacity),
+  back: Geometry2dBatchI32(capacity)
+) -> Geometry2dBatchI32(capacity) {
+  append_geometry2d_batch_loop(
+    capacity,
+    layout.core.IndexCursor::start(capacity),
+    front,
+    back
+  )
+}
+
+fn append_geometry2d_batch_loop(
+  const capacity: count,
+  cursor: layout.core.IndexCursor(capacity),
+  front: Geometry2dBatchI32(capacity),
+  back: Geometry2dBatchI32(capacity)
+) -> Geometry2dBatchI32(capacity) {
+  let front_then = front;
+  let front_else = front;
+  let back_for_len = back;
+  let back_for_item = back;
+  let back_next = back;
+  match layout.core.IndexCursor::next(capacity, cursor) {
+    Yield(i, next) => match i < back_for_len.len {
+      true => append_geometry2d_batch_loop(
+        capacity,
+        next,
+        array.CompactArray::push(
+          capacity,
+          Vertex2dI32,
+          front_then,
+          back_for_item.items[i]
+        ),
+        back_next
+      ),
+      false => front_else,
+    },
+    Done => front_else,
+  }
+}
+
+fn emit_rect2d(
+  x: i32,
+  y: i32,
+  w: i32,
+  h: i32,
+  z: i32,
+  color: i32
+) -> Geometry2dI32 {
   emit_quad2d(quad2d_rect(x, y, w, h, z, color))
 }
 
-fn emit_rect2d_batch3(x: i32, y: i32, w: i32, h: i32, z: i32, color: i32) -> Geometry2dBatch3I32 {
-  emit_quad2d_batch3(quad2d_rect(x, y, w, h, z, color))
+fn emit_rect2d_batch(
+  const capacity: count,
+  x: i32,
+  y: i32,
+  w: i32,
+  h: i32,
+  z: i32,
+  color: i32
+) -> Geometry2dBatchI32(capacity) {
+  emit_quad2d_batch(
+    capacity,
+    quad2d_rect(x, y, w, h, z, color)
+  )
 }

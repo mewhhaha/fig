@@ -404,6 +404,24 @@ Deno.test("LSP indexes destructured import bindings as imports", async () => {
   assertEquals(referencesAt(result, { line: 0, character: 9 }).length, 1);
 });
 
+Deno.test("LSP treats destructured source imports as bindings not namespaces", async () => {
+  const dir = await Deno.makeTempDir();
+  const importedPath = `${dir}/math.fig`;
+  const rootUri = pathToUri(`${dir}/main.fig`);
+  const importedUri = pathToUri(importedPath);
+  await Deno.writeTextFile(importedPath, "fn add_one(x: i32) -> i32 { x + 1 }");
+  const source = 'const { add_one } = @import("./math.fig");\npub fn main() -> i32 { add_one(1) }';
+  const cache = new AnalysisCache();
+  cache.open(rootUri, 1, source);
+  const result = await cache.reanalyze(rootUri);
+  assert(result);
+
+  assertEquals(result.imports[0]?.alias, undefined);
+  assertEquals(result.imports[0]?.destructured, true);
+  assertEquals(hoverAt(result, positionIn(source, "{ add_one", 1)), undefined);
+  assertEquals(definitionAt(result, positionIn(source, "add_one(1)", 1))[0]?.uri, importedUri);
+});
+
 Deno.test("LSP hover definition and completion use visible bindings", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
@@ -730,6 +748,31 @@ Deno.test("LSP hover renders field and expression type details", async () => {
   assertStringIncludes(fieldHover?.contents.value ?? "", "horizontal position");
 });
 
+Deno.test("LSP hover preserves product constructor type for inferred lets", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "type fn Velocity2d() -> struct {",
+    "  let Velocity2d = {x: i32, y: i32};",
+    "  struct(Velocity2d)",
+    "}",
+    "pub fn main() -> i32 {",
+    "  let speed = 4;",
+    "  let velocity0 = Velocity2d {x: speed, y: 0};",
+    "  velocity0.x",
+    "}",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const bindingHover = hoverAt(result, positionIn(source, "velocity0 =", 1));
+  assertStringIncludes(bindingHover?.contents.value ?? "", "```fig\nvelocity0: Velocity2d\n```");
+
+  const referenceHover = hoverAt(result, positionIn(source, "velocity0.x", 1));
+  assertStringIncludes(referenceHover?.contents.value ?? "", "```fig\nvelocity0: Velocity2d\n```");
+});
+
 Deno.test("LSP hover resolves individual dotted value segments", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
@@ -1040,6 +1083,31 @@ Deno.test("LSP completions cover import strings directives and snippets", async 
   );
 });
 
+Deno.test("LSP completions suggest destructured import bindings from source module", async () => {
+  const dir = await Deno.makeTempDir();
+  const modulePath = `${dir}/geometry.fig`;
+  const uri = pathToUri(`${dir}/main.fig`);
+  await Deno.writeTextFile(
+    modulePath,
+    [
+      "type fn Geometry2dI32() -> type { i32 }",
+      "fn quad2d_rect(x: i32) -> i32 { x }",
+      "const origin: i32 = 0",
+    ].join("\n"),
+  );
+  const source = 'const { Geom } = @import("./geometry.fig");\npub fn main() -> i32 { 0 }';
+  const cache = new AnalysisCache();
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+  assert(!result.diagnostics.some((diagnostic) => diagnostic.code === "parse.syntax"));
+
+  const items = await cache.completionsAt(uri, positionIn(source, "Geom", 2));
+  assert(items.some((item) => item.label === "Geometry2dI32" && item.kind === 7));
+  assert(items.some((item) => item.label === "quad2d_rect" && item.kind === 3));
+  assert(items.some((item) => item.label === "origin" && item.kind === 21));
+});
+
 Deno.test("LSP completions filter checked product members after dot", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
@@ -1132,6 +1200,60 @@ Deno.test("LSP inlay hints render inferred local let types", async () => {
     end: { line: 0, character: 35 },
   });
   assertEquals(firstHintOnly.map((hint) => hint.label), [": range_i32"]);
+});
+
+Deno.test("LSP inlay hints infer product constructors and hide import aliases", async () => {
+  const rootUri = pathToUri("/tmp/project/main.fig");
+  const geometryUri = pathToUri("/tmp/project/geometry.fig");
+  const cache = new AnalysisCache();
+  cache.open(
+    geometryUri,
+    1,
+    [
+      "type fn Geometry2dBatchI32(capacity: count) -> struct {",
+      "  let Geometry2dBatchI32 = {len: i32};",
+      "  struct(Geometry2dBatchI32)",
+      "}",
+      "fn empty_geometry2d_batch(const capacity: count) -> Geometry2dBatchI32(capacity) {",
+      "  Geometry2dBatchI32 {len: 0}",
+      "}",
+      "fn append_geometry2d_batch(",
+      "  front: Geometry2dBatchI32(capacity),",
+      "  back: Geometry2dBatchI32(capacity)",
+      ") -> Geometry2dBatchI32(capacity) {",
+      "  front",
+      "}",
+    ].join("\n"),
+  );
+  const source = [
+    'const { Geometry2dBatchI32, empty_geometry2d_batch, append_geometry2d_batch } = @import("./geometry.fig");',
+    "type fn Velocity2d() -> struct {",
+    "  let Velocity2d = {x: i32, y: i32};",
+    "  struct(Velocity2d)",
+    "}",
+    "pub fn main() -> i32 {",
+    "  let speed = 4;",
+    "  let velocity0 = Velocity2d {x: speed, y: 0};",
+    "  let acc0 = empty_geometry2d_batch(3);",
+    "  let acc1 = append_geometry2d_batch(acc0, acc0);",
+    "  velocity0.x + acc1.len",
+    "}",
+  ].join("\n");
+  cache.open(rootUri, 1, source);
+  const result = await cache.reanalyze(rootUri);
+  assert(result);
+
+  const labels = inlayHintsAt(result, {
+    start: { line: 0, character: 0 },
+    end: { line: 20, character: 0 },
+  }).map((hint) => hint.label);
+  assert(labels.includes(": Velocity2d"));
+  assertEquals(labels.filter((label) => label === ": Geometry2dBatchI32(3)").length, 2);
+  assertEquals(labels.some((label) => label.includes("__import")), false);
+
+  const hover = hoverAt(result, positionIn(source, "acc0 =", 1));
+  assertStringIncludes(hover?.contents.value ?? "", "```fig\nacc0: Geometry2dBatchI32(3)\n```");
+  assertEquals(hover?.contents.value.includes("__import"), false);
 });
 
 Deno.test("LSP server advertises and returns inlay hints", async () => {

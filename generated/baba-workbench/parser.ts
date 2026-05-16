@@ -9,7 +9,7 @@ export interface LiteralParseNode { kind: "literal"; value: string; text: string
 export interface ParseDiagnostic { message: string; span?: { start: number; end: number }; token?: Token; }
 export interface ParseResult { ok: boolean; tree: RuleParseNode | null; ast: AstNode | null; diagnostics: ParseDiagnostic[]; tokens: Token[]; }
 
-export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeAssociatedTailAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | ContractFnDeclAstNode | ContractReturnSigAstNode | ContractResultKindAstNode | BranchHintAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ImportBindingListAstNode | ImportBindingItemsAstNode | ImportBindingTailAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | DoExprAstNode | DoStrategyAstNode | DoBlockAstNode | DoBlockItemAstNode | DoBindStmtAstNode | ConstFnAstNode | ConstFnParamsAstNode | ConstFnParamListAstNode | PipeBindAstNode | PipeBindAtomAstNode | IfExprAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | PunnedShapeValueSlotAstNode | ShapeValueSlotKeyAstNode | SpreadSlotAstNode | SlotPositionAstNode | CollectionValueAstNode | CollectionValueItemsAstNode | CollectionValueTailAstNode | CollectionSpreadSlotAstNode | CollectionOverrideSlotAstNode | CollectionExprAstNode | CollectionPipeBindAstNode | CollectionPipeBindAtomAstNode | CollectionBinaryAstNode | TupleValueAstNode | TupleValueItemsAstNode | TupleValueTailAstNode | TupleSpreadSlotAstNode | TupleOverrideSlotAstNode | TupleValueRepeatAstNode | PatternAstNode | PatternIdentAstNode | PatternArgsAstNode | TuplePatternAstNode | TuplePatternItemsAstNode | TuplePatternTailAstNode | ParamsAstNode | ParamAstNode | ConstTypeFnParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | TypeUnionAstNode | TypeAtomAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotKeyAstNode | ShapeSlotBodyAstNode | TupleTypeAstNode | TupleTypeBodyAstNode | TupleTypeTailAstNode | TupleTypeMoreAstNode | TupleTypeRepeatAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeTupleAstNode | TypeTupleBodyAstNode | TypeTupleTailAstNode | TypeTupleMoreAstNode | TypeTupleRepeatAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | TypeRepeatCountAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | OpNoCollectionCloseAstNode | TypeOpAstNode;
+export type AstNode = ProgramAstNode | FieldNameAstNode | DeclAstNode | TypeFnDeclAstNode | TypeBlockAstNode | TypeBlockItemAstNode | TypeLetDeclAstNode | TypeExprAstNode | TypeMatchAstNode | TypeArmAstNode | TypePatternAstNode | TypeBinaryAstNode | TypeCallAstNode | TypePrimaryAstNode | TypeOperatorDescriptorAstNode | TypeOperatorTargetAstNode | TypeAssociatedTailAstNode | TypeQualifiedTailAstNode | TypeBuilderNameAstNode | StaticBuiltinAstNode | TypeMemberAstNode | TypeInlineMemberAstNode | TypeExprArgsAstNode | FnDeclAstNode | FnTailAstNode | ContractFnDeclAstNode | ContractReturnSigAstNode | ContractResultKindAstNode | BranchHintAstNode | FnNameAstNode | FnSigAstNode | ConstDeclAstNode | ImportBindingListAstNode | ImportBindingItemsAstNode | ImportBindingTailAstNode | ConstValueAstNode | TopLetDeclAstNode | TopLetTailAstNode | BlockAstNode | BlockStmtAstNode | BlockLetDeclAstNode | BlockLetTailAstNode | BlockProofConstDeclAstNode | ExprAstNode | DoExprAstNode | DoStrategyAstNode | DoBlockAstNode | DoBlockBodyAstNode | DoBindStmtAstNode | DoExprOrFinalAstNode | ConstFnAstNode | ConstFnParamsAstNode | ConstFnParamListAstNode | PipeBindAstNode | PipeBindAtomAstNode | IfExprAstNode | MatchExprAstNode | ArmAstNode | PipeBindNameAstNode | BinaryAstNode | CallAstNode | PrimaryAstNode | PlaceholderAstNode | ProductConstructorTailAstNode | ParenExprAstNode | ShapeValueAstNode | ShapeValueItemsAstNode | RangeAstNode | ShapeValueTailAstNode | ShapeValueSlotAstNode | PunnedShapeValueSlotAstNode | ShapeValueSlotKeyAstNode | SpreadSlotAstNode | SlotPositionAstNode | CollectionValueAstNode | CollectionValueItemsAstNode | CollectionValueTailAstNode | CollectionSpreadSlotAstNode | CollectionOverrideSlotAstNode | CollectionExprAstNode | CollectionPipeBindAstNode | CollectionPipeBindAtomAstNode | CollectionBinaryAstNode | TupleValueAstNode | TupleValueItemsAstNode | TupleValueTailAstNode | TupleSpreadSlotAstNode | TupleOverrideSlotAstNode | TupleValueRepeatAstNode | PatternAstNode | PatternIdentAstNode | PatternArgsAstNode | TuplePatternAstNode | TuplePatternItemsAstNode | TuplePatternTailAstNode | ParamsAstNode | ParamAstNode | ConstTypeFnParamAstNode | ParamTailAstNode | ArgsAstNode | TypeAstNode | TypeUnionAstNode | TypeAtomAstNode | FnTypeAstNode | TypeArgsAstNode | TypeParamsDeclAstNode | TypeParamDeclAstNode | TypeParamKindAstNode | TypeKindTailAstNode | TypeConstructorTailAstNode | TypeResultSigAstNode | TypeResultKindAstNode | TypeAnnAstNode | ReturnSigAstNode | EffectRowAstNode | ShapeTypeAstNode | ShapeTypeBodyAstNode | ShapeTypeTailAstNode | ShapeSlotAstNode | ShapeSlotKeyAstNode | ShapeSlotBodyAstNode | TupleTypeAstNode | TupleTypeBodyAstNode | TupleTypeTailAstNode | TupleTypeMoreAstNode | TupleTypeRepeatAstNode | TypeShapeAstNode | TypeShapeBodyAstNode | TypeShapeTailAstNode | TypeShapeSlotAstNode | TypeShapeSlotBodyAstNode | TypeShapeAnonSlotBodyAstNode | TypeTupleAstNode | TypeTupleBodyAstNode | TypeTupleTailAstNode | TypeTupleMoreAstNode | TypeTupleRepeatAstNode | TypeNonFnExprAstNode | TypeShapeRepeatAstNode | TypeRepeatCountAstNode | VisibilityAstNode | LiteralAstNode | BoolAstNode | OpAstNode | OpNoCollectionCloseAstNode | TypeOpAstNode;
 
 export interface ProgramAstNode {
   kind: "Program";
@@ -340,9 +340,9 @@ export interface DoBlockAstNode {
   children: AstNode[];
 }
 
-export interface DoBlockItemAstNode {
-  kind: "DoBlockItem";
-  type: "DoBlockItem";
+export interface DoBlockBodyAstNode {
+  kind: "DoBlockBody";
+  type: "DoBlockBody";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -350,6 +350,13 @@ export interface DoBlockItemAstNode {
 export interface DoBindStmtAstNode {
   kind: "DoBindStmt";
   type: "DoBindStmt";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface DoExprOrFinalAstNode {
+  kind: "DoExprOrFinal";
+  type: "DoExprOrFinal";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -1070,7 +1077,7 @@ const rules: Record<string, Expression> = {
   "FnSig": { kind: "sequence", items: [{ kind: "literal", value: "fn" }, { kind: "ref", name: "FnName" }, { kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "Params" } }, { kind: "literal", value: ")" }, { kind: "optional", expression: { kind: "ref", name: "ReturnSig" } }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }, { kind: "literal", value: ";" }] },
   "ConstDecl": { kind: "sequence", items: [{ kind: "literal", value: "const" }, { kind: "choice", options: [{ kind: "ref", name: "ImportBindingList" }, { kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Type" }, { kind: "optional", expression: { kind: "ref", name: "EffectRow" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "optional", expression: { kind: "ref", name: "TypeAnn" } }] }] }, { kind: "literal", value: "=" }, { kind: "ref", name: "ConstValue" }, { kind: "optional", expression: { kind: "literal", value: ";" } }] },
   "ImportBindingList": { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "ref", name: "ImportBindingItems" }] },
-  "ImportBindingItems": { kind: "choice", options: [{ kind: "literal", value: "}" }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "ImportBindingTail" }] }] },
+  "ImportBindingItems": { kind: "choice", options: [{ kind: "literal", value: "}" }, { kind: "sequence", items: [{ kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }] }, { kind: "ref", name: "ImportBindingTail" }] }] },
   "ImportBindingTail": { kind: "choice", options: [{ kind: "literal", value: "}" }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "literal", value: "}" }] }, { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "ImportBindingItems" }] }] },
   "ConstValue": { kind: "ref", name: "Expr" },
   "TopLetDecl": { kind: "sequence", items: [{ kind: "literal", value: "let" }, { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "TuplePattern" }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "ref", name: "FieldName" }, { kind: "ref", name: "Type" }, { kind: "literal", value: "=" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] }, { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "TopLetTail" }] }] }] },
@@ -1083,9 +1090,10 @@ const rules: Record<string, Expression> = {
   "Expr": { kind: "choice", options: [{ kind: "ref", name: "ConstFn" }, { kind: "ref", name: "PipeBind" }] },
   "DoExpr": { kind: "sequence", items: [{ kind: "literal", value: "do" }, { kind: "ref", name: "DoStrategy" }, { kind: "ref", name: "DoBlock" }] },
   "DoStrategy": { kind: "sequence", items: [{ kind: "ref", name: "StaticBuiltin" }, { kind: "literal", value: "(" }, { kind: "ref", name: "TypeExpr" }, { kind: "literal", value: ")" }] },
-  "DoBlock": { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "repeat", expression: { kind: "ref", name: "DoBlockItem" } }, { kind: "optional", expression: { kind: "ref", name: "Expr" } }, { kind: "literal", value: "}" }] },
-  "DoBlockItem": { kind: "choice", options: [{ kind: "ref", name: "DoBindStmt" }, { kind: "ref", name: "BlockLetDecl" }, { kind: "ref", name: "BlockProofConstDecl" }] },
+  "DoBlock": { kind: "sequence", items: [{ kind: "literal", value: "{" }, { kind: "optional", expression: { kind: "ref", name: "DoBlockBody" } }, { kind: "literal", value: "}" }] },
+  "DoBlockBody": { kind: "choice", options: [{ kind: "sequence", items: [{ kind: "ref", name: "DoBindStmt" }, { kind: "optional", expression: { kind: "ref", name: "DoBlockBody" } }] }, { kind: "ref", name: "DoExprOrFinal" }, { kind: "sequence", items: [{ kind: "ref", name: "BlockLetDecl" }, { kind: "optional", expression: { kind: "ref", name: "DoBlockBody" } }] }, { kind: "sequence", items: [{ kind: "ref", name: "BlockProofConstDecl" }, { kind: "optional", expression: { kind: "ref", name: "DoBlockBody" } }] }] },
   "DoBindStmt": { kind: "sequence", items: [{ kind: "ref", name: "DoBindName" }, { kind: "ref", name: "Expr" }, { kind: "literal", value: ";" }] },
+  "DoExprOrFinal": { kind: "sequence", items: [{ kind: "ref", name: "Expr" }, { kind: "optional", expression: { kind: "sequence", items: [{ kind: "literal", value: ";" }, { kind: "optional", expression: { kind: "ref", name: "DoBlockBody" } }] } }] },
   "ConstFn": { kind: "sequence", items: [{ kind: "literal", value: "\\" }, { kind: "ref", name: "ConstFnParams" }, { kind: "literal", value: "->" }, { kind: "choice", options: [{ kind: "ref", name: "Block" }, { kind: "ref", name: "Expr" }] }] },
   "ConstFnParams": { kind: "choice", options: [{ kind: "ref", name: "LowerIdent" }, { kind: "sequence", items: [{ kind: "literal", value: "(" }, { kind: "optional", expression: { kind: "ref", name: "ConstFnParamList" } }, { kind: "literal", value: ")" }] }] },
   "ConstFnParamList": { kind: "sequence", items: [{ kind: "ref", name: "LowerIdent" }, { kind: "repeat", expression: { kind: "sequence", items: [{ kind: "literal", value: "," }, { kind: "ref", name: "LowerIdent" }] } }, { kind: "optional", expression: { kind: "literal", value: "," } }] },
@@ -1538,10 +1546,10 @@ export function projectParseNode(node: ParseNode): AstNode | null {
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
-    case "DoBlockItem":
+    case "DoBlockBody":
       return {
-        kind: "DoBlockItem",
-        type: "DoBlockItem",
+        kind: "DoBlockBody",
+        type: "DoBlockBody",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };
@@ -1549,6 +1557,13 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "DoBindStmt",
         type: "DoBindStmt",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
+      };
+    case "DoExprOrFinal":
+      return {
+        kind: "DoExprOrFinal",
+        type: "DoExprOrFinal",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode => child !== null),
       };

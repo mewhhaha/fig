@@ -85,6 +85,7 @@ export interface AnalysisResult {
 export interface IndexedImport {
   module: string;
   alias?: string;
+  destructured?: boolean;
   uri?: string;
   range: Range;
 }
@@ -254,6 +255,8 @@ export class AnalysisCache {
   async completionsAt(uri: string, position: Position): Promise<CompletionItem[]> {
     const result = this.get(uri) ?? await this.reanalyze(uri);
     if (!result) return [];
+    const importCompletions = await this.destructuredImportCompletionsAt(result, position);
+    if (importCompletions) return importCompletions;
     const memberCompletions = await this.memberCompletionsAt(result, position);
     return memberCompletions ?? completionsAt(result, position);
   }
@@ -326,9 +329,7 @@ export class AnalysisCache {
   ): Promise<IndexedSymbol | undefined> {
     const [prefix, ...rest] = symbol.name.split(".");
     if (!rest.length) return symbol;
-    const imported = result.imports.find((item) =>
-      item.uri && importPrefix(result, item) === prefix
-    );
+    const imported = result.imports.find((item) => item.uri && importPrefix(item) === prefix);
     if (!imported?.uri) return symbol;
     const importedResult = await this.resultForUri(imported.uri);
     return importedResult?.symbols.find((item) =>
@@ -399,6 +400,38 @@ export class AnalysisCache {
       : await this.repairedMemberCompletionResult(result, context);
     if (!checked) return undefined;
     return memberCompletionItems(checked, context);
+  }
+
+  private async destructuredImportCompletionsAt(
+    result: AnalysisResult,
+    position: Position,
+  ): Promise<CompletionItem[] | undefined> {
+    const context = destructuredImportCompletionContext(
+      result.document.text,
+      result.mapper.offsetAt(position),
+    );
+    if (!context) return undefined;
+    const source = await this.moduleText(result.document.uri, context.module);
+    if (!source) return [];
+    try {
+      const program = await parse(source.text, { sourceId: source.sourceId });
+      const selected = new Set(context.selectedNames);
+      const items: CompletionItem[] = [];
+      for (const decl of program.declarations) {
+        const name = declarationCompletionName(decl);
+        if (!name || selected.has(name)) continue;
+        items.push({
+          label: name,
+          kind: completionKind(decl.kind),
+          detail: detailForDecl(decl, program),
+          documentation: "doc" in decl ? decl.doc : undefined,
+        });
+        selected.add(name);
+      }
+      return dedupeCompletions(items);
+    } catch {
+      return [];
+    }
   }
 
   private async repairedMemberCompletionResult(
@@ -581,30 +614,36 @@ export function documentSymbols(result: AnalysisResult): DocumentSymbol[] {
 export function inlayHintsAt(result: AnalysisResult, range: Range): InlayHint[] {
   if (!result.program) return [];
   const hints: InlayHint[] = [];
-  const visitBlock = (expr: Expr | undefined) => {
+  const visitBlock = (expr: Expr | undefined, localTypes = new Map<string, string>()) => {
     if (!expr || expr.kind !== "block") return;
+    const blockTypes = new Map(localTypes);
     for (const stmt of expr.statements) {
       if (stmt.kind === "let") {
-        const hint = inlayHintForLet(result, stmt);
+        const hint = inlayHintForLet(result, stmt, blockTypes);
         if (hint && positionInRange(hint.position, range)) hints.push(hint);
-        visitExpr(stmt.value);
+        visitExpr(stmt.value, blockTypes);
+        recordStatementTypes(stmt, result.program!, blockTypes);
       } else if (stmt.kind === "destructure_let") {
-        visitExpr(stmt.value);
+        visitExpr(stmt.value, blockTypes);
+        recordStatementTypes(stmt, result.program!, blockTypes);
       }
     }
-    visitExpr(expr.expr);
+    visitExpr(expr.expr, blockTypes);
   };
-  const visitExpr = (expr: Expr | undefined) => {
+  const visitExpr = (expr: Expr | undefined, localTypes = new Map<string, string>()) => {
     if (!expr) return;
     if (expr.kind === "block") {
-      visitBlock(expr);
+      visitBlock(expr, localTypes);
       return;
     }
-    for (const child of childExprs(expr)) visitExpr(child);
+    for (const child of childExprs(expr)) visitExpr(child, localTypes);
   };
   for (const decl of result.program.declarations) {
-    if (decl.kind === "fn") visitBlock(decl.body);
-    else if (decl.kind === "let" || decl.kind === "const") visitExpr(decl.value);
+    if (decl.kind === "fn") {
+      visitBlock(decl.body, new Map(decl.params.map((param) => [param.name, param.type])));
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      visitExpr(decl.value);
+    }
   }
   return hints;
 }
@@ -1182,7 +1221,8 @@ function symbolsForExpr(
     case "do":
       return [
         ...expr.statements.flatMap((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? symbolsForExpr(uri, stmt.value, source, mapper, container, program, localTypes)
             : []
         ),
@@ -1291,16 +1331,22 @@ function statementValue(stmt: Statement): Expr | undefined {
   return stmt.kind === "let" || stmt.kind === "destructure_let" ? stmt.value : undefined;
 }
 
-function inlayHintForLet(result: AnalysisResult, stmt: Statement): InlayHint | undefined {
-  if (stmt.kind !== "let" || !stmt.type || hasExplicitLetAnnotation(result, stmt)) {
+function inlayHintForLet(
+  result: AnalysisResult,
+  stmt: Statement,
+  localTypes: Map<string, string>,
+): InlayHint | undefined {
+  if (stmt.kind !== "let" || hasExplicitLetAnnotation(result, stmt)) {
     return undefined;
   }
+  const type = stmt.type ?? expressionTypeFromProgram(stmt.value, result.program, localTypes);
+  if (!type) return undefined;
   const range = rangeFromSpan(spanForStatementName(stmt, stmt.name), result.mapper) ??
     rangeFromFound(findNameRange(result.document.text, stmt.name), result.mapper);
   if (!range) return undefined;
   return {
     position: range.end,
-    label: `: ${stmt.type}`,
+    label: `: ${displayType(type)}`,
     kind: InlayHintKind.Type,
   };
 }
@@ -1427,6 +1473,7 @@ function expressionTypeFromProgram(
   }
   if (expr.kind === "range") return "range_i32";
   if (expr.kind === "shape") {
+    if (expr.inferredType) return expr.inferredType;
     return shapeExpressionType(
       expr,
       (value) => expressionTypeFromProgram(value, program, localTypes),
@@ -1480,7 +1527,7 @@ function indexSource(uri: string, source: string, mapper: PositionMapper): Index
   const destructuredImportRegex = /\bconst\s*\{\s*([^}]*)\}\s*=\s*@import\s*\(\s*"([^"]+)"/g;
   for (const match of source.matchAll(destructuredImportRegex)) {
     const listStart = match.index + match[0].indexOf(match[1]);
-    const bindingRegex = /\b[a-z_][\w]*\b/g;
+    const bindingRegex = /\b[A-Za-z_][\w]*\b/g;
     for (const binding of match[1].matchAll(bindingRegex)) {
       const start = listStart + (binding.index ?? 0);
       const name = binding[0];
@@ -1509,8 +1556,32 @@ function indexSource(uri: string, source: string, mapper: PositionMapper): Index
 
 function indexImports(uri: string, source: string, mapper: PositionMapper): IndexedImport[] {
   const imports: IndexedImport[] = [];
+  const matchedImportOffsets = new Set<number>();
+  const namespaceImportRegex = /\bconst\s+([a-z_][\w]*)\b[^=\n]*=\s*@import\s*\(\s*"([^"]+)"/g;
+  for (const match of source.matchAll(namespaceImportRegex)) {
+    const importOffset = match.index + match[0].indexOf("@import");
+    matchedImportOffsets.add(importOffset);
+    const start = match.index + match[0].indexOf(match[2]);
+    imports.push({
+      module: match[2],
+      alias: match[1],
+      range: mapper.range(start, start + match[2].length),
+    });
+  }
+  const destructuredImportRegex = /\bconst\s*\{\s*[^}]*\}\s*=\s*@import\s*\(\s*"([^"]+)"/g;
+  for (const match of source.matchAll(destructuredImportRegex)) {
+    const importOffset = match.index + match[0].indexOf("@import");
+    matchedImportOffsets.add(importOffset);
+    const start = match.index + match[0].indexOf(match[1]);
+    imports.push({
+      module: match[1],
+      destructured: true,
+      range: mapper.range(start, start + match[1].length),
+    });
+  }
   const sourceImportRegex = /@import\s*\(\s*"([^"]+)"\s*(?:,\s*alias\s*:\s*([A-Za-z_][\w]*))?/g;
   for (const match of source.matchAll(sourceImportRegex)) {
+    if (matchedImportOffsets.has(match.index)) continue;
     const start = match.index + match[0].indexOf(match[1]);
     imports.push({
       module: match[1],
@@ -1519,6 +1590,43 @@ function indexImports(uri: string, source: string, mapper: PositionMapper): Inde
     });
   }
   return imports;
+}
+
+interface DestructuredImportCompletionContext {
+  module: string;
+  selectedNames: string[];
+}
+
+function destructuredImportCompletionContext(
+  source: string,
+  offset: number,
+): DestructuredImportCompletionContext | undefined {
+  const importStartRegex = /\bconst\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = importStartRegex.exec(source))) {
+    const open = source.indexOf("{", match.index);
+    if (open < 0 || open > offset) continue;
+    const close = source.indexOf("}", open + 1);
+    if (close < 0 || offset > close) continue;
+    const after = source.slice(close + 1);
+    const importMatch = after.match(/^\s*=\s*@import\s*\(\s*"([^"]+)"/);
+    if (!importMatch) continue;
+    const names = source.slice(open + 1, close)
+      .match(/\b[A-Za-z_][\w]*\b/g) ?? [];
+    const word = wordAt(source, offset);
+    return {
+      module: importMatch[1],
+      selectedNames: names.filter((name) => name !== word),
+    };
+  }
+  return undefined;
+}
+
+function declarationCompletionName(decl: Declaration): string | undefined {
+  return decl.kind === "fn" || decl.kind === "contract" || decl.kind === "const" ||
+      decl.kind === "let" || decl.kind === "type"
+    ? decl.name
+    : undefined;
 }
 
 function indexReferences(uri: string, source: string, mapper: PositionMapper): IndexedReference[] {
@@ -1535,7 +1643,7 @@ function indexReferences(uri: string, source: string, mapper: PositionMapper): I
   }
   for (const match of source.matchAll(/\bconst\s*\{\s*([^}]*)\}\s*=\s*@import\s*\(/g)) {
     const listStart = match.index + match[0].indexOf(match[1]);
-    for (const binding of match[1].matchAll(/\b[a-z_][\w]*\b/g)) {
+    for (const binding of match[1].matchAll(/\b[A-Za-z_][\w]*\b/g)) {
       declarationStarts.add(listStart + (binding.index ?? 0));
     }
   }
@@ -1631,18 +1739,25 @@ function renderHoverMarkdown(symbol: IndexedSymbol): string {
 
 function hoverSignature(symbol: IndexedSymbol): string | undefined {
   if (symbol.detail?.startsWith("fn ") || symbol.detail?.startsWith("type fn ")) {
-    return symbol.detail;
+    return displayType(symbol.detail);
   }
   if (symbol.kind === "param" || symbol.kind === "local") {
-    return symbol.detail ? `${symbol.name}: ${symbol.detail}` : symbol.name;
+    return symbol.detail ? `${symbol.name}: ${displayType(symbol.detail)}` : symbol.name;
   }
   if (symbol.kind === "const" || symbol.kind === "let") {
-    return symbol.detail ?? symbol.name;
+    return symbol.detail ? displayType(symbol.detail) : symbol.name;
   }
   if (symbol.kind === "member" || symbol.kind === "variant") {
-    return symbol.detail ? `${symbol.name}: ${symbol.detail}` : symbol.name;
+    return symbol.detail ? `${symbol.name}: ${displayType(symbol.detail)}` : symbol.name;
   }
-  return symbol.detail;
+  return symbol.detail ? displayType(symbol.detail) : undefined;
+}
+
+function displayType(type: string): string {
+  return type.replace(
+    /(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)+([A-Z][A-Za-z0-9_]*)(?![A-Za-z0-9_])/g,
+    "$1",
+  );
 }
 
 function renderDocumentation(documentation: string | undefined): string | undefined {
@@ -1826,17 +1941,15 @@ function equivalentSymbol(
   if (!rest.length || rest.join(".") !== target.name || candidate.kind !== target.kind) {
     return false;
   }
-  return result.imports.some((item) =>
-    item.uri === target.uri && importPrefix(result, item) === prefix
-  );
+  return result.imports.some((item) => {
+    const importedPrefix = importPrefix(item);
+    return item.uri === target.uri && importedPrefix !== undefined && importedPrefix === prefix;
+  });
 }
 
-function importPrefix(result: AnalysisResult, item: IndexedImport): string {
+function importPrefix(item: IndexedImport): string | undefined {
   if (item.alias) return item.alias;
-  const binding = result.symbols.find((symbol) =>
-    symbol.kind === "import" && symbol.detail === item.module
-  );
-  if (binding) return binding.name;
+  if (item.destructured) return undefined;
   const file = item.module.split("/").at(-1) ?? item.module;
   return file.replace(/\.fig$/, "").split(".").at(-1) ?? file;
 }
@@ -1852,10 +1965,16 @@ function sameSymbolIdentity(candidate: IndexedSymbol, target: IndexedSymbol): bo
 }
 
 function resolveName(result: AnalysisResult, name: string): IndexedSymbol | undefined {
-  return result.symbols.find((item) => item.name === name) ??
-    result.symbols.find((item) => item.name === name.split(".")[0]) ??
-    result.symbols.find((item) => item.name === lastSegment(name)) ??
-    result.symbols.find((item) => item.name.endsWith(`.${lastSegment(name)}`));
+  return preferredResolvedSymbol(result.symbols.filter((item) => item.name === name)) ??
+    preferredResolvedSymbol(result.symbols.filter((item) => item.name === name.split(".")[0])) ??
+    preferredResolvedSymbol(result.symbols.filter((item) => item.name === lastSegment(name))) ??
+    preferredResolvedSymbol(
+      result.symbols.filter((item) => item.name.endsWith(`.${lastSegment(name)}`)),
+    );
+}
+
+function preferredResolvedSymbol(symbols: IndexedSymbol[]): IndexedSymbol | undefined {
+  return symbols.find((item) => item.kind !== "import") ?? symbols[0];
 }
 
 function resolveNameAtOffset(
@@ -2486,7 +2605,8 @@ function childExprs(expr: Expr): Expr[] {
     case "do":
       return [
         ...expr.statements.flatMap((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? [stmt.value]
             : []
         ),
@@ -2660,6 +2780,7 @@ function expressionType(expr: Expr, result: AnalysisResult): string | undefined 
   }
   if (expr.kind === "range") return "range_i32";
   if (expr.kind === "shape") {
+    if (expr.inferredType) return expr.inferredType;
     return shapeExpressionType(expr, (value) => expressionType(value, result));
   }
   return undefined;

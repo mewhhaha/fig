@@ -307,10 +307,17 @@ function collectImportBindingDecls(root: RuleParseNode | null): Map<number, Impo
     const bindingList = descendantRules(decl, "ImportBindingList")[0];
     const stringToken = descendantTokens(decl, "String")[0];
     if (!bindingList || !stringToken || !containsImportBuiltin(decl)) continue;
-    const names = descendantTokens(bindingList, "LowerIdent").map((item) => item.text);
+    const names = [
+      ...descendantTokens(bindingList, "LowerIdent"),
+      ...descendantTokens(bindingList, "PascalIdent"),
+    ].sort((a, b) => a.span.start - b.span.start).map((item) => item.text);
+    const flat = `const { ${names.join(", ")} } = @import(${stringToken.text});`;
+    const text = flat.length <= MAX_LINE_WIDTH
+      ? flat
+      : `const {\n  ${names.join(",\n  ")}\n} = @import(${stringToken.text});`;
     result.set(decl.span.start, {
       end: decl.span.end,
-      text: `const { ${names.join(", ")} } = @import(${stringToken.text});`,
+      text,
     });
   }
   return result;

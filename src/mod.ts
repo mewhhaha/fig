@@ -837,7 +837,10 @@ function referencedDeclarationNames(
         add(expr.strategy.name);
         visitTypeExpr(expr.strategy.effect);
         for (const stmt of expr.statements) {
-          if (stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let") {
+          if (
+            stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
+          ) {
             visitExpr(stmt.value);
           } else visitTypeExpr(stmt.value);
         }
@@ -1412,7 +1415,8 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
       return withMeta(expr, {
         ...expr,
         statements: expr.statements.map((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "let" || stmt.kind === "destructure_let"
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
             ? { ...stmt, value: qualifyExpr(stmt.value, alias, names) }
             : stmt
         ),

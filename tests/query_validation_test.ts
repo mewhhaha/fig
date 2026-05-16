@@ -102,6 +102,39 @@ Deno.test("highlight query captures static builtin identifiers", async () => {
   );
 });
 
+Deno.test("highlight query captures type function and const declaration names", async () => {
+  await Parser.init();
+  const language = await Language.load(parserUrl.pathname);
+  const parser = new Parser();
+  parser.setLanguage(language);
+  const source = `
+type fn Hello() -> type { i32 }
+const answer: i32 = 42;
+const { map4_i32, Geometry2dI32 } = @import("prelude.array_static");
+`;
+  const tree = parser.parse(source);
+  if (!tree) throw new Error("failed to parse declaration highlight smoke source");
+  const query = new Query(language, await Deno.readTextFile(new URL("highlights.scm", queriesUrl)));
+
+  const captures = query.captures(tree.rootNode).map((capture) => ({
+    name: capture.name,
+    text: capture.node.text,
+  }));
+
+  assertEquals(
+    captures.filter((capture) => capture.name === "type.definition").map((capture) => capture.text),
+    ["Hello", "Geometry2dI32"],
+  );
+  assertEquals(
+    captures.some(({ name, text }) => name === "constant" && text === "map4_i32"),
+    true,
+  );
+  assertEquals(
+    captures.some(({ name, text }) => name === "constant" && text === "answer"),
+    true,
+  );
+});
+
 Deno.test("highlight query captures type identifiers inside union types", async () => {
   await Parser.init();
   const language = await Language.load(parserUrl.pathname);

@@ -1,14 +1,443 @@
+const layout = @import("prelude.layout");
+
 type fn InlineArray(n: count, component: type) -> type {
   let InlineArray = {n*component};
   struct(InlineArray)
 }
 
-type fn ComponentStore(n: count, component: type) -> type {
-  InlineArray(n, component)
+type fn Batch(capacity: count, component: type) -> type {
+  layout.InlineArray(capacity, component)
 }
 
-type fn ComponentCountFor(spec: const) -> type {
-  3
+type fn BatchIndex(capacity: count) -> type {
+  layout.core.Index(capacity)
+}
+
+type fn EntityWorld(capacity: count, entity: type) -> type {
+  let EntityWorld = {
+    entities: Batch(capacity, entity),
+    len: i32
+  };
+  struct(EntityWorld)
+}
+
+fn batch_capacity(
+  const capacity: count,
+  const component: type,
+  batch: Batch(capacity, component)
+) -> i32 {
+  capacity
+}
+
+fn batch_fill(
+  const capacity: count,
+  const component: type,
+  value: component
+) -> Batch(capacity, component) {
+  layout.InlineArray::fill(capacity, component, value)
+}
+
+fn batch_set(
+  const capacity: count,
+  const component: type,
+  batch: Batch(capacity, component),
+  index: BatchIndex(capacity),
+  value: component
+) -> Batch(capacity, component) {
+  layout.InlineArray::set(
+    capacity,
+    component,
+    batch,
+    index,
+    value
+  )
+}
+
+fn batch_map(
+  const capacity: count,
+  const component: type,
+  const result: type,
+  batch: Batch(capacity, component),
+  const step: fn(item: component) -> result
+) -> Batch(capacity, result) {
+  layout.InlineArray::map(
+    capacity,
+    component,
+    result,
+    batch,
+    step
+  )
+}
+
+fn batch_map_with_state(
+  const capacity: count,
+  const component: type,
+  const result: type,
+  const state: type,
+  batch: Batch(capacity, component),
+  state_value: state,
+  const step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    state_value: state
+  ) -> result
+) -> Batch(capacity, result) {
+  layout.InlineArray::imap_with_state(
+    capacity,
+    component,
+    result,
+    state,
+    batch,
+    state_value,
+    step
+  )
+}
+
+fn batch_fold(
+  const capacity: count,
+  const component: type,
+  const accumulator: type,
+  batch: Batch(capacity, component),
+  initial: accumulator,
+  const step: fn(acc: accumulator, item: component) -> accumulator
+) -> accumulator {
+  batch_fold_loop(
+    capacity,
+    component,
+    accumulator,
+    layout.core.IndexCursor::start(capacity),
+    batch,
+    initial,
+    step
+  )
+}
+
+fn batch_fold_loop(
+  const capacity: count,
+  const component: type,
+  const accumulator: type,
+  cursor: layout.core.IndexCursor(capacity),
+  batch: Batch(capacity, component),
+  acc: accumulator,
+  const step: fn(acc: accumulator, item: component) -> accumulator
+) -> accumulator {
+  let batch_then = batch;
+  let batch_else = batch;
+  let acc_then = acc;
+  let acc_else = acc;
+  let batch_item = batch_then;
+  let batch_next = batch_then;
+  match layout.core.IndexCursor::next(capacity, cursor) {
+    Yield(i, next) => batch_fold_loop(
+      capacity,
+      component,
+      accumulator,
+      next,
+      batch_next,
+      step(acc_then, batch_item[i]),
+      step
+    ),
+    Done => acc_else,
+  }
+}
+
+fn EntityWorld::from_batch(
+  const capacity: count,
+  const entity: type,
+  entities: Batch(capacity, entity)
+) -> EntityWorld(capacity, entity) {
+  EntityWorld {entities: entities, len: capacity}
+}
+
+fn world_from_batch(
+  const capacity: count,
+  const entity: type,
+  entities: Batch(capacity, entity)
+) -> EntityWorld(capacity, entity) {
+  EntityWorld::from_batch(capacity, entity, entities)
+}
+
+fn world_map_with_state(
+  world: EntityWorld(capacity, entity),
+  state_value: state,
+  const step: fn(
+    index: BatchIndex(capacity),
+    item: entity,
+    state_value: state
+  ) -> result
+) -> EntityWorld(capacity, result) {
+  EntityWorld {
+    entities: batch_map_with_state(
+      world.entities,
+      state_value,
+      step
+    ),
+    len: world.len
+  }
+}
+
+fn world_fold(
+  world: EntityWorld(capacity, entity),
+  initial: accumulator,
+  const step: fn(acc: accumulator, item: entity) -> accumulator
+) -> accumulator {
+  batch_fold(world.entities, initial, step)
+}
+
+fn components(const spec) -> const {
+  spec
+}
+
+type fn ComponentBatchFor(
+  capacity: count,
+  component: type
+) -> type {
+  Batch(capacity, component)
+}
+
+type fn World(capacity: count, components: const) -> type {
+  let Base = {
+    entities: Batch(capacity, BatchIndex(capacity)),
+    len: i32
+  };
+  let Stores = @shape_map(
+    components,
+    ComponentBatchFor(capacity)
+  );
+  let World = @shape_concat(Base, Stores);
+  struct(World)
+}
+
+type fn Read(component: type) -> type {
+  component
+}
+
+type fn Write(component: type) -> type {
+  component
+}
+
+type fn Query(access: const) -> type {
+  let Query = {};
+  struct(Query)
+}
+
+type fn Res(resource: type) -> type {
+  resource
+}
+
+type fn System() -> type {
+  let System = {};
+  struct(System)
+}
+
+type fn Command(world: type) -> type {
+  world
+}
+
+fn Command::pure(value: world_t) -> Command(world_t) {
+  value
+}
+
+fn Command::bind(
+  value: Command(world_t),
+  const step: fn(value: world_t) -> Command(world_t)
+) -> Command(world_t) {
+  step(value)
+}
+
+type fn QueryRowFor(access: const) -> type {
+  struct(access)
+}
+
+fn each_with(
+  query: Query(access),
+  input: input_t,
+  const step: fn(
+    row: QueryRowFor(access),
+    input: input_t
+  ) -> writes
+) -> System {
+  {}
+}
+
+fn each(query: Query(access)) -> QueryRowFor(access) {
+  @empty(QueryRowFor(access))
+}
+
+fn write(values: writes) -> System {
+  {}
+}
+
+fn spawn(
+  world: world_t,
+  entity_values: row
+) -> world_t {
+  @replace_field(world, #len, world.len + 1)
+}
+
+fn run(
+  world: world_t,
+  input: input_t,
+  system: system_t
+) -> world_t {
+  world
+}
+
+fn query_collect(
+  values: Batch(capacity, entity),
+  state_value: state,
+  const select: fn(
+    index: BatchIndex(capacity),
+    entity: entity,
+    state_value: state
+  ) -> result
+) -> Batch(capacity, result) {
+  batch_map_with_state(values, state_value, select)
+}
+
+type fn SystemContext(systems: type) -> type {
+  let Slots = @type_slots(systems);
+  let HasWorld = @require(
+    @shape_has_slot(Slots, #world),
+    "ECS system context requires a world field"
+  );
+  let HasInput = @require(
+    @shape_has_slot(Slots, #input),
+    "ECS system context requires an input field"
+  );
+  systems
+}
+
+type fn SystemWorld(systems: type) -> type {
+  @shape_slot(
+    @type_slots(SystemContext(systems)),
+    #world
+  )
+}
+
+type fn SystemInput(systems: type) -> type {
+  @shape_slot(
+    @type_slots(SystemContext(systems)),
+    #input
+  )
+}
+
+type fn ComponentMap(
+  capacity: count,
+  systems: type,
+  component: type,
+  state: type
+) -> type {
+  let Context = SystemContext(systems);
+  let ComponentMap = {
+    map: fn(
+      systems: Context,
+      const f: fn(
+        index: BatchIndex(capacity),
+        item: component,
+        state: state
+      ) -> component
+    ) -> Context
+  };
+  struct(ComponentMap)
+}
+
+type fn InputComponentMap(
+  capacity: count,
+  systems: type,
+  component: type
+) -> type {
+  ComponentMap(
+    capacity,
+    systems,
+    component,
+    SystemInput(systems)
+  )
+}
+
+type fn WorldComponentField(
+  capacity: count,
+  systems: type,
+  field: const,
+  component: type
+) -> type {
+  let FieldType = @shape_slot(
+    @type_slots(SystemWorld(systems)),
+    field
+  );
+  let FieldOk = @require(
+    FieldType == Batch(capacity, component),
+    "ECS component field must be a Batch with the queried component type"
+  );
+  component
+}
+
+fn cmap_query(
+  systems: systems_t,
+  const query: ComponentMap(
+    capacity,
+    systems_t,
+    component,
+    state
+  ),
+  const step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    state: state
+  ) -> component
+) -> systems_t {
+  query.map(systems, step)
+}
+
+fn cmap(
+  const systems_t: type,
+  const field: const,
+  systems: systems_t,
+  state_value: state,
+  const step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    state_value: state
+  ) -> component
+) -> systems_t {
+  let world = @field(systems, #world);
+  let values: Batch(capacity, component) = @field(
+    world,
+    field
+  );
+  let mapped = batch_map_with_state(
+    values,
+    state_value,
+    step
+  );
+  @replace_field(
+    systems,
+    #world,
+    @replace_field(world, field, mapped)
+  )
+}
+
+fn cmap_input(
+  const systems_t: type,
+  const field: const,
+  systems: systems_t,
+  const step: fn(
+    index: BatchIndex(capacity),
+    item: component,
+    input: state
+  ) -> component
+) -> systems_t {
+  cmap(
+    systems_t,
+    field,
+    systems,
+    @field(systems, #input),
+    step
+  )
+}
+
+type fn ComponentStore(n: count, component: type) -> type {
+  InlineArray(n, component)
 }
 
 type fn ComponentSlot(n: count, component: type) -> type {
@@ -20,19 +449,28 @@ type fn ComponentSlot(n: count, component: type) -> type {
 }
 
 type fn ComponentSlotFor(spec: const) -> type {
-  ComponentSlot(ComponentCountFor(spec), ComponentValueFor(spec))
+  ComponentSlot(
+    spec.capacity,
+    ComponentValueFor(spec)
+  )
 }
 
 type fn ComponentValueFor(spec: const) -> type {
-  spec
+  spec.component
 }
 
 type fn ComponentValues(selected: const) -> type {
-  let ComponentValues = @shape_map(selected, ComponentValueFor);
+  let ComponentValues = @shape_map(
+    selected,
+    ComponentValueFor
+  );
   struct(ComponentValues)
 }
 
-type fn SparseWorld(entity_count: count, components: const) -> type {
+type fn SparseWorld(
+  entity_count: count,
+  components: const
+) -> type {
   let Base = {
     next_entity_id: i32,
     defaults: ComponentValues(components)
@@ -42,13 +480,16 @@ type fn SparseWorld(entity_count: count, components: const) -> type {
   struct(SparseWorld)
 }
 
-type fn QueryRow(e: type, selected: const) -> type {
-  let QueryRow = @shape_concat({entity: e}, @shape_map(selected, ComponentValueFor));
+type fn QueryRow(entity: type, selected: const) -> type {
+  let QueryRow = @shape_concat(
+    {entity: entity},
+    @shape_map(selected, ComponentValueFor)
+  );
   struct(QueryRow)
 }
 
-type fn Row(selected: const) -> type {
-  QueryRow(i32, selected)
+type fn Row(entity_count: count, selected: const) -> type {
+  QueryRow(BatchIndex(entity_count), selected)
 }
 
 type fn Values(selected: const) -> type {
@@ -73,71 +514,87 @@ fn ComponentStore::get_typed(
   const n: count,
   const component: type,
   store: ComponentStore(n, component),
-  index: i32
+  index: BatchIndex(n)
 ) -> component {
-  match index == 0 {
-    true => store[0],
-    false => match index == 1 {
-      true => store[1],
-      false => store[2],
-    },
-  }
+  store[index]
 }
 
-fn ComponentStore::get_present(store: ComponentStore(3, bool), index: i32) -> bool {
-  ComponentStore::get_typed(3, bool, store, index)
+fn ComponentStore::get_present(
+  const n: count,
+  store: ComponentStore(n, bool),
+  index: BatchIndex(n)
+) -> bool {
+  ComponentStore::get_typed(n, bool, store, index)
 }
 
 fn ComponentSlot::set_typed(
   const component: type,
-  slot: ComponentSlot(3, component),
-  index: i32,
+  slot: ComponentSlot(n, component),
+  index: BatchIndex(n),
   value: component
-) -> ComponentSlot(3, component) {
+) -> ComponentSlot(n, component) {
   {
     present: slot.present,
-    values: <
-      match index == 0 { true => value, false => slot.values[0] },
-      match index == 1 { true => value, false => slot.values[1] },
-      match index == 2 { true => value, false => slot.values[2] }
-    >
+    values: layout.InlineArray::set(
+      n,
+      component,
+      slot.values,
+      index,
+      value
+    )
   }
 }
 
 fn ComponentSlot::put_typed(
   const component: type,
-  slot: ComponentSlot(3, component),
-  index: i32,
+  slot: ComponentSlot(n, component),
+  index: BatchIndex(n),
   present: bool,
   value: component
-) -> ComponentSlot(3, component) {
+) -> ComponentSlot(n, component) {
   {
-    present: <
-      match index == 0 { true => present, false => slot.present[0] },
-      match index == 1 { true => present, false => slot.present[1] },
-      match index == 2 { true => present, false => slot.present[2] }
-    >,
-    values: <
-      match index == 0 { true => value, false => slot.values[0] },
-      match index == 1 { true => value, false => slot.values[1] },
-      match index == 2 { true => value, false => slot.values[2] }
-    >
+    present: layout.InlineArray::set(
+      n,
+      bool,
+      slot.present,
+      index,
+      present
+    ),
+    values: layout.InlineArray::set(
+      n,
+      component,
+      slot.values,
+      index,
+      value
+    )
   }
 }
 
-fn SparseWorld::empty(const components) -> SparseWorld(3, components) {
-  @empty(SparseWorld(3, components))
+fn SparseWorld::empty(
+  const entity_count: count,
+  const components
+) -> SparseWorld(entity_count, components) {
+  @empty(SparseWorld(entity_count, components))
 }
 
-fn entity.add(world: SparseWorld(3, components), entity_values: row) -> SparseWorld(3, components) {
+fn entity.add(
+  world: SparseWorld(entity_count, components),
+  entity_values: row
+) -> SparseWorld(entity_count, components) {
   const row_ok = EntityRow(components, row);
   world
 }
 
 type fn SparseQuery(w: type, selected: const) -> type {
   let WorldSlots = @type_slots(w);
-  let SelectedSlots = @shape_map(selected, ComponentSlotFor);
-  let Matched = @shape_intersect(WorldSlots, SelectedSlots);
+  let SelectedSlots = @shape_map(
+    selected,
+    ComponentSlotFor
+  );
+  let Matched = @shape_intersect(
+    WorldSlots,
+    SelectedSlots
+  );
   let SlotCountOk = @require(
     @shape_count(Matched) == @shape_count(SelectedSlots),
     "sparse query selected slot is missing from world"
@@ -157,157 +614,264 @@ fn bool_and(a: bool, b: bool) -> bool {
   }
 }
 
-fn selected_present(const selected, world: w, entity: i32) -> bool {
+fn selected_present(
+  const selected,
+  world: SparseWorld(entity_count, components),
+  entity: BatchIndex(entity_count)
+) -> bool {
   match @shape_count(selected) {
     0 => true,
-    1 => selected_present_one(selected, world, entity),
-    2 => selected_present_two(selected, world, entity),
-    _ => selected_present_three(selected, world, entity),
+    _ => bool_and(
+      ComponentStore::get_present(
+        @field(
+          @field(world, @shape_first_key(selected)),
+          #present
+        ),
+        entity
+      ),
+      selected_present(
+        @shape_tail(selected),
+        world,
+        entity
+      )
+    ),
   }
 }
 
-fn selected_present_one(const selected, world: w, entity: i32) -> bool {
-  ComponentStore::get_present(@field(@field(world, @shape_first_key(selected)), #present), entity)
-}
-
-fn selected_present_two(const selected, world: w, entity: i32) -> bool {
-  bool_and(
-    ComponentStore::get_present(@field(@field(world, @shape_first_key(selected)), #present), entity),
-    ComponentStore::get_present(@field(@field(world, @shape_first_key(@shape_tail(selected))), #present), entity)
-  )
-}
-
-fn selected_present_three(const selected, world: w, entity: i32) -> bool {
-  bool_and(
-    ComponentStore::get_present(@field(@field(world, @shape_first_key(selected)), #present), entity),
-    bool_and(
-      ComponentStore::get_present(@field(@field(world, @shape_first_key(@shape_tail(selected))), #present), entity),
-      ComponentStore::get_present(@field(@field(world, @shape_first_key(@shape_tail(@shape_tail(selected)))), #present), entity)
-    )
-  )
-}
-
-fn selected_row(const selected, world: w, entity: i32) -> Row(selected) {
+fn selected_row(
+  const selected,
+  world: SparseWorld(entity_count, components),
+  entity: BatchIndex(entity_count)
+) -> Row(entity_count, selected) {
   {entity: entity}
 }
 
-fn apply_writes(const writes, world: w, entity: i32, write_values: Values(writes)) -> w {
+fn apply_writes(
+  const writes,
+  world: SparseWorld(entity_count, components),
+  entity: BatchIndex(entity_count),
+  write_values: Values(writes)
+) -> SparseWorld(entity_count, components) {
   match @shape_count(writes) {
     0 => world,
-    _ => apply_writes_nonempty(writes, world, entity, write_values),
+    _ => apply_writes_nonempty(
+      writes,
+      world,
+      entity,
+      write_values
+    ),
   }
 }
 
-fn apply_writes_nonempty(const writes, world: w, entity: i32, write_values: Values(writes)) -> w {
+fn apply_writes_nonempty(
+  const writes,
+  world: SparseWorld(entity_count, components),
+  entity: BatchIndex(entity_count),
+  write_values: Values(writes)
+) -> SparseWorld(entity_count, components) {
   let next_slot = ComponentSlot::set_typed(
-    @shape_slot(writes, @shape_first_key(writes)),
+    ComponentValueFor(@shape_slot(
+      writes,
+      @shape_first_key(writes)
+    )),
     @field(world, @shape_first_key(writes)),
     entity,
     @field(write_values, @shape_first_key(writes))
   );
-  let next_world: w = world;
+  let next_world: SparseWorld(entity_count, components) = world;
   match @shape_count(@shape_tail(writes)) {
     0 => next_world,
-    _ => apply_writes(@shape_tail(writes), next_world, entity, write_values),
+    _ => apply_writes(
+      @shape_tail(writes),
+      next_world,
+      entity,
+      write_values
+    ),
   }
 }
 
 fn each_loop(
-  const i: count,
-  const n: count,
-  world: w,
+  cursor: layout.core.IndexCursor(entity_count),
+  world: SparseWorld(entity_count, components),
   events: events_t,
-  const step: fn(row: Row(reads), events: events_t) -> Values(writes)
-) -> w {
-  match i == n {
-    true => world,
-    false => each_step(i, n, world, events, step),
+  const step: fn(
+    row: Row(entity_count, reads),
+    events: events_t
+  ) -> Values(writes)
+) -> SparseWorld(entity_count, components) {
+  match layout.core.IndexCursor::next(
+    entity_count,
+    cursor
+  ) {
+    Yield(i, next) => each_step(
+      next,
+      i,
+      world,
+      events,
+      step
+    ),
+    Done => world,
   }
 }
 
 fn each_step(
-  const i: count,
-  const n: count,
-  world: w,
+  next: layout.core.IndexCursor(entity_count),
+  entity: BatchIndex(entity_count),
+  world: SparseWorld(entity_count, components),
   events: events_t,
-  const step: fn(row: Row(reads), events: events_t) -> Values(writes)
-) -> w {
-  match bool_and(i < world.next_entity_id, selected_present(reads, world, i)) {
-    true => each_step_present(i, n, world, world, events, step),
-    false => each_loop(i + 1, n, world, events, step),
+  const step: fn(
+    row: Row(entity_count, reads),
+    events: events_t
+  ) -> Values(writes)
+) -> SparseWorld(entity_count, components) {
+  match bool_and(
+    entity < world.next_entity_id,
+    selected_present(reads, world, entity)
+  ) {
+    true => each_step_present(
+      next,
+      entity,
+      world,
+      world,
+      events,
+      step
+    ),
+    false => each_loop(next, world, events, step),
   }
 }
 
 fn each_step_present(
-  const i: count,
-  const n: count,
-  world_for_read: w,
-  world_for_update: w,
+  next: layout.core.IndexCursor(entity_count),
+  entity: BatchIndex(entity_count),
+  world_for_read: SparseWorld(entity_count, components),
+  world_for_update: SparseWorld(
+    entity_count,
+    components
+  ),
   events: events_t,
-  const step: fn(row: Row(reads), events: events_t) -> Values(writes)
-) -> w {
-  let selected_values = selected_row(reads, world_for_read, i);
+  const step: fn(
+    row: Row(entity_count, reads),
+    events: events_t
+  ) -> Values(writes)
+) -> SparseWorld(entity_count, components) {
+  let selected_values = selected_row(
+    reads,
+    world_for_read,
+    entity
+  );
   let write_values = step(selected_values, events);
-  let next_world = apply_writes(writes, world_for_update, i, write_values);
-  each_loop(i + 1, n, next_world, events, step)
+  let next_world = apply_writes(
+    writes,
+    world_for_update,
+    entity,
+    write_values
+  );
+  each_loop(next, next_world, events, step)
 }
 
-fn each(
-  world: w,
+fn sparse_each(
+  world: SparseWorld(entity_count, components),
   events: events_t,
-  const step: fn(row: Row(reads), events: events_t) -> Values(writes)
-) -> w {
-  each_loop(0, 3, world, events, step)
+  const step: fn(
+    row: Row(entity_count, reads),
+    events: events_t
+  ) -> Values(writes)
+) -> SparseWorld(entity_count, components) {
+  each_loop(
+    layout.core.IndexCursor::start(entity_count),
+    world,
+    events,
+    step
+  )
 }
 
 fn fold_loop(
-  const i: count,
-  const n: count,
-  world: w,
+  cursor: layout.core.IndexCursor(entity_count),
+  world: SparseWorld(entity_count, components),
   acc: acc_t,
-  const step: fn(acc: acc_t, row: Row(reads)) -> acc_t
+  const step: fn(
+    acc: acc_t,
+    row: Row(entity_count, reads)
+  ) -> acc_t
 ) -> acc_t {
-  match i == n {
-    true => acc,
-    false => fold_step(i, n, world, acc, step),
+  match layout.core.IndexCursor::next(
+    entity_count,
+    cursor
+  ) {
+    Yield(i, next) => fold_step(
+      next,
+      i,
+      world,
+      acc,
+      step
+    ),
+    Done => acc,
   }
 }
 
 fn fold_step(
-  const i: count,
-  const n: count,
-  world: w,
+  next: layout.core.IndexCursor(entity_count),
+  entity: BatchIndex(entity_count),
+  world: SparseWorld(entity_count, components),
   acc: acc_t,
-  const step: fn(acc: acc_t, row: Row(reads)) -> acc_t
+  const step: fn(
+    acc: acc_t,
+    row: Row(entity_count, reads)
+  ) -> acc_t
 ) -> acc_t {
-  match bool_and(i < world.next_entity_id, selected_present(reads, world, i)) {
-    true => fold_step_present(i, n, world, world, acc, step),
-    false => fold_loop(i + 1, n, world, acc, step),
+  match bool_and(
+    entity < world.next_entity_id,
+    selected_present(reads, world, entity)
+  ) {
+    true => fold_step_present(
+      next,
+      entity,
+      world,
+      world,
+      acc,
+      step
+    ),
+    false => fold_loop(next, world, acc, step),
   }
 }
 
 fn fold_step_present(
-  const i: count,
-  const n: count,
-  world_for_row: w,
-  world_for_next: w,
+  next: layout.core.IndexCursor(entity_count),
+  entity: BatchIndex(entity_count),
+  world_for_row: SparseWorld(entity_count, components),
+  world_for_next: SparseWorld(entity_count, components),
   acc: acc_t,
-  const step: fn(acc: acc_t, row: Row(reads)) -> acc_t
+  const step: fn(
+    acc: acc_t,
+    row: Row(entity_count, reads)
+  ) -> acc_t
 ) -> acc_t {
-  let selected_values = selected_row(reads, world_for_row, i);
+  let selected_values = selected_row(
+    reads,
+    world_for_row,
+    entity
+  );
   let next_acc = step(acc, selected_values);
-  fold_loop(i + 1, n, world_for_next, next_acc, step)
+  fold_loop(next, world_for_next, next_acc, step)
 }
 
 fn fold(
-  world: w,
+  world: SparseWorld(entity_count, components),
   initial: acc_t,
-  const step: fn(acc: acc_t, row: Row(reads)) -> acc_t
+  const step: fn(
+    acc: acc_t,
+    row: Row(entity_count, reads)
+  ) -> acc_t
 ) -> acc_t {
-  fold_loop(0, 3, world, initial, step)
+  fold_loop(
+    layout.core.IndexCursor::start(entity_count),
+    world,
+    initial,
+    step
+  )
 }
 
-fn run(
+fn sparse_run(
   world: w,
   events: events_t,
   const system: fn(world: w, events: events_t) -> w
