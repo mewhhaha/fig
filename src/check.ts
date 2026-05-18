@@ -1857,6 +1857,11 @@ function productSlotTypes(
   typeDecls: TypeDecl[],
   arity: number,
 ): string[] | undefined {
+  const structural = structuralProductSlotsForType(expectedType, typeDecls);
+  if (structural) {
+    if (structural.length !== arity) return undefined;
+    return structural.map((slot) => slot.type);
+  }
   const resolved = resolveAliasType(expectedType, typeDecls) ?? expectedType;
   const decl = findTypeDecl(typeDecls, typeNameOf(resolved ?? ""));
   if (decl?.normalized?.kind !== "product") return undefined;
@@ -4848,6 +4853,7 @@ function inferExprType(
     return decl ? renderConstructedType(decl, expr, context) : undefined;
   }
   if (expr.kind === "shape") {
+    if (expr.inferredType) return expr.inferredType;
     const slots = expr.slots.map((slot) => {
       const label = slot.label ? `${slot.label}: ` : "";
       return `${label}${inferExprType(slot.value, context, env) ?? "i32"}`;
@@ -4873,10 +4879,10 @@ function inferExprType(
   if (expr.kind === "field") {
     const valueType = inferExprType(expr.value, context, env);
     const label = exprLiteralLabel(expr.key);
-    return label ? projectTypeField(valueType, label, context.types ?? []) : undefined;
+    return label ? projectTypeField(valueType, label, context.types ?? [], context) : undefined;
   }
   if (expr.kind === "var") {
-    const projected = inferVarType(expr.name, env, context.types ?? []);
+    const projected = inferVarType(expr.name, env, context.types ?? [], context);
     if (projected) return projected;
     const constType = context.consts?.get(expr.name)?.type;
     if (constType) return constType;
@@ -4927,11 +4933,15 @@ function inferVarType(
   name: string,
   env: Map<string, string>,
   types: TypeDecl[],
+  context?: {
+    functions: Map<string, FnDecl>;
+    consts?: Map<string, ConstValue>;
+  },
 ): string | undefined {
   const parts = name.split(".");
   let current = env.get(parts[0]);
   for (const field of parts.slice(1)) {
-    current = projectTypeField(current, field, types);
+    current = projectTypeField(current, field, types, context);
     if (!current) return undefined;
   }
   return current;
@@ -4941,13 +4951,185 @@ function projectTypeField(
   type: string | undefined,
   field: string,
   types: TypeDecl[],
+  context?: {
+    functions: Map<string, FnDecl>;
+    consts?: Map<string, ConstValue>;
+  },
 ): string | undefined {
   if (!type) return undefined;
+  const structArgs = typeCallArgsForBase(type, "struct");
+  if (structArgs) return projectTypeField(structArgs.trim(), field, types, context);
   const decl = resolveTypeDecl(type, types);
-  if (decl?.normalized?.kind !== "product") return undefined;
-  const bindings = genericBindings(type, decl);
-  const slot = decl.normalized.shape.slots.find((item) => item.label === field);
-  return slot ? substituteTypeVars(slot.type, bindings) : undefined;
+  if (decl?.normalized?.kind === "product") {
+    const bindings = genericBindings(type, decl);
+    const slot = decl.normalized.shape.slots.find((item) => item.label === field);
+    if (slot) return substituteTypeVars(slot.type, bindings);
+  }
+  if (!context) return undefined;
+  const blockSlot = projectTypeBlockField(type, field, types, context);
+  if (blockSlot) return blockSlot;
+  const parsed = parseAnnotationType(type);
+  if (!parsed) return undefined;
+  const diagnostics: Diagnostic[] = [];
+  const evaluator = new TypeEvaluator(
+    new Map(types.map((item) => [item.name, item])),
+    context.functions,
+    new Map(),
+    context.consts ?? new Map(),
+    diagnostics,
+    shaderManifestEntry,
+    defaultCompilerPluginRegistry,
+  );
+  const evaluated = evaluator.eval(parsed, new Map());
+  const resolved = evaluated?.kind === "type" ? evaluator.resolve(evaluated) : evaluated;
+  if (resolved?.kind !== "type" || resolved.normalized?.kind !== "product") return undefined;
+  return resolved.normalized.shape.slots.find((item) => item.label === field)?.type;
+}
+
+function projectTypeBlockField(
+  type: string,
+  field: string,
+  types: TypeDecl[],
+  context: {
+    functions: Map<string, FnDecl>;
+    consts?: Map<string, ConstValue>;
+  },
+): string | undefined {
+  const decl = types.find((item) => item.name === typeNameOf(type));
+  if (!decl || decl.body.statements.length === 0) return undefined;
+  const call = type.match(/^[A-Za-z_][A-Za-z0-9_.]*\((.*)\)$/);
+  const argTexts = call ? splitTypeArgs(call[1]) : [];
+  const diagnostics: Diagnostic[] = [];
+  const typesByName = new Map(types.map((item) => [item.name, item]));
+  const locals = new Map<string, TypeEvalValue>();
+  for (const [index, param] of decl.params.entries()) {
+    const parsed = parseAnnotationType(argTexts[index] ?? param.name);
+    const value = parsed
+      ? instantiateTypeExpr(
+        parsed,
+        typesByName,
+        context.functions,
+        new Map(),
+        context.consts ?? new Map(),
+        diagnostics,
+      )
+      : undefined;
+    locals.set(param.name, value ?? { kind: "type", name: argTexts[index] ?? param.name });
+  }
+  for (const stmt of decl.body.statements) {
+    const value = instantiateTypeExpr(
+      stmt.value,
+      typesByName,
+      context.functions,
+      new Map(),
+      context.consts ?? new Map(),
+      diagnostics,
+      locals,
+    );
+    if (!value) return undefined;
+    locals.set(stmt.name, value);
+  }
+  for (const value of locals.values()) {
+    if (value.kind !== "shape") continue;
+    const slot = value.slots.find((item) => item.label === field);
+    if (slot?.value.kind === "type") return slot.value.name;
+  }
+  return undefined;
+}
+
+function structuralProductSlotsForType(
+  type: string | undefined,
+  types: TypeDecl[],
+  functions: Map<string, FnDecl> = new Map(),
+  consts: Map<string, ConstValue> = new Map(),
+): { label?: string; type: string; repeat?: string }[] | undefined {
+  if (!type) return undefined;
+  const block = structuralProductSlotsFromTypeBlock(type, types, functions, consts);
+  if (block) return block;
+  const direct = structuralProductSlotsFromTypeExpr(type, types, functions, consts);
+  if (direct) return direct;
+  const resolved = resolveAliasType(type, types) ?? type;
+  const decl = resolveTypeDecl(resolved, types);
+  if (decl?.normalized?.kind === "product") {
+    const bindings = genericBindings(resolved, decl);
+    return decl.normalized.shape.slots.map((slot) => ({
+      label: slot.label,
+      type: substituteTypeVars(slot.type, bindings),
+      repeat: slot.repeat ? substituteTypeVars(slot.repeat, bindings) : undefined,
+    }));
+  }
+  return structuralProductSlotsFromTypeExpr(resolved, types, functions, consts);
+}
+
+function structuralProductSlotsFromTypeBlock(
+  type: string,
+  types: TypeDecl[],
+  functions: Map<string, FnDecl>,
+  consts: Map<string, ConstValue>,
+): { label?: string; type: string; repeat?: string }[] | undefined {
+  const decl = types.find((item) => item.name === typeNameOf(type));
+  if (!decl || decl.body.statements.length === 0) return undefined;
+  const call = type.match(/^[A-Za-z_][A-Za-z0-9_.]*\((.*)\)$/);
+  const argTexts = call ? splitTypeArgs(call[1]) : [];
+  const diagnostics: Diagnostic[] = [];
+  const typesByName = new Map(types.map((item) => [item.name, item]));
+  const locals = new Map<string, TypeEvalValue>();
+  for (const [index, param] of decl.params.entries()) {
+    locals.set(param.name, { kind: "type", name: argTexts[index] ?? param.name });
+  }
+  for (const stmt of decl.body.statements) {
+    const value = instantiateTypeExpr(
+      stmt.value,
+      typesByName,
+      functions,
+      new Map(),
+      consts,
+      diagnostics,
+      locals,
+    );
+    if (value) locals.set(stmt.name, value);
+  }
+  const expr = decl.body.expr;
+  if (
+    expr?.kind === "type_call" &&
+    expr.callee.kind === "type_ref" &&
+    expr.callee.name === "struct" &&
+    expr.args[0]?.kind === "type_ref"
+  ) {
+    const shape = locals.get(expr.args[0].name);
+    if (shape?.kind === "shape") {
+      return shape.slots.map((slot) => ({
+        label: slot.label,
+        type: slot.value.kind === "type" ? slot.value.name : renderTypeEvalValue(slot.value),
+        repeat: slot.repeat,
+      }));
+    }
+  }
+  return undefined;
+}
+
+function structuralProductSlotsFromTypeExpr(
+  type: string,
+  types: TypeDecl[],
+  functions: Map<string, FnDecl>,
+  consts: Map<string, ConstValue>,
+): { label?: string; type: string; repeat?: string }[] | undefined {
+  const parsed = parseAnnotationType(type);
+  if (!parsed) return undefined;
+  const diagnostics: Diagnostic[] = [];
+  const evaluator = new TypeEvaluator(
+    new Map(types.map((item) => [item.name, item])),
+    functions,
+    new Map(),
+    consts,
+    diagnostics,
+    shaderManifestEntry,
+    defaultCompilerPluginRegistry,
+  );
+  const evaluated = evaluator.eval(parsed, new Map());
+  const product = evaluated?.kind === "type" ? evaluator.resolve(evaluated) : evaluated;
+  if (product?.kind !== "type" || product.normalized?.kind !== "product") return undefined;
+  return product.normalized.shape.slots;
 }
 
 function resolveTypeDecl(type: string, types: TypeDecl[]): TypeDecl | undefined {
@@ -5148,6 +5330,11 @@ function bindTypePattern(
           consts,
         );
       }
+      return;
+    }
+    const resolvedPattern = resolveAliasType(pattern, typeDecls);
+    if (resolvedPattern && resolvedPattern !== pattern) {
+      bindTypePattern(resolvedPattern, actual, types, typeDecls, consts);
       return;
     }
     const resolvedActual = resolveAliasType(actual, typeDecls);
@@ -6861,6 +7048,15 @@ function renderTypeProofArg(expr: Expr): string | undefined {
     if (args.some((arg) => arg === undefined)) return undefined;
     return canonicalTypeProofName(`${expr.callee.name}(${args.join(", ")})`);
   }
+  if (expr.kind === "shape") {
+    const slots = expr.slots.map((slot) => {
+      const type = renderTypeProofArg(slot.value);
+      if (!type) return undefined;
+      return `${slot.label ? `${slot.label}: ` : ""}${type}`;
+    });
+    if (slots.some((slot) => slot === undefined)) return undefined;
+    return `{${slots.join(", ")}}`;
+  }
   return undefined;
 }
 
@@ -7540,10 +7736,13 @@ function expandReplaceField(
     ): [string, OwnershipBinding] => [name, { type, moved: false }]),
   );
   const sourceType = projectedBindingType(source.name, env, context.types);
-  const resolvedType = resolveAliasType(sourceType, context.types) ?? sourceType;
-  const typeDecl = findTypeDecl(context.types, typeNameOf(resolvedType ?? ""));
-  if (typeDecl?.normalized?.kind !== "product") return undefined;
-  const slots = typeDecl.normalized.shape.slots;
+  const slots = structuralProductSlotsForType(
+    sourceType,
+    context.types,
+    context.functions,
+    context.consts,
+  );
+  if (!slots) return undefined;
   if (!slots.some((slot) => slot.label === label)) return undefined;
   return {
     kind: "shape",
@@ -7694,9 +7893,8 @@ function expandReplaceFieldWithEnv(
   const label = exprLiteralLabel(key);
   if (!label || source.kind !== "var") return undefined;
   const sourceType = inferVarType(source.name, env, types);
-  const decl = sourceType ? resolveTypeDecl(sourceType, types) : undefined;
-  if (decl?.normalized?.kind !== "product") return undefined;
-  const slots = decl.normalized.shape.slots;
+  const slots = structuralProductSlotsForType(sourceType, types);
+  if (!slots) return undefined;
   if (!slots.some((slot) => slot.label === label)) return undefined;
   return {
     kind: "shape",
@@ -8115,7 +8313,9 @@ function checkTypeExprCasing(
   } else if (expr.kind === "type_call") {
     diagnoseScalarDomainTypeExpr(expr, diagnostics);
     if (expr.callee.kind === "type_ref") {
-      diagnoseTypeRefCasing(expr.callee.name, true, typeNames, diagnostics, expr.callee.span);
+      if (expr.callee.name !== "struct" && expr.callee.name !== "union") {
+        diagnoseTypeRefCasing(expr.callee.name, true, typeNames, diagnostics, expr.callee.span);
+      }
     } else {
       checkTypeExprCasing(expr.callee, typeNames, diagnostics);
     }
@@ -9406,6 +9606,12 @@ class TypeEvaluator {
         expr.span,
       );
     }
+    if (args.length < decl.params.length) {
+      return this.withSpan(
+        this.namedType(`${callee}(${args.map(renderTypeEvalValue).join(", ")})`),
+        expr.span,
+      );
+    }
     return this.evalTypeFunction(callee, decl, args);
   }
 
@@ -9980,9 +10186,18 @@ class TypeEvaluator {
         shape?.span ?? mapper?.span,
       );
     }
-    const mapperName = mapper.name.replace(/\(.*\)$/, "");
+    const mapperCall = mapper.name.match(/^(.+)\((.*)\)$/);
+    const mapperName = mapperCall ? mapperCall[1]!.trim() : mapper.name;
+    const mapperArgs = mapperCall
+      ? splitTypeArgs(mapperCall[2]!).map((arg) => {
+        const parsed = parseAnnotationType(arg);
+        return parsed ? this.eval(parsed, new Map()) ?? { kind: "never" as const } : {
+          kind: "never" as const,
+        };
+      })
+      : [];
     const decl = this.typesByName.get(mapperName);
-    if (!decl || decl.params.length !== 1) {
+    if (!decl || decl.params.length !== mapperArgs.length + 1) {
       return this.unsupported(
         "type.shape_map",
         "@shape_map mapper must be a one-argument type fn",
@@ -9998,7 +10213,7 @@ class TypeEvaluator {
             message: `@shape_map input slot ${index} must be labeled`,
           });
         }
-        const mapped = this.evalTypeFunction(mapperName, decl, [slot.value]);
+        const mapped = this.evalTypeFunction(mapperName, decl, [...mapperArgs, slot.value]);
         return { label: slot.label, value: mapped ?? { kind: "never" } };
       }),
     };
@@ -10496,7 +10711,12 @@ class TypeEvaluator {
   ): Extract<TypeEvalValue, { kind: "type" }> {
     if (seen.has(type.name)) return type;
     seen.add(type.name);
-    if (type.normalized) return type;
+    if (type.normalized) {
+      const decl = this.typesByName.get(typeNameOf(type.name));
+      if (!(type.normalized.kind === "alias" && (decl?.body.statements.length ?? 0) > 0)) {
+        return type;
+      }
+    }
 
     const call = type.name.match(/^(.+)\((.*)\)$/);
     if (call) {
@@ -10513,6 +10733,14 @@ class TypeEvaluator {
         if (
           decl.normalized?.kind === "alias" && decl.params.every((param) => param.kind !== "const")
         ) {
+          if (decl.body.statements.length > 0) {
+            const called = this.selectTypeClause(decl, args)
+              ? this.evalTypeFunction(directDecl ? base : decl.name, decl, args)
+              : undefined;
+            if (called?.kind === "type" && called.normalized) {
+              return this.resolveTypeValue(called, seen);
+            }
+          }
           const aliased = substituteAliasTypeParams(
             decl.normalized.type,
             decl,
@@ -12981,6 +13209,21 @@ function exprBindingTypeImpl(
     );
     return finish(type?.name);
   }
+  if (expr.kind === "shape") {
+    return finish(inferExprType(
+      expr,
+      {
+        functions: new Map(functions.map((fn) => [fn.name, fn])),
+        typeConstructors: new Map(
+          types.flatMap((decl): [string, TypeDecl][] =>
+            decl.normalized?.kind === "product" ? [[decl.normalized.constructor, decl]] : []
+          ),
+        ),
+        types,
+      },
+      new Map([...env].map(([name, binding]) => [name, binding.type ?? ""])),
+    ));
+  }
   if (expr.kind === "pipe_bind") {
     return finish(exprBindingType(expr.body, env, types, functions, options));
   }
@@ -13124,6 +13367,9 @@ function expectedShapeSlotType(
   types: TypeDecl[],
 ): string | undefined {
   if (!label) return undefined;
+  const structural = structuralProductSlotsForType(expectedType, types);
+  const structuralSlot = structural?.find((slot) => slot.label === label);
+  if (structuralSlot) return structuralSlot.type;
   const resolved = resolveAliasType(expectedType, types);
   const decl = types.find((item) => item.name === typeNameOf(resolved ?? ""));
   if (decl?.normalized?.kind !== "product") return undefined;
@@ -13493,14 +13739,12 @@ function projectedBindingType(
   const [base, ...fields] = name.split(".");
   let current = env.get(base)?.type;
   for (const field of fields) {
-    const resolved = resolveAliasType(stripReferenceType(current), types);
-    const decl = findTypeDecl(types, typeNameOf(resolved ?? ""));
-    if (decl?.normalized?.kind !== "product") return undefined;
-    const args = typeCallArgsForBase(resolved ?? "", typeNameOf(resolved ?? ""));
-    const argValues = args === undefined ? [] : splitTypeArgs(args);
-    const bindings = new Map(decl.params.map((param, index) => [param.name, argValues[index]]));
-    const slotType = decl.normalized.shape.slots.find((slot) => slot.label === field)?.type;
-    current = slotType ? substituteSignatureTypeArgs(slotType, bindings) : undefined;
+    current = projectTypeField(
+      resolveAliasType(stripReferenceType(current), types) ?? stripReferenceType(current),
+      field,
+      types,
+    );
+    if (!current) return undefined;
   }
   return current;
 }

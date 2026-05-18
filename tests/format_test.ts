@@ -51,6 +51,20 @@ pub fn main()->i32!{time}{clock()}`,
     expected: "fn pure() -> i32 !{} {\n  1\n}\n\nfn work() -> i32 !{time, gpu} {\n  2\n}\n",
   },
   {
+    name: "inline anonymous struct annotations",
+    input:
+      "fn sum(row:struct({x:i32,y:i32}))->struct({x:i32,y:i32}){row}",
+    expected:
+      "fn sum(row: struct({x: i32, y: i32})) -> struct({x: i32, y: i32}) {\n  row\n}\n",
+  },
+  {
+    name: "multiline anonymous struct annotations",
+    input:
+      "fn project(row:struct({first_very_long_field_name:i32,second_very_long_field_name:bool,third_very_long_field_name:i32,fourth_very_long_field_name:bool}))->i32{row.first_very_long_field_name}",
+    expected:
+      "fn project(row: struct({\n  first_very_long_field_name: i32,\n  second_very_long_field_name: bool,\n  third_very_long_field_name: i32,\n  fourth_very_long_field_name: bool\n})) -> i32 {\n  row.first_very_long_field_name\n}\n",
+  },
+  {
     name: "type function block with optional final semicolon",
     input: "type fn Option(a:type)->union{let None={};let Some={value:a};union(None,Some);}",
     expected:

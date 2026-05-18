@@ -802,203 +802,74 @@ type fn PatchForQuery(row: type, patch: type) -> type {
   patch
 }
 
-type fn SetOneValue(row: type, field: const, component: type) -> type {
-  let RowSlot = @shape_slot(@type_slots(row), field);
-  let FieldTypeOk = @require(
-    RowSlot == component,
-    "ECS set_one field must be present in the query row with matching type"
-  );
-  component
-}
-
-fn set_one(
+fn map(
   systems: Systems(world_t, input_t),
   query: Query(world_t, input_t, row_t),
-  const field: const,
-  const step: fn(row: row_t) -> component
+  const step: fn(row: row_t) -> patch_t
 ) -> Systems(world_t, input_t) {
-  Systems {
-    world: set_one_field(
-      systems,
-      systems.world,
-      field,
-      step
-    ),
-    input: systems.input
-  }
+  set(systems, query, step)
 }
 
-fn set_one_with_world(
+fn map_with_world(
   systems: Systems(world_t, input_t),
   query: Query(world_t, input_t, row_t),
-  const field: const,
-  const step: fn(row: row_t, world: world_t) -> component
+  const step: fn(row: row_t, world: world_t) -> patch_t
 ) -> Systems(world_t, input_t) {
-  Systems {
-    world: set_one_field_with_world(
-      systems,
-      systems.world,
-      field,
-      step
-    ),
-    input: systems.input
-  }
+  set_with_world(systems, query, step)
 }
 
-fn set_one_field(
+fn fold(
   systems: Systems(world_t, input_t),
-  world: world_t,
-  const field: const,
-  const step: fn(row: row_t) -> component
-) -> world_t {
-  let mapped = set_one_field_start(
-    @field(world, field),
+  query: Query(world_t, input_t, row_t),
+  initial: accumulator,
+  const step: fn(acc: accumulator, row: row_t) -> accumulator
+) -> accumulator {
+  fold_start(
     systems,
-    field,
-    step
-  );
-  @replace_field(world, field, mapped)
-}
-
-fn set_one_field_start(
-  values: Batch(capacity, component),
-  systems: Systems(world_t, input_t),
-  const field: const,
-  const step: fn(row: row_t) -> SetOneValue(row_t, field, component)
-) -> Batch(capacity, component) {
-  set_one_field_loop(
-    layout.core.IndexCursor::start(capacity),
-    layout.InlineArrayBuilder::start(
-      capacity,
-      component
-    ),
-    values,
-    systems,
-    field,
+    initial,
     step
   )
 }
 
-fn set_one_field_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  builder: layout.InlineArrayBuilder(capacity, component),
-  values: Batch(capacity, component),
+fn fold_start(
   systems: Systems(world_t, input_t),
-  const field: const,
-  const step: fn(row: row_t) -> SetOneValue(row_t, field, component)
-) -> Batch(capacity, component) {
-  let builder_then = builder;
-  let builder_else = builder;
-  let values_next = values;
+  initial: accumulator,
+  const step: fn(acc: accumulator, row: row_t) -> accumulator
+) -> accumulator {
+  fold_loop(
+    layout.core.IndexCursor::start(capacity),
+    systems,
+    initial,
+    step
+  )
+}
+
+fn fold_loop(
+  cursor: layout.core.IndexCursor(capacity),
+  systems: Systems(world_t, input_t),
+  acc: accumulator,
+  const step: fn(acc: accumulator, row: row_t) -> accumulator
+) -> accumulator {
+  let systems_then = systems;
+  let systems_next = systems;
+  let acc_then = acc;
+  let acc_else = acc;
   match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => set_one_field_loop(
+    Yield(i, next) => fold_loop(
       next,
-      layout.InlineArrayBuilder::push(
-        capacity,
-        component,
-        builder_then,
-        i,
-        step(query_row(
+      systems_next,
+      step(
+        acc_then,
+        query_row(
           @type_slots(row_t),
-          systems,
+          systems_then,
           i,
           @empty(row_t)
-        ))
-      ),
-      values_next,
-      systems,
-      field,
-      step
-    ),
-    Done => layout.InlineArrayBuilder::finish(
-      capacity,
-      component,
-      builder_else
-    ),
-  }
-}
-
-fn set_one_field_with_world(
-  systems: Systems(world_t, input_t),
-  world: world_t,
-  const field: const,
-  const step: fn(row: row_t, world: world_t) -> component
-) -> world_t {
-  let mapped = set_one_field_with_world_start(
-    @field(world, field),
-    systems,
-    field,
-    step
-  );
-  @replace_field(world, field, mapped)
-}
-
-fn set_one_field_with_world_start(
-  values: Batch(capacity, component),
-  systems: Systems(world_t, input_t),
-  const field: const,
-  const step: fn(row: row_t, world: world_t) -> SetOneValue(
-    row_t,
-    field,
-    component
-  )
-) -> Batch(capacity, component) {
-  set_one_field_with_world_loop(
-    layout.core.IndexCursor::start(capacity),
-    layout.InlineArrayBuilder::start(
-      capacity,
-      component
-    ),
-    values,
-    systems,
-    field,
-    step
-  )
-}
-
-fn set_one_field_with_world_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  builder: layout.InlineArrayBuilder(capacity, component),
-  values: Batch(capacity, component),
-  systems: Systems(world_t, input_t),
-  const field: const,
-  const step: fn(row: row_t, world: world_t) -> SetOneValue(
-    row_t,
-    field,
-    component
-  )
-) -> Batch(capacity, component) {
-  let builder_then = builder;
-  let builder_else = builder;
-  let values_next = values;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => set_one_field_with_world_loop(
-      next,
-      layout.InlineArrayBuilder::push(
-        capacity,
-        component,
-        builder_then,
-        i,
-        step(
-          query_row(
-            @type_slots(row_t),
-            systems,
-            i,
-            @empty(row_t)
-          ),
-          systems.world
         )
       ),
-      values_next,
-      systems,
-      field,
       step
     ),
-    Done => layout.InlineArrayBuilder::finish(
-      capacity,
-      component,
-      builder_else
-    ),
+    Done => acc_else,
   }
 }
 
@@ -1284,7 +1155,24 @@ fn spawn(
   world: world_t,
   entity_values: EntityRow(WorldComponents(world_t), row)
 ) -> Command(world_t) {
-  spawn_with_entities(world.entities, world, entity_values)
+  let entity = match layout.core.Index::try(
+    capacity,
+    world.len
+  ) {
+    Some(index) => index,
+    None => 0,
+  };
+  spawn_components(
+    @type_slots(row),
+    capacity,
+    @replace_field(
+      world,
+      #len,
+      world.len + 1
+    ),
+    entity,
+    entity_values
+  )
 }
 
 fn spawn_with_entities(

@@ -10,6 +10,7 @@ import type {
   ShapeTypeSlot,
   Statement,
   TypeDecl,
+  TypeExpr,
 } from "./core_ast.ts";
 import { runtimeProgramFromProgram } from "./check.ts";
 import { CompileError } from "./diagnostics.ts";
@@ -1651,7 +1652,7 @@ function lowerInlineArrayHelperCall(
   expr: Extract<Expr, { kind: "call" }>,
   ctx: LowerContext,
   locals: Set<string>,
-  _expectedType?: string,
+  expectedType?: string,
 ): Instr[] | undefined {
   if (expr.callee.kind !== "var") return undefined;
   const fn = ctx.functions.get(expr.callee.name);
@@ -1660,7 +1661,7 @@ function lowerInlineArrayHelperCall(
   const localSlotUpdate = fixedUpdate
     ? localSlotPlanForName(fixedUpdate.source.name, ctx.localSlotArrays)
     : undefined;
-  if (fixedUpdate && localSlotUpdate) {
+  if (fixedUpdate && localSlotUpdate && !expectedType) {
     return [
       ...lowerLocalSlotArrayUpdateStore(localSlotUpdate, fixedUpdate, ctx, locals),
       ...lowerLocalSlotArrayMaterialize(localSlotUpdate, ctx, locals),
@@ -1669,7 +1670,7 @@ function lowerInlineArrayHelperCall(
   const packedUpdate = fixedUpdate
     ? packedPlanForName(fixedUpdate.source.name, ctx.packedArrays)
     : undefined;
-  if (fixedUpdate && packedUpdate) {
+  if (fixedUpdate && packedUpdate && !expectedType) {
     return [
       ...lowerPackedArrayUpdateStore(packedUpdate, fixedUpdate, ctx, locals),
       ...lowerPackedArrayMaterialize(packedUpdate, ctx, locals),
@@ -1678,7 +1679,7 @@ function lowerInlineArrayHelperCall(
   const scratchUpdate = fixedUpdate
     ? scratchPlanForName(fixedUpdate.source.name, ctx.scratchArrays)
     : undefined;
-  if (fixedUpdate && scratchUpdate) {
+  if (fixedUpdate && scratchUpdate && !expectedType) {
     return [
       ...lowerScratchArrayUpdate(scratchUpdate, fixedUpdate, ctx, locals),
       ...lowerScratchArrayMaterialize(scratchUpdate, ctx, locals),
@@ -3294,6 +3295,7 @@ function lowerBlock(
   ctx: LowerContext,
   locals: Set<string>,
   expectedType?: string,
+  finalUsageExpr?: Expr,
 ): Instr[] {
   const body: Instr[] = [];
   for (let index = 0; index < block.statements.length; index++) {
@@ -3301,12 +3303,12 @@ function lowerBlock(
     const usedLater = usedNames({
       kind: "block",
       statements: block.statements.slice(index + 1),
-      ...(block.expr ? { expr: block.expr } : {}),
+      ...(block.expr ?? finalUsageExpr ? { expr: block.expr ?? finalUsageExpr } : {}),
     });
     const remaining: BlockExpr = {
       kind: "block",
       statements: block.statements.slice(index + 1),
-      ...(block.expr ? { expr: block.expr } : {}),
+      ...(block.expr ?? finalUsageExpr ? { expr: block.expr ?? finalUsageExpr } : {}),
     };
     body.push(...lowerStatement(stmt, ctx, locals, usedLater, remaining));
   }
@@ -3769,7 +3771,13 @@ function lowerTailOpcodeBlock(
   locals: Set<string>,
 ): Instr[] {
   return [
-    ...lowerBlock({ kind: "block", statements: block.statements }, ctx, locals, fn.returnType),
+    ...lowerBlock(
+      { kind: "block", statements: block.statements },
+      ctx,
+      locals,
+      fn.returnType,
+      block.expr,
+    ),
     ...(block.expr ? lowerTailOpcodeExpr(block.expr, fn, ctx, locals) : []),
   ];
 }
@@ -5739,6 +5747,14 @@ function lowerExpr(
           value: 0,
         }));
       }
+      if (expr.callee.name === "@replace_field") {
+        const replaced = lowerReplaceFieldCall(expr, ctx, locals, expectedType);
+        if (replaced) return replaced;
+      }
+      if (expr.callee.name.endsWith("spawn_components")) {
+        const spawned = lowerEcsSpawnComponentsCall(expr, ctx, locals, expectedType);
+        if (spawned) return spawned;
+      }
       const branch = lowerBranchIntrinsic(expr, ctx, locals);
       if (branch) return branch;
       const temporal = lowerTemporalIntrinsic(expr, ctx, locals);
@@ -5923,6 +5939,21 @@ function lowerExpr(
           );
         }
       }
+      if (expectedType) {
+        const actualType = exprTypeWithLocals(expr.value, ctx) ??
+          (expr.value.kind === "index" ? indexedItemType(expr.value, ctx) : undefined);
+        const indexes = uniqueProductFieldIndexesByType(actualType, expectedType, ctx.layouts);
+        if (indexes) {
+          if (actualType?.includes(")(")) return lowerExpr(expr.value, ctx, locals, expectedType);
+          return lowerFlattenedSlotsViaTemps(
+            lowerExpr(expr.value, ctx, locals, actualType),
+            flattenType(actualType, ctx.layouts),
+            indexes,
+            ctx,
+            locals,
+          );
+        }
+      }
       if (expr.value.kind === "var" && expectedType) {
         const actualType = exprTypeWithLocals(expr.value, ctx);
         const candidateSlots = (productSlotsForType(actualType, ctx.layouts) ?? [])
@@ -5969,6 +6000,164 @@ function lowerParityRemainderComparison(
     { op: "binary", wasm: "i32.and" },
   ];
   return expr.op === "!=" ? test : [...test, { op: "binary", wasm: "i32.eqz" }];
+}
+
+function uniqueProductFieldIndexesByType(
+  actualType: string | undefined,
+  expectedType: string,
+  layouts: LayoutEnv,
+): number[] | undefined {
+  const slots = productSlotsForType(actualType, layouts);
+  if (!slots) return undefined;
+  let offset = 0;
+  const matches: number[][] = [];
+  for (const slot of slots) {
+    const flat = flattenType(slot.type, layouts);
+    const count = flat.length * (slot.repeat ? Number.parseInt(slot.repeat, 10) : 1);
+    if (
+      compactTypeSource(slot.type) === compactTypeSource(expectedType) ||
+      flattenedTypesMatch(slot.type, expectedType, layouts)
+    ) {
+      matches.push(Array.from({ length: count }, (_, index) => offset + index));
+    }
+    offset += count;
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function lowerReplaceFieldCall(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType: string | undefined,
+): Instr[] | undefined {
+  if (expr.args.length !== 3) return undefined;
+  const [source, key, value] = expr.args;
+  if (!source || !key || !value) return undefined;
+  const label = key.kind === "literal" && key.literalKind === "literalType"
+    ? key.value.replace(/^#/, "")
+    : key.kind === "literal" && key.literalKind === "string"
+    ? key.value.replace(/^"|"$/g, "")
+    : undefined;
+  if (!label) return undefined;
+  const sourceType = exprTypeWithLocals(source, ctx);
+  const productType = expectedType ?? sourceType;
+  const slots = productSlotsForType(productType, ctx.layouts);
+  if (!slots?.some((slot) => slot.label === label)) return undefined;
+  return slots.flatMap((slot) => {
+    if (!slot.label) return [];
+    const slotType = slot.label === label
+      ? exprTypeWithLocals(
+        {
+          kind: "field",
+          value: source,
+          key: { kind: "literal", literalKind: "literalType", value: `#${slot.label}` },
+        },
+        ctx,
+      ) ?? slot.type
+      : slot.type;
+    if (slot.label === label) return lowerExpr(value, ctx, locals, slotType);
+    return lowerExpr(
+      {
+        kind: "field",
+        value: source,
+        key: { kind: "literal", literalKind: "literalType", value: `#${slot.label}` },
+      },
+      ctx,
+      locals,
+      slotType,
+    );
+  });
+}
+
+function lowerEcsSpawnComponentsCall(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType: string | undefined,
+): Instr[] | undefined {
+  if (expr.args.length !== 5) return undefined;
+  const [fieldsArg, capacityArg, world, entity, entityValues] = expr.args;
+  if (!fieldsArg || !capacityArg || !world || !entity || !entityValues) return undefined;
+  const rowType = fieldsArg.kind === "call" && fieldsArg.callee.kind === "var" &&
+      fieldsArg.callee.name === "@type_slots"
+    ? renderBackendTypeProofArg(fieldsArg.args[0]!)
+    : undefined;
+  const rowSlots = productSlotsForType(rowType, ctx.layouts);
+  const productType = resolveAlias(expectedType, ctx.layouts) ?? exprTypeWithLocals(world, ctx);
+  const worldSlots = productSlotsForType(productType, ctx.layouts);
+  if (!rowSlots || !worldSlots) return undefined;
+  const rowByLabel = new Map(rowSlots.flatMap((slot) => slot.label ? [[slot.label, slot]] : []));
+  const replacedWorld = world.kind === "call" && world.callee.kind === "var" &&
+      world.callee.name === "@replace_field"
+    ? {
+      source: world.args[0],
+      label: world.args[1]?.kind === "literal" && world.args[1].literalKind === "literalType"
+        ? world.args[1].value.replace(/^#/, "")
+        : undefined,
+      value: world.args[2],
+    }
+    : undefined;
+  return worldSlots.flatMap((slot) => {
+    if (!slot.label) return [];
+    const rowSlot = rowByLabel.get(slot.label);
+    if (!rowSlot) {
+      if (replacedWorld?.label === slot.label && replacedWorld.value) {
+        return lowerExpr(replacedWorld.value, ctx, locals, slot.type);
+      }
+      const fieldSource = replacedWorld?.source ?? world;
+      if (!fieldSource) return [];
+      return lowerExpr(
+        {
+          kind: "field",
+          value: fieldSource,
+          key: { kind: "literal", literalKind: "literalType", value: `#${slot.label}` },
+        },
+        ctx,
+        locals,
+        slot.type,
+      );
+    }
+    const arrayArgs = inlineArrayLikeTypeArgs(slot.type, ctx.layouts);
+    if (!arrayArgs) return [];
+    const [capacity, itemType] = arrayArgs;
+    const itemSlots = flattenType(itemType, ctx.layouts);
+    return Array.from({ length: capacity }, (_, item) =>
+      itemSlots.map((itemSlot, slotIndex): Instr[] => [
+        ...lowerExpr(entity, ctx, locals, "i32"),
+        { op: "const", type: "i32", value: item },
+        { op: "binary", wasm: "i32.eq" },
+        {
+          op: "if",
+          results: [itemSlot.wat],
+          thenBody: lowerFlattenedValueSlot(
+            {
+              kind: "field",
+              value: entityValues,
+              key: { kind: "literal", literalKind: "literalType", value: `#${slot.label}` },
+            },
+            itemType,
+            slotIndex,
+            ctx,
+            locals,
+          ),
+          elseBody: lowerFlattenedValueSlot(
+            {
+              kind: "var",
+              name: `${
+                (replacedWorld?.source ?? world).kind === "var"
+                  ? ((replacedWorld?.source ?? world) as Extract<Expr, { kind: "var" }>).name
+                  : "world"
+              }.${slot.label}[${item}]`,
+            },
+            itemType,
+            slotIndex,
+            ctx,
+            locals,
+          ),
+        },
+      ]).flat()).flat();
+  });
 }
 
 function lowerOddDivisibilityComparison(
@@ -7479,7 +7668,7 @@ function lowerIndex(
   }
   const fieldTarget = fieldAccessName(expr.target);
   if (fieldTarget) {
-    const storageTarget = fieldTarget;
+    const storageTarget = resolveInlineArrayStorageTarget(fieldTarget, locals) ?? fieldTarget;
     const targetType = exprTypeWithLocals(expr.target, ctx);
     const arrayArgs = inlineArrayLikeTypeArgs(targetType, ctx.layouts);
     const [rawCapacity, itemType] = arrayArgs ?? [Number.NaN, expectedType ?? "i32"];
@@ -7530,15 +7719,30 @@ function fieldAccessName(expr: Expr): string | undefined {
 }
 
 function inlineArrayCapacityFromLocals(target: string, locals: Set<string>): number {
-  const localBase = target.replaceAll(".", "$");
+  const localBases = [target.replaceAll(".", "$"), target];
   let capacity = 0;
   while (
-    locals.has(`${localBase}$${capacity}`) ||
-    [...locals].some((slot) => slot.startsWith(`${localBase}$${capacity}$`))
+    localBases.some((localBase) =>
+      locals.has(`${localBase}$${capacity}`) ||
+      [...locals].some((slot) => slot.startsWith(`${localBase}$${capacity}$`))
+    )
   ) {
     capacity++;
   }
   return capacity;
+}
+
+function resolveInlineArrayStorageTarget(target: string, locals: Set<string>): string | undefined {
+  if (inlineArrayCapacityFromLocals(target, locals) > 0) return target;
+  const field = target.split(".").at(-1);
+  if (!field) return undefined;
+  const fieldSuffix = `$${field}`;
+  for (const local of locals) {
+    const match = local.match(/^(.*)\$0(?:\$|$)/);
+    const base = match?.[1];
+    if (base?.endsWith(fieldSuffix)) return base.replaceAll("$", ".");
+  }
+  return undefined;
 }
 
 function unresolvedTypeParam(type: string): boolean {
@@ -9108,10 +9312,17 @@ function productSlotsForType(
   const resolved = resolveAlias(original, layouts) ?? original;
   const declSource = original ?? resolved;
   if (!declSource) return undefined;
-  const structArgs = typeCallArgs(resolved ?? declSource, "struct") ??
-    typeCallArgs(declSource, "struct");
-  if (structArgs) {
-    const shape = constShapeFromTypeArg(structArgs, layouts);
+  const directShape = constShapeFromTypeArg(declSource, layouts);
+  if (directShape) {
+    return directShape.slots.map((slot) => ({
+      label: slot.label,
+      position: slot.position,
+      type: staticShapeSlotType(slot.value) ?? "i32",
+    }));
+  }
+  const directStructArgs = typeCallArgs(declSource, "struct");
+  if (directStructArgs) {
+    const shape = constShapeFromTypeArg(directStructArgs, layouts);
     if (shape) {
       return shape.slots.map((slot) => ({
         label: slot.label,
@@ -9119,32 +9330,252 @@ function productSlotsForType(
         type: staticShapeSlotType(slot.value) ?? "i32",
       }));
     }
+    const inner = directStructArgs.trim();
+    if (compactTypeSource(inner) !== compactTypeSource(declSource)) {
+      const nested = productSlotsForType(inner, layouts);
+      if (nested) return nested;
+    }
+  }
+  const trailingArg = trailingTypeCallArg(declSource);
+  if (trailingArg && compactTypeSource(trailingArg) !== compactTypeSource(declSource)) {
+    const trailingSlots = productSlotsForType(trailingArg, layouts);
+    if (trailingSlots) return trailingSlots;
   }
   const decl = layouts.types.get(typeName(declSource));
-  if (!decl) return undefined;
-  const args = typeCallArgs(declSource, typeName(declSource)) ??
-    (resolved ? typeCallArgs(resolved, typeName(resolved)) : undefined);
-  const argValues = args ? splitTypeArgs(args) : [];
-  if (decl.normalized?.kind === "product") {
-    return decl.normalized.shape.slots.map((slot) => ({
-      ...slot,
-      type: substituteAliasTypeParams(slot.type, decl, argValues),
-      repeat: slot.repeat ? substituteAliasTypeParams(slot.repeat, decl, argValues) : undefined,
+  if (decl) {
+    const args = typeCallArgs(declSource, typeName(declSource)) ??
+      (resolved ? typeCallArgs(resolved, typeName(resolved)) : undefined);
+    const argValues = args ? splitTypeArgs(args) : [];
+    if (decl.normalized?.kind === "product") {
+      return decl.normalized.shape.slots.map((slot) => ({
+        ...slot,
+        type: substituteAliasTypeParams(slot.type, decl, argValues),
+        repeat: slot.repeat ? substituteAliasTypeParams(slot.repeat, decl, argValues) : undefined,
+      }));
+    }
+    if (decl.body.kind === "type_block") {
+      const slots = productSlotsFromTypeBlock(decl, declSource, argValues, layouts);
+      if (slots) return slots;
+    }
+  }
+  const resolvedStructArgs = resolved && compactTypeSource(resolved) !== compactTypeSource(declSource)
+    ? typeCallArgs(resolved, "struct")
+    : undefined;
+  if (!resolvedStructArgs) return undefined;
+  const shape = constShapeFromTypeArg(resolvedStructArgs, layouts);
+  if (shape) {
+    return shape.slots.map((slot) => ({
+      label: slot.label,
+      position: slot.position,
+      type: staticShapeSlotType(slot.value) ?? "i32",
     }));
   }
+  return productSlotsForType(resolvedStructArgs.trim(), layouts);
+}
+
+function productSlotsFromTypeBlock(
+  decl: TypeDecl,
+  source: string,
+  argValues: string[],
+  layouts: LayoutEnv,
+): ShapeTypeSlot[] | undefined {
   if (decl.body.kind !== "type_block") return undefined;
-  const shape = decl.body.statements.find((stmt) =>
-    stmt.name === typeName(declSource) && stmt.value.kind === "type_shape"
-  )?.value;
-  if (shape?.kind !== "type_shape") return undefined;
-  return shape.shape.slots.map((slot) => ({
+  const bindings = typeParamBindings(decl, argValues);
+  const shapes = new Map<string, ShapeTypeSlot[]>();
+  for (const stmt of decl.body.statements) {
+    if (stmt.kind !== "type_let") continue;
+    const shape = evalTypeShapeExpr(stmt.value, layouts, shapes, bindings);
+    if (shape) shapes.set(stmt.name, shape);
+  }
+  const expr = decl.body.expr;
+  if (!expr) return undefined;
+  if (expr.kind === "type_call") {
+    if (
+      expr.callee.kind === "type_ref" && expr.callee.name === "struct" &&
+      expr.args.length === 1
+    ) {
+      const key = typeShapeRefName(expr.args[0]!, bindings);
+      if (key) return shapes.get(key);
+    }
+    const rendered = renderBackendTypeExprWithBindings(expr, bindings);
+    if (rendered && rendered !== source) return productSlotsForType(rendered, layouts);
+  }
+  if (expr.kind === "type_shape" && expr.shape.slots.length === 0) {
+    const namedShape = shapes.get(decl.name);
+    if (namedShape) return namedShape;
+  }
+  if (expr.kind === "type_shape") {
+    const slots = typeShapeSlots(expr.shape.slots, bindings);
+    return slots.length ? slots : undefined;
+  }
+  if (expr.kind === "type_match") {
+    const value = evalBackendTypeBool(expr.value, layouts, shapes, bindings);
+    const arm = expr.arms.find((candidate) =>
+      candidate.pattern.kind === "bool" && candidate.pattern.value === value
+    );
+    if (!arm) return undefined;
+    if (
+      arm.value.kind === "type_call" &&
+      arm.value.callee.kind === "type_ref" &&
+      arm.value.callee.name === "struct" &&
+      arm.value.args.length === 1
+    ) {
+      const key = typeShapeRefName(arm.value.args[0]!, bindings);
+      if (key) return shapes.get(key);
+    }
+    const rendered = renderBackendTypeExprWithBindings(arm.value, bindings);
+    if (rendered && rendered !== source) return productSlotsForType(rendered, layouts);
+  }
+  return undefined;
+}
+
+function evalBackendTypeBool(
+  expr: TypeExpr,
+  layouts: LayoutEnv,
+  shapes: Map<string, ShapeTypeSlot[]>,
+  bindings: Map<string, string>,
+): boolean | undefined {
+  if (expr.kind === "type_bool") return expr.value;
+  if (expr.kind !== "type_call" || expr.callee.kind !== "type_static_ref") return undefined;
+  if (expr.callee.name === "type_has_slot" && expr.args.length === 2) {
+    const type = renderBackendTypeExprWithBindings(expr.args[0]!, bindings);
+    const label = expr.args[1]?.kind === "type_literal" ? expr.args[1].value : undefined;
+    return Boolean(type && label && productSlotsForType(type, layouts)?.some((slot) =>
+      slot.label === label
+    ));
+  }
+  if (expr.callee.name === "type_is_product" && expr.args.length === 1) {
+    const type = renderBackendTypeExprWithBindings(expr.args[0]!, bindings);
+    return Boolean(type && productSlotsForType(type, layouts));
+  }
+  if (expr.callee.name === "require" && expr.args.length >= 1) {
+    return evalBackendTypeBool(expr.args[0]!, layouts, shapes, bindings);
+  }
+  if (expr.callee.name === "shape_count" && expr.args.length === 1) {
+    return Boolean(evalTypeShapeExpr(expr.args[0]!, layouts, shapes, bindings)?.length);
+  }
+  return undefined;
+}
+
+function evalTypeShapeExpr(
+  expr: TypeExpr,
+  layouts: LayoutEnv,
+  shapes: Map<string, ShapeTypeSlot[]>,
+  bindings: Map<string, string>,
+): ShapeTypeSlot[] | undefined {
+  if (expr.kind === "type_shape") return typeShapeSlots(expr.shape.slots, bindings);
+  if (expr.kind === "type_ref") {
+    const bound = bindings.get(expr.name);
+    if (bound) return constShapeSlots(bound, layouts);
+    return shapes.get(expr.name) ?? constShapeSlots(expr.name, layouts);
+  }
+  if (expr.kind !== "type_call" || expr.callee.kind !== "type_static_ref") return undefined;
+  if (expr.callee.name === "type_slots" && expr.args.length === 1) {
+    const type = renderBackendTypeExprWithBindings(expr.args[0], bindings);
+    return productSlotsForType(type, layouts);
+  }
+  if (expr.callee.name === "shape_concat") {
+    const slots = expr.args.flatMap((arg) =>
+      evalTypeShapeExpr(arg, layouts, shapes, bindings) ?? []
+    );
+    return slots.length ? slots : undefined;
+  }
+  if (expr.callee.name === "shape_map" && expr.args.length === 2) {
+    const source = evalTypeShapeExpr(expr.args[0]!, layouts, shapes, bindings);
+    if (!source) return undefined;
+    return source.map((slot) => ({
+      label: slot.label,
+      position: slot.position,
+      type: applyTypeMapper(expr.args[1]!, slot.type, bindings),
+      repeat: slot.repeat,
+    }));
+  }
+  return undefined;
+}
+
+function constShapeSlots(source: string, layouts: LayoutEnv): ShapeTypeSlot[] | undefined {
+  const shape = constShapeFromTypeArg(source, layouts);
+  return shape?.slots.map((slot) => ({
     label: slot.label,
     position: slot.position,
-    type: substituteAliasTypeParams(renderBackendTypeExpr(slot.type), decl, argValues),
-    repeat: slot.repeat
-      ? substituteAliasTypeParams(renderBackendCountExpr(slot.repeat), decl, argValues)
-      : undefined,
+    type: staticShapeSlotType(slot.value) ?? "i32",
   }));
+}
+
+function typeShapeSlots(
+  slots: import("./core_ast.ts").TypeShapeSlot[],
+  bindings: Map<string, string>,
+): ShapeTypeSlot[] {
+  return slots.map((slot) => ({
+    label: slot.label,
+    position: slot.position,
+    type: renderBackendTypeExprWithBindings(slot.type, bindings) ?? "i32",
+    repeat: slot.repeat ? substituteTypeBindings(renderBackendCountExpr(slot.repeat), bindings) : undefined,
+  }));
+}
+
+function applyTypeMapper(
+  mapper: TypeExpr,
+  itemType: string,
+  bindings: Map<string, string>,
+): string {
+  if (mapper.kind === "type_ref") return `${mapper.name}(${itemType})`;
+  if (mapper.kind === "type_call") {
+    const callee = renderBackendTypeExprWithBindings(mapper.callee, bindings);
+    const args = mapper.args
+      .map((arg) => renderBackendTypeExprWithBindings(arg, bindings))
+      .filter((arg): arg is string => Boolean(arg));
+    return `${callee}(${[...args, itemType].join(", ")})`;
+  }
+  return itemType;
+}
+
+function typeParamBindings(decl: TypeDecl, argValues: string[]): Map<string, string> {
+  const bindings = new Map<string, string>();
+  const prefix = decl.name.includes(".") ? decl.name.slice(0, decl.name.lastIndexOf(".")) : "";
+  for (const [index, param] of decl.params.entries()) {
+    const value = argValues[index];
+    if (!value) continue;
+    bindings.set(param.name, value);
+    if (prefix) bindings.set(`${prefix}.${param.name}`, value);
+  }
+  return bindings;
+}
+
+function typeShapeRefName(expr: TypeExpr, bindings: Map<string, string>): string | undefined {
+  return expr.kind === "type_ref" ? bindings.get(expr.name) ?? expr.name : undefined;
+}
+
+function renderBackendTypeExprWithBindings(
+  expr: TypeExpr,
+  bindings: Map<string, string>,
+): string | undefined {
+  if (expr.kind === "type_ref") return bindings.get(expr.name) ?? expr.name;
+  if (expr.kind === "type_static_ref") return `@${expr.name}`;
+  if (expr.kind === "type_number") return expr.value;
+  if (expr.kind === "type_literal") return `#${expr.value}`;
+  if (expr.kind === "type_string") return JSON.stringify(expr.value);
+  if (expr.kind === "type_char") return expr.value;
+  if (expr.kind === "type_bool") return expr.value ? "true" : "false";
+  if (expr.kind === "type_call") {
+    const callee = renderBackendTypeExprWithBindings(expr.callee, bindings);
+    const args = expr.args.map((arg) => renderBackendTypeExprWithBindings(arg, bindings));
+    if (!callee || args.some((arg) => arg === undefined)) return undefined;
+    return `${callee}(${args.join(", ")})`;
+  }
+  return renderBackendTypeExpr(expr);
+}
+
+function substituteTypeBindings(source: string, bindings: Map<string, string>): string {
+  let result = source;
+  for (const [name, value] of bindings) {
+    result = result.replace(new RegExp(`\\b${escapeRegExp(name)}\\b`, "g"), value);
+  }
+  return result;
+}
+
+function escapeRegExp(source: string): string {
+  return source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function flattenedTypesMatch(
@@ -12731,13 +13162,14 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
   if (!resolved) return [{ suffix: "", type: "i32", wat: "i32" }];
   if (parseRefinedI32Type(resolved)) return [{ suffix: "", type: resolved, wat: "i32" }];
   if (isPrimitiveType(resolved)) return [{ suffix: "", type: resolved, wat: watType(resolved) }];
-  const inlineArrayArgs = typeCallArgs(resolved, "InlineArray");
+  const inlineArrayArgs = inlineArrayLikeTypeArgs(type, layouts) ??
+    inlineArrayLikeTypeArgs(resolved, layouts);
   if (inlineArrayArgs) {
-    const args = splitTypeArgs(inlineArrayArgs);
-    const count = staticCountValue(args[0] ?? "1", layouts);
-    const itemType = args[1]?.trim() ?? "i32";
-    return repeatSlots(count, itemType, layouts);
+    const [count, itemType] = inlineArrayArgs;
+    if (Number.isFinite(count) && count > 0) return repeatSlots(count, itemType, layouts);
   }
+  const productSlots = productSlotsForType(type, layouts) ?? productSlotsForType(resolved, layouts);
+  if (productSlots) return flattenShape(productSlots, layouts);
   const inlineArrayBuilderArgs = typeCallArgs(resolved, "InlineArrayBuilder");
   if (inlineArrayBuilderArgs) {
     const args = splitTypeArgs(inlineArrayBuilderArgs);
@@ -13012,6 +13444,15 @@ function shapeSlotTypes(type: string | undefined, layouts: LayoutEnv): string[] 
       () => args[1]?.trim() ?? "i32",
     );
   }
+  const productSlots = productSlotsForType(type, layouts) ?? productSlotsForType(resolved, layouts);
+  if (productSlots) {
+    return productSlots.flatMap((slot) =>
+      Array.from(
+        { length: slot.repeat ? Number.parseInt(slot.repeat, 10) : 1 },
+        () => slot.type,
+      )
+    );
+  }
   const decl = layouts.types.get(typeName(resolved));
   if (decl?.normalized?.kind !== "product") return [];
   const args = typeCallArgs(resolved, typeName(resolved));
@@ -13043,6 +13484,15 @@ function renderBackendTypeProofArg(expr: Expr): string | undefined {
     if (args.some((arg) => arg === undefined)) return undefined;
     return `${expr.callee.name}(${args.join(", ")})`;
   }
+  if (expr.kind === "shape") {
+    const slots = expr.slots.map((slot) => {
+      const type = renderBackendTypeProofArg(slot.value);
+      if (!type) return undefined;
+      return `${slot.label ? `${slot.label}: ` : ""}${type}`;
+    });
+    if (slots.some((slot) => slot === undefined)) return undefined;
+    return `{${slots.join(", ")}}`;
+  }
   return undefined;
 }
 
@@ -13053,6 +13503,10 @@ function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
       const known = backendFunctionByName(expr.callee.name, ctx)?.returnType;
       if (known) return specializeCallReturnType(expr, known, ctx) ?? known;
       const calleeType = varType(expr.callee.name, ctx);
+      const parsed = parseBackendFnSignature(calleeType);
+      if (parsed) return parsed.returnType;
+    } else {
+      const calleeType = exprTypeWithLocals(expr.callee, ctx);
       const parsed = parseBackendFnSignature(calleeType);
       if (parsed) return parsed.returnType;
     }
@@ -13257,6 +13711,25 @@ function typeCallArgs(type: string, baseName: string): string | undefined {
     return undefined;
   }
   return type.slice(prefix.length, -1);
+}
+
+function trailingTypeCallArg(type: string): string | undefined {
+  const source = type.trim();
+  if (!source.endsWith(")")) return undefined;
+  let depth = 0;
+  for (let index = source.length - 1; index >= 0; index--) {
+    const char = source[index];
+    if (char === ")") depth++;
+    else if (char === "(") {
+      depth--;
+      if (depth === 0) {
+        const prefix = source.slice(0, index).trim();
+        if (!prefix) return undefined;
+        return source.slice(index + 1, -1).trim();
+      }
+    }
+  }
+  return undefined;
 }
 
 function splitTypeArgs(source: string): string[] {

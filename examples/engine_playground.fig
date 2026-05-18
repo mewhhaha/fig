@@ -99,13 +99,13 @@ let movement_q = do @applicative(ecs.Query(World, FrameInput)) {
   transform <- ecs.write(#transform);
   velocity <- ecs.read(#velocity);
   input <- ecs.res();
-  pure(MovementRow {transform, velocity, input})
+  pure({transform, velocity, input})
 };
 
 let sprite_animation_q = do @applicative(ecs.Query(World, FrameInput)) {
   sprite <- ecs.write(#sprite);
   input <- ecs.res();
-  pure(SpriteAnimationRow {sprite, input})
+  pure({sprite, input})
 };
 
 fn empty_world() -> World {
@@ -129,47 +129,49 @@ fn read_frame_input() -> FrameInput !{time, event} {
 
 fn moved_transform(
   row: MovementRow
-) -> Transform2d {
-  Transform2d {
-    x: row.transform.x
-      + row.velocity.x
-      * row.input.axis_x
-      * row.input.dt_ms
-      / 16,
-    y: row.transform.y + row.velocity.y * row.input.dt_ms / 16,
-    z: row.transform.z
+) -> struct({transform: Transform2d}) {
+  {
+    transform: Transform2d {
+      x: row.transform.x
+        + row.velocity.x
+        * row.input.axis_x
+        * row.input.dt_ms
+        / 16,
+      y: row.transform.y + row.velocity.y * row.input.dt_ms / 16,
+      z: row.transform.z
+    }
   }
 }
 
 fn animated_sprite(
   row: SpriteAnimationRow
-) -> Sprite2d {
-  Sprite2d {
-    w: row.sprite.w,
-    h: row.sprite.h,
-    color: row.sprite.color + row.input.pressed
+) -> struct({sprite: Sprite2d}) {
+  {
+    sprite: Sprite2d {
+      w: row.sprite.w,
+      h: row.sprite.h,
+      color: row.sprite.color + row.input.pressed
+    }
   }
 }
 
-fn movement_system(systems: ecs.System(World, FrameInput)) -> ecs.System(
-  World,
-  FrameInput
-) {
-  ecs.set_one(systems, movement_q, #transform, moved_transform)
+fn movement_system() -> ecs.System(World, FrameInput) {
+  do @monad(ecs.System(World, FrameInput)) {
+    ecs.map(movement_q, moved_transform);
+  }
 }
 
-fn sprite_animation_system(systems: ecs.System(
-  World,
-  FrameInput
-)) -> ecs.System(World, FrameInput) {
-  ecs.set_one(systems, sprite_animation_q, #sprite, animated_sprite)
+fn sprite_animation_system() -> ecs.System(World, FrameInput) {
+  do @monad(ecs.System(World, FrameInput)) {
+    ecs.map(sprite_animation_q, animated_sprite);
+  }
 }
 
-fn frame_systems(systems: ecs.System(World, FrameInput)) -> ecs.System(
-  World,
-  FrameInput
-) {
-  sprite_animation_system(movement_system(systems))
+fn frame_systems() -> ecs.System(World, FrameInput) {
+  do @monad(ecs.System(World, FrameInput)) {
+    movement_system();
+    sprite_animation_system();
+  }
 }
 
 fn run_frame(world: World, input: FrameInput) -> World {

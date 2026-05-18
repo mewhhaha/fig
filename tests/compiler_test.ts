@@ -1423,7 +1423,7 @@ Deno.test.ignore("ecs dense world derives storage from component spec", async ()
   assert(world);
 });
 
-Deno.test("ecs query set_one derives system input from query context", async () => {
+Deno.test("ecs query map derives system input from query context", async () => {
   await checkSource(
     `
       const ecs = @import("engine.ecs");
@@ -1449,14 +1449,12 @@ Deno.test("ecs query set_one derives system input from query context", async () 
         pure(PositionRow {positions, input})
       };
 
-      fn step(
-        row: PositionRow
-      ) -> Position {
-        Position {x: row.positions.x + row.input.dt_ms}
+      fn step(row: PositionRow) -> struct({positions: Position}) {
+        {positions: Position {x: row.positions.x + row.input.dt_ms}}
       }
       fn movement() -> ecs.System(GameWorld, FrameInput) {
         do @monad(ecs.System(GameWorld, FrameInput)) {
-          ecs.set_one(positions_q, #positions, step);
+          ecs.map(positions_q, step);
         }
       }
       pub fn main(world: GameWorld, input: FrameInput) -> GameWorld {
@@ -1519,7 +1517,7 @@ Deno.test("ecs fused fill iterator maps and folds without materialized batch", a
   assert([...artifact.wat.matchAll(/\bif\b/g)].length <= 4, artifact.wat);
 });
 
-Deno.test.ignore("ecs query applicative set lowers to fused read input update", async () => {
+Deno.test("ecs query applicative map lowers to fused read input update", async () => {
   const source = `
       const ecs = @import("engine.ecs");
 
@@ -1571,14 +1569,20 @@ Deno.test.ignore("ecs query applicative set lowers to fused read input update", 
         }
       }
 
+      fn movement_step(
+        row: struct({positions: Position, velocities: Velocity, input: FrameInput})
+      ) -> struct({positions: Position}) {
+        {
+          positions: Position {
+            x: row.positions.x + row.velocities.dx + row.input.dt,
+            y: row.positions.y + row.velocities.dy
+          }
+        }
+      }
+
       fn movement_system() -> ecs.System(World, FrameInput) {
         do @monad(ecs.System(World, FrameInput)) {
-          ecs.set(movement_q, \\row -> {
-            positions: Position {
-              x: row.positions.x + row.velocities.dx + row.input.dt,
-              y: row.positions.y + row.velocities.dy
-            }
-          });
+          ecs.map(movement_q, movement_step);
         }
       }
 
@@ -1598,7 +1602,7 @@ Deno.test.ignore("ecs query applicative set lowers to fused read input update", 
   assertEquals((instance.exports.main as (seed: number) => number)(0), 7);
 });
 
-Deno.test.ignore("ecs system monad sequences query set systems", async () => {
+Deno.test("ecs system monad sequences query map systems", async () => {
   const source = `
       const ecs = @import("engine.ecs");
 
@@ -1639,14 +1643,16 @@ Deno.test.ignore("ecs system monad sequences query set systems", async () => {
         }
       }
 
+      fn movement_step(
+        row: struct({positions: Position, input: FrameInput})
+      ) -> struct({positions: Position}) {
+        {positions: Position {x: row.positions.x + row.input.dt, y: row.positions.y}}
+      }
+
       fn twice_system() -> ecs.System(World, FrameInput) {
         do @monad(ecs.System(World, FrameInput)) {
-          ecs.set(positions_q, \\row -> {
-            positions: Position {x: row.positions.x + row.input.dt, y: row.positions.y}
-          });
-          ecs.set(positions_q, \\row -> {
-            positions: Position {x: row.positions.x + row.input.dt, y: row.positions.y}
-          });
+          ecs.map(positions_q, movement_step);
+          ecs.map(positions_q, movement_step);
         }
       }
 
@@ -1796,7 +1802,7 @@ Deno.test.ignore("ecs query set rejects missing world fields", async () => {
 
       fn bad_system() -> ecs.System(World, FrameInput) {
         do @monad(ecs.System(World, FrameInput)) {
-          ecs.set(bad_q, \\row -> {missing: row.missing});
+          ecs.map(bad_q, \\row -> {missing: row.missing});
         }
       }
 
@@ -3376,6 +3382,96 @@ Deno.test("do applicative supports multiple query-style binds when effect has bi
     ),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 10);
+});
+
+Deno.test("anonymous record values infer structural product types", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Query(a: type) -> type { a }
+    fn Query::pure(value: a) -> Query(a) { value }
+    fn Query::map(const f: fn(x: a) -> Query(b), value: Query(a)) -> Query(b) { f(value) }
+    fn each(value: i32) -> Query(i32) { value }
+    type fn SlotsOk(row: type) -> type {
+      let Slots = @type_slots(row);
+      let HasX = @require(@shape_slot(Slots, #x) == i32, "anonymous row x slot");
+      row
+    }
+    type fn Row() -> type {
+      let Row = {x: i32};
+      struct(Row)
+    }
+    fn take(row: SlotsOk(Row)) -> i32 {
+      let empty = @empty(Row);
+      row.x + empty.x
+    }
+    pub fn main() -> i32 {
+      let q = do @applicative(Query) {
+        x <- each(7);
+        pure({x})
+      };
+      take(q)
+    }
+  `,
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 7);
+});
+
+Deno.test("anonymous struct annotations support fields literals and returns", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    fn sum(row: struct({x: i32, y: i32})) -> i32 {
+      row.x + row.y
+    }
+    fn make(x: i32) -> struct({x: i32, y: i32}) {
+      {x, y: 5}
+    }
+    fn bump(row: struct({x: i32, y: i32})) -> struct({x: i32, y: i32}) {
+      @replace_field(row, #x, row.x + 1)
+    }
+    pub fn main() -> i32 {
+      let single: struct({x: i32}) = {x: 1};
+      let row = bump(make(6));
+      sum(row) + single.x
+    }
+  `,
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 13);
+});
+
+Deno.test("anonymous struct annotations work with type reflection and empty", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Check(row: type) -> type {
+      let Slots = @type_slots(row);
+      let HasX = @require(@shape_slot(Slots, #x) == i32, "x slot");
+      let HasY = @require(@shape_slot(Slots, #y) == bool, "y slot");
+      row
+    }
+    fn take(row: Check(struct({x: i32, y: bool}))) -> i32 {
+      let empty: struct({x: i32, y: bool}) = @empty(struct({x: i32, y: bool}));
+      match row.y, empty.y {
+        true, false => row.x + empty.x,
+        _, _ => 0,
+      }
+    }
+    pub fn main() -> i32 {
+      take({x: 9, y: true})
+    }
+  `,
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 9);
 });
 
 Deno.test("product result destructuring binds local result slots", async () => {

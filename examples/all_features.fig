@@ -135,23 +135,23 @@ fn shape_first(weird: Weird) -> i32 {
   weird[0]
 }
 
-fn same(dict: Eq(Point), a: Point, b: Point) -> i32 {
-  match dict.eql(a, b) {
+fn same(a: Point, b: Point) -> i32 {
+  match eql_point(a, b) {
     true => 1,
     false => 0,
   }
 }
 
-fn mapped(dict: Functor(Box), x: Box) -> i32 {
-  dict.map(x).value
+fn mapped(x: Box) -> i32 {
+  map_box(x).value
 }
 
-fn applied(dict: Applicative(Box), x: i32) -> i32 {
-  dict.apply(dict.pure(x), {value: 2}).value
+fn applied(x: i32) -> i32 {
+  apply_box(pure_box(x), {value: 2}).value
 }
 
-fn bound(dict: Monad(Box), x: Box) -> i32 {
-  dict.bind(x).value
+fn bound(x: Box) -> i32 {
+  bind_box(x).value
 }
 
 fn Choose(flag: bool) -> i32 {
@@ -187,14 +187,10 @@ line```;
   let entropy = random();
   let owned = 7;
   let sunk = sink(owned);
-  let matched = same(
-    point_eq,
-    Point {x: 1, y: 2},
-    Point {x: 1, y: 2}
-  );
-  let mapped_value = mapped(box_functor, {value: 1});
-  let applied_value = applied(box_applicative, 2);
-  let bound_value = bound(box_monad, {value: 3});
+  let matched = same(Point {x: 1, y: 2}, Point {x: 1, y: 2});
+  let mapped_value = mapped({value: 1});
+  let applied_value = applied(2);
+  let bound_value = bound({value: 3});
   Choose(ok)
     + classify(1)
     + pair_first(pair)

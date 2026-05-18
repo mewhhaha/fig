@@ -1494,6 +1494,8 @@ function lowerPrimary(node: Node): Expr {
         ...meta(child, firstIdentifier(child)),
         name: `@${text(firstIdentifier(child), "static builtin")}`,
       };
+    case "TypeBuilderName":
+      return { kind: "var", ...spanOnly(child), name: child.text };
     case "PascalIdent":
     case "LowerIdent": {
       const tail = optional(node, "ProductConstructorTail");
