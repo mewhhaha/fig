@@ -4,14 +4,8 @@ type Runtime =
   | "fig_wasm_host_loop_batch_materialized"
   | "fig_wasm_host_loop_batch_iter_fused"
   | "fig_wasm_internal_loop_batch_iter_fused"
-  | "fig_wasm_host_loop_world_cmap"
-  | "fig_wasm_internal_loop_world_cmap"
-  | "fig_wasm_host_loop_world_cmap_fold_fused"
-  | "fig_wasm_internal_loop_world_cmap_fold_fused"
-  | "fig_wasm_host_loop_world_fill_iter_fused"
-  | "fig_wasm_internal_loop_world_fill_iter_fused"
   | "rust";
-type ScenarioName = "dense_batch_move_fold_128" | "dense_world_cmap_fold_128";
+type ScenarioName = "dense_batch_move_fold_128";
 
 interface Row {
   runtime: Runtime;
@@ -70,12 +64,11 @@ const scenarios: Scenario[] = [
           pub fn main(seed: i32) -> i32 {
             let positions = ecs.batch_fill(
               128,
-              Position,
               Position {x: seed, y: seed + 1}
             );
             let moved = ecs.batch_map_with_state(
               positions,
-              Velocity {dx: 2, dy: 3},
+              read_frame_input(),
               move_position
             );
             ecs.batch_fold(moved, 0, score_position)
@@ -91,42 +84,6 @@ const scenarios: Scenario[] = [
         runtime: "fig_wasm_internal_loop_batch_iter_fused",
         mode: "internal",
         source: withInternalBench(batchFusedSource()),
-      },
-    ],
-  },
-  {
-    name: "dense_world_cmap_fold_128",
-    expected: 8_896,
-    cases: [
-      {
-        runtime: "fig_wasm_host_loop_world_cmap",
-        mode: "host",
-        source: worldCmapSource(),
-      },
-      {
-        runtime: "fig_wasm_internal_loop_world_cmap",
-        mode: "internal",
-        source: withInternalBench(worldCmapSource()),
-      },
-      {
-        runtime: "fig_wasm_host_loop_world_cmap_fold_fused",
-        mode: "host",
-        source: worldCmapFoldFusedSource(),
-      },
-      {
-        runtime: "fig_wasm_internal_loop_world_cmap_fold_fused",
-        mode: "internal",
-        source: withInternalBench(worldCmapFoldFusedSource()),
-      },
-      {
-        runtime: "fig_wasm_host_loop_world_fill_iter_fused",
-        mode: "host",
-        source: worldFillIterFusedSource(),
-      },
-      {
-        runtime: "fig_wasm_internal_loop_world_fill_iter_fused",
-        mode: "internal",
-        source: withInternalBench(worldFillIterFusedSource()),
       },
     ],
   },
@@ -156,7 +113,13 @@ async function benchFigCase(
     optMode: "release",
     pruneImports: true,
   });
-  const exports = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm)).exports;
+  let module: WebAssembly.Module;
+  try {
+    module = new WebAssembly.Module(artifact.wasm);
+  } catch (error) {
+    throw new Error(`failed to instantiate ${figCase.runtime}: ${error}`);
+  }
+  const exports = new WebAssembly.Instance(module).exports;
   const main = exports.main as CallableFunction;
   assertExpected(figCase.runtime, scenario.name, main(0) as number, scenario.expected);
   const start = performance.now();
@@ -286,24 +249,28 @@ function scenarioPrelude(): string {
         struct(Position)
       }
 
-      type fn Velocity() -> type {
-        let Velocity = {dx: i32, dy: i32};
-        struct(Velocity)
+      type fn FrameInput() -> type {
+        let FrameInput = {dx: i32, dy: i32};
+        struct(FrameInput)
       }
 
       fn move_position(
         index: ecs.BatchIndex(128),
         item: Position,
-        velocity: Velocity
+        input: FrameInput
       ) -> Position {
         Position {
-          x: item.x + velocity.dx + index,
-          y: item.y + velocity.dy
+          x: item.x + input.dx + index,
+          y: item.y + input.dy
         }
       }
 
       fn score_position(acc: i32, item: Position) -> i32 {
         acc + item.x + item.y
+      }
+
+      fn read_frame_input() -> FrameInput {
+        FrameInput {dx: 2, dy: 3}
       }
     `;
 }
@@ -312,100 +279,12 @@ function batchFusedSource(): string {
   return `${scenarioPrelude()}
       pub fn main(seed: i32) -> i32 {
         ecs.batch_iter_map_with_state_fold(
-          ecs.batch_fill_iter(128, Position, Position {x: seed, y: seed + 1}),
-          Velocity {dx: 2, dy: 3},
+          ecs.batch_fill_iter(128, Position {x: seed, y: seed + 1}),
+          read_frame_input(),
           0,
           move_position,
           score_position
         )
-      }
-    `;
-}
-
-function worldCmapSource(): string {
-  return `${worldPrelude()}
-      pub fn main(seed: i32) -> i32 {
-        let systems = seed_systems(seed);
-        let moved = ecs.cmap_input(Systems, #positions, systems, move_position);
-        ecs.batch_fold(128, Position, i32, moved.world.positions, 0, score_position)
-      }
-    `;
-}
-
-function worldCmapFoldFusedSource(): string {
-  return `${worldPrelude()}
-      pub fn main(seed: i32) -> i32 {
-        let systems = seed_systems(seed);
-        ecs.cmap_input_fold(
-          Systems,
-          #positions,
-          systems,
-          0,
-          move_position,
-          score_position
-        )
-      }
-    `;
-}
-
-function worldFillIterFusedSource(): string {
-  return `${worldTypePrelude()}
-      pub fn main(seed: i32) -> i32 {
-        let positions = ecs.component_ref(Systems, #positions);
-        ecs.map_input_fill_fold(
-          positions,
-          Velocity {dx: 2, dy: 3},
-          Position {x: seed, y: seed + 1},
-          0,
-          move_position,
-          score_position
-        )
-      }
-    `;
-}
-
-function worldPrelude(): string {
-  return `${worldTypePrelude()}
-      fn seed_systems(seed: i32) -> Systems {
-        let world: World = ecs.World::empty(128, components);
-        Systems {
-          world: @replace_field(
-            world,
-            #positions,
-            ecs.batch_fill(128, Position, Position {x: seed, y: seed + 1})
-          ),
-          input: Velocity {dx: 2, dy: 3}
-        }
-      }
-    `;
-}
-
-function worldTypePrelude(): string {
-  return `${scenarioPrelude()}
-      const components = ecs.components({
-        positions: Position
-      });
-
-      type fn World() -> type {
-        let Expected = @type_slots(ecs.World(128, components));
-        let World = {
-          entities: ecs.Batch(128, ecs.BatchIndex(128)),
-          len: i32,
-          positions: ecs.Batch(128, Position)
-        };
-        let MatchesEcsWorld = @require(
-          World == Expected,
-          "benchmark World must match ecs.World"
-        );
-        struct(World)
-      }
-
-      type fn Systems() -> type {
-        let Systems = {
-          world: World,
-          input: Velocity
-        };
-        struct(Systems)
       }
     `;
 }
@@ -437,27 +316,14 @@ struct Position {
 }
 
 #[derive(Clone, Copy)]
-struct Velocity {
+struct FrameInput {
     dx: i32,
     dy: i32,
 }
 
-#[derive(Clone, Copy)]
-struct World {
-    entities: [i32; 128],
-    len: i32,
-    positions: [Position; 128],
-}
-
-#[derive(Clone, Copy)]
-struct Systems {
-    world: World,
-    input: Velocity,
-}
-
 fn dense_batch_move_fold_128(seed: i32) -> i32 {
     let seed = black_box(seed);
-    let velocity = black_box(Velocity { dx: 2, dy: 3 });
+    let input = black_box(FrameInput { dx: 2, dy: 3 });
     let positions = black_box([Position { x: seed, y: seed + 1 }; 128]);
     positions
         .iter()
@@ -465,38 +331,10 @@ fn dense_batch_move_fold_128(seed: i32) -> i32 {
         .enumerate()
         .fold(0_i32, |acc, (index, item)| {
             let moved = Position {
-                x: item.x + velocity.dx + index as i32,
-                y: item.y + velocity.dy,
+                x: item.x + input.dx + index as i32,
+                y: item.y + input.dy,
             };
             black_box(acc.wrapping_add(moved.x).wrapping_add(moved.y))
-        })
-}
-
-fn dense_world_cmap_fold_128(seed: i32) -> i32 {
-    let seed = black_box(seed);
-    let world = World {
-        entities: [0_i32; 128],
-        len: 0,
-        positions: [Position { x: seed, y: seed + 1 }; 128],
-    };
-    let systems = Systems {
-        world,
-        input: Velocity { dx: 2, dy: 3 },
-    };
-    let mut moved = systems;
-    for (index, item) in systems.world.positions.iter().copied().enumerate() {
-        moved.world.positions[index] = Position {
-            x: item.x + systems.input.dx + index as i32,
-            y: item.y + systems.input.dy,
-        };
-    }
-    moved
-        .world
-        .positions
-        .iter()
-        .copied()
-        .fold(0_i32, |acc, item| {
-            black_box(acc.wrapping_add(item.x).wrapping_add(item.y))
         })
 }
 
@@ -527,7 +365,6 @@ fn main() {
         .unwrap_or(100_000);
     let rows = [
         bench("dense_batch_move_fold_128", calls, 8_896, dense_batch_move_fold_128),
-        bench("dense_world_cmap_fold_128", calls, 8_896, dense_world_cmap_fold_128),
     ];
     println!("[{}]", rows.join(","));
 }

@@ -14,7 +14,7 @@ First-party compiler behavior is registered through built-in plugins:
 
 | Plugin             | Builtins                                                          |
 | ------------------ | ----------------------------------------------------------------- |
-| `core-imports`     | `@import`, `@capability`                                          |
+| `core-imports`     | `@import`, `@effect`                                              |
 | `core-static`      | `@require`, `@compile_error`, `@shape_*`, `@type_*`, `@wgsl_*`    |
 | `core-annotations` | `@likely`, `@unlikely`                                            |
 | `core-intrinsics`  | backend/compiler intrinsics such as `@branch_*` and `@temporal_*` |
@@ -24,12 +24,12 @@ registrations are compile diagnostics. In v1, backend plugins register compiler 
 identities; the low-level lowering for those identities still runs through compiler-owned IR paths
 rather than raw Wasm byte emission.
 
-## Module and Capability Builtins
+## Module and Effect Builtins
 
 | Builtin       | Arguments               | Returns                       | Phase                             |
 | ------------- | ----------------------- | ----------------------------- | --------------------------------- |
 | `@import`     | string module specifier | namespace alias value         | top-level const lowering/checking |
-| `@capability` | string import name      | annotated function capability | top-level const checking/backend  |
+| `@effect` | string import name      | annotated host effect function | top-level const checking/backend  |
 
 ## Diagnostics and Contracts
 

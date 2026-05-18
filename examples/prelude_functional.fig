@@ -9,6 +9,14 @@ fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
+fn Box::pure(value: a) -> Box(a) {
+  Box {value}
+}
+
+fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
+  Box {value: v.value(x.value)}
+}
+
 fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
   f(v.value)
 }
@@ -21,15 +29,27 @@ fn wrap(x: i32) -> Box(i32) {
   Box {value: x + 10}
 }
 
-fn Mapper(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
+fn Mapper(
+  v: t(a),
+  const f: fn(x: a) -> b,
+  const _proof: Functor(t)
+) -> t(b) {
   t::map(f, v)
 }
 
-fn binder(v: t(a), const f: fn(x: a) -> t(b), const _proof: Monad(t)) -> t(b) {
+fn binder(
+  v: t(a),
+  const f: fn(x: a) -> t(b),
+  const _proof: Monad(t)
+) -> t(b) {
   t::bind(v, f)
 }
 
 pub fn main() -> i32 {
-  let mapped = fmap(Box {value: 1}, inc, Functor(Box));
+  let mapped = fmap(
+    Box {value: 1},
+    inc,
+    Functor(Box)
+  );
   bind(mapped, wrap, Monad(Box)).value
 }

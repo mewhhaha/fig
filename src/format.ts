@@ -55,7 +55,7 @@ const binaryOperators = new Set([
 const compactBefore = new Set([")", "]", ",", ";", ".", ":", "::"]);
 const compactAfter = new Set(["(", "[", ".", "::", "@", "\\"]);
 const spacedSymbols = new Set(["=", "->", "=>"]);
-const declarationKeywords = new Set(["pub", "fn", "type", "const", "let", "capability", "import"]);
+const declarationKeywords = new Set(["pub", "fn", "type", "const", "let", "effect", "import"]);
 
 export function formatSource(source: string): string {
   const normalized = source.replace(/\r\n?/g, "\n");
@@ -88,6 +88,9 @@ export function formatSource(source: string): string {
     ...comments,
   ].sort((a, b) => startOf(a) - startOf(b));
   const matchBraceStarts = collectMatchBraceStarts(items);
+  const matchValueCommaStarts = collectMatchValueCommaStarts(parsed.tree);
+  const matchPatternCommaStarts = collectMatchPatternCommaStarts(parsed.tree);
+  const multiMatchBraceStarts = collectMultiMatchBraceStarts(parsed.tree);
   const collectionDelimiterStarts = collectCollectionDelimiterStarts(parsed.tree);
   const flatBraceCandidateStarts = collectFlatBraceCandidateStarts(parsed.tree, normalized);
 
@@ -129,6 +132,9 @@ export function formatSource(source: string): string {
           nextTopLevelDecl: topLevelDecl,
           items,
           rightIndex: index,
+          matchValueCommaStarts,
+          matchPatternCommaStarts,
+          multiMatchBraceStarts,
         });
       } else {
         writer.lineStart();
@@ -166,6 +172,9 @@ export function formatSource(source: string): string {
         nextTopLevelDecl: topLevelDecl,
         items,
         rightIndex: index,
+        matchValueCommaStarts,
+        matchPatternCommaStarts,
+        multiMatchBraceStarts,
       });
     } else {
       writer.lineStart();
@@ -286,6 +295,9 @@ interface SeparateContext {
   nextTopLevelDecl?: TopLevelDecl;
   items?: item[];
   rightIndex?: number;
+  matchValueCommaStarts?: Set<number>;
+  matchPatternCommaStarts?: Set<number>;
+  multiMatchBraceStarts?: Set<number>;
 }
 
 interface ImportBindingDecl {
@@ -409,6 +421,14 @@ function separate(
     return;
   }
   if (left.text === ",") {
+    if (context.matchValueCommaStarts?.has(left.token.span.start)) {
+      writer.continuationLineBreak();
+      return;
+    }
+    if (context.matchPatternCommaStarts?.has(left.token.span.start)) {
+      writer.space();
+      return;
+    }
     const flatBrace = delimiterContext?.delimiter === "{" && !delimiterContext.broken;
     if (
       (delimiterContext?.commaBreaks && delimiterContext.broken) ||
@@ -433,6 +453,10 @@ function separate(
     return;
   }
   if (delimiterContext?.delimiter === "<" && (left.text === "<" || right.text === ">")) return;
+  if (right.text === "{" && context.multiMatchBraceStarts?.has(right.token.span.start)) {
+    writer.newline();
+    return;
+  }
   if (right.text === "[" && opensBracketWithoutSpace(left)) return;
   if (left.text === "{" && delimiterContext?.delimiter === "{" && !delimiterContext.broken) return;
   if (left.text === "{" || left.text === ";") {
@@ -721,13 +745,60 @@ function collectMatchBraceStarts(items: item[]): Set<number> {
       continue;
     }
 
-    if (item.text === ";" || item.text === "," || item.text === "=>") {
+    if (item.text === ";" || item.text === "=>") {
       for (let index = pendingMatchDepths.length - 1; index >= 0; index--) {
         if (pendingMatchDepths[index] >= depth) pendingMatchDepths.splice(index, 1);
       }
     }
   }
 
+  return starts;
+}
+
+function collectMatchValueCommaStarts(root: RuleParseNode | null): Set<number> {
+  const starts = new Set<number>();
+  if (!root) return starts;
+  for (const node of descendantRules(root, "MatchValues")) {
+    const exprCount = node.children.filter((child) =>
+      child.kind === "rule" && child.name === "Expr"
+    ).length;
+    if (exprCount <= 1) continue;
+    for (const child of node.children) {
+      if (child.kind === "literal" && child.value === ",") starts.add(child.span.start);
+    }
+  }
+  return starts;
+}
+
+function collectMatchPatternCommaStarts(root: RuleParseNode | null): Set<number> {
+  const starts = new Set<number>();
+  if (!root) return starts;
+  for (const node of descendantRules(root, "MatchPatterns")) {
+    const patternCount = node.children.filter((child) =>
+      child.kind === "rule" && child.name === "Pattern"
+    ).length;
+    if (patternCount <= 1) continue;
+    for (const child of node.children) {
+      if (child.kind === "literal" && child.value === ",") starts.add(child.span.start);
+    }
+  }
+  return starts;
+}
+
+function collectMultiMatchBraceStarts(root: RuleParseNode | null): Set<number> {
+  const starts = new Set<number>();
+  if (!root) return starts;
+  for (const node of descendantRules(root, "MatchExpr")) {
+    const values = node.children.find((child): child is RuleParseNode =>
+      child.kind === "rule" && child.name === "MatchValues"
+    );
+    const exprCount = values?.children.filter((child) =>
+      child.kind === "rule" && child.name === "Expr"
+    ).length ?? 0;
+    if (exprCount <= 1) continue;
+    const brace = node.children.find((child) => child.kind === "literal" && child.value === "{");
+    if (brace) starts.add(brace.span.start);
+  }
   return starts;
 }
 

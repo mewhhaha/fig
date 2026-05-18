@@ -18,7 +18,7 @@ Type functions currently cover several compile-time concepts:
 - Constructor-polymorphic helpers: generic functions can infer type constructors at call sites and
   use local proof consts such as `const Mapper = Functor(t);`.
 - Value-layout modeling: examples encode products, sums, fixed inline buffers, compact arrays, and
-  static capabilities as compile-time type-function contracts.
+  static constraints as compile-time type-function contracts.
 
 See `examples/type_fn_memory.fig` for a checked memory-model sketch that ties these pieces together
 without adding runtime proof parameters.
@@ -110,9 +110,9 @@ model.
 `prelude.geometry2d` is a tiny pure playground layer for geometry-shaped programs. It provides
 integer `vec2`, `vec3`, packed `rgba8`, `vertex2d_i32`, `quad2d_i32`, and `geometry2d_i32` helpers.
 The first entry point is quad-first 2D rendering data: `emit_rect2d` and `emit_quad2d` produce fixed
-inline vertex geometry that can later be uploaded by host capabilities.
+inline vertex geometry that can later be uploaded by host effects.
 
-Browser canvas, GPU, shader metadata, and event host capabilities live outside the prelude in
+Browser canvas, GPU, shader metadata, and event host effects live outside the prelude in
 `web.canvas`:
 
 ```fig

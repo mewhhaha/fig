@@ -571,7 +571,10 @@ function mergePrograms(
             cache,
           )
           : importedProgram;
-        return qualifyImportedDeclarations(prunedProgram.declarations, alias);
+        return [
+          ...qualifyEffectImportsAsDeclarations(prunedProgram.imports, alias),
+          ...qualifyImportedDeclarations(prunedProgram.declarations, alias),
+        ];
       }),
     (decls) => ({ keptDeclarationCount: decls.length }),
   );
@@ -1304,6 +1307,64 @@ function declarationName(decl: Declaration): string {
 function qualifyImportedDeclarations(declarations: Declaration[], alias: string): Declaration[] {
   const names = new Set(declarations.flatMap(collectDeclarationNames));
   return declarations.map((decl) => qualifyDeclaration(decl, alias, names));
+}
+
+function qualifyEffectImportsAsDeclarations(imports: Program["imports"], alias: string): FnDecl[] {
+  return imports.map((item) => {
+    const signature = parseFunctionType(item.type);
+    return {
+      kind: "fn",
+      public: false,
+      imported: true,
+      rootPublic: false,
+      name: qualifyName(item.name, alias),
+      params: signature.params,
+      returnType: signature.returnType,
+      effects: [...item.effects],
+      body: {
+        kind: "block",
+        statements: [],
+        expr: {
+          kind: "call",
+          callee: { kind: "var", name: item.name },
+          args: signature.params.map((param) => ({ kind: "var", name: param.name })),
+        },
+      },
+    };
+  });
+}
+
+function parseFunctionType(
+  type: string,
+): { params: { name: string; type: string }[]; returnType: string } {
+  const match = type.match(/^fn\s*\(([\s\S]*?)\)\s*->\s*([^!]+)(?:![\s\S]*)?$/);
+  const params = splitTopLevelComma(match?.[1] ?? "").map((part, index) => {
+    const pieces = part.split(":");
+    return {
+      name: pieces.length > 1 ? pieces[0].trim() : `arg${index}`,
+      type: (pieces.at(-1) ?? "i32").trim(),
+    };
+  });
+  return { params, returnType: match?.[2].trim() ?? "i32" };
+}
+
+function splitTopLevelComma(source: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (char === "(" || char === "{" || char === "[") depth++;
+    else if (char === ")" || char === "}" || char === "]") depth--;
+    else if (char === "," && depth === 0) {
+      const part = source.slice(start, index).trim();
+      if (part) parts.push(part);
+      start = index + 1;
+    }
+  }
+  const tail = source.slice(start).trim();
+  if (tail) parts.push(tail);
+  return parts;
 }
 
 function collectDeclarationNames(decl: Declaration): string[] {

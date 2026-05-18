@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fig Brackeys Platformer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background: #101418;
+        color: #e7eef5;
+        overflow: hidden;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-rows: 44px 1fr;
+        min-height: 100%;
+      }
+
+      .bar {
+        align-items: center;
+        background: #171d22;
+        border-bottom: 1px solid #2b3740;
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        padding: 0 16px;
+      }
+
+      .title {
+        font-size: 14px;
+        font-weight: 650;
+      }
+
+      .meters {
+        color: #9fb2c4;
+        display: flex;
+        font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        gap: 14px;
+      }
+
+      canvas {
+        background: #17202a;
+        display: block;
+        height: calc(100vh - 44px);
+        image-rendering: pixelated;
+        outline: none;
+        width: 100vw;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="bar">
+        <div class="title">Fig Brackeys Platformer</div>
+        <div class="meters" aria-live="polite">
+          <span id="axis">axis 0</span>
+          <span id="jump">jump 0</span>
+          <span id="coins">coins 0</span>
+          <span id="frame">dt 16</span>
+        </div>
+      </header>
+      <canvas id="game" tabindex="0" width="960" height="600"></canvas>
+    </main>
+
+    <script type="module">
+      const WORLD_W = 256;
+      const WORLD_H = 160;
+
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const axisMeter = document.querySelector("#axis");
+      const jumpMeter = document.querySelector("#jump");
+      const coinMeter = document.querySelector("#coins");
+      const frameMeter = document.querySelector("#frame");
+
+      const keys = new Set();
+      const input = { axis: 0, jump: 0, restart: 0, dt: 16 };
+      let viewport = { x: 0, y: 0, scale: 1 };
+      let exports;
+      let world;
+      let lastFrame = performance.now();
+
+      const atlas = new Map();
+      const atlasSources = new Map([
+        [1, "../brackeys_fig_platformer/sprites/world_tileset.png"],
+        [2, "../brackeys_fig_platformer/sprites/knight.png"],
+        [3, "../brackeys_fig_platformer/sprites/coin.png"],
+        [4, "../brackeys_fig_platformer/sprites/fruit.png"],
+        [5, "../brackeys_fig_platformer/sprites/slime_green.png"],
+        [6, "../brackeys_fig_platformer/sprites/platforms.png"],
+      ]);
+
+      function refreshAxis() {
+        const left = keys.has("ArrowLeft") || keys.has("KeyA");
+        const right = keys.has("ArrowRight") || keys.has("KeyD");
+        input.axis = right && !left ? 1 : left && !right ? -1 : 0;
+      }
+
+      addEventListener("keydown", (event) => {
+        if (
+          event.code === "Space" || event.code === "KeyW" || event.code === "ArrowUp" ||
+          event.code === "KeyR" || event.code === "ArrowLeft" || event.code === "ArrowRight" ||
+          event.code === "KeyA" || event.code === "KeyD"
+        ) {
+          event.preventDefault();
+        }
+        keys.add(event.code);
+        input.jump = keys.has("Space") || keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0;
+        input.restart = keys.has("KeyR") ? 1 : 0;
+        refreshAxis();
+      });
+
+      addEventListener("keyup", (event) => {
+        keys.delete(event.code);
+        input.jump = keys.has("Space") || keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0;
+        input.restart = keys.has("KeyR") ? 1 : 0;
+        refreshAxis();
+      });
+
+      canvas.addEventListener("pointerdown", (event) => {
+        canvas.setPointerCapture(event.pointerId);
+        input.jump = event.clientY < canvas.getBoundingClientRect().top + canvas.clientHeight / 2 ? 1 : 0;
+        input.axis = event.clientX >= canvas.getBoundingClientRect().left + canvas.clientWidth / 2 ? 1 : -1;
+      });
+
+      canvas.addEventListener("pointerup", (event) => {
+        canvas.releasePointerCapture(event.pointerId);
+        input.jump = 0;
+        input.axis = 0;
+      });
+
+      function hostImports() {
+        return {
+          env: {
+            canvas_init: () => 1,
+            gpu_create_shader: () => 1,
+            gpu_create_pipeline: () => 1,
+            gpu_upload_vertices: () => 1,
+            gpu_draw_quads: () => 1,
+            gpu_draw_rect: () => 1,
+            event_poll: () => 0,
+            gpu_begin_frame: (_target, _width, _height) => {
+              viewport = drawBackdrop();
+              return 1;
+            },
+            gpu_draw_sprite: (_canvas, atlasId, sx, sy, sw, sh, dx, dy, dw, dh, flipX) => {
+              const image = atlas.get(atlasId);
+              if (!image) return 0;
+              ctx.save();
+              ctx.translate(viewport.x, viewport.y);
+              ctx.scale(viewport.scale, viewport.scale);
+              if (flipX > 0) {
+                ctx.translate(dx + dw, dy);
+                ctx.scale(-1, 1);
+                ctx.drawImage(image, sx, sy, sw, sh, 0, 0, dw, dh);
+              } else {
+                ctx.drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh);
+              }
+              ctx.restore();
+              return 1;
+            },
+            gpu_present: () => 1,
+            audio_play: () => 1,
+            audio_music: () => 1,
+          },
+        };
+      }
+
+      async function loadImage(src) {
+        const image = new Image();
+        image.src = new URL(src, import.meta.url);
+        await image.decode();
+        return image;
+      }
+
+      async function loadAssets() {
+        await Promise.all([...atlasSources].map(async ([id, src]) => {
+          atlas.set(id, await loadImage(src));
+        }));
+      }
+
+      async function loadWasm() {
+        const response = await fetch(new URL("./brackeys_platformer.wasm", import.meta.url));
+        if (!response.ok) throw new Error(`failed to load wasm: ${response.status}`);
+        const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), hostImports());
+        return instance.exports;
+      }
+
+      function resizeCanvas() {
+        const ratio = Math.max(1, Math.min(devicePixelRatio || 1, 2));
+        const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
+        const height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+        return ratio;
+      }
+
+      function drawBackdrop() {
+        const ratio = resizeCanvas();
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+        const scale = Math.floor(Math.max(1, Math.min(width / WORLD_W, height / WORLD_H)));
+        const x = Math.floor((width - WORLD_W * scale) / 2);
+        const y = Math.floor((height - WORLD_H * scale) / 2);
+
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        ctx.fillStyle = "#101820";
+        ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = "#6fb6d8";
+        ctx.fillRect(x, y, WORLD_W * scale, WORLD_H * scale);
+        return { x, y, scale };
+      }
+
+      function updateMeters() {
+        axisMeter.textContent = `axis ${input.axis}`;
+        jumpMeter.textContent = `jump ${input.jump}`;
+        coinMeter.textContent = `coins ${exports.coin_count(...world)}`;
+        frameMeter.textContent = `dt ${Math.round(input.dt)}`;
+      }
+
+      function frame(now) {
+        input.dt = Math.max(1, Math.min(32, Math.round(now - lastFrame)));
+        lastFrame = now;
+        world = exports.step_world(...world, input.dt, input.axis, input.jump, input.restart);
+        exports.render_world(1, canvas.clientWidth, canvas.clientHeight, ...world);
+        updateMeters();
+        requestAnimationFrame(frame);
+      }
+
+      try {
+        await loadAssets();
+        exports = await loadWasm();
+        world = exports.init_world();
+        canvas.focus();
+        requestAnimationFrame((now) => {
+          lastFrame = now;
+          frame(now);
+        });
+      } catch (error) {
+        console.error(error);
+        frameMeter.textContent = "load failed";
+      }
+    </script>
+  </body>
+</html>

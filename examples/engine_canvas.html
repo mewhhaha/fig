@@ -85,6 +85,7 @@
       const input = { axis: 0, pressed: 0, dt: 16 };
       let wasmExports;
       let lastFrame = performance.now();
+      let viewport = { offsetX: 0, offsetY: 0, scale: 1 };
 
       const keyAxis = new Map([
         ["ArrowLeft", -1],
@@ -134,6 +135,23 @@
             tick_millis: () => Math.max(1, Math.min(64, Math.round(input.dt))),
             input_axis_x: () => input.axis,
             input_pressed: () => input.pressed,
+            gpu_begin_frame: (_target, _width, _height) => {
+              viewport = drawBackdrop();
+              return 1;
+            },
+            gpu_draw_rect: (_canvas, x, y, w, h, _z, color) => {
+              ctx.save();
+              ctx.translate(viewport.offsetX, viewport.offsetY);
+              ctx.scale(viewport.scale, viewport.scale);
+              ctx.fillStyle = colorFor(color);
+              ctx.fillRect(x, y, w, h);
+              ctx.strokeStyle = "#11181d";
+              ctx.lineWidth = 0.35;
+              ctx.strokeRect(x, y, w, h);
+              ctx.restore();
+              return 1;
+            },
+            gpu_present: () => 1,
           },
         };
       }
@@ -239,7 +257,7 @@
       function frame(now) {
         input.dt = Math.max(1, Math.min(64, now - lastFrame));
         lastFrame = now;
-        drawWorld(wasmExports.main());
+        wasmExports.render_frame(1, canvas.clientWidth, canvas.clientHeight);
         requestAnimationFrame(frame);
       }
 
@@ -248,7 +266,7 @@
       try {
         wasmExports = await loadEngine();
         canvas.focus();
-        drawWorld(wasmExports.main());
+        wasmExports.render_frame(1, canvas.clientWidth, canvas.clientHeight);
         requestAnimationFrame((now) => {
           lastFrame = now;
           frame(now);

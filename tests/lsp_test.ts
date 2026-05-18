@@ -628,14 +628,14 @@ Deno.test("LSP hover renders TSDoc and inferred types", async () => {
   assertStringIncludes(callHover?.contents.value ?? "", "```fig\nfn add_one(x: i32) -> i32\n```");
 });
 
-Deno.test("LSP hover renders capability signatures and inferred let results first", async () => {
+Deno.test("LSP hover renders host effect signatures and inferred let results first", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   cache.open(
     uri,
     1,
     [
-      'const clock: fn() -> i32 !{time} = @capability("clock");',
+      'const clock: fn() -> i32 !{time} = @effect("clock");',
       "pub fn main() -> i32 !{time} {",
       "  let now = clock();",
       "  let later = now;",
@@ -646,9 +646,9 @@ Deno.test("LSP hover renders capability signatures and inferred let results firs
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const capabilityHover = hoverAt(result, { line: 0, character: 7 });
+  const effectHover = hoverAt(result, { line: 0, character: 7 });
   assert(
-    capabilityHover?.contents.value.startsWith(
+    effectHover?.contents.value.startsWith(
       "```fig\nconst clock: fn() -> i32 !{time}\n```",
     ),
   );
@@ -660,14 +660,14 @@ Deno.test("LSP hover renders capability signatures and inferred let results firs
   assert(laterHover?.contents.value.startsWith("```fig\nlater: i32\n```"));
 });
 
-Deno.test("LSP hover renders top-level values inferred from capabilities", async () => {
+Deno.test("LSP hover renders top-level values inferred from host effects", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   cache.open(
     uri,
     1,
     [
-      'const clock: fn() -> i32 !{time} = @capability("clock");',
+      'const clock: fn() -> i32 !{time} = @effect("clock");',
       "const top_const = clock();",
       "let top_let = clock();",
       "let copied = top_const;",
@@ -957,7 +957,7 @@ Deno.test("LSP hover covers checked AST syntax nodes without symbol hovers", asy
   const cache = new AnalysisCache();
   const source = [
     'const std = @import("prelude.std");',
-    'const clock: fn() -> i32 !{time} = @capability("clock");',
+    'const clock: fn() -> i32 !{time} = @effect("clock");',
     "type fn Pair() -> struct {",
     "  let Pair = {first: i32, second: i32};",
     "  struct(Pair)",

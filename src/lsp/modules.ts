@@ -19,10 +19,7 @@ export function candidateModulePaths(entryPath: string, moduleName: string): str
     new URL(relative, entryDir).pathname,
     new URL(dotted, entryDir).pathname,
   ];
-  if (
-    moduleName.startsWith("prelude.") || moduleName.startsWith("web.") ||
-    moduleName.startsWith("engine.")
-  ) {
+  if (!moduleName.startsWith(".") && !moduleName.startsWith("/")) {
     candidates.push(new URL(`../../${relative}`, import.meta.url).pathname);
   }
   return candidates;

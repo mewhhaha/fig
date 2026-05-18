@@ -1,10 +1,116 @@
-const canvas_init: fn(target: i32, width: i32, height: i32) -> i32 !{canvas} = @capability("canvas_init");
-const gpu_create_shader: fn(shader_id: i32) -> i32 !{gpu} = @capability("gpu_create_shader");
-const gpu_create_pipeline: fn(shader: i32, layout: i32) -> i32 !{gpu} = @capability("gpu_create_pipeline");
-const gpu_upload_vertices: fn(buffer: i32, ptr: i32, byte_len: i32) -> i32 !{gpu} = @capability("gpu_upload_vertices");
-const gpu_draw_quads: fn(pipeline: i32, vertices: i32, quad_count: i32) -> i32 !{gpu} = @capability("gpu_draw_quads");
-const gpu_present: fn(canvas: i32) -> i32 !{canvas, gpu} = @capability("gpu_present");
-const event_poll: fn(ptr: i32, capacity: i32) -> i32 !{event} = @capability("event_poll");
+const asset = @import("web.asset");
+
+const canvas_init: fn(
+  target: i32,
+  width: i32,
+  height: i32
+) -> i32 !{canvas} = @effect("canvas_init");
+const gpu_create_shader: fn(shader_id: i32) -> i32 !{gpu} = @effect("gpu_create_shader");
+const gpu_create_pipeline: fn(shader: i32, layout: i32) -> i32 !{gpu} = @effect(
+  "gpu_create_pipeline"
+);
+const gpu_upload_vertices: fn(
+  buffer: i32,
+  ptr: i32,
+  byte_len: i32
+) -> i32 !{gpu} = @effect("gpu_upload_vertices");
+const gpu_draw_quads: fn(
+  pipeline: i32,
+  vertices: i32,
+  quad_count: i32
+) -> i32 !{gpu} = @effect("gpu_draw_quads");
+const gpu_begin_frame: fn(
+  target: i32,
+  width: i32,
+  height: i32
+) -> i32 !{canvas, gpu} = @effect("gpu_begin_frame");
+const gpu_draw_rect: fn(
+  canvas: i32,
+  x: i32,
+  y: i32,
+  w: i32,
+  h: i32,
+  z: i32,
+  color: i32
+) -> i32 !{gpu} = @effect("gpu_draw_rect");
+const gpu_draw_sprite: fn(
+  canvas: i32,
+  atlas: i32,
+  sx: i32,
+  sy: i32,
+  sw: i32,
+  sh: i32,
+  dx: i32,
+  dy: i32,
+  dw: i32,
+  dh: i32,
+  flip_x: i32,
+  z: i32
+) -> i32 !{gpu} = @effect("gpu_draw_sprite");
+const gpu_present: fn(canvas: i32) -> i32 !{canvas, gpu} = @effect("gpu_present");
+const event_poll: fn(ptr: i32, capacity: i32) -> i32 !{event} = @effect("event_poll");
+
+type fn Rect2d() -> type {
+  let Rect2d = {
+    x: i32,
+    y: i32,
+    z: i32,
+    w: i32,
+    h: i32,
+    color: i32
+  };
+  struct(Rect2d)
+}
+
+fn draw_rect(canvas: i32, rect: Rect2d) -> i32 !{gpu} {
+  gpu_draw_rect(
+    canvas,
+    rect.x,
+    rect.y,
+    rect.w,
+    rect.h,
+    rect.z,
+    rect.color
+  )
+}
+
+type fn SpriteDraw2d() -> type {
+  let SpriteDraw2d = {
+    atlas: asset.Handle(#texture),
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+    dx: i32,
+    dy: i32,
+    dw: i32,
+    dh: i32,
+    flip_x: i32,
+    z: i32
+  };
+  struct(SpriteDraw2d)
+}
+
+fn draw_sprite(canvas: i32, sprite: SpriteDraw2d) -> i32 !{gpu} {
+  gpu_draw_sprite(
+    canvas,
+    asset.id(sprite.atlas),
+    sprite.sx,
+    sprite.sy,
+    sprite.sw,
+    sprite.sh,
+    sprite.dx,
+    sprite.dy,
+    sprite.dw,
+    sprite.dh,
+    sprite.flip_x,
+    sprite.z
+  )
+}
+
+fn texture(id: i32) -> asset.Handle(#texture) {
+  asset.handle(#texture, id)
+}
 
 type fn ShaderSource(source: string) -> type {
   string

@@ -22,7 +22,7 @@ Use `@type_is_number(t)` in compile-time contracts to test whether `t` is one of
 types, including arbitrary unsigned widths such as `u3` or `u17`.
 
 Function types are `fn(params) -> Type`. Effect rows are part of function declarations and typed
-capabilities, written as `!{effect, other}` or `!{}`.
+host effects, written as `!{effect, other}` or `!{}`.
 
 ## Shapes, Products, and Unions
 

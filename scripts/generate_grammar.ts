@@ -61,7 +61,7 @@ for await (const entry of Deno.readDir("generated/baba-workbench/queries")) {
 
 const tokenKinds = [
   "import",
-  "capability",
+  "effect",
   "type",
   "contract",
   "const",

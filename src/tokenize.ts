@@ -7,7 +7,7 @@ import { fail, type Span } from "./diagnostics.ts";
 
 export type GeneratedTokenKind =
   | "import"
-  | "capability"
+  | "effect"
   | "type"
   | "const"
   | "fn"

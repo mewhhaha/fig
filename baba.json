@@ -18,7 +18,8 @@
     ["PatternIdent", "ConstTypeFnParam"],
     ["FieldName", "ConstTypeFnParam"],
     ["FieldName", "TypeParamDecl"],
-    ["ImportBindingItems", "ImportBindingTail"]
+    ["ImportBindingItems", "ImportBindingTail"],
+    ["MatchValues"]
   ],
   "queries": {
     "highlights": {

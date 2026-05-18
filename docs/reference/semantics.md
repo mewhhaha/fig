@@ -36,7 +36,7 @@ fn uses_clock() -> i32 !{time} { clock() }
 ```
 
 An effectful call is rejected unless the caller's effect row covers the callee effects. Host
-capabilities declare their effects in the function type used by `@capability`.
+host effects declare their effect rows in the function type used by `@effect`.
 
 ## Const Evaluation and Reflection
 
@@ -96,7 +96,7 @@ Deno. Safari/WebKit support is not required unless a task explicitly asks for it
 
 Prefer the browser and Deno supported subset when adding backend behavior. Heap-backed growable
 collections and allocation-backed append APIs are intentionally not part of the current standard
-prelude. Use fixed inline arrays and host capabilities for lower-level work.
+prelude. Use fixed inline arrays and host effects for lower-level work.
 
 The Branch-Bit runtime uses multiple internal memories for ordinary heap values: object data and
 large byte buffers. Branch code emits `fig_objects` and `fig_buffers` memories and currently packs

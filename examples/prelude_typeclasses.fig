@@ -22,6 +22,14 @@ fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
 }
 
+fn Box::pure(value: a) -> Box(a) {
+  Box {value}
+}
+
+fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
+  Box {value: v.value(x.value)}
+}
+
 fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
   f(v.value)
 }
@@ -35,7 +43,16 @@ fn wrap(x: i32) -> Box(i32) {
 }
 
 pub fn main() -> i32 {
-  let point_total = append(Point, Semigroup(Point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
-  let boxed = bind(fmap(Box {value: 1}, inc, Functor(Box)), wrap, Monad(Box));
+  let point_total = append(
+    Point,
+    Semigroup(Point),
+    Point {x: 1, y: 2},
+    Point {x: 3, y: 4}
+  );
+  let boxed = bind(
+    fmap(Box {value: 1}, inc, Functor(Box)),
+    wrap,
+    Monad(Box)
+  );
   point_total.x + point_total.y + boxed.value
 }

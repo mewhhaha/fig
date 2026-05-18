@@ -218,7 +218,7 @@ const coreStaticBuiltinNames = [
 export const coreImportsPlugin: CompilerPlugin = {
   apiVersion: COMPILER_PLUGIN_API_VERSION,
   id: "core-imports",
-  declarationBuiltins: [{ name: "import" }, { name: "capability" }],
+  declarationBuiltins: [{ name: "import" }, { name: "effect" }],
 };
 
 export const coreStaticPlugin: CompilerPlugin = {

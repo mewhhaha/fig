@@ -6,7 +6,7 @@ truth: use `grammar.ebnf`, `src/check.ts`, `src/primitives.ts`, and the tested f
 
 ## Reading Order
 
-1. [Syntax](reference/syntax.md) covers source files, declarations, imports, capabilities,
+1. [Syntax](reference/syntax.md) covers source files, declarations, imports, host effects,
    parameters, blocks, patterns, and literals.
 2. [Types](reference/types.md) covers primitive types, function types, shapes, products, unions,
    repeats, and constructors.

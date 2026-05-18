@@ -13,7 +13,7 @@ summarizes the current supported surface.
 
 - Use `docs/LANGUAGE.md` as the language index and reading order.
 - Use `docs/reference/syntax.md` for declarations, params, blocks, patterns, literals, imports, and
-  capabilities.
+  effects.
 - Use `docs/reference/types.md` for primitive, function, tuple, shape/product/union, repeat, and
   constructor types.
 - Use `docs/reference/expressions.md` for calls, constructors, tuples, collections, match,
@@ -95,7 +95,7 @@ Generated grammar/parser updates require `deno task codegen`.
 Write Fig files with `.fig` extension. a program is a sequence of declarations:
 
 - `type fn` declarations for compile-time type functions.
-- `const` declarations for compile-time constants, dictionaries, capabilities, and imports.
+- `const` declarations for compile-time constants, dictionaries, host effects, and imports.
 - `fn` or `pub fn` declarations for value functions.
 - Top-level `let` declarations for simple Values.
 
@@ -292,7 +292,7 @@ Inside type functions:
 - Return a final type expression.
 - Use `match` for static branching.
 - Use `@compile_error("message")` or `@require(condition, "message")` for diagnostics.
-- Do not call effectful host capabilities from type-level evaluation.
+- Do not call effectful host effects from type-level evaluation.
 
 When choosing a type-function pattern:
 
@@ -525,15 +525,15 @@ The arity must match the flattened product Result.
 
 ## Effects and Capabilities
 
-Declare host imports as const capabilities:
+Declare host imports as const effects:
 
 ```fig
-const clock: fn() -> i32 !{time} = @capability("clock");
+const clock: fn() -> i32 !{time} = @effect("clock");
 pub fn main() -> i32 !{time} { clock() }
 ```
 
 Calling an effectful host function from a pure function is rejected. Effect rows use `!{name}` or
-`!{}` and must cover the host capabilities used by the function. Capabilities lower to Wasm imports
+`!{}` and must cover the host effects used by the function. Host effects lower to Wasm imports
 from module `env`.
 
 ## Heap Runtime Intrinsics
@@ -546,7 +546,7 @@ the language surface.
 Compiler-recognized branch intrinsics such as `@branch_handle`, `@branch_mark`, and
 `@branch_ensure_editable` may appear behind narrow internal wrappers while the runtime scaffold is
 being built. Temporal intrinsics remain compatibility-only in temporal memory mode. Ordinary Fig
-modules should prefer prelude APIs and host capabilities.
+modules should prefer prelude APIs and host effects.
 
 ## Const Function and Pipe Sugar
 
@@ -580,18 +580,18 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
 - `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, and `prelude.schedule`.
 - `prelude.geometry2d`: Fixed 2D vector, color, vertex, quad, and geometry helpers.
 
-Prelude modules are pure and do not declare host capabilities. Heap-backed lists, growable vectors,
+Prelude modules are pure and do not declare host effects. Heap-backed lists, growable vectors,
 allocation-backed append, `push`, `pop`, and `reserve` are intentionally absent.
 
 ## Web Canvas Module
 
-Use `const canvas = @import("web.canvas");` for browser-facing host capabilities and WGSL metadata.
-It provides canvas/GPU/event capabilities, event record helpers, `shader_id`, and `shader_layout`.
+Use `const canvas = @import("web.canvas");` for browser-facing host effects and WGSL metadata.
+It provides canvas/GPU/event effects, event record helpers, `shader_id`, and `shader_layout`.
 WGSL shader layout reflection uses fenced source strings and extracts bindings/locations into the
 compiler shader manifest.
 
 ## Current Syntax Checklist
 
 Use `type fn` for type-level computation, `match` for branching, attached members for namespaced
-operations, `@import` for modules, and `@capability` for host imports. Model dictionaries and
+operations, `@import` for modules, and `@effect` for host imports. Model dictionaries and
 typeclass-like evidence as ordinary `type fn` product builders plus `const` Values.

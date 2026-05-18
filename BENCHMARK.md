@@ -175,45 +175,25 @@ Focused ECS comparison from:
 deno run --allow-read --allow-write --allow-run scripts/bench_ecs_compare.ts 100000
 ```
 
-This benchmark compares Fig ECS helpers compiled to Wasm against native Rust kernels with the same
-dense 128-element position/velocity update and fold shape. The Rust batch row uses a matching
-iterator `enumerate().fold(...)` shape. The world row uses a small Rust `World`/`Systems` wrapper so
-it can be compared against Fig code that goes through `ecs.components`, `ecs.World`,
-`ecs.World::empty`, and `ecs.cmap_input`.
+Latest saved ECS rows are from the 2026-05-17 local run.
 
-The materialized batch row keeps the older `batch_fill -> batch_map_with_state -> batch_fold` source
-shape for regression tracking. The fused batch rows use
-`batch_fill_iter -> batch_iter_map_with_state_fold`, which lets the checker specialize map and fold
-into one loop without building the intermediate batch. The world rows deliberately exercise the
-higher ECS abstraction path, so they expose abstraction overhead that the tight batch kernel hides.
-The `world_cmap_fold_fused` rows use `ecs.cmap_input_fold` to accumulate through the component-map
-abstraction without materializing the updated world component batch. The `world_fill_iter_fused`
-rows use the ergonomic `ecs.component_ref(Systems, #positions)` handle with
-`ecs.map_input_fill_fold(...)`; the handle validates the component field against the ECS world shape
-and lets the helper infer capacity, component, mapped, state, and accumulator types from the
-existing values.
+This benchmark compares Fig batch helpers compiled to Wasm against a native Rust kernel with the
+same dense 128-element position/frame-input update and fold shape. The Rust row uses a matching
+iterator `enumerate().fold(...)` shape. The materialized batch row keeps the older
+`batch_fill -> batch_map_with_state -> batch_fold` source shape for regression tracking. The fused
+batch rows use `batch_fill_iter -> batch_iter_map_with_state_fold`, which lets the checker
+specialize map and fold into one loop without building the intermediate batch.
 
-| Scenario                    | Runtime                                        |  Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes | WAT ifs |              Checksum |
-| --------------------------- | ---------------------------------------------- | -----: | ----------: | -----------: | -------: | -------------------: | -------------: | ------: | --------------------: |
-| `dense_batch_move_fold_128` | `fig_wasm_host_loop_batch_materialized`        | 100000 |      1082.2 |         80.4 |    13.46 |              879.606 |          17051 |     256 | `976545792/976545792` |
-| `dense_batch_move_fold_128` | `fig_wasm_host_loop_batch_iter_fused`          | 100000 |        91.7 |         80.4 |     1.14 |               24.132 |            218 |       2 | `976545792/976545792` |
-| `dense_batch_move_fold_128` | `fig_wasm_internal_loop_batch_iter_fused`      | 100000 |        79.7 |         80.4 |     0.99 |               24.244 |            287 |       3 | `976545792/976545792` |
-| `dense_world_cmap_fold_128` | `fig_wasm_host_loop_world_cmap`                | 100000 |      1820.9 |         95.7 |    19.03 |             1677.512 |          21597 |     256 | `976545792/976545792` |
-| `dense_world_cmap_fold_128` | `fig_wasm_internal_loop_world_cmap`            | 100000 |      1834.6 |         95.7 |    19.17 |             1596.783 |          21666 |     257 | `976545792/976545792` |
-| `dense_world_cmap_fold_128` | `fig_wasm_host_loop_world_cmap_fold_fused`     | 100000 |      1156.2 |         95.7 |    12.08 |              113.225 |          13085 |     256 | `976545792/976545792` |
-| `dense_world_cmap_fold_128` | `fig_wasm_internal_loop_world_cmap_fold_fused` | 100000 |      1219.0 |         95.7 |    12.74 |              111.243 |          13154 |     257 | `976545792/976545792` |
-| `dense_world_cmap_fold_128` | `fig_wasm_host_loop_world_fill_iter_fused`     | 100000 |        82.9 |         95.7 |     0.87 |               27.108 |            218 |       2 | `976545792/976545792` |
-| `dense_world_cmap_fold_128` | `fig_wasm_internal_loop_world_fill_iter_fused` | 100000 |        76.2 |         95.7 |     0.80 |               24.717 |            287 |       3 | `976545792/976545792` |
+| Scenario                    | Runtime                                   |  Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes | WAT ifs |              Checksum |
+| --------------------------- | ----------------------------------------- | -----: | ----------: | -----------: | -------: | -------------------: | -------------: | ------: | --------------------: |
+| `dense_batch_move_fold_128` | `fig_wasm_host_loop_batch_materialized`   | 100000 |      1023.6 |         87.9 |    11.65 |              828.601 |          17438 |     256 | `976545792/976545792` |
+| `dense_batch_move_fold_128` | `fig_wasm_host_loop_batch_iter_fused`     | 100000 |        80.1 |         87.9 |     0.91 |               26.254 |            218 |       2 | `976545792/976545792` |
+| `dense_batch_move_fold_128` | `fig_wasm_internal_loop_batch_iter_fused` | 100000 |        82.2 |         87.9 |     0.94 |               23.136 |            287 |       3 | `976545792/976545792` |
 
 The source-code issue was the materialized API shape: the old path forced a full 128-element filled
 batch, a mapped batch, and a fold over that batch, leaving 256 branch arms in WAT. The fused
 iterator helper keeps the same user-level computation but gives the compiler one explicit map-fold
-loop to specialize, cutting the focused kernel to one loop and a few branches. Accumulating through
-`ecs.cmap_input_fold` removes the mapped-world materialization and cuts the abstraction benchmark by
-roughly one third, but the row still pays for a materialized source component batch and fixed-array
-indexing. `ecs.map_input_fill_fold` removes that source batch too for fill-shaped component sources,
-giving the ECS-validated world path the same compact single-loop kernel as the low-level batch
-iterator without requiring callers to pass the inferred static types by hand.
+loop to specialize, cutting the focused kernel to one loop and a few branches.
 
 ## Fannkuch Lowering Investigation
 

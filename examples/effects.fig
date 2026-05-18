@@ -1,5 +1,5 @@
-const clock: fn() -> i32 !{time} = @capability("clock");
-const random: fn() -> i32 !{entropy} = @capability("random");
+const clock: fn() -> i32 !{time} = @effect("clock");
+const random: fn() -> i32 !{entropy} = @effect("random");
 
 pub fn main() -> i32 !{time, entropy} {
   let now = clock();

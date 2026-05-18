@@ -86,8 +86,8 @@ function readUleb(bytes: Uint8Array, offset: number): { value: number; offset: n
 
 Deno.test("WAT and wasm share lowered import signatures", async () => {
   const source = `
-    const clock: fn() -> i32 !{time} = @capability("clock");
-    const random: fn(seed: i32) -> i32 !{entropy} = @capability("random");
+    const clock: fn() -> i32 !{time} = @effect("clock");
+    const random: fn(seed: i32) -> i32 !{entropy} = @effect("random");
     pub fn main() -> i32 !{time, entropy} { clock() + random(1) }
   `;
 
@@ -120,6 +120,53 @@ Deno.test("debug is the default opt mode and emits wasm name section", async () 
   assert(!releaseWat.includes("(func $add1"));
   assert(!releaseWat.includes("call $add1"));
   assert(!hasCustomSection(await wasmFromSource(source, { optMode: "release" }), "name"));
+});
+
+Deno.test("private calls inside field projections stay reachable", async () => {
+  const source = `
+    type fn Pair() -> type { let Pair = {x: i32, y: i32}; struct(Pair) }
+    type fn Patch() -> type { let Patch = {value: Pair}; struct(Patch) }
+    fn make_patch(pair: Pair) -> Patch { Patch {value: pair} }
+    fn apply(pair: Pair) -> Pair { make_patch(pair).value }
+    pub fn main(pair: Pair) -> Pair { apply(pair) }
+  `;
+
+  const wat = await watFromSource(source);
+  assertStringIncludes(wat, "call $make_patch");
+  new WebAssembly.Module(await wasmFromSource(source));
+});
+
+Deno.test("static shape-count matches lower only the reachable arm", async () => {
+  const source = `
+    type fn Pair() -> type { let Pair = {x: i32, y: i32}; struct(Pair) }
+    fn scalar() -> i32 { 1 }
+    fn choose(pair: Pair) -> Pair {
+      match @shape_count({}) {
+        0 => pair,
+        _ => scalar(),
+      }
+    }
+    pub fn main(pair: Pair) -> Pair { choose(pair) }
+  `;
+
+  const wat = await watFromSource(source);
+  assert(!wat.includes("call $scalar"));
+  new WebAssembly.Module(await wasmFromSource(source));
+});
+
+Deno.test("const-key field projection lowers on anonymous struct rows", async () => {
+  const source = `
+    type fn Point() -> type { let Point = {x: i32, y: i32}; struct(Point) }
+    fn select(const field: const, row: row_t) -> Point {
+      @field(row, field)
+    }
+    pub fn main() -> i32 {
+      select(#point, {point: Point {x: 3, y: 4}, other: 9}).y
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 4);
 });
 
 Deno.test("branch hints emit release custom section and WAT annotations", async () => {
@@ -700,7 +747,7 @@ Deno.test("optimizer simplifies numeric identities without dropping effects", as
 
   const effectful = await watFromSource(
     `
-    const clock: fn() -> i32 !{time} = @capability("clock");
+    const clock: fn() -> i32 !{time} = @effect("clock");
     pub fn main() -> i32 !{time} { clock() * 0 }
   `,
     { optMode: "release" },
@@ -738,9 +785,9 @@ Deno.test("benchmark-style internal loop calls private kernel directly", async (
   assert(!wat.includes("fig_objects"));
 });
 
-Deno.test("backend preserves and drops unused effectful capability calls", async () => {
+Deno.test("backend preserves and drops unused host effect calls", async () => {
   const wat = await watFromSource(`
-    const clock: fn() -> i32 !{time} = @capability("clock");
+    const clock: fn() -> i32 !{time} = @effect("clock");
     pub fn main() -> i32 !{time} {
       let unused: i32 = clock();
       7
@@ -761,7 +808,7 @@ Deno.test("wildcard match skips pure scrutinee but preserves effectful scrutinee
   assert(!pure.includes("i32.const 3"));
 
   const effectful = await watFromSource(`
-    const clock: fn() -> i32 !{time} = @capability("clock");
+    const clock: fn() -> i32 !{time} = @effect("clock");
     pub fn main() -> i32 !{time} {
       match clock() { _ => 7 }
     }
@@ -959,7 +1006,7 @@ Deno.test("optimizer drops pure unused private call arguments only when safe", a
 
   const effectful = await watFromSource(
     `
-    const clock: fn() -> i32 !{time} = @capability("clock");
+    const clock: fn() -> i32 !{time} = @effect("clock");
     fn keep_second(_: i32, b: i32) -> i32 {
       b + b + b + b + b + b + b + b + b + b + b + b
     }
@@ -1220,7 +1267,7 @@ Deno.test("private let-chain product search chain fuses into same tail loop shap
 
 Deno.test("effectful product transformer is not fused into private search loop", async () => {
   const source = `
-    const tick: fn() -> i32 !{time} = @capability("tick");
+    const tick: fn() -> i32 !{time} = @effect("tick");
     type fn State() -> type {
       let State = {x: i32, r: i32};
       struct(State)

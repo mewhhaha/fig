@@ -1,0 +1,17 @@
+type fn Handle(kind: const) -> type {
+  let Handle = {id: i32};
+  struct(Handle)
+}
+
+fn handle(const kind: const, id: i32) -> Handle(kind) {
+  Handle {id: id}
+}
+
+fn id(value: Handle(kind)) -> i32 {
+  value.id
+}
+
+fn same(left: Handle(kind), right: Handle(kind)) -> bool {
+  left.id == right.id
+}
+

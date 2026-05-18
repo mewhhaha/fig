@@ -730,7 +730,7 @@ export function buildOptimizationScope(program: Program): OptimizationScope {
       returnType: item.type,
       effects: item.effects,
       body: { kind: "block", statements: [] },
-      primitiveId: "capability",
+      primitiveId: "host_effect",
     });
   }
   const runtimeRoots = new Set(
@@ -945,7 +945,14 @@ function genericRewriteBinding(
 }
 
 function typeCallParts(expr: TypeExpr): { callee: string; args: string[] } | undefined {
-  if (expr.kind !== "type_call" || expr.callee.kind !== "type_ref") return undefined;
+  if (expr.kind !== "type_call") return undefined;
+  if (expr.callee.kind === "type_static_ref" && expr.callee.name === "satisfies") {
+    const [effect, contract] = expr.args;
+    const effectKey = effect ? typeExprKey(effect)[0] : undefined;
+    const contractKey = contract ? typeExprKey(contract)[0] : undefined;
+    return effectKey && contractKey ? { callee: contractKey, args: [effectKey] } : undefined;
+  }
+  if (expr.callee.kind !== "type_ref") return undefined;
   const args = expr.args.flatMap(typeExprKey);
   return args.length === expr.args.length ? { callee: expr.callee.name, args } : undefined;
 }
@@ -1463,7 +1470,7 @@ function functionMap(program: Program, scope?: OptimizationScope): Map<string, F
       returnType: item.type,
       effects: item.effects,
       body: { kind: "block", statements: [] },
-      primitiveId: "capability",
+      primitiveId: "host_effect",
     });
   }
   return functions;
@@ -2890,7 +2897,7 @@ function functionSummaries(
   const recurrenceIndex = recurrences ? recurrenceSummariesByFunction(recurrences) : new Map();
   const summaries = new Map<string, FunctionSummary>();
   for (const fn of functions.values()) {
-    const imported = fn.primitiveId === "capability" && fn.body.statements.length === 0 &&
+    const imported = fn.primitiveId === "host_effect" && fn.body.statements.length === 0 &&
       !program.declarations.includes(fn);
     const astCost = functionCost(fn);
     const recursiveKind = directSelfRecursiveKind(fn);
@@ -2946,7 +2953,7 @@ function effectClass(
   hostCall: boolean,
 ): FunctionSummary["effectClass"] {
   if (fn.effects.length === 0) return "pure";
-  if (imported || fn.primitiveId === "capability" || hostCall) return "host";
+  if (imported || fn.primitiveId === "host_effect" || hostCall) return "host";
   if (fn.effects.every((effect) => READ_ONLY_EFFECTS.has(effect))) return "read_only";
   if (fn.effects.some((effect) => VOLATILE_EFFECTS.has(effect))) return "volatile";
   return "state";
@@ -5206,7 +5213,9 @@ function exprHasHostCall(
   expr: Expr | BlockExpr | undefined,
   functions: Map<string, FnDecl>,
 ): boolean {
-  return calledFunctionList(expr).some((name) => functions.get(name)?.primitiveId === "capability");
+  return calledFunctionList(expr).some((name) =>
+    functions.get(name)?.primitiveId === "host_effect"
+  );
 }
 
 function exprReturnsAlias(expr: Expr, name: string): boolean {

@@ -447,6 +447,14 @@ Deno.test("prelude std exposes functor map and monad bind operators", async () =
       Box {value: f(v.value)}
     }
 
+    fn Box::pure(value: a) -> Box(a) {
+      Box {value}
+    }
+
+    fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
+      Box {value: v.value(x.value)}
+    }
+
     fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
       f(v.value)
     }
@@ -492,6 +500,52 @@ Deno.test("prelude std rejects functional operators without matching members", a
   );
 });
 
+Deno.test("prelude monad inherits applicative requirements", async () => {
+  await checkSource(
+    `
+    const merge = @import("prelude.std");
+
+    type fn Box(a: type) -> type {
+      let Box = {value: a};
+      struct(Box)
+    }
+
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) { Box {value: f(v.value)} }
+    fn Box::pure(value: a) -> Box(a) { Box {value} }
+    fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) { Box {value: v.value(x.value)} }
+    fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) { f(v.value) }
+
+    pub fn main() -> i32 {
+      const proof = @satisfies(Box, Monad);
+      1
+    }
+    `,
+    { resolveModule },
+  );
+
+  await assertThrowsCompile(
+    `
+    const merge = @import("prelude.std");
+
+    type fn Box(a: type) -> type {
+      let Box = {value: a};
+      struct(Box)
+    }
+
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) { Box {value: f(v.value)} }
+    fn Box::pure(value: a) -> Box(a) { Box {value} }
+    fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) { f(v.value) }
+
+    pub fn main() -> i32 {
+      const proof = @satisfies(Box, Monad);
+      1
+    }
+    `,
+    "type.require",
+    { resolveModule },
+  );
+});
+
 Deno.test("prelude std keeps heap collection APIs out of the pure surface", async () => {
   const std = await Deno.readTextFile("prelude/std.fig");
   const array = await Deno.readTextFile("prelude/array_static.fig");
@@ -510,13 +564,16 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
     `
     const option = @import("prelude.option");
 
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn bump_to_option(x: i32) -> option.core.Option(i32) { option.some(x + 1) }
     fn fallback() -> option.core.Option(i32) { option.some(9) }
 
     pub fn main() -> i32 {
-      let mapped = option.core.Option::map(\\x -> x + 1, option.some(1));
-      let bound = option.core.Option::bind(mapped, \\x -> option.some(x + 1));
-      let picked = option.core.Option::append(option.none(), bound);
-      option.core.Option::unwrap_or(picked, 0) + option.core.Option::unwrap_or(option.core.Option::or_else(option.none(), fallback), 0)
+      let empty: option.core.Option(i32) = option.none();
+      let mapped = option.core.Option::map(inc, option.some(1));
+      let bound = option.core.Option::bind(mapped, bump_to_option);
+      let picked = option.core.Option::append(empty, bound);
+      option.core.Option::unwrap_or(picked, 0) + option.core.Option::unwrap_or(option.core.Option::or_else(empty, fallback), 0)
     }
     `,
     { resolveModule },
@@ -638,7 +695,7 @@ Deno.test("prelude fig modules are pure", async () => {
       continue;
     }
     const source = await Deno.readTextFile(`prelude/${entry.name}`);
-    assert(!source.includes("@capability("), `${entry.name} declares a capability`);
+    assert(!source.includes("@effect("), `${entry.name} declares a host effect`);
   }
 
   const std = await Deno.readTextFile("prelude/std.fig");

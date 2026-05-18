@@ -187,8 +187,6 @@ function candidateModulePaths(entryFile: string, moduleName: string): string[] {
   if (moduleName.startsWith("prelude.")) {
     candidates.push(new URL(`../${relative}`, import.meta.url).pathname);
   }
-  if (moduleName.startsWith("engine.") || moduleName.startsWith("web.")) {
-    candidates.push(new URL(`../${relative}`, import.meta.url).pathname);
-  }
+  candidates.push(new URL(`../${relative}`, import.meta.url).pathname);
   return candidates;
 }

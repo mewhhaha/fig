@@ -41,8 +41,8 @@ expose it as `array.layout` through its own namespace import.
 | `prelude.order`        | Compatibility namespace that imports `prelude.scalar`.                                                    |
 | `prelude.schedule`     | Static schedule metadata vocabulary.                                                                      |
 | `prelude.geometry2d`   | Pure fixed 2D geometry layout helpers.                                                                    |
-| `web.canvas`           | Browser canvas/GPU/event capabilities plus WGSL shader metadata helpers.                                  |
+| `web.canvas`           | Browser canvas/GPU/event effects plus WGSL shader metadata helpers.                                        |
 | `engine.ecs`           | Experimental ECS sketch retained for parser coverage while shape-recursive value builders are redesigned. |
 
 Prelude modules are intended to remain pure and portable across the browser and Deno WebAssembly
-target. Browser-specific capabilities live under `web.*`.
+target. Browser-specific host effects live under `web.*`.

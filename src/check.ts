@@ -221,7 +221,7 @@ function checkProgramInternal(
     shaderManifest.set(entry.id, entry);
     return entry;
   };
-  const capabilities = new Map(program.imports.map((item) => [item.name, item.effects]));
+  const hostEffects = new Map(program.imports.map((item) => [item.name, item.effects]));
   recordPhase("lowerDoExpressions", () => lowerDoExpressions(program, diagnostics));
   recordPhase(
     "checkBorrowTypeRestrictions",
@@ -261,7 +261,7 @@ function checkProgramInternal(
       program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
       typeDecls,
       fnDecls,
-      capabilities,
+      hostEffects,
       addShader,
       diagnostics,
       pluginRegistry,
@@ -358,7 +358,7 @@ function checkProgramInternal(
       program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
       typeDecls,
       fnDecls,
-      capabilities,
+      hostEffects,
       functions,
       diagnostics,
     ));
@@ -367,7 +367,7 @@ function checkProgramInternal(
       program,
       typeDecls,
       fnDecls,
-      capabilities,
+      hostEffects,
       constValues,
       diagnostics,
       pluginRegistry,
@@ -399,7 +399,7 @@ function checkProgramInternal(
           });
         }
         if (!decl.generated && !decl.primitiveId) {
-          checkFn(decl, capabilities, diagnostics, typeDecls, fnDecls, { ...options, memo });
+          checkFn(decl, hostEffects, diagnostics, typeDecls, fnDecls, { ...options, memo });
         }
       }
     }
@@ -797,6 +797,14 @@ function lowerDoExpression(
       ? lowerExpr(expr.expr)
       : { kind: "literal", literalKind: "number", value: "0" };
   }
+  validateDoStrategyEvidence(
+    expr.strategy.effect,
+    effect,
+    strategy,
+    functionNames,
+    diagnostics,
+    expr.span,
+  );
   const lowerDoChild = (child: Expr, shadowed = new Set<string>()) =>
     lowerExpr(rewriteDoEffectOperations(child, effect, shadowed));
   let loweredStatements: DoStatement[] = [];
@@ -829,6 +837,7 @@ function lowerDoExpression(
       : loweredStatements;
     return withDoStrategyProof(
       expr.strategy.effect,
+      strategy,
       stateMonadicDo(
         effect,
         state.name,
@@ -855,22 +864,55 @@ function lowerDoExpression(
   if (strategy === "applicative") {
     const binds = loweredStatements.filter((stmt) => stmt.kind === "do_bind");
     if (binds.length > 1) {
-      diagnostics.push({
-        code: "do.applicative_unsupported",
-        message: "@applicative do with multiple <- bindings requires function-valued effects",
-        span: expr.span,
-      });
+      if (!hasDoEffectMember(functionNames, effect, "bind")) {
+        diagnostics.push({
+          code: "do.applicative_unsupported",
+          message:
+            "@applicative do with multiple <- bindings currently requires bind on the effect",
+          span: expr.span,
+        });
+      }
       return withDoStrategyProof(
         expr.strategy.effect,
+        strategy,
         monadicDo(effect, loweredStatements, finalExpr),
       );
     }
     return withDoStrategyProof(
       expr.strategy.effect,
+      strategy,
       applicativeDo(effect, loweredStatements, finalExpr),
     );
   }
-  return withDoStrategyProof(expr.strategy.effect, monadicDo(effect, loweredStatements, finalExpr));
+  return withDoStrategyProof(
+    expr.strategy.effect,
+    strategy,
+    monadicDo(effect, loweredStatements, finalExpr),
+  );
+}
+
+function validateDoStrategyEvidence(
+  effect: TypeExpr,
+  runtimeEffect: string,
+  strategy: string,
+  functionNames: Set<string> | undefined,
+  diagnostics: Diagnostic[],
+  span?: Span,
+) {
+  if (!functionNames) return;
+  const required = strategy === "monad" ? ["bind", "pure"] : ["map", "pure"];
+  const missing = required.filter((member) =>
+    !hasDoEffectMember(functionNames, runtimeEffect, member)
+  );
+  if (!missing.length) return;
+  const contract = strategy === "monad" ? "Monad" : "Applicative";
+  diagnostics.push({
+    code: "do.missing_strategy_proof",
+    message: `@${strategy} do requires @satisfies(${
+      renderTypeExpr(effect)
+    }, ${contract}): missing ${missing.map((member) => `${runtimeEffect}::${member}`).join(", ")}`,
+    span,
+  });
 }
 
 function doRuntimeEffectName(
@@ -878,12 +920,24 @@ function doRuntimeEffectName(
   strategy: string,
   functionNames?: Set<string>,
 ): string | undefined {
-  if (effect.kind !== "type_call" || effect.args.length !== 1) return undefined;
-  const [arg] = effect.args;
+  if (effect.kind !== "type_call") return undefined;
   const callee = renderTypeExpr(effect.callee);
   const member = strategy === "applicative" ? "map" : "bind";
-  if (functionNames?.has(`${callee}::${member}`)) return callee;
+  if (hasDoEffectMember(functionNames, callee, member)) return callee;
+  if (effect.args.length !== 1) return undefined;
+  const [arg] = effect.args;
   return arg ? renderTypeExpr(arg) : undefined;
+}
+
+function hasDoEffectMember(
+  functionNames: Set<string> | undefined,
+  effectName: string,
+  member: string,
+): boolean {
+  if (!functionNames) return false;
+  if (functionNames.has(`${effectName}::${member}`)) return true;
+  const localName = effectName.split(".").at(-1) ?? effectName;
+  return functionNames.has(`${localName}::${member}`);
 }
 
 function stateDoContext(
@@ -892,17 +946,26 @@ function stateDoContext(
   functionNames: Set<string> | undefined,
   env: Map<string, string>,
 ): { name: string; type: string } | undefined {
-  if (strategy !== "monad" || effect.kind !== "type_call" || effect.args.length !== 1) {
+  if (strategy !== "monad" || effect.kind !== "type_call") {
     return undefined;
   }
   const effectName = renderTypeExpr(effect.callee);
-  if (!functionNames?.has(`${effectName}::bind`)) return undefined;
-  const stateType = effect.args[0] ? renderTypeExpr(effect.args[0]) : undefined;
-  if (!stateType) return undefined;
-  const matches = [...env.entries()].filter(([, type]) => type === stateType);
+  if (!hasDoEffectMember(functionNames, effectName, "bind")) return undefined;
+  const stateTypes = [
+    renderTypeExpr(effect),
+    ...(effect.args.length === 1 && effect.args[0] ? [renderTypeExpr(effect.args[0])] : []),
+  ].map(doStateTypeKey);
+  const matches = [...env.entries()].filter(([, type]) =>
+    stateTypes.includes(doStateTypeKey(type))
+  );
   const namedWorld = matches.find(([name]) => name === "world");
-  const selected = namedWorld ?? (matches.length === 1 ? matches[0] : undefined);
+  const namedSystems = matches.find(([name]) => name === "systems");
+  const selected = namedSystems ?? namedWorld ?? (matches.length === 1 ? matches[0] : undefined);
   return selected ? { name: selected[0], type: selected[1] } : undefined;
+}
+
+function doStateTypeKey(type: string): string {
+  return type.replace(/\s+/g, "");
 }
 
 const DO_EFFECT_OPERATION_NAMES = new Set(["pure", "bind", "map", "apply"]);
@@ -1056,15 +1119,18 @@ function stateMonadicDo(
   depth = 0,
 ): Expr {
   const [head, ...tail] = statements;
-  if (!head) return callExpr(`${effect}::pure`, [finalExpr ?? { kind: "var", name: stateName }]);
+  if (!head) return finalExpr ?? callExpr(`${effect}::pure`, [{ kind: "var", name: stateName }]);
   if (head.kind === "do_bind" || head.kind === "do_expr") {
     const nextStateName = head.kind === "do_bind" ? head.name : `__state${depth}`;
-    return {
-      kind: "pipe_bind",
-      value: injectStateArgument(head.value, stateName),
-      name: nextStateName,
-      body: stateMonadicDo(effect, nextStateName, tail, finalExpr, depth + 1),
-    };
+    return callExpr(`${effect}::bind`, [
+      injectStateArgument(head.value, stateName),
+      {
+        kind: "const_fn",
+        params: [nextStateName],
+        body: stateMonadicDo(effect, nextStateName, tail, finalExpr, depth + 1),
+        allowCaptures: true,
+      },
+    ]);
   }
   return {
     kind: "block",
@@ -1081,14 +1147,21 @@ function injectStateArgument(expr: Expr, stateName: string): Expr {
   };
 }
 
-function withDoStrategyProof(effect: TypeExpr, expr: Expr): Expr {
-  if (effect.kind !== "type_call" || effect.args.length !== 1) return expr;
+function withDoStrategyProof(effect: TypeExpr, strategy: string, expr: Expr): Expr {
+  const proofValue = {
+    kind: "type_call" as const,
+    callee: { kind: "type_static_ref" as const, name: "satisfies" },
+    args: [
+      effect,
+      { kind: "type_ref" as const, name: strategy === "monad" ? "Monad" : "Applicative" },
+    ],
+  };
   return {
     kind: "block",
     statements: [{
       kind: "proof_const",
       name: "__do_strategy_proof",
-      value: effect,
+      value: proofValue,
     }],
     expr,
   };
@@ -3098,7 +3171,7 @@ function checkConstDictionaries(
   consts: ConstDecl[],
   types: TypeDecl[],
   functionDecls: FnDecl[],
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   functions: Set<string>,
   diagnostics: Diagnostic[],
 ) {
@@ -3129,7 +3202,7 @@ function checkConstDictionaries(
       });
     }
     if (decl.type) {
-      checkConstDictionaryShape(decl, typesByName, functionsByName, capabilities, diagnostics);
+      checkConstDictionaryShape(decl, typesByName, functionsByName, hostEffects, diagnostics);
     }
     const labels = new Set<string>();
     for (const slot of decl.value.slots) {
@@ -3210,7 +3283,7 @@ function checkConstDictionaryShape(
   decl: ConstDecl,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   diagnostics: Diagnostic[],
 ) {
   const normalized = decl.type
@@ -3218,7 +3291,7 @@ function checkConstDictionaryShape(
       decl.type,
       typesByName,
       functions,
-      capabilities,
+      hostEffects,
       new Map(),
       diagnostics,
       decl.span,
@@ -3285,7 +3358,7 @@ function evaluateConstDecls(
   consts: ConstDecl[],
   types: TypeDecl[],
   functions: FnDecl[],
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   addShader: (source: string) => ShaderManifestEntry,
   diagnostics: Diagnostic[],
   pluginRegistry: CompilerPluginRegistry,
@@ -3317,7 +3390,7 @@ function evaluateConstDecls(
     typeValues,
     new Map(types.map((decl) => [decl.name, decl])),
     byFn,
-    capabilities,
+    hostEffects,
     addShader,
     diagnostics,
     (name) => evaluateConst(name),
@@ -3359,7 +3432,7 @@ class ConstEvaluator {
     private types: Map<string, ConstValue>,
     private typesByName: Map<string, TypeDecl>,
     private functions: Map<string, FnDecl>,
-    private capabilities: Map<string, string[]>,
+    private hostEffects: Map<string, string[]>,
     private addShader: (source: string) => ShaderManifestEntry,
     private diagnostics: Diagnostic[],
     private constLookup: (name: string) => ConstValue | undefined,
@@ -3504,10 +3577,10 @@ class ConstEvaluator {
         span: expr.span,
       };
     }
-    if (this.capabilities.has(name)) {
+    if (this.hostEffects.has(name)) {
       return this.unsupported(
         "const.runtime_call",
-        `cannot call imported capability ${name} during const evaluation`,
+        `cannot call imported host effect ${name} during const evaluation`,
       );
     }
     const fn = this.functions.get(name);
@@ -3887,7 +3960,7 @@ class ConstEvaluator {
     const evaluator = new TypeEvaluator(
       this.typesByName,
       this.functions,
-      this.capabilities,
+      this.hostEffects,
       this.types,
       this.diagnostics,
       this.addShader,
@@ -4495,6 +4568,7 @@ function specializeInferredCall(
   try {
     const types = new Map<string, string>();
     const staticArgNames: string[] = [];
+    const staticNames = new Map<string, string>();
     const nonConstParams = fn.params.filter((param) => !param.const);
     const omitConstArgs = false;
     let runtimeArgIndex = 0;
@@ -4508,37 +4582,35 @@ function specializeInferredCall(
       const arg = argsByParam[index];
       if (!param.const || !arg) continue;
       if (exprContainsPlaceholder(arg)) continue;
-      const proofArg = renderTypeProofArg(arg);
-      if (proofArg) continue;
-      if (arg.kind === "var" && (context.consts.has(arg.name) || context.functions.has(arg.name))) {
-        continue;
+      if (!staticConstArgValue(arg, substituteTypeVars(param.type, types), context)) {
+        return undefined;
       }
-      if (arg.kind === "var") return undefined;
-      return undefined;
     }
     fn.params.forEach((param, index) => {
       const arg = argsByParam[index];
       inferFromValuePattern(param.type, arg, types, context, env);
       if (param.const) {
         if (!arg) return;
-        const proof = renderTypeProofArg(arg);
-        const match = proof?.match(/^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$/);
+        const staticArg = staticConstArgValue(arg, substituteTypeVars(param.type, types), context);
+        if (!staticArg) return;
+        const match = staticArg.name.match(/^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$/);
         const expected = param.type.match(/^([A-Za-z_][A-Za-z0-9_]*)\(([a-z][A-Za-z0-9_]*)\)$/);
         if (match && expected && match[1] === expected[1]) {
           types.set(expected[2], match[2].trim());
-          staticArgNames.push(proof!);
+          staticArgNames.push(staticArg.name);
+          staticNames.set(param.name, staticArg.name);
           return;
         }
-        if (arg?.kind === "var") {
-          const value = context.consts.get(arg.name);
-          if (value?.kind === "fn") {
-            inferFnTypeArgs(param.type, context.functions.get(value.name), types, context.consts);
-          }
-          if (context.functions.has(arg.name)) {
-            inferFnTypeArgs(param.type, context.functions.get(arg.name), types, context.consts);
-          }
-          staticArgNames.push(arg.name);
+        if (staticArg.value.kind === "fn") {
+          inferFnTypeArgs(
+            param.type,
+            context.functions.get(staticArg.value.name),
+            types,
+            context.consts,
+          );
         }
+        staticArgNames.push(staticArg.name);
+        staticNames.set(param.name, staticArg.name);
       }
     });
     fn.params.forEach((param, index) => {
@@ -4581,12 +4653,6 @@ function specializeInferredCall(
     } else {
       context.stats && (context.stats.cacheMisses += 1);
     }
-    const staticNames = new Map<string, string>();
-    fn.params.forEach((param, index) => {
-      if (param.const && args[index]?.kind === "var") {
-        staticNames.set(param.name, (args[index] as Extract<Expr, { kind: "var" }>).name);
-      }
-    });
     if (!specialized) {
       const name = allocateSpecializationName(
         fn.name,
@@ -4712,6 +4778,13 @@ function inferFromValuePattern(
     );
     return;
   }
+  const proof = exprLooksLikeTypeProof(arg, context.types ?? [])
+    ? renderTypeProofArg(arg)
+    : undefined;
+  if (proof) {
+    bindTypePattern(runtimePattern, proof, types, context.types ?? [], context.consts);
+    return;
+  }
   bindTypePattern(
     runtimePattern,
     inferExprType(arg, context, env),
@@ -4782,12 +4855,25 @@ function inferExprType(
     return `struct({${slots.join(", ")}})`;
   }
   if (expr.kind === "call" && expr.callee.kind === "var") {
-    return context.functions.get(expr.callee.name)?.returnType;
+    if (expr.callee.name === "@empty") {
+      const proof = renderTypeProofArg(expr.args[0]);
+      const resolved = proof ? resolveStaticTypeName(proof, context.types ?? []) : undefined;
+      if (resolved?.kind === "type") return resolved.name;
+      if (proof) return proof;
+    }
+    const fn = context.functions.get(expr.callee.name);
+    if (!fn) return undefined;
+    return inferCallReturnType(expr, fn, context, env) ?? fn.returnType;
   }
   if (expr.kind === "pipe_bind") {
     const valueType = inferExprType(expr.value, context, env);
     const scoped = valueType ? new Map(env).set(expr.name, valueType) : env;
     return inferExprType(expr.body, context, scoped);
+  }
+  if (expr.kind === "field") {
+    const valueType = inferExprType(expr.value, context, env);
+    const label = exprLiteralLabel(expr.key);
+    return label ? projectTypeField(valueType, label, context.types ?? []) : undefined;
   }
   if (expr.kind === "var") {
     const projected = inferVarType(expr.name, env, context.types ?? []);
@@ -4799,6 +4885,42 @@ function inferExprType(
       : undefined;
   }
   return undefined;
+}
+
+function inferCallReturnType(
+  expr: Extract<Expr, { kind: "call" }>,
+  fn: FnDecl,
+  context: {
+    functions: Map<string, FnDecl>;
+    consts?: Map<string, ConstValue>;
+    typeConstructors: Map<string, TypeDecl>;
+    types?: TypeDecl[];
+  },
+  env: Map<string, string>,
+): string | undefined {
+  if (!fn.returnType) return undefined;
+  const bindings = new Map<string, string>();
+  for (const argsByParam of inferCallArgLayouts(fn, expr.args)) {
+    argsByParam.forEach((arg, index) => {
+      inferFromValuePattern(fn.params[index]?.type ?? "", arg, bindings, context, env);
+    });
+  }
+  return substituteTypeVars(fn.returnType, bindings);
+}
+
+function inferCallArgLayouts(fn: FnDecl, args: Expr[]): Array<Array<Expr | undefined>> {
+  const layouts: Array<Array<Expr | undefined>> = [];
+  if (args.length === fn.params.length) layouts.push(args);
+  const leadingConstCount = leadingConstParamCount(fn);
+  if (leadingConstCount > 0 && args.length === fn.params.length - leadingConstCount) {
+    layouts.push(
+      fn.params.map((param, index) =>
+        index < leadingConstCount && param.const ? undefined : args[index - leadingConstCount]
+      ),
+    );
+  }
+  if (!layouts.length) layouts.push(args);
+  return layouts;
 }
 
 function inferVarType(
@@ -5004,8 +5126,8 @@ function bindTypePattern(
     );
     return;
   }
-  const pCall = pattern.match(/^([A-Za-z_][A-Za-z0-9_.]*)\((.*)\)$/);
-  const aCall = actual.match(/^([A-Za-z_][A-Za-z0-9_.]*)\((.*)\)$/);
+  const pCall = pattern.match(/^([A-Za-z_][A-Za-z0-9_.]*)\(([\s\S]*)\)$/);
+  const aCall = actual.match(/^([A-Za-z_][A-Za-z0-9_.]*)\(([\s\S]*)\)$/);
   if (pCall && aCall) {
     if (isInferredTypeVarName(pCall[1])) {
       if (!isUnresolvedInferredBinding(aCall[1]) || consts?.has(aCall[1].trim())) {
@@ -5161,7 +5283,11 @@ function substituteInferredExpr(
       return staticExpr ?? { kind: "var", name: type };
     }
     const staticName = staticNames.get(expr.name);
-    return staticName ? { kind: "var", name: staticName } : expr;
+    if (staticName) {
+      const staticValue = constValueFromRenderedTypeArg(staticName);
+      return constValueToExpr(staticValue) ?? { kind: "var", name: staticName };
+    }
+    return expr;
   }
   if (expr.kind === "call") {
     return {
@@ -5239,6 +5365,13 @@ function substituteInferredExpr(
       ...expr,
       start: substituteInferredExpr(expr.start, types, staticNames, proofTypes, context),
       end: substituteInferredExpr(expr.end, types, staticNames, proofTypes, context),
+    };
+  }
+  if (expr.kind === "field") {
+    return {
+      ...expr,
+      value: substituteInferredExpr(expr.value, types, staticNames, proofTypes, context),
+      key: substituteInferredExpr(expr.key, types, staticNames, proofTypes, context),
     };
   }
   if (expr.kind === "block") {
@@ -5352,13 +5485,17 @@ function specializeConstParamCalls(
     stats,
   };
   for (const decl of program.declarations) {
-    if (decl.kind === "fn" && !decl.params.some((param) => param.const)) {
+    if (
+      decl.kind === "fn" && !decl.params.some((param) => param.const) &&
+      !fnUsesInferredTypeVars(decl, consts)
+    ) {
       specializeBlock(
         decl.body,
         context,
         new Map(
           decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
         ),
+        decl.returnType,
       );
     } else if (decl.kind === "let" || decl.kind === "const") {
       decl.value = specializeExpr(decl.value, context, new Map());
@@ -5374,6 +5511,7 @@ function specializeConstParamCalls(
           decl.body,
           context,
           new Map(decl.params.map((param) => [param.name, param.type])),
+          decl.returnType,
         );
       }
     }
@@ -5385,6 +5523,7 @@ function specializeBlock(
   block: Extract<Expr, { kind: "block" }>,
   context: ConstSpecializationContext,
   env: Map<string, string>,
+  expectedType?: string,
 ) {
   block.statements = block.statements.flatMap((stmt): Statement[] => {
     if (stmt.kind === "let") {
@@ -5396,13 +5535,14 @@ function specializeBlock(
     }
     return [stmt];
   });
-  if (block.expr) block.expr = specializeExpr(block.expr, context, env);
+  if (block.expr) block.expr = specializeExpr(block.expr, context, env, expectedType);
 }
 
 function specializeExpr(
   expr: Expr,
   context: ConstSpecializationContext,
   env: Map<string, string>,
+  expectedType?: string,
 ): Expr {
   const previousRuntimeEnv = context.runtimeEnv;
   context.runtimeEnv = env;
@@ -5420,16 +5560,29 @@ function specializeExpr(
         context.stats && (context.stats.visitedCalls += 1);
         const callee = specializeExpr(expr.callee, context, env);
         const args = expr.args.map((arg) => specializeExpr(arg, context, env));
-        if (
-          callee.kind === "var" &&
-          (callee.name === "World::empty" || callee.name.endsWith(".World::empty"))
-        ) {
-          const emptyWorld = expandEcsWorldEmpty(args, new Map(), context);
-          if (emptyWorld) return emptyWorld;
-        }
         const direct = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
-        if (!direct?.params.some((param) => param.const)) return { ...expr, callee, args };
-        return specializeConstParamCall(direct, args, context, callSiteSpan(expr)) ??
+        if (!direct?.params.some((param) => param.const)) {
+          if (direct && fnUsesInferredTypeVars(direct, context.consts)) {
+            return specializeInferredCall(
+              direct,
+              args,
+              context,
+              env,
+              callSiteSpan(expr),
+              undefined,
+              false,
+            ) ?? { ...expr, callee, args };
+          }
+          return { ...expr, callee, args };
+        }
+        return specializeConstParamCall(
+          direct,
+          args,
+          context,
+          callSiteSpan(expr),
+          new Map(),
+          expectedType,
+        ) ??
           { ...expr, callee, args };
       }
       case "index":
@@ -5508,7 +5661,7 @@ function specializeExpr(
         };
       case "block": {
         const block = cloneExpr(expr) as Extract<Expr, { kind: "block" }>;
-        specializeBlock(block, context, new Map(env));
+        specializeBlock(block, context, new Map(env), expectedType);
         return block;
       }
       case "literal":
@@ -5538,12 +5691,32 @@ interface ConstSpecializationContext {
   runtimeEnv?: Map<string, string>;
 }
 
+type StaticConstArgContext =
+  & Pick<
+    ConstSpecializationContext,
+    "functions" | "consts" | "types" | "diagnostics"
+  >
+  & Partial<
+    Pick<
+      ConstSpecializationContext,
+      "addShader" | "constFnCaptures" | "diagnosticSpan" | "emitDiagnostics" | "memo"
+    >
+  >;
+
+function hasConstFnHelperContext(
+  context: StaticConstArgContext,
+): context is ConstSpecializationContext {
+  return !!context.addShader && !!context.constFnCaptures &&
+    context.emitDiagnostics !== undefined;
+}
+
 function specializeConstParamCall(
   fn: FnDecl,
   args: Expr[],
   context: ConstSpecializationContext,
   diagnosticSpan?: Span,
   outerStaticValues = new Map<string, ConstValue>(),
+  expectedType?: string,
 ): Expr | undefined {
   const previousDiagnosticSpan = context.diagnosticSpan;
   if (diagnosticSpan) context.diagnosticSpan = diagnosticSpan;
@@ -5555,6 +5728,7 @@ function specializeConstParamCall(
       outerStaticValues,
       false,
       false,
+      expectedType,
     );
     if (explicit) return explicit;
     const inferred = specializeConstParamCallAttempt(
@@ -5564,6 +5738,7 @@ function specializeConstParamCall(
       outerStaticValues,
       true,
       false,
+      expectedType,
     );
     if (inferred) return inferred;
     return specializeConstParamCallAttempt(
@@ -5573,6 +5748,7 @@ function specializeConstParamCall(
       outerStaticValues,
       false,
       true,
+      expectedType,
     );
   } finally {
     context.diagnosticSpan = previousDiagnosticSpan;
@@ -5586,6 +5762,7 @@ function specializeConstParamCallAttempt(
   outerStaticValues: Map<string, ConstValue>,
   omitLeadingConstArgs: boolean,
   emitDiagnostics: boolean,
+  expectedType?: string,
 ): Expr | undefined {
   const leadingConstCount = leadingConstParamCount(fn);
   if (omitLeadingConstArgs) {
@@ -5598,16 +5775,20 @@ function specializeConstParamCallAttempt(
     return args[index - leadingConstCount];
   });
   const inferredStaticBindings = inferConstStaticBindings(fn, argsByParam, context);
+  bindTypePattern(
+    fn.returnType,
+    expectedType,
+    inferredStaticBindings,
+    context.types,
+    context.consts,
+  );
   const staticValues = new Map<string, ConstValue>();
   const staticArgNames = new Map<string, string>();
-  const explicitStaticBodyArgs = collectExplicitConstArgNames(fn.body, context.functions);
   const staticParamNames = new Set(
     fn.params.filter((param) => param.const).map((param) => param.name),
   );
   const inferredTypes = new Map(
-    [...inferredStaticBindings].filter(([name]) =>
-      explicitStaticBodyArgs.has(name) && !staticParamNames.has(name)
-    ),
+    [...inferredStaticBindings].filter(([name]) => !staticParamNames.has(name)),
   );
   const constArgNames: string[] = [];
   const runtimeArgs: Expr[] = [];
@@ -5616,9 +5797,10 @@ function specializeConstParamCallAttempt(
     const param = fn.params[index];
     const arg = argsByParam[index];
     if (param.const) {
-      const expectedType = param.inferStaticType
-        ? undefined
-        : substituteConstParamType(param.type, staticValues, staticArgNames);
+      const expectedType = param.inferStaticType ? undefined : substituteTypeVars(
+        substituteConstParamType(param.type, staticValues, staticArgNames),
+        inferredStaticBindings,
+      );
       const staticArg = arg
         ? staticConstArgValue(arg, expectedType, context, outerStaticValues)
         : omitLeadingConstArgs && index < leadingConstCount
@@ -5637,7 +5819,7 @@ function specializeConstParamCallAttempt(
       }
       staticValues.set(param.name, staticArg.value);
       const expectedForInference = substituteConstParamType(
-        param.type,
+        substituteTypeVars(param.type, inferredStaticBindings),
         staticValues,
         staticArgNames,
       );
@@ -5928,17 +6110,34 @@ function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
 function staticConstArgValue(
   arg: Expr,
   expectedType: string | undefined,
-  context: ConstSpecializationContext,
+  context: StaticConstArgContext,
   staticValues = new Map<string, ConstValue>(),
 ): { name: string; value: ConstValue } | undefined {
-  const helper = expectedType ? synthesizeConstFnHelper(arg, expectedType, context) : undefined;
+  const helper = expectedType && hasConstFnHelperContext(context)
+    ? synthesizeConstFnHelper(arg, expectedType, context, staticValues)
+    : undefined;
   if (helper) return helper;
+  if (arg.kind === "literal") {
+    const evaluatedStaticValue = staticConstExprValue(arg, staticValues, context);
+    if (evaluatedStaticValue && !expectedType) {
+      return { name: renderConstTypeArg(evaluatedStaticValue), value: evaluatedStaticValue };
+    }
+    if (
+      evaluatedStaticValue && expectedType &&
+      constValueMatchesExpectedType(evaluatedStaticValue, expectedType)
+    ) {
+      return { name: renderConstTypeArg(evaluatedStaticValue), value: evaluatedStaticValue };
+    }
+  }
   if (arg.kind === "var") {
     const staticValue = staticValues.get(arg.name) ?? constValueFromKeyName(arg.name);
     if (staticValue && !expectedType) {
       return { name: renderConstTypeArg(staticValue), value: staticValue };
     }
     if (staticValue?.kind === "fn" && expectedType === "type") {
+      return { name: renderConstTypeArg(staticValue), value: staticValue };
+    }
+    if (staticValue?.kind === "fn" && expectedType?.trim().startsWith("fn(")) {
       return { name: renderConstTypeArg(staticValue), value: staticValue };
     }
     if (staticValue && expectedType && constValueMatchesExpectedType(staticValue, expectedType)) {
@@ -5989,6 +6188,7 @@ function staticConstArgValue(
   }
   if (
     proof && expectedType &&
+    isKnownStaticProofArg(proof, context.types) &&
     (typeProofMatchesExpected(proof, expectedType) ||
       (expectedType === "type" && isKnownTypeProof(proof, context.types)))
   ) {
@@ -6020,6 +6220,9 @@ function staticConstArgValue(
     if (expectedType === "type" && /^[A-Z]/.test(arg.name)) {
       return { name: arg.name, value: { kind: "type", name: arg.name } };
     }
+    if (expectedType === "type" && arg.name.startsWith("struct(")) {
+      return { name: arg.name, value: { kind: "type", name: arg.name } };
+    }
     if (expectedType === "type" && context.functions.has(arg.name)) {
       return { name: arg.name, value: { kind: "fn", name: arg.name } };
     }
@@ -6043,6 +6246,7 @@ function constValueMatchesExpectedType(value: ConstValue, expectedType: string):
 }
 
 function typeProofMatchesExpected(proof: string, expectedType: string): boolean {
+  if (isInferredTypeVarName(expectedType.trim())) return true;
   const proofDomain = parseRefinedI32Type(proof);
   const expectedDomain = parseRefinedI32Type(expectedType);
   if (proofDomain || expectedDomain) {
@@ -6139,10 +6343,21 @@ function isKnownTypeProof(proof: string, types: TypeDecl[]): boolean {
   ].includes(name) || types.some((type) => type.name === name || type.name === terminalName(name));
 }
 
+function isKnownStaticProofArg(proof: string, types: TypeDecl[]): boolean {
+  return isKnownTypeProof(proof, types) || refinedI32TypeCanonical(proof) !== undefined ||
+    /^-?[0-9]+$/.test(proof);
+}
+
+function exprLooksLikeTypeProof(expr: Expr, types: TypeDecl[]): boolean {
+  const proof = renderTypeProofArg(expr);
+  return proof ? isKnownStaticProofArg(proof, types) : false;
+}
+
 function synthesizeConstFnHelper(
   arg: Expr,
   expectedType: string,
   context: ConstSpecializationContext,
+  staticValues = new Map<string, ConstValue>(),
 ): { name: string; value: ConstValue } | undefined {
   if (exprContainsPlaceholder(arg)) {
     context.diagnostics.push({
@@ -6173,7 +6388,8 @@ function synthesizeConstFnHelper(
   }
   const paramNames = new Set(arg.params);
   const captureNames = [...exprRuntimeCaptures(arg.body)].filter((name) =>
-    !paramNames.has(name) && !context.functions.has(name) && !context.consts.has(name)
+    !paramNames.has(name) && !context.functions.has(name) && !context.consts.has(name) &&
+    !staticValues.has(name)
   );
   const captures = captureNames.map((name) => {
     const type = context.runtimeEnv?.get(name);
@@ -6843,7 +7059,7 @@ function substituteSpecializedExpr(
         const staticValue = staticConstExprValue(
           expr,
           staticValues,
-          context.emitDiagnostics ? context : { ...context, diagnostics: [] },
+          { ...context, diagnostics: [] },
         );
         const staticExpr = staticValue ? constValueToExpr(staticValue) : undefined;
         if (staticExpr) return staticExpr;
@@ -6869,17 +7085,6 @@ function substituteSpecializedExpr(
       if (callee.kind === "var" && callee.name === "@replace_field") {
         const replacement = expandReplaceField(callArgs, staticValues, context);
         if (replacement) return replacement;
-      }
-      if (callee.kind === "var" && callee.name === "@ecs_world_empty") {
-        const emptyWorld = expandEcsWorldEmpty(callArgs, staticValues, context);
-        if (emptyWorld) return emptyWorld;
-      }
-      if (
-        callee.kind === "var" &&
-        (callee.name === "World::empty" || callee.name.endsWith(".World::empty"))
-      ) {
-        const emptyWorld = expandEcsWorldEmpty(callArgs, staticValues, context);
-        if (emptyWorld) return emptyWorld;
       }
       if (callee.kind === "var" && callee.name === "@empty") {
         const emptyType = renderTypeProofArg(callArgs[0]);
@@ -7080,7 +7285,13 @@ function substituteSpecializedExpr(
         staticArgNames,
         context,
       );
-      const label = staticLabelName(key, staticValues);
+      const label = staticLabelName(key, staticValues) ??
+        (expr.key.kind === "var"
+          ? staticLabelName(
+            { kind: "var", name: staticArgNames.get(expr.key.name) ?? "" },
+            staticValues,
+          ) ?? staticArgNames.get(expr.key.name)?.replace(/^_+/, "")
+          : undefined);
       if (value.kind === "var" && label) return { kind: "var", name: `${value.name}.${label}` };
       return { ...expr, value, key };
     }
@@ -7347,82 +7558,6 @@ function expandReplaceField(
   };
 }
 
-function expandEcsWorldEmpty(
-  args: Expr[],
-  staticValues: Map<string, ConstValue>,
-  context: ConstSpecializationContext,
-): Expr | undefined {
-  if (args.length !== 2) return undefined;
-  const [capacityArg, specArg] = args;
-  const capacity = staticConstExprValue(capacityArg, staticValues, context);
-  const spec = staticConstExprValue(specArg, staticValues, context);
-  if (capacity?.kind !== "number" || spec?.kind !== "shape") return undefined;
-  const capacityExpr = constValueToExpr(capacity) ?? capacityArg;
-  const namespace = context.functions.has("ecs.batch_fill") ? "ecs." : "";
-  const batchFill = `${namespace}batch_fill`;
-  const batchIndex = `${namespace}BatchIndex`;
-  const componentSlots = spec.slots
-    .map((slot) => {
-      if (!slot.label || slot.value.kind !== "type") return undefined;
-      const componentType = slot.value.name;
-      const componentExpr: Expr = { kind: "var", name: componentType };
-      const defaultValue = emptyExprForType(componentType, context);
-      if (!defaultValue) return undefined;
-      return {
-        label: slot.label,
-        value: callExpr(batchFill, [
-          cloneExpr(capacityExpr),
-          componentExpr,
-          defaultValue,
-        ]),
-      };
-    });
-  if (componentSlots.some((slot) => !slot)) return undefined;
-  const constructor = inferEcsWorldConstructor(spec, context) ?? "World";
-  return {
-    kind: "product_constructor",
-    constructor,
-    slots: [
-      {
-        label: "entities",
-        value: callExpr(batchFill, [
-          cloneExpr(capacityExpr),
-          {
-            kind: "call",
-            callee: { kind: "var", name: batchIndex },
-            args: [cloneExpr(capacityExpr)],
-          },
-          { kind: "literal", literalKind: "number", value: "0" },
-        ]),
-      },
-      { label: "len", value: { kind: "literal", literalKind: "number", value: "0" } },
-      ...(componentSlots as { label: string; value: Expr }[]),
-    ],
-  };
-}
-
-function inferEcsWorldConstructor(
-  spec: Extract<ConstValue, { kind: "shape" }>,
-  context: ConstSpecializationContext,
-): string | undefined {
-  if (context.typeConstructors.has("World")) return "World";
-  const expected = new Set(["entities", "len"]);
-  for (const slot of spec.slots) {
-    if (slot.label) expected.add(slot.label);
-  }
-  const matches = [...context.typeConstructors.entries()].filter(([, decl]) => {
-    if (decl.normalized?.kind !== "product") return false;
-    const actual = new Set(
-      decl.normalized.shape.slots
-        .map((slot) => slot.label)
-        .filter((label): label is string => !!label),
-    );
-    if (actual.size !== expected.size) return false;
-    return [...expected].every((label) => actual.has(label));
-  });
-  return matches.length === 1 ? matches[0]![0] : undefined;
-}
-
 function expandReplaceFieldsWithEnv(
   expr: Expr,
   env: Map<string, string>,
@@ -7578,7 +7713,16 @@ function expandReplaceFieldWithEnv(
 }
 
 function exprLiteralLabel(expr: Expr | undefined): string | undefined {
-  if (expr?.kind !== "literal") return undefined;
+  if (!expr) return undefined;
+  if (
+    expr.kind === "call" &&
+    expr.callee.kind === "var" &&
+    expr.callee.name === "@shape_first_key" &&
+    expr.args[0]?.kind === "shape"
+  ) {
+    return expr.args[0].slots[0]?.label;
+  }
+  if (expr.kind !== "literal") return undefined;
   if (expr.literalKind === "literalType") return expr.value.replace(/^#/, "");
   if (expr.literalKind === "string") return expr.value;
   return undefined;
@@ -7658,6 +7802,12 @@ function staticConstExprValue(
   }
   if (expr.kind !== "call" || expr.callee.kind !== "var") return finish(undefined);
   const name = expr.callee.name.replace(/^@/, "");
+  if (!isStaticBuiltinName(name)) {
+    const proof = renderTypeProofArg(expr);
+    if (proof && isKnownTypeProof(proof, context?.types ?? [])) {
+      return finish(resolveStaticTypeName(proof, context?.types) ?? { kind: "type", name: proof });
+    }
+  }
   const args = expr.args.map((arg) =>
     constValueWithSpan(staticConstExprValue(arg, staticValues, context), arg.span)
   );
@@ -7669,8 +7819,6 @@ function staticConstExprValue(
       : undefined;
     if (rawInlineStructSlots) return finish(rawInlineStructSlots);
     const type = resolveStaticTypeConst(rawType, context);
-    const sparseSlots = staticSparseWorldTypeSlots(type, context);
-    if (sparseSlots) return finish(sparseSlots);
     const inlineStructSlots = type?.kind === "type" ? inlineStructTypeSlots(type.name) : undefined;
     if (inlineStructSlots) return finish(inlineStructSlots);
     return finish(
@@ -7722,23 +7870,13 @@ function staticConstExprValue(
   if (name === "shape_first_key") {
     const first = shape.slots[0];
     if (!first?.label) {
-      context?.diagnostics?.push({
-        code: "type.shape_empty",
-        message: "@shape_first_key requires a non-empty labeled shape",
-        span: args[0]?.span ?? context.diagnosticSpan,
-      });
-      return finish({ kind: "never" });
+      return finish(undefined);
     }
     return finish({ kind: "literal_type", value: first.label });
   }
   if (name === "shape_tail") {
     if (!shape.slots.length) {
-      context?.diagnostics?.push({
-        code: "type.shape_empty",
-        message: "@shape_tail requires a non-empty shape",
-        span: args[0]?.span ?? context.diagnosticSpan,
-      });
-      return finish({ kind: "never" });
+      return finish(undefined);
     }
     return finish({ kind: "shape", slots: shape.slots.slice(1) });
   }
@@ -7827,35 +7965,6 @@ function resolveStaticTypeConst(
   return resolved.kind === "type"
     ? { kind: "type", name: resolved.name, normalized: resolved.normalized }
     : value;
-}
-
-function staticSparseWorldTypeSlots(
-  type: ConstValue | undefined,
-  context: Parameters<typeof staticConstExprValue>[2],
-): ConstValue | undefined {
-  if (type?.kind !== "type") return undefined;
-  const sparseType = type.normalized?.kind === "alias" ? type.normalized.type : type.name;
-  const match = sparseType.match(/(?:^|\.)SparseWorld\((.*)\)$/);
-  if (!match) return undefined;
-  const args = splitTypeArgs(match[1]);
-  const componentsName = args[1]?.trim();
-  const componentsValue = componentsName ? context?.consts?.get(componentsName) : undefined;
-  const components = componentsValue?.kind === "shape" ? componentsValue : undefined;
-  if (components?.kind !== "shape") return undefined;
-  return {
-    kind: "shape",
-    slots: [
-      { label: "next_entity_id", value: { kind: "type", name: "i32" } },
-      { label: "defaults", value: { kind: "type", name: `ComponentValues(${componentsName})` } },
-      ...components.slots.map((slot) => ({
-        label: slot.label,
-        value: {
-          kind: "type" as const,
-          name: `ComponentSlot(${args[0]?.trim() ?? "3"}, ${renderConstTypeArg(slot.value)})`,
-        },
-      })),
-    ],
-  };
 }
 
 function evaluateTypeDecls(types: TypeDecl[], diagnostics: Diagnostic[]) {
@@ -8684,7 +8793,7 @@ function checkTypeContracts(
   program: Program,
   types: TypeDecl[],
   functions: FnDecl[],
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   pluginRegistry: CompilerPluginRegistry,
@@ -8698,7 +8807,7 @@ function checkTypeContracts(
           decl.type,
           byName,
           byFn,
-          capabilities,
+          hostEffects,
           consts,
           diagnostics,
           decl.span,
@@ -8716,7 +8825,7 @@ function checkTypeContracts(
             param.type,
             byName,
             byFn,
-            capabilities,
+            hostEffects,
             consts,
             diagnostics,
             param.span ?? decl.span,
@@ -8735,7 +8844,7 @@ function checkTypeContracts(
           decl.returnType,
           byName,
           byFn,
-          capabilities,
+          hostEffects,
           consts,
           diagnostics,
           decl.span,
@@ -8746,7 +8855,7 @@ function checkTypeContracts(
         decl.body,
         byName,
         byFn,
-        capabilities,
+        hostEffects,
         consts,
         diagnostics,
         constTypeParams,
@@ -8760,7 +8869,7 @@ function checkBlockTypeContracts(
   block: Extract<Expr, { kind: "block" }>,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   deferredTypeParams = new Set<string>(),
@@ -8775,7 +8884,7 @@ function checkBlockTypeContracts(
         stmt.type,
         typesByName,
         functions,
-        capabilities,
+        hostEffects,
         consts,
         diagnostics,
         stmt.span,
@@ -8787,7 +8896,7 @@ function checkBlockTypeContracts(
         stmt.value,
         typesByName,
         functions,
-        capabilities,
+        hostEffects,
         consts,
         diagnostics,
         pluginRegistry,
@@ -8799,7 +8908,7 @@ function checkBlockTypeContracts(
       block.expr,
       typesByName,
       functions,
-      capabilities,
+      hostEffects,
       consts,
       diagnostics,
       pluginRegistry,
@@ -8811,7 +8920,7 @@ function checkExprTypeContracts(
   expr: Expr,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   pluginRegistry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
@@ -8821,7 +8930,7 @@ function checkExprTypeContracts(
       expr,
       typesByName,
       functions,
-      capabilities,
+      hostEffects,
       consts,
       diagnostics,
       new Set(),
@@ -8832,7 +8941,7 @@ function checkExprTypeContracts(
       expr.value,
       typesByName,
       functions,
-      capabilities,
+      hostEffects,
       consts,
       diagnostics,
       pluginRegistry,
@@ -8842,7 +8951,7 @@ function checkExprTypeContracts(
         arm.value,
         typesByName,
         functions,
-        capabilities,
+        hostEffects,
         consts,
         diagnostics,
         pluginRegistry,
@@ -8854,7 +8963,7 @@ function checkExprTypeContracts(
         slot.value,
         typesByName,
         functions,
-        capabilities,
+        hostEffects,
         consts,
         diagnostics,
         pluginRegistry,
@@ -9058,7 +9167,7 @@ function instantiateNestedAnnotations(
   annotation: string,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   diagnosticSpan?: Span,
@@ -9069,7 +9178,7 @@ function instantiateNestedAnnotations(
       typeExpr,
       typesByName,
       functions,
-      capabilities,
+      hostEffects,
       consts,
       diagnostics,
       new Map(),
@@ -9083,7 +9192,7 @@ function instantiateAnnotation(
   annotation: string,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   diagnosticSpan?: Span,
@@ -9095,7 +9204,7 @@ function instantiateAnnotation(
     expr,
     typesByName,
     functions,
-    capabilities,
+    hostEffects,
     consts,
     diagnostics,
     new Map(),
@@ -9109,7 +9218,7 @@ function instantiateTypeExpr(
   expr: TypeExpr,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   locals = new Map<string, TypeEvalValue>(),
@@ -9119,7 +9228,7 @@ function instantiateTypeExpr(
   const evaluator = new TypeEvaluator(
     typesByName,
     functions,
-    capabilities,
+    hostEffects,
     consts,
     diagnostics,
     shaderManifestEntry,
@@ -9133,7 +9242,7 @@ class TypeEvaluator {
   constructor(
     private typesByName: Map<string, TypeDecl>,
     private functions: Map<string, FnDecl>,
-    private capabilities: Map<string, string[]>,
+    private hostEffects: Map<string, string[]>,
     private consts: Map<string, ConstValue>,
     private diagnostics: Diagnostic[],
     private addShader: (source: string) => ShaderManifestEntry,
@@ -9250,12 +9359,15 @@ class TypeEvaluator {
       : evaluatedCallee?.kind === "type"
       ? evaluatedCallee.name
       : undefined;
-    const args = expr.args.map((arg) =>
-      this.withSpan(this.eval(arg, locals) ?? { kind: "never" as const }, arg.span)
-    );
     if (!callee) {
       return this.unsupported("type.unsupported_expr", "type calls require a named callee");
     }
+    if (callee === "@satisfies") {
+      return this.evalSatisfiesRaw(expr, locals);
+    }
+    const args = expr.args.map((arg) =>
+      this.withSpan(this.eval(arg, locals) ?? { kind: "never" as const }, arg.span)
+    );
     if (callee === "struct" || callee === "union") {
       return this.evalTypeBuilder(callee, expr.args, locals);
     }
@@ -9279,10 +9391,10 @@ class TypeEvaluator {
     }
     const builtin = this.evalBuiltin(callee, args);
     if (builtin) return builtin;
-    if (this.capabilities.has(callee)) {
+    if (this.hostEffects.has(callee)) {
       return this.unsupported(
-        "type.runtime_capability_call",
-        `cannot call imported capability ${callee} during type evaluation`,
+        "type.runtime_effect_call",
+        `cannot call imported host effect ${callee} during type evaluation`,
       );
     }
     const fn = this.functions.get(callee);
@@ -9627,6 +9739,29 @@ class TypeEvaluator {
     return undefined;
   }
 
+  private evalSatisfiesRaw(
+    expr: Extract<TypeExpr, { kind: "type_call" }>,
+    locals: Map<string, TypeEvalValue>,
+  ): TypeEvalValue | undefined {
+    const [effectExpr, contractExpr] = expr.args;
+    if (!effectExpr || !contractExpr) {
+      return this.unsupported("type.satisfies", "@satisfies requires an effect and contract");
+    }
+    const contract = renderTypeExpr(contractExpr);
+    const effect = renderTypeExpr(effectExpr);
+    const contractName = terminalName(contract);
+    const contractDecl = this.typesByName.get(contract) ?? this.typesByName.get(contractName) ??
+      [...this.typesByName.values()].find((type) => terminalName(type.name) === contractName);
+    if (contractDecl) {
+      this.evalTypeFunction(
+        contractDecl.name,
+        contractDecl,
+        [this.withSpan({ kind: "type", name: effect }, effectExpr.span)],
+      );
+    }
+    return this.namedType(`${contractName}(${effect})`);
+  }
+
   private evalFunction(
     fn: FnDecl,
     args: TypeEvalValue[],
@@ -9698,10 +9833,10 @@ class TypeEvaluator {
         }
         const builtin = this.evalBuiltin(name, args);
         if (builtin) return builtin;
-        if (this.capabilities.has(name)) {
+        if (this.hostEffects.has(name)) {
           return this.unsupported(
-            "type.runtime_capability_call",
-            `cannot call imported capability ${name} during type evaluation`,
+            "type.runtime_effect_call",
+            `cannot call imported host effect ${name} during type evaluation`,
           );
         }
         const fn = this.functions.get(name);
@@ -10470,7 +10605,7 @@ class TypeEvaluator {
         // Fall through to the rendered name.
       }
     }
-    const array = resolved.name.match(/(?:^|\.)(?:ComponentStore|InlineArray)\((.*)\)$/);
+    const array = resolved.name.match(/(?:^|\.)InlineArray\((.*)\)$/);
     if (array) {
       const args = splitTypeArgs(array[1]);
       return JSON.stringify({
@@ -10872,13 +11007,33 @@ function emptyExprForType(type: string, context: ConstSpecializationContext): Ex
   if (context.functions.has(`${type}::empty`)) {
     return { kind: "call", callee: { kind: "var", name: `${type}::empty` }, args: [] };
   }
-  return derivedEmptyExpr(type, context.types);
+  const parsed = parseAnnotationType(type);
+  if (parsed) {
+    const diagnostics: Diagnostic[] = [];
+    const evaluator = new TypeEvaluator(
+      new Map(context.types.map((decl) => [decl.name, decl])),
+      context.functions,
+      new Map(),
+      context.consts,
+      diagnostics,
+      shaderManifestEntry,
+      defaultCompilerPluginRegistry,
+      context.diagnosticSpan,
+    );
+    const evaluated = evaluator.eval(parsed, new Map(), context.diagnosticSpan);
+    if (evaluated?.kind === "type") {
+      const derived = derivedEmptyExprForTypeValue(evaluated, context);
+      if (derived) return derived;
+    }
+  }
+  return derivedEmptyExpr(type, context);
 }
 
 function typeHasDerivedEmpty(
   type: Extract<TypeEvalValue, { kind: "type" }>,
   seen = new Set<string>(),
 ): boolean {
+  if (isEmptyPrimitiveType(type.name)) return true;
   const name = terminalName(type.name);
   if (isEmptyPrimitiveType(name)) return true;
   if (seen.has(type.name)) return false;
@@ -10894,31 +11049,64 @@ function typeHasDerivedEmpty(
 
 function derivedEmptyExpr(
   type: string,
-  types: TypeDecl[],
+  context: ConstSpecializationContext,
   seen = new Set<string>(),
 ): Expr | undefined {
   const literal = literalTypeMembers(type)?.[0];
   if (literal) return literalTypeMemberExpr(literal);
+  if (isEmptyNumericType(type)) return { kind: "literal", literalKind: "number", value: "0" };
   const name = terminalName(type);
   if (name === "bool") return { kind: "literal", literalKind: "bool", value: "false" };
   if (isEmptyNumericType(name)) return { kind: "literal", literalKind: "number", value: "0" };
   if (seen.has(type)) return undefined;
   seen.add(type);
-  const decl = resolveTypeDecl(type, types);
+  const decl = resolveTypeDecl(type, context.types);
   if (!decl?.normalized) return undefined;
-  if (decl.normalized.kind === "alias") return derivedEmptyExpr(decl.normalized.type, types, seen);
+  if (decl.normalized.kind === "alias") {
+    return derivedEmptyExpr(decl.normalized.type, context, seen);
+  }
   if (decl.normalized.kind !== "product") return undefined;
   const bindings = genericBindings(type, decl);
   const slots = [];
   for (const slot of decl.normalized.shape.slots) {
     const slotType = substituteTypeVars(slot.type, bindings);
-    const value = derivedEmptyExpr(slotType, types, seen);
+    const value = emptyExprForType(slotType, context);
     if (!value) return undefined;
     slots.push({ label: slot.label, value });
   }
   return {
     kind: "product_constructor",
     constructor: decl.normalized.constructor,
+    slots,
+  };
+}
+
+function derivedEmptyExprForTypeValue(
+  type: Extract<TypeEvalValue, { kind: "type" }>,
+  context: ConstSpecializationContext,
+  seen = new Set<string>(),
+): Expr | undefined {
+  const literal = literalTypeMembers(type.name)?.[0];
+  if (literal) return literalTypeMemberExpr(literal);
+  if (isEmptyNumericType(type.name)) return { kind: "literal", literalKind: "number", value: "0" };
+  const name = terminalName(type.name);
+  if (name === "bool") return { kind: "literal", literalKind: "bool", value: "false" };
+  if (isEmptyNumericType(name)) return { kind: "literal", literalKind: "number", value: "0" };
+  if (seen.has(type.name)) return undefined;
+  seen.add(type.name);
+  if (type.normalized?.kind === "alias") {
+    return derivedEmptyExpr(type.normalized.type, context, seen);
+  }
+  if (type.normalized?.kind !== "product") return derivedEmptyExpr(type.name, context, seen);
+  const slots = [];
+  for (const slot of type.normalized.shape.slots) {
+    const value = emptyExprForType(slot.type, context);
+    if (!value) return undefined;
+    slots.push({ label: slot.label, value });
+  }
+  return {
+    kind: "product_constructor",
+    constructor: type.normalized.constructor,
     slots,
   };
 }
@@ -10944,7 +11132,7 @@ function isEmptyPrimitiveType(type: string): boolean {
 }
 
 function isEmptyNumericType(type: string): boolean {
-  return isNumericType(type);
+  return isNumericType(type) || refinedI32ContainsLiteral(type, 0);
 }
 
 function isNumericType(type: string): boolean {
@@ -11474,7 +11662,7 @@ interface SynthResult {
 
 interface CheckContext {
   env: Map<string, OwnershipBinding>;
-  capabilities: Map<string, string[]>;
+  hostEffects: Map<string, string[]>;
   effects: string[];
   types: TypeDecl[];
   functions: FnDecl[];
@@ -11485,17 +11673,14 @@ interface CheckContext {
 
 function checkFn(
   fn: FnDecl,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   diagnostics: Diagnostic[],
   types: TypeDecl[],
   functions: FnDecl[],
   options: RuntimeCheckOptions,
 ) {
   checkRuntimeScalarDomainSymbols(fn, diagnostics);
-  if (
-    exprContainsStaticExpansion(fn.body) || isInlineArrayExprBuiltinWrapper(fn) ||
-    fn.name.endsWith("ComponentStore.set")
-  ) return;
+  if (exprContainsStaticExpansion(fn.body) || isInlineArrayExprBuiltinWrapper(fn)) return;
   const env = new Map<string, OwnershipBinding>();
   const runtimeOptions = {
     ...options,
@@ -11505,7 +11690,7 @@ function checkFn(
   };
   const ctx = checkContext(
     env,
-    capabilities,
+    hostEffects,
     fn.effects,
     diagnostics,
     types,
@@ -11530,7 +11715,7 @@ function checkFn(
   checkBlock(
     fn.body,
     env,
-    capabilities,
+    hostEffects,
     fn.effects,
     diagnostics,
     returnType?.runtimeType ?? fn.returnType,
@@ -11650,7 +11835,7 @@ function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
 function checkStatement(
   stmt: Statement,
   env: Map<string, OwnershipBinding>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   types: TypeDecl[],
@@ -11660,7 +11845,7 @@ function checkStatement(
   if (stmt.kind === "let") {
     const ctx = checkContext(
       env,
-      capabilities,
+      hostEffects,
       effects,
       diagnostics,
       types,
@@ -11671,7 +11856,7 @@ function checkStatement(
     checkExpr(
       stmt.value,
       env,
-      capabilities,
+      hostEffects,
       effects,
       diagnostics,
       annotated?.runtimeType ?? stmt.type,
@@ -11690,7 +11875,7 @@ function checkStatement(
     checkExpr(
       stmt.value,
       env,
-      capabilities,
+      hostEffects,
       effects,
       diagnostics,
       undefined,
@@ -11811,7 +11996,7 @@ function typeNameOf(type: string): string {
 function checkExpr(
   expr: Expr,
   env: Map<string, OwnershipBinding>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType?: string,
@@ -11821,7 +12006,7 @@ function checkExpr(
 ): SynthResult {
   const ctx = checkContext(
     env,
-    capabilities,
+    hostEffects,
     effects,
     diagnostics,
     types,
@@ -11839,7 +12024,7 @@ function checkExprAgainst(
   checkExprImpl(
     expr,
     ctx.env,
-    ctx.capabilities,
+    ctx.hostEffects,
     ctx.effects,
     ctx.diagnostics,
     expected?.runtimeType,
@@ -11976,6 +12161,7 @@ function checkTypeVariableMemberProofs(
       if (stmt.kind === "let") {
         active.push(...(normalizeExpectedType(stmt.type, ctx)?.proofFacts ?? []));
       } else if (stmt.kind === "proof_const") {
+        validateSatisfiesProofConst(stmt.value, ctx);
         active.push(...(normalizeExpectedType(renderTypeExpr(stmt.value), ctx)?.proofFacts ?? []));
       }
     }
@@ -12060,6 +12246,53 @@ function checkTypeVariableMemberProofs(
     }
   };
   visitBlock(block, initialProofs);
+}
+
+function validateSatisfiesProofConst(expr: TypeExpr, ctx: CheckContext) {
+  if (
+    expr.kind !== "type_call" ||
+    expr.callee.kind !== "type_static_ref" ||
+    expr.callee.name !== "satisfies"
+  ) return;
+  const effect = expr.args[0];
+  if (!effect || !typeExprIsConcreteProofTarget(effect)) return;
+  const typeEvaluator = new TypeEvaluator(
+    new Map(ctx.types.map((decl) => [decl.name, decl])),
+    new Map(ctx.functions.map((fn) => [fn.name, fn])),
+    new Map(),
+    new Map(),
+    ctx.diagnostics,
+    shaderManifestEntry,
+    defaultCompilerPluginRegistry,
+  );
+  typeEvaluator.eval(expr, new Map(), expr.span);
+}
+
+function typeExprIsConcreteProofTarget(expr: TypeExpr): boolean {
+  switch (expr.kind) {
+    case "type_ref":
+      return !/^[a-z][A-Za-z0-9_]*$/.test(expr.name) || isPrimitiveTypeName(expr.name);
+    case "type_call":
+      return typeExprIsConcreteProofTarget(expr.callee) &&
+        expr.args.every(typeExprIsConcreteProofTarget);
+    case "type_static_ref":
+      return false;
+    case "type_fn":
+    case "type_shape":
+    case "type_match":
+    case "type_operator":
+    case "type_binary":
+    case "type_bool":
+    case "type_number":
+    case "type_char":
+    case "type_string":
+    case "type_literal":
+      return true;
+  }
+}
+
+function isPrimitiveTypeName(name: string): boolean {
+  return ["i32", "u32", "i64", "u64", "f32", "f64", "bool", "string"].includes(name);
 }
 
 function proofFactsGuaranteeMember(
@@ -12164,7 +12397,7 @@ function checkAmbiguousNullaryInferredCalls(
 
 function checkContext(
   env: Map<string, OwnershipBinding>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   types: TypeDecl[],
@@ -12172,7 +12405,7 @@ function checkContext(
   options: RuntimeCheckOptions,
   proofFacts: ProofFact[] = [],
 ): CheckContext {
-  return { env, capabilities, effects, diagnostics, types, functions, options, proofFacts };
+  return { env, hostEffects, effects, diagnostics, types, functions, options, proofFacts };
 }
 
 function typeFactsForRuntimeType(type: string | undefined): TypeFacts | undefined {
@@ -12182,7 +12415,7 @@ function typeFactsForRuntimeType(type: string | undefined): TypeFacts | undefine
 function checkExprImpl(
   expr: Expr,
   env: Map<string, OwnershipBinding>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType?: string,
@@ -12191,13 +12424,36 @@ function checkExprImpl(
   options: RuntimeCheckOptions = { recoverTypes: false },
 ) {
   switch (expr.kind) {
-    case "const_fn":
+    case "const_fn": {
+      const signature = expectedType ? parseExpectedFnType(expectedType) : undefined;
+      if (signature) {
+        const nextEnv = new Map(env);
+        for (let index = 0; index < expr.params.length; index++) {
+          const param = signature.params[index];
+          if (param && expr.params[index]) {
+            nextEnv.set(expr.params[index], { moved: false, type: param.type });
+          }
+        }
+        checkExpr(
+          expr.body,
+          nextEnv,
+          hostEffects,
+          effects,
+          diagnostics,
+          signature.returnType,
+          types,
+          functions,
+          options,
+        );
+        return;
+      }
       diagnostics.push({
         code: "const.const_fn_context",
         message: "const fn literal is only valid as an expected const fn argument",
         span: expr.span,
       });
       return;
+    }
     case "var": {
       checkProjection(expr.name, env, types, diagnostics);
       const binding = env.get(expr.name);
@@ -12235,7 +12491,7 @@ function checkExprImpl(
             fn.name === calleeName || fn.name.endsWith(`.${calleeName}`) ||
             fn.name.endsWith(`::${calleeName}`)
           ) &&
-          !capabilities.has(calleeName)
+          !hostEffects.has(calleeName)
         ) {
           diagnostics.push(diagnosticAt(
             "function.unknown",
@@ -12243,11 +12499,11 @@ function checkExprImpl(
             expr.callee,
           ));
         }
-        const capabilityEffects = capabilities.get(calleeName);
-        if (capabilityEffects && !capabilityEffects.every((effect) => effects.includes(effect))) {
+        const importedEffects = hostEffects.get(calleeName);
+        if (importedEffects && !importedEffects.every((effect) => effects.includes(effect))) {
           diagnostics.push({
             code: "effect.pure_host_call",
-            message: `capability ${calleeName} requires effects {${capabilityEffects.join(", ")}}`,
+            message: `host effect ${calleeName} requires effects {${importedEffects.join(", ")}}`,
           });
         }
       }
@@ -12262,7 +12518,7 @@ function checkExprImpl(
           rawExpected,
           checkContext(
             env,
-            capabilities,
+            hostEffects,
             effects,
             diagnostics,
             types,
@@ -12273,7 +12529,7 @@ function checkExprImpl(
         checkExpr(
           arg,
           env,
-          capabilities,
+          hostEffects,
           effects,
           diagnostics,
           expected,
@@ -12310,7 +12566,7 @@ function checkExprImpl(
       checkExpr(
         expr.target,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12321,7 +12577,7 @@ function checkExprImpl(
       checkExpr(
         expr.index,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12336,7 +12592,7 @@ function checkExprImpl(
         checkExpr(
           expr.left,
           env,
-          capabilities,
+          hostEffects,
           effects,
           diagnostics,
           undefined,
@@ -12348,7 +12604,7 @@ function checkExprImpl(
         checkExpr(
           expr.right,
           env,
-          capabilities,
+          hostEffects,
           effects,
           diagnostics,
           leftType,
@@ -12360,7 +12616,7 @@ function checkExprImpl(
         checkExpr(
           expr.left,
           env,
-          capabilities,
+          hostEffects,
           effects,
           diagnostics,
           numericExpectedType(expectedType),
@@ -12371,7 +12627,7 @@ function checkExprImpl(
         checkExpr(
           expr.right,
           env,
-          capabilities,
+          hostEffects,
           effects,
           diagnostics,
           numericExpectedType(expectedType),
@@ -12395,7 +12651,7 @@ function checkExprImpl(
       checkExpr(
         expr.value,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12415,7 +12671,7 @@ function checkExprImpl(
       checkExpr(
         expr.body,
         scoped,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         expectedType,
@@ -12429,7 +12685,7 @@ function checkExprImpl(
       checkExpr(
         expr.value,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12451,7 +12707,7 @@ function checkExprImpl(
         checkExpr(
           arm.value,
           armEnv,
-          capabilities,
+          hostEffects,
           effects,
           diagnostics,
           expectedType,
@@ -12467,7 +12723,7 @@ function checkExprImpl(
           checkFixedCollectionUpdateLiteral(
             expr,
             env,
-            capabilities,
+            hostEffects,
             effects,
             diagnostics,
             inlineArrayLikeTypeArgs(expectedType, types),
@@ -12479,7 +12735,7 @@ function checkExprImpl(
           checkInlineArraySpreadLiteral(
             expr,
             env,
-            capabilities,
+            hostEffects,
             effects,
             diagnostics,
             expectedType,
@@ -12494,7 +12750,7 @@ function checkExprImpl(
         checkExpr(
           slot.value,
           env,
-          capabilities,
+          hostEffects,
           effects,
           diagnostics,
           options.recoverTypes ? expectedShapeSlotType(expectedType, slot.label, types) : undefined,
@@ -12518,7 +12774,7 @@ function checkExprImpl(
         checkExpr(
           slot.value,
           env,
-          capabilities,
+          hostEffects,
           effects,
           diagnostics,
           options.recoverTypes
@@ -12534,7 +12790,7 @@ function checkExprImpl(
       checkExpr(
         expr.start,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12545,7 +12801,7 @@ function checkExprImpl(
       checkExpr(
         expr.end,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12558,7 +12814,7 @@ function checkExprImpl(
       checkExpr(
         expr.value,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12571,7 +12827,7 @@ function checkExprImpl(
       checkExpr(
         expr.value,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12582,7 +12838,7 @@ function checkExprImpl(
       checkExpr(
         expr.key,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12595,7 +12851,7 @@ function checkExprImpl(
       checkBlock(
         expr,
         new Map(env),
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         expectedType,
@@ -12877,7 +13133,7 @@ function expectedShapeSlotType(
 function checkInlineArraySpreadLiteral(
   expr: Extract<Expr, { kind: "shape" }>,
   env: Map<string, OwnershipBinding>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType: string | undefined,
@@ -12927,7 +13183,7 @@ function checkInlineArraySpreadLiteral(
       checkExpr(
         slot.value,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -12959,7 +13215,7 @@ function checkInlineArraySpreadLiteral(
       checkExpr(
         slot.value,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         itemType,
@@ -12981,7 +13237,7 @@ function checkInlineArraySpreadLiteral(
 function checkFixedCollectionUpdateLiteral(
   expr: Extract<Expr, { kind: "shape" }>,
   env: Map<string, OwnershipBinding>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expected:
@@ -13029,7 +13285,7 @@ function checkFixedCollectionUpdateLiteral(
       checkExpr(
         slot.value,
         env,
-        capabilities,
+        hostEffects,
         effects,
         diagnostics,
         undefined,
@@ -13072,7 +13328,7 @@ function checkFixedCollectionUpdateLiteral(
     checkExpr(
       slot.index,
       env,
-      capabilities,
+      hostEffects,
       effects,
       diagnostics,
       undefined,
@@ -13083,7 +13339,7 @@ function checkFixedCollectionUpdateLiteral(
     checkExpr(
       slot.value,
       env,
-      capabilities,
+      hostEffects,
       effects,
       diagnostics,
       itemType,
@@ -13260,7 +13516,7 @@ function isInlineArrayExprBuiltinWrapper(fn: FnDecl): boolean {
 function checkBlock(
   block: Extract<Expr, { kind: "block" }>,
   env: Map<string, OwnershipBinding>,
-  capabilities: Map<string, string[]>,
+  hostEffects: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType?: string,
@@ -13270,13 +13526,13 @@ function checkBlock(
 ) {
   const ordered = orderBlockStatements(block.statements, diagnostics);
   for (const stmt of ordered) {
-    checkStatement(stmt, env, capabilities, effects, diagnostics, types, functions, options);
+    checkStatement(stmt, env, hostEffects, effects, diagnostics, types, functions, options);
   }
   if (block.expr) {
     checkExpr(
       block.expr,
       env,
-      capabilities,
+      hostEffects,
       effects,
       diagnostics,
       expectedType,

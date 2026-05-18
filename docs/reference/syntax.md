@@ -6,7 +6,7 @@ Fig source files use the `.fig` extension. a program is a sequence of `type fn`,
 ## Names
 
 Lowercase identifiers match `[a-z_][a-z0-9_]*` and are used for functions, locals, fields,
-capabilities, imports, primitive type names, and type functions. PascalCase identifiers match
+host effects, imports, primitive type names, and type functions. PascalCase identifiers match
 `[a-Z][a-Za-z0-9]*` and are used for product constructors, union variants, and type-level local
 shape bindings.
 
@@ -107,15 +107,15 @@ Destructured import entries are plain declaration names. Aliases, dotted names, 
 non-`@import` right-hand sides are rejected. Namespace imports can qualify nested imports, so a
 module imported as `std` can expose names such as `std.array.Layout.lane4_i32`.
 
-Host imports are top-level consts whose value is `@capability("name")` and whose type is a function
+Host imports are top-level consts whose value is `@effect("name")` and whose type is a function
 type:
 
 ```fig
-const clock: fn() -> i32 !{time} = @capability("clock");
+const clock: fn() -> i32 !{time} = @effect("clock");
 ```
 
-Capabilities lower to WebAssembly imports from module `env`. Calling a capability requires the
-enclosing function effect row to contain the capability effects.
+Host effects lower to WebAssembly imports from module `env`. Calling a host effect requires the
+enclosing function effect row to contain the imported function's effects.
 
 ## Constants and Lets
 

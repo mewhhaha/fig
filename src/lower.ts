@@ -1,12 +1,12 @@
 import type {
   AstNodeMeta,
   BranchHint,
-  CapabilityImport,
   ConstDecl,
   ContractDecl,
   Declaration,
   DestructureLetDecl,
   DoStatement,
+  EffectImport,
   Expr,
   FnDecl,
   LetDecl,
@@ -63,23 +63,23 @@ export function lowerProgram(
   const sourceImportConsts = decls.map(unwrap).filter(isSourceImportConst).map(
     lowerSourceImportConst,
   );
-  const capabilityConstImports = decls.map(unwrap).filter(isCapabilityConst).map(
-    lowerCapabilityConst,
+  const effectConstImports = decls.map(unwrap).filter(isEffectConst).map(
+    lowerEffectConst,
   );
   const declarations = decls.filter((decl) => {
     const unwrapped = unwrap(decl);
-    return !isSourceImportConst(unwrapped) && !isCapabilityConst(unwrapped);
+    return !isSourceImportConst(unwrapped) && !isEffectConst(unwrapped);
   }).map(lowerDecl);
   declarations.push(...lowerInlineTypeMemberFns(declarations));
   return hideAstMetadata({
     moduleName: undefined,
-    imports: capabilityConstImports,
+    imports: effectConstImports,
     sourceImports: sourceImportConsts,
     declarations,
   }) as Program;
 }
 
-function lowerCapabilityConst(node: Node): CapabilityImport {
+function lowerEffectConst(node: Node): EffectImport {
   const nameNode = named(node).find((child) => isIdentifier(child) || isFieldName(child));
   const name = bindingName(nameNode);
   const type = only(node, "Type").text;
@@ -124,8 +124,8 @@ function isSourceImportConst(node: Node): boolean {
   return isDeclarationBuiltinConst(node, "import");
 }
 
-function isCapabilityConst(node: Node): boolean {
-  return node.type === "ConstDecl" && isDeclarationBuiltinConst(node, "capability");
+function isEffectConst(node: Node): boolean {
+  return node.type === "ConstDecl" && isDeclarationBuiltinConst(node, "effect");
 }
 
 function isDeclarationBuiltinConst(node: Node, name: string): boolean {
@@ -1022,17 +1022,17 @@ function lowerExpr(node: Node): Expr {
       };
     }
     case "MatchExpr": {
-      const value = first(expr, "Expr");
+      const value = first(expr, "MatchValues");
       const arms = named(expr).filter(is("Arm")).map((arm) => {
         const armExpr = first(arm, "Expr");
         return {
           ...spanOnly(arm),
           ...(lowerBranchHint(optional(arm, "BranchHint")) ?? {}),
-          pattern: lowerParamPattern(first(arm, "Pattern")),
+          pattern: lowerMatchPatterns(first(arm, "MatchPatterns")),
           value: lowerExpr(armExpr),
         };
       });
-      return { kind: "match", ...spanOnly(expr), value: lowerExpr(value), arms };
+      return { kind: "match", ...spanOnly(expr), value: lowerMatchValues(value), arms };
     }
     case "ConstFn": {
       const paramsNode = first(expr, "ConstFnParams");
@@ -1064,6 +1064,31 @@ function lowerExpr(node: Node): Expr {
     default:
       return unreachable(expr, "expression");
   }
+}
+
+function lowerMatchValues(node: Node): Expr {
+  const values = named(node).filter(is("Expr"));
+  if (values.length === 1) return lowerExpr(values[0]);
+  return {
+    kind: "shape",
+    syntax: "record",
+    ...spanOnly(node),
+    slots: values.map((value, position) => ({
+      ...spanOnly(value),
+      position,
+      value: lowerExpr(value),
+    })),
+  };
+}
+
+function lowerMatchPatterns(node: Node): ParamPattern {
+  const patterns = named(node).filter(is("Pattern"));
+  if (patterns.length === 1) return lowerParamPattern(patterns[0]);
+  return {
+    kind: "tuple",
+    ...spanOnly(node),
+    items: patterns.map(lowerParamPattern),
+  };
 }
 
 function lowerDoExpr(node: Node): Expr {
@@ -1360,6 +1385,18 @@ function lowerCall(node: Node): Expr {
         (nextNamedCallChild(children, i)?.type === "Args" || children[i + 1]?.type === "(")
       ) {
         pendingMember = { receiver: expr, member: child.text };
+      } else if (expr.kind !== "var") {
+        expr = {
+          kind: "field",
+          ...spanOnly(child),
+          value: expr,
+          key: {
+            kind: "literal",
+            ...spanOnly(child),
+            literalKind: "literalType",
+            value: `#${child.text}`,
+          },
+        };
       } else {
         expr = { kind: "var", ...spanOnly(child), name: `${nameOf(expr)}.${child.text}` };
       }

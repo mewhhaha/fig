@@ -43,6 +43,18 @@ Deno.test("example wasm modules instantiate with explicit host imports when need
         tick_millis: () => 16,
         input_axis_x: () => 1,
         input_pressed: () => 0,
+        canvas_init: () => 1,
+        gpu_create_shader: () => 1,
+        gpu_create_pipeline: () => 1,
+        gpu_upload_vertices: () => 1,
+        gpu_draw_quads: () => 1,
+        gpu_begin_frame: () => 1,
+        gpu_draw_rect: () => 1,
+        gpu_draw_sprite: () => 1,
+        gpu_present: () => 1,
+        event_poll: () => 0,
+        audio_play: () => 1,
+        audio_music: () => 1,
       },
     });
     if (imports.length === 0 && typeof instance.exports.main === "function") {
@@ -51,23 +63,64 @@ Deno.test("example wasm modules instantiate with explicit host imports when need
   }
 });
 
-Deno.test("engine playground tick consumes time and event capabilities", async () => {
+Deno.test("engine playground tick consumes time event and render effects", async () => {
   const source = await Deno.readTextFile("examples/engine_playground.fig");
   const module = new WebAssembly.Module(await wasmFromSource(source, { resolveModule }));
   assertEquals(
     WebAssembly.Module.imports(module).map((item) => `${item.module}.${item.name}`),
-    ["env.tick_millis", "env.input_axis_x", "env.input_pressed"],
+    [
+      "env.canvas_init",
+      "env.gpu_create_shader",
+      "env.gpu_create_pipeline",
+      "env.gpu_upload_vertices",
+      "env.gpu_draw_quads",
+      "env.gpu_begin_frame",
+      "env.gpu_draw_rect",
+      "env.gpu_draw_sprite",
+      "env.gpu_present",
+      "env.event_poll",
+      "env.tick_millis",
+      "env.input_axis_x",
+      "env.input_pressed",
+    ],
   );
+});
+
+Deno.test("engine playground release build handles generated ECS systems", async () => {
+  const source = await Deno.readTextFile("examples/engine_playground.fig");
+  new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" }));
 });
 
 Deno.test("engine playground frame builds, ticks, and renders visible sprites", async () => {
   const source = await Deno.readTextFile("examples/engine_playground.fig");
   const module = new WebAssembly.Module(await wasmFromSource(source, { resolveModule }));
+  const drawCalls: number[][] = [];
+  let began = 0;
+  let presented = 0;
   const instance = new WebAssembly.Instance(module, {
     env: {
       tick_millis: () => 16,
       input_axis_x: () => 1,
       input_pressed: () => 1,
+      canvas_init: () => 1,
+      gpu_create_shader: () => 1,
+      gpu_create_pipeline: () => 1,
+      gpu_upload_vertices: () => 1,
+      gpu_draw_quads: () => 1,
+      gpu_begin_frame: (_target: number, _width: number, _height: number) => {
+        began++;
+        return 1;
+      },
+      gpu_draw_rect: (...args: number[]) => {
+        drawCalls.push(args);
+        return 1;
+      },
+      gpu_draw_sprite: () => 1,
+      gpu_present: () => {
+        presented++;
+        return 1;
+      },
+      event_poll: () => 0,
     },
   });
   assertEquals((instance.exports.playground_world_len as () => number)(), 2);
@@ -76,9 +129,19 @@ Deno.test("engine playground frame builds, ticks, and renders visible sprites", 
   assertEquals(frame[0], 16);
   assertEquals(frame[5], 2);
   assertEquals(frame[48], 8);
+  const rendered = (instance.exports.render_frame as (
+    target: number,
+    width: number,
+    height: number,
+  ) => number)(1, 960, 540);
+  assertEquals(rendered, 4);
+  assertEquals(began, 1);
+  assertEquals(presented, 1);
+  assertEquals(drawCalls.length, 2);
+  assertEquals(drawCalls[0]?.slice(1), [16, 8, 16, 16, 1, 2]);
 });
 
-Deno.test("capability imports are emitted in WAT and wasm", async () => {
+Deno.test("host effect imports are emitted in WAT and wasm", async () => {
   const source = await Deno.readTextFile("examples/effects.fig");
   const wat = await watFromSource(source, { resolveModule });
   assertStringIncludes(wat, `(func $clock (import "env" "clock") (result i32))`);

@@ -2,8 +2,8 @@ import { TSDocParser } from "tsdoc";
 import { checkParsedSourceForAnalysis, type ModuleSource, parse } from "../mod.ts";
 import { CompileError, type Diagnostic as CompileDiagnostic } from "../diagnostics.ts";
 import type {
-  CapabilityImport,
   Declaration,
+  EffectImport,
   Expr,
   FnDecl,
   ParamPattern,
@@ -99,14 +99,12 @@ interface MemberCompletionContext {
 
 const BUILTIN_COMPLETIONS: CompletionItem[] = [
   { label: "@import", kind: 3, detail: "source import" },
-  { label: "@capability", kind: 3, detail: "host capability import" },
+  { label: "@effect", kind: 3, detail: "host effect import" },
   { label: "@require", kind: 3, detail: "compile-time requirement" },
   { label: "prelude.std", kind: 9, detail: "module" },
   { label: "prelude.option", kind: 9, detail: "module" },
   { label: "prelude.result", kind: 9, detail: "module" },
   { label: "prelude.array_static", kind: 9, detail: "module" },
-  { label: "web.canvas", kind: 9, detail: "module" },
-  { label: "engine.ecs", kind: 9, detail: "module" },
 ];
 
 const MEMBER_COMPLETION_PLACEHOLDER = "__fig_completion_placeholder";
@@ -1026,7 +1024,7 @@ function indexProgram(
 ): IndexedSymbol[] {
   if (!program) return [];
   const symbols = [
-    ...program.imports.map((item) => symbolForCapabilityImport(uri, item, source, mapper)),
+    ...program.imports.map((item) => symbolForEffectImport(uri, item, source, mapper)),
     ...(program.sourceImports ?? []).flatMap((item) => symbolForSourceImport(uri, item, mapper)),
   ];
   const topLevelTypes = new Map<string, string>();
@@ -1067,9 +1065,9 @@ function symbolForSourceImport(
   }];
 }
 
-function symbolForCapabilityImport(
+function symbolForEffectImport(
   uri: string,
-  item: CapabilityImport,
+  item: EffectImport,
   source: string,
   mapper: PositionMapper,
 ): IndexedSymbol {
@@ -1081,7 +1079,7 @@ function symbolForCapabilityImport(
     uri,
     range,
     selectionRange: range,
-    detail: detailForCapabilityImport(item),
+    detail: detailForEffectImport(item),
   };
 }
 
@@ -1461,8 +1459,8 @@ function expressionTypeFromProgram(
       decl.kind === "fn" && (decl.name === name || decl.name.endsWith(`.${name}`))
     );
     if (fn?.returnType) return fn.returnType;
-    const capability = program?.imports.find((item) => item.name === name);
-    return capability ? functionReturnType(capability.type) : undefined;
+    const effectImport = program?.imports.find((item) => item.name === name);
+    return effectImport ? functionReturnType(effectImport.type) : undefined;
   }
   if (expr.kind === "literal") {
     if (expr.inferredType) return expr.inferredType;
@@ -1712,7 +1710,7 @@ function detailForDecl(
   return `${decl.kind} ${decl.name}${type ? `: ${type}` : ""}`;
 }
 
-function detailForCapabilityImport(item: CapabilityImport): string {
+function detailForEffectImport(item: EffectImport): string {
   return `const ${item.name}: ${item.type}${
     item.effects.length ? ` !{${item.effects.join(", ")}}` : ""
   }`;
@@ -2516,7 +2514,7 @@ function checkedAstHoverAt(
   };
 
   for (const item of result.program.imports) {
-    add(item.nameSpan ?? item.span, item.name, detailForCapabilityImport(item), "const");
+    add(item.nameSpan ?? item.span, item.name, detailForEffectImport(item), "const");
   }
   for (const item of result.program.sourceImports ?? []) {
     const detail = `@import("${item.module}")`;

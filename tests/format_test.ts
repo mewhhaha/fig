@@ -24,14 +24,14 @@ x}
     expected: "/// docs\n// plain\nfn main() -> i32 {\n  let x = 1; // keep\n  // inside\n  x\n}\n",
   },
   {
-    name: "imports capabilities consts and effect rows",
+    name: "imports effects consts and effect rows",
     input: `/// import docs
 const std=@import("prelude.std");
-/// capability docs
-const clock:fn()->i32!{time}=@capability("clock");
+/// effect docs
+const clock:fn()->i32!{time}=@effect("clock");
 pub fn main()->i32!{time}{clock()}`,
     expected:
-      '/// import docs\nconst std = @import("prelude.std");\n/// capability docs\nconst clock: fn() -> i32 !{time} = @capability("clock");\n\npub fn main() -> i32 !{time} {\n  clock()\n}\n',
+      '/// import docs\nconst std = @import("prelude.std");\n/// effect docs\nconst clock: fn() -> i32 !{time} = @effect("clock");\n\npub fn main() -> i32 !{time} {\n  clock()\n}\n',
   },
   {
     name: "destructured source imports",

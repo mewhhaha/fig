@@ -6,7 +6,11 @@ fn constant(value: a, _ignored: b) -> a {
   value
 }
 
-fn compose(const f: fn(x: b) -> c, const g: fn(x: a) -> b, value: a) -> c {
+fn compose(
+  const f: fn(x: b) -> c,
+  const g: fn(x: a) -> b,
+  value: a
+) -> c {
   f(g(value))
 }
 
@@ -24,8 +28,14 @@ fn flip(const f: fn(a: a, b: b) -> c, b: b, a: a) -> c {
 
 type fn Functor(t: type fn(a: type) -> type) -> type {
   let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
-  @require(@type_has_member(t, #map), "Functor requires map");
-  @require(@type_member_type(t, #map) == Expected, "Functor.map has wrong type");
+  @require(
+    @type_has_member(t, #map),
+    "Functor requires map"
+  );
+  @require(
+    @type_member_type(t, #map) == Expected,
+    "Functor.map has wrong type"
+  );
   t
 }
 
@@ -39,20 +49,34 @@ contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> re
   @assume(\x -> T::map(identity, x), \x -> x)
 }
 
-fn fmap(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
+fn fmap(
+  v: t(a),
+  const f: fn(x: a) -> b,
+  const _proof: Functor(t)
+) -> t(b) {
   t::map(f, v)
 }
 
 type fn Applicative(t: type fn(a: type) -> type) -> type {
-  let Map = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
   let Pure = fn(value: a) -> t(a);
   let Apply = fn(v: t(fn(x: a) -> b), x: t(a)) -> t(b);
-  @require(@type_has_member(t, #map), "Applicative requires map");
-  @require(@type_member_type(t, #map) == Map, "Applicative.map has wrong type");
-  @require(@type_has_member(t, #pure), "Applicative requires pure");
-  @require(@type_has_member(t, #apply), "Applicative requires apply");
-  @require(@type_member_type(t, #pure) == Pure, "Applicative.pure has wrong type");
-  @require(@type_member_type(t, #apply) == Apply, "Applicative.apply has wrong type");
+  Functor(t);
+  @require(
+    @type_has_member(t, #pure),
+    "Applicative requires pure"
+  );
+  @require(
+    @type_has_member(t, #apply),
+    "Applicative requires apply"
+  );
+  @require(
+    @type_member_type(t, #pure) == Pure,
+    "Applicative.pure has wrong type"
+  );
+  @require(
+    @type_member_type(t, #apply) == Apply,
+    "Applicative.apply has wrong type"
+  );
   t
 }
 
@@ -63,34 +87,50 @@ type fn LawfulApplicative(t: type fn(a: type) -> type) -> type {
 }
 
 contract fn LawfulApplicative::apply_pure_identity(
-  const T: type fn(a: type) -> type
-) -> rewrite {
+const T: type fn(a: type) -> type) -> rewrite {
   const proof = LawfulApplicative(T);
-  @assume(\x -> T::apply(T::pure(identity), x), \x -> x)
+  @assume(
+    \x -> T::apply(T::pure(identity), x),
+    \x -> x
+  )
 }
 
 contract fn LawfulApplicative::apply_pure(
-  const T: type fn(a: type) -> type
-) -> rewrite {
+const T: type fn(a: type) -> type) -> rewrite {
   const proof = LawfulApplicative(T);
-  @assume(\(f, x) -> T::apply(T::pure(f), x), \(f, x) -> T::map(f, x))
+  @assume(
+    \(f, x) -> T::apply(T::pure(f), x),
+    \(f, x) -> T::map(f, x)
+  )
 }
 
-fn pure(const t, value: a, const _proof: Applicative(t)) -> t(a) {
+fn pure(
+  const t,
+  value: a,
+  const _proof: Applicative(t)
+) -> t(a) {
   t::pure(value)
 }
 
-fn apply(v: t(fn(x: a) -> b), x: t(a), const _proof: Applicative(t)) -> t(b) {
+fn apply(
+  v: t(fn(x: a) -> b),
+  x: t(a),
+  const _proof: Applicative(t)
+) -> t(b) {
   t::apply(v, x)
 }
 
 type fn Monad(t: type fn(a: type) -> type) -> type {
-  let Map = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
   let Bind = fn(v: t(a), const f: fn(x: a) -> t(b)) -> t(b);
-  @require(@type_has_member(t, #map), "Monad requires map");
-  @require(@type_member_type(t, #map) == Map, "Monad.map has wrong type");
-  @require(@type_has_member(t, #bind), "Monad requires bind");
-  @require(@type_member_type(t, #bind) == Bind, "Monad.bind has wrong type");
+  Applicative(t);
+  @require(
+    @type_has_member(t, #bind),
+    "Monad requires bind"
+  );
+  @require(
+    @type_member_type(t, #bind) == Bind,
+    "Monad.bind has wrong type"
+  );
   t
 }
 
@@ -102,7 +142,10 @@ type fn LawfulMonad(t: type fn(a: type) -> type) -> type {
 
 contract fn LawfulMonad::bind_pure_left(const T: type fn(a: type) -> type) -> rewrite {
   const proof = LawfulMonad(T);
-  @assume(\(x, f) -> T::bind(T::pure(x), f), \(x, f) -> f(x))
+  @assume(
+    \(x, f) -> T::bind(T::pure(x), f),
+    \(x, f) -> f(x)
+  )
 }
 
 contract fn LawfulMonad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
@@ -110,6 +153,10 @@ contract fn LawfulMonad::bind_pure_right(const T: type fn(a: type) -> type) -> r
   @assume(\m -> T::bind(m, T::pure), \m -> m)
 }
 
-fn bind(v: t(a), const f: fn(x: a) -> t(b), const _proof: Monad(t)) -> t(b) {
+fn bind(
+  v: t(a),
+  const f: fn(x: a) -> t(b),
+  const _proof: Monad(t)
+) -> t(b) {
   t::bind(v, f)
 }

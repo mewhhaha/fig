@@ -7,7 +7,7 @@ export interface AstNodeMeta {
 
 export interface Program {
   moduleName?: string;
-  imports: CapabilityImport[];
+  imports: EffectImport[];
   sourceImports?: SourceImport[];
   declarations: Declaration[];
 }
@@ -15,7 +15,7 @@ export interface Program {
 export type Declaration = FnDecl | ContractDecl | LetDecl | ConstDecl | TypeDecl;
 export type BranchHint = string;
 
-export interface CapabilityImport extends AstNodeMeta {
+export interface EffectImport extends AstNodeMeta {
   kind: "import";
   name: string;
   type: string;

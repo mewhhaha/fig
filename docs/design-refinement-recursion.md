@@ -167,7 +167,7 @@ Effect rows are part of optimization soundness:
 
 - Pure code may be folded, duplicated, reordered, and inlined.
 - Read-only effects may be inlined but not duplicated freely.
-- State, host, random, time, and I/O effects cannot be folded unless the capability is explicitly
+- State, host, random, time, and I/O effects cannot be folded unless the host effect is explicitly
   proven safe for that transformation.
 
 Each function summary tracks estimated Wasm bytes, runtime instructions, maximum unfolding
