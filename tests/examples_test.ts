@@ -126,7 +126,7 @@ Deno.test("engine playground frame builds, ticks, and renders visible sprites", 
   assertEquals((instance.exports.playground_world_len as () => number)(), 2);
   assertEquals((instance.exports.playground_probe as () => number)(), 8);
   const frame = (instance.exports.main as () => number[])();
-  assertEquals(frame[0], 16);
+  assertEquals(frame[0], 20);
   assertEquals(frame[5], 2);
   assertEquals(frame[48], 8);
   const rendered = (instance.exports.render_frame as (
@@ -138,7 +138,7 @@ Deno.test("engine playground frame builds, ticks, and renders visible sprites", 
   assertEquals(began, 1);
   assertEquals(presented, 1);
   assertEquals(drawCalls.length, 2);
-  assertEquals(drawCalls[0]?.slice(1), [16, 8, 16, 16, 1, 2]);
+  assertEquals(drawCalls[0]?.slice(1), [20, 8, 16, 16, 1, 2]);
 });
 
 Deno.test("host effect imports are emitted in WAT and wasm", async () => {

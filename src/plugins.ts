@@ -14,6 +14,11 @@ export type ConstPluginValue =
     | { kind: "literal_type"; value: string }
     | { kind: "type"; name: string; normalized?: TypeBody }
     | { kind: "fn"; name: string }
+    | {
+      kind: "product";
+      constructor: string;
+      slots: { label?: string; value: ConstPluginValue }[];
+    }
     | { kind: "shape"; slots: { label?: string; value: ConstPluginValue }[] }
   )
   & { type?: string; span?: Span };

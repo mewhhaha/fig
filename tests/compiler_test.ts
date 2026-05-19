@@ -534,6 +534,89 @@ Deno.test("spread entries stay out of product and require inline array list tail
   );
 });
 
+Deno.test("product spread updates named and structural product values", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+    type fn Sprite2d() -> type {
+      let Sprite2d = {
+        atlas: i32,
+        sx: i32,
+        sy: i32,
+        flip_x: i32,
+        visible: i32
+      };
+      struct(Sprite2d)
+    }
+    fn base_sprite() -> Sprite2d {
+      Sprite2d {atlas: 7, sx: 2, sy: 3, flip_x: 0, visible: 1}
+    }
+    fn update_row(row: struct({x: i32, y: i32})) -> struct({x: i32, y: i32}) {
+      {...row, x: 10}
+    }
+    pub fn main() -> i32 {
+      let sprite = base_sprite();
+      let updated = Sprite2d {...sprite, sx: 32, flip_x: 1};
+      let row = update_row({x: 1, y: 5});
+      updated.atlas + updated.sx + updated.sy + updated.flip_x + updated.visible + row.x + row.y
+    }
+  `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 59);
+});
+
+Deno.test("product spread updates use later fields and spreads", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+    type fn Pair() -> type {
+      let Pair = {x: i32, y: i32};
+      struct(Pair)
+    }
+    pub fn main() -> i32 {
+      let left = Pair {x: 1, y: 2};
+      let right = Pair {x: 3, y: 4};
+      let updated = Pair {...left, x: 5, ...right, y: 7};
+      updated.x * 10 + updated.y
+    }
+  `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 37);
+});
+
+Deno.test("product spread diagnostics cover source target and fields", async () => {
+  await assertThrowsCompile(
+    `
+      type fn Pair() -> type { let Pair = {x: i32, y: i32}; struct(Pair) }
+      pub fn bad() -> Pair { Pair {...1, x: 2, y: 3} }
+    `,
+    "product.spread_source",
+  );
+  await assertThrowsCompile(
+    `
+      type fn Pair() -> type { let Pair = {x: i32, y: i32}; struct(Pair) }
+      type fn OnlyX() -> type { let OnlyX = {x: i32}; struct(OnlyX) }
+      pub fn bad() -> Pair {
+        let only = OnlyX {x: 1};
+        Pair {...only}
+      }
+    `,
+    "product.spread_missing_field",
+  );
+  await assertThrowsCompile(
+    `
+      type fn Pair() -> type { let Pair = {x: i32, y: i32}; struct(Pair) }
+      pub fn bad() -> Pair {
+        let pair = Pair {x: 1, y: 2};
+        Pair {...pair, z: 3}
+      }
+    `,
+    "product.spread_unknown_field",
+  );
+});
+
 Deno.test("target-typed collection literals lower through collector members", async () => {
   const checked = await checkSource(`
     type fn Bag(a: type) {
@@ -654,14 +737,20 @@ Deno.test("comma match arm patterns bind tuple values", async () => {
         x, y => x + y
       }
     }
-    pub fn main(a: i32, b: i32) -> i32 { pick(a, b) }
+    fn pick_paren(a: i32, b: i32) -> i32 {
+      match (a, b) {
+        1, _ => 10,
+        x, y => x + y
+      }
+    }
+    pub fn main(a: i32, b: i32) -> i32 { pick(a, b) + pick_paren(a, b) }
   `;
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { optMode: "debug" })),
   );
   const main = instance.exports.main as (a: number, b: number) => number;
-  assertEquals(main(2, 3), 5);
-  assertEquals(main(1, 9), 10);
+  assertEquals(main(2, 3), 10);
+  assertEquals(main(1, 9), 20);
 });
 
 Deno.test("field projection after dynamic inline-array index lowers product items", async () => {
@@ -1443,7 +1532,7 @@ Deno.test("ecs query map derives system input from query context", async () => {
         let PositionRow = {positions: Position, input: FrameInput};
         struct(PositionRow)
       }
-      let positions_q = do @applicative(ecs.Query(GameWorld, FrameInput)) {
+      const positions_q = do @applicative(ecs.Query(GameWorld, FrameInput)) {
         positions <- ecs.write(#positions);
         input <- ecs.res();
         pure(PositionRow {positions, input})
@@ -1553,7 +1642,7 @@ Deno.test("ecs query applicative map lowers to fused read input update", async (
         struct(World)
       }
 
-      let movement_q = do @applicative(ecs.Query(World, FrameInput)) {
+      const movement_q = do @applicative(ecs.Query(World, FrameInput)) {
         positions <- ecs.write(#positions);
         velocities <- ecs.read(#velocities);
         input <- ecs.res();
@@ -1629,7 +1718,7 @@ Deno.test("ecs system monad sequences query map systems", async () => {
         struct(Shape)
       }
 
-      let positions_q = do @applicative(ecs.Query(World, FrameInput)) {
+      const positions_q = do @applicative(ecs.Query(World, FrameInput)) {
         positions <- ecs.write(#positions);
         input <- ecs.res();
         pure({positions, input})
@@ -1794,7 +1883,7 @@ Deno.test.ignore("ecs query set rejects missing world fields", async () => {
         struct(Shape)
       }
 
-      let bad_q = do @applicative(ecs.Query(World, FrameInput)) {
+      const bad_q = do @applicative(ecs.Query(World, FrameInput)) {
         missing <- ecs.write(#missing);
         input <- ecs.res();
         pure({missing, input})
@@ -1917,7 +2006,7 @@ Deno.test("checks type function result kinds", async () => {
   );
   await assertThrowsCompile(
     "fn main() -> struct { 1 }",
-    "parse.syntax",
+    "parse.lower",
   );
 });
 
@@ -2715,6 +2804,169 @@ Deno.test("rejects pure calls to effectful host effects", async () => {
   );
 });
 
+Deno.test("top-level const evaluates pure product helpers", async () => {
+  const source = `
+    type fn Point() -> type {
+      let Point = {x: i32, y: i32};
+      struct(Point)
+    }
+    fn point(x: i32) -> Point {
+      Point {x, y: x + 1}
+    }
+    const origin = point(1);
+    pub fn main() -> i32 {
+      origin.x + origin.y
+    }
+  `;
+
+  const checked = await checkSource(source);
+  const origin = checked.program.declarations.find((decl): decl is ConstDecl =>
+    decl.kind === "const" && decl.name === "origin"
+  );
+  assertEquals(origin?.value.kind, "shape");
+  if (origin?.value.kind === "shape") {
+    assertEquals(origin.value.inferredType, "Point");
+  }
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as () => number)(), 3);
+});
+
+Deno.test("top-level const evaluates pure scalar helpers", async () => {
+  const source = `
+    fn add(a: i32, b: i32) -> i32 {
+      a + b
+    }
+    const x = add(1, 2);
+    pub fn main() -> i32 {
+      x
+    }
+  `;
+  const checked = await checkSource(source);
+  const x = checked.program.declarations.find((decl): decl is ConstDecl =>
+    decl.kind === "const" && decl.name === "x"
+  );
+  assertEquals(x?.value, {
+    kind: "literal",
+    literalKind: "number",
+    value: "3",
+    inferredType: "i32",
+  });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as () => number)(), 3);
+});
+
+Deno.test("top-level const evaluates higher-order const functions", async () => {
+  const source = `
+    fn apply(const f: fn(v: i32) -> i32, value: i32) -> i32 {
+      f(value)
+    }
+    const y = apply(\\v -> v + 1, 2);
+    pub fn main() -> i32 {
+      y
+    }
+  `;
+  const checked = await checkSource(source);
+  const y = checked.program.declarations.find((decl): decl is ConstDecl =>
+    decl.kind === "const" && decl.name === "y"
+  );
+  assertEquals(y?.value, {
+    kind: "literal",
+    literalKind: "number",
+    value: "3",
+    inferredType: "i32",
+  });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as () => number)(), 3);
+});
+
+Deno.test("top-level const preserves phantom scalar return types", async () => {
+  const checked = await checkSource(`
+    type fn Descriptor(value: type) -> type {
+      i32
+    }
+    fn descriptor() -> Descriptor(i32) {
+      0
+    }
+    const d = descriptor();
+    pub fn main() -> i32 {
+      d
+    }
+  `);
+  const d = checked.program.declarations.find((decl): decl is ConstDecl =>
+    decl.kind === "const" && decl.name === "d"
+  );
+  assertEquals(d?.value, {
+    kind: "literal",
+    literalKind: "number",
+    value: "0",
+    inferredType: "Descriptor(i32)",
+  });
+});
+
+Deno.test("top-level const rejects impure unknown and runtime-dependent initializers", async () => {
+  await assertThrowsCompile(
+    `
+      const clock: fn() -> i32 !{time} = @effect("clock");
+      const x = clock();
+      pub fn main() -> i32 !{time} { clock() }
+    `,
+    "const.runtime_call",
+  );
+  await assertThrowsCompile(
+    `
+      const x = missing();
+      pub fn main() -> i32 { 0 }
+    `,
+    "const.runtime_call",
+  );
+  await assertThrowsCompile(
+    `
+      fn id(x: i32) -> i32 { x }
+      const x = id(seed);
+      pub fn main(seed: i32) -> i32 { seed }
+    `,
+    "const.unknown_name",
+  );
+});
+
+Deno.test("top-level const evaluates imported pure product helpers", async () => {
+  const modules = new Map([
+    [
+      "pure.assets",
+      `
+        type fn Handle(kind: const) -> type {
+          let Handle = {id: i32};
+          struct(Handle)
+        }
+        fn handle(const kind: const, id: i32) -> Handle(kind) {
+          Handle {id}
+        }
+        fn texture(id: i32) -> Handle(#texture) {
+          handle(#texture, id)
+        }
+        fn id(value: Handle(kind)) -> i32 {
+          value.id
+        }
+      `,
+    ],
+  ]);
+  const source = `
+    const assets = @import("pure.assets");
+    const atlas = assets.texture(7);
+    pub fn main() -> i32 {
+      assets.id(atlas)
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(source, { resolveModule: (name) => modules.get(name) }),
+    ),
+  );
+  assertEquals((instance.exports.main as () => number)(), 7);
+});
+
 Deno.test("accepts explicit effect rows for host effects", async () => {
   await checkSource(`
     const clock: fn() -> i32 !{time} = @effect("clock");
@@ -3027,6 +3279,23 @@ Deno.test("const function literals specialize const fn parameters", async () => 
     "const.placeholder_deprecated",
     "$ + 1",
   );
+});
+
+Deno.test("static product function slots lower to direct calls", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+    type fn Runner(a: type) -> type {
+      let Runner = {run: fn(x: i32) -> a};
+      struct(Runner)
+    }
+    fn add_one(x: i32) -> i32 { x + 1 }
+    const runner: Runner(i32) = {run: add_one}
+    pub fn main() -> i32 { runner.run(4) }
+  `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 5);
 });
 
 Deno.test("do monad lowers through generated capturing const functions", async () => {
@@ -4568,6 +4837,54 @@ Deno.test("optimizes const-parameter forwarding wrappers to direct calls", async
   const counts = countCalls(optimized, { includeGenerated: false });
   assertEquals(counts.get("mapped__box_functor") ?? 0, 0);
   assertEquals(counts.get("map_box") ?? 0, 0);
+});
+
+Deno.test("lowers global const function slots to direct calls", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Runner() -> type {
+      let Runner = {run: fn(x: i32) -> i32};
+      struct(Runner)
+    }
+    fn add_one(x: i32) -> i32 { x + 1 }
+    const runner: Runner = {run: add_one};
+    pub fn main() -> i32 {
+      runner.run(4)
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 5);
+});
+
+Deno.test("specialized const product aliases keep function slots callable", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Runner() -> type {
+      let Runner = {run: fn(x: i32) -> i32};
+      struct(Runner)
+    }
+    fn add_one(x: i32) -> i32 { x + 1 }
+    fn apply(const runner: Runner, x: i32) -> i32 {
+      let alias = runner;
+      alias.run(x)
+    }
+    const default_runner: Runner = {run: add_one};
+    pub fn main() -> i32 {
+      apply(default_runner, 4)
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 5);
 });
 
 Deno.test("optimizer treats narrow unsigned returns as scalar", async () => {

@@ -1202,6 +1202,33 @@ Deno.test("LSP inlay hints render inferred local let types", async () => {
   assertEquals(firstHintOnly.map((hint) => hint.label), [": range_i32"]);
 });
 
+Deno.test("LSP inlay hints ignore type-block shape declarations", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "type fn Collider2d() -> type {",
+    "  let Collider2d = {",
+    "    offset_x: i32,",
+    "    offset_y: i32,",
+    "    w: i32,",
+    "    h: i32,",
+    "    active: i32",
+    "  };",
+    "  struct(Collider2d)",
+    "}",
+    "pub fn main() -> i32 { let active = 1; active }",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const hints = inlayHintsAt(result, {
+    start: { line: 0, character: 0 },
+    end: { line: 10, character: 0 },
+  });
+  assertEquals(hints.map((hint) => hint.label), []);
+});
+
 Deno.test("LSP inlay hints infer product constructors and hide import aliases", async () => {
   const rootUri = pathToUri("/tmp/project/main.fig");
   const geometryUri = pathToUri("/tmp/project/geometry.fig");

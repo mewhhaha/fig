@@ -9,58 +9,19 @@ type fn EntityId() -> type {
   ecs.BatchIndex(entity_capacity)
 }
 
-fn atlas_world() -> asset.Handle(#texture) {
-  canvas.texture(1)
-}
-
-fn atlas_knight() -> asset.Handle(#texture) {
-  canvas.texture(2)
-}
-
-fn atlas_coin() -> asset.Handle(#texture) {
-  canvas.texture(3)
-}
-
-fn atlas_fruit() -> asset.Handle(#texture) {
-  canvas.texture(4)
-}
-
-fn atlas_slime() -> asset.Handle(#texture) {
-  canvas.texture(5)
-}
-
-fn atlas_platforms() -> asset.Handle(#texture) {
-  canvas.texture(6)
-}
-
-fn sound_none() -> asset.Handle(#sound) {
-  audio.sound(0)
-}
-
-fn sound_jump() -> asset.Handle(#sound) {
-  audio.sound(1)
-}
-
-fn sound_coin() -> asset.Handle(#sound) {
-  audio.sound(2)
-}
-
-fn sound_hurt() -> asset.Handle(#sound) {
-  audio.sound(3)
-}
-
-fn sound_power() -> asset.Handle(#sound) {
-  audio.sound(4)
-}
-
-fn sound_win() -> asset.Handle(#sound) {
-  audio.sound(5)
-}
-
-fn music_theme() -> asset.Handle(#music) {
-  audio.music_track(1)
-}
-
+const atlas_world = canvas.texture(1);
+const atlas_knight = canvas.texture(2);
+const atlas_coin = canvas.texture(3);
+const atlas_fruit = canvas.texture(4);
+const atlas_slime = canvas.texture(5);
+const atlas_platforms = canvas.texture(6);
+const sound_none = audio.sound(0);
+const sound_jump = audio.sound(1);
+const sound_coin = audio.sound(2);
+const sound_hurt = audio.sound(3);
+const sound_power = audio.sound(4);
+const sound_win = audio.sound(5);
+const music_theme = audio.music_track(1);
 const mode_play: i32 = 0;
 const mode_dead: i32 = 1;
 const mode_win: i32 = 2;
@@ -220,7 +181,7 @@ type fn CollectDelta() -> type {
   struct(CollectDelta)
 }
 
-let velocity_q = do @applicative(ecs.Query(
+const velocity_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -236,10 +197,8 @@ let velocity_q = do @applicative(ecs.Query(
     grounded,
     input
   })
-}
-
-;
-let movement_q = do @applicative(ecs.Query(
+};
+const movement_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -247,19 +206,15 @@ let movement_q = do @applicative(ecs.Query(
   velocity <- ecs.read(#velocity);
   input <- ecs.res();
   pure({transform, velocity, input})
-}
-
-;
-let grounded_q = do @applicative(ecs.Query(
+};
+const grounded_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
   grounded <- ecs.write(#grounded);
   pure({grounded})
-}
-
-;
-let collision_velocity_q = do @applicative(ecs.Query(
+};
+const collision_velocity_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -275,10 +230,8 @@ let collision_velocity_q = do @applicative(ecs.Query(
     grounded,
     collider
   })
-}
-
-;
-let collision_grounded_q = do @applicative(ecs.Query(
+};
+const collision_grounded_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -294,10 +247,8 @@ let collision_grounded_q = do @applicative(ecs.Query(
     grounded,
     collider
   })
-}
-
-;
-let collision_transform_q = do @applicative(ecs.Query(
+};
+const collision_transform_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -313,10 +264,8 @@ let collision_transform_q = do @applicative(ecs.Query(
     grounded,
     collider
   })
-}
-
-;
-let patrol_velocity_q = do @applicative(ecs.Query(
+};
+const patrol_velocity_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -328,10 +277,8 @@ let patrol_velocity_q = do @applicative(ecs.Query(
     velocity,
     patrol
   })
-}
-
-;
-let patrol_state_q = do @applicative(ecs.Query(
+};
+const patrol_state_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -343,30 +290,24 @@ let patrol_state_q = do @applicative(ecs.Query(
     velocity,
     patrol
   })
-}
-
-;
-let clear_sound_q = do @applicative(ecs.Query(
+};
+const clear_sound_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
   player_state <- ecs.write(#player_state);
   player_control <- ecs.read(#player_control);
   pure({player_state, player_control})
-}
-
-;
-let player_collect_q = do @applicative(ecs.Query(
+};
+const player_collect_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
   player_state <- ecs.write(#player_state);
   player_control <- ecs.read(#player_control);
   pure({player_state, player_control})
-}
-
-;
-let collectible_q = do @applicative(ecs.Query(
+};
+const collectible_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -374,10 +315,8 @@ let collectible_q = do @applicative(ecs.Query(
   transform <- ecs.read(#transform);
   collider <- ecs.read(#collider);
   pure({collectible, transform, collider})
-}
-
-;
-let collectible_sprite_q = do @applicative(ecs.Query(
+};
+const collectible_sprite_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -391,10 +330,8 @@ let collectible_sprite_q = do @applicative(ecs.Query(
     transform,
     collider
   })
-}
-
-;
-let hazard_transform_q = do @applicative(ecs.Query(
+};
+const hazard_transform_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -406,10 +343,8 @@ let hazard_transform_q = do @applicative(ecs.Query(
     player_control,
     collider
   })
-}
-
-;
-let hazard_velocity_q = do @applicative(ecs.Query(
+};
+const hazard_velocity_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -423,10 +358,8 @@ let hazard_velocity_q = do @applicative(ecs.Query(
     transform,
     collider
   })
-}
-
-;
-let hazard_grounded_q = do @applicative(ecs.Query(
+};
+const hazard_grounded_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -440,10 +373,8 @@ let hazard_grounded_q = do @applicative(ecs.Query(
     transform,
     collider
   })
-}
-
-;
-let hazard_state_q = do @applicative(ecs.Query(
+};
+const hazard_state_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -457,20 +388,16 @@ let hazard_state_q = do @applicative(ecs.Query(
     transform,
     collider
   })
-}
-
-;
-let win_q = do @applicative(ecs.Query(
+};
+const win_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
   player_state <- ecs.write(#player_state);
   player_control <- ecs.read(#player_control);
   pure({player_state, player_control})
-}
-
-;
-let animation_q = do @applicative(ecs.Query(
+};
+const animation_q = do @applicative(ecs.Query(
   World,
   FrameInput
 )) {
@@ -486,28 +413,14 @@ let animation_q = do @applicative(ecs.Query(
     player_control,
     patrol
   })
-}
-
-;
-
-fn empty_velocity() -> Velocity2d {
-  Velocity2d {
-    x: 0,
-    y: 0
-  }
-}
-
-fn no_gravity() -> Gravity2d {
-  Gravity2d {value: 0}
-}
-
-fn not_grounded() -> Grounded {
-  Grounded {value: 0}
-}
-
-fn no_player_control() -> PlayerControl {
-  PlayerControl {enabled: 0, speed: 0, jump_impulse: 0}
-}
+};
+const empty_velocity: Velocity2d = Velocity2d {
+  x: 0,
+  y: 0
+};
+const no_gravity: Gravity2d = Gravity2d {value: 0};
+const not_grounded: Grounded = Grounded {value: 0};
+const no_player_control: PlayerControl = PlayerControl {enabled: 0, speed: 0, jump_impulse: 0};
 
 fn sprite(
   atlas: asset.Handle(#texture),
@@ -531,9 +444,7 @@ fn sprite(
   }
 }
 
-fn no_collider() -> Collider2d {
-  Collider2d {offset_x: 0, offset_y: 0, w: 0, h: 0, active: 0}
-}
+const no_collider: Collider2d = Collider2d {offset_x: 0, offset_y: 0, w: 0, h: 0, active: 0};
 
 fn collider(
   offset_x: i32,
@@ -544,17 +455,18 @@ fn collider(
   Collider2d {offset_x: offset_x, offset_y: offset_y, w: w, h: h, active: 1}
 }
 
-fn no_patrol() -> Patrol2d {
-  Patrol2d {active: 0, dir: 0, min_x: 0, max_x: 0}
-}
+const no_patrol: Patrol2d = Patrol2d {active: 0, dir: 0, min_x: 0, max_x: 0};
 
 fn patrol(dir: i32, min_x: i32, max_x: i32) -> Patrol2d {
   Patrol2d {active: 1, dir: dir, min_x: min_x, max_x: max_x}
 }
 
-fn no_collectible() -> Collectible {
-  Collectible {active: 0, collected: 0, sound: sound_none(), value: 0}
-}
+const no_collectible: Collectible = Collectible {
+  active: 0,
+  collected: 0,
+  sound: sound_none,
+  value: 0
+};
 
 fn collectible(
   sound: asset.Handle(#sound),
@@ -563,12 +475,15 @@ fn collectible(
   Collectible {active: 1, collected: 0, sound: sound, value: value}
 }
 
-fn no_player_state() -> PlayerState {
-  PlayerState {lives: 0, mode: mode_play, collected: 0, sound: sound_none()}
-}
+const no_player_state: PlayerState = PlayerState {
+  lives: 0,
+  mode: mode_play,
+  collected: 0,
+  sound: sound_none
+};
 
 fn player_state(lives: i32) -> PlayerState {
-  PlayerState {lives: lives, mode: mode_play, collected: 0, sound: sound_none()}
+  PlayerState {lives: lives, mode: mode_play, collected: 0, sound: sound_none}
 }
 
 fn empty_world() -> World {
@@ -582,40 +497,40 @@ pub fn init_world() -> World {
       transform: Transform2d {x: 24, y: 104, z: 5},
       gravity: Gravity2d {value: 2},
       player_control: PlayerControl {enabled: 1, speed: 3, jump_impulse: 20},
-      sprite: sprite(atlas_knight(), 32, 32, 32, 32, 5),
+      sprite: sprite(atlas_knight, 32, 32, 32, 32, 5),
       collider: collider(0, 0, 12, 16),
       player_state: player_state(3)
     });
     ecs.spawn({
       transform: Transform2d {x: 166, y: 124, z: 4},
       velocity: Velocity2d {x: 0 - 1, y: 0},
-      sprite: sprite(atlas_slime(), 32, 24, 32, 24, 4),
+      sprite: sprite(atlas_slime, 32, 24, 32, 24, 4),
       collider: collider(8, 8, 16, 16),
       patrol: patrol(0 - 1, 146, 192)
     });
     ecs.spawn({
       transform: Transform2d {x: 50, y: 98, z: 4},
-      sprite: sprite(atlas_coin(), 16, 16, 16, 16, 4),
+      sprite: sprite(atlas_coin, 16, 16, 16, 16, 4),
       collider: collider(3, 3, 10, 10),
-      collectible: collectible(sound_coin(), 1)
+      collectible: collectible(sound_coin, 1)
     });
     ecs.spawn({
       transform: Transform2d {x: 132, y: 76, z: 4},
-      sprite: sprite(atlas_coin(), 16, 16, 16, 16, 4),
+      sprite: sprite(atlas_coin, 16, 16, 16, 16, 4),
       collider: collider(3, 3, 10, 10),
-      collectible: collectible(sound_coin(), 1)
+      collectible: collectible(sound_coin, 1)
     });
     ecs.spawn({
       transform: Transform2d {x: 196, y: 58, z: 4},
-      sprite: sprite(atlas_coin(), 16, 16, 16, 16, 4),
+      sprite: sprite(atlas_coin, 16, 16, 16, 16, 4),
       collider: collider(3, 3, 10, 10),
-      collectible: collectible(sound_coin(), 1)
+      collectible: collectible(sound_coin, 1)
     });
     ecs.spawn({
       transform: Transform2d {x: 220, y: 56, z: 4},
-      sprite: sprite(atlas_fruit(), 16, 16, 16, 16, 4),
+      sprite: sprite(atlas_fruit, 16, 16, 16, 16, 4),
       collider: collider(1, 1, 14, 14),
-      collectible: collectible(sound_power(), 1)
+      collectible: collectible(sound_power, 1)
     });
   }
 }
@@ -623,9 +538,7 @@ pub fn init_world() -> World {
 fn clamp(value: i32, low: i32, high: i32) -> i32 {
   let below = value < low;
   let above = value > high;
-  match below,
-    above
-  {
+  match (below, above) {
     true, _ => low,
     false, true => high,
     false, false => value
@@ -660,11 +573,12 @@ fn overlaps(a: Rect, b: Rect) -> bool {
   let b_left_of_a_right = b.x < a.x + a.w;
   let a_above_b_bottom = a.y < b.y + b.h;
   let b_above_a_bottom = b.y < a.y + a.h;
-  match a_left_of_b_right,
+  match (
+    a_left_of_b_right,
     b_left_of_a_right,
     a_above_b_bottom,
     b_above_a_bottom
-  {
+  ) {
     true, true, true, true => true,
     _ => false
   }
@@ -677,9 +591,7 @@ fn horizontal_overlap_rect(
 ) -> bool {
   let right_of_left_edge = x + w > platform.x;
   let left_of_right_edge = x < platform.x + platform.w;
-  match right_of_left_edge,
-    left_of_right_edge
-  {
+  match (right_of_left_edge, left_of_right_edge) {
     true, true => true,
     _ => false
   }
@@ -699,34 +611,17 @@ fn landed_on_rect(
   );
   let reaches_platform = y + h >= platform.y;
   let above_platform = y < platform.y;
-  match horizontal,
-    reaches_platform,
-    above_platform
-  {
+  match (horizontal, reaches_platform, above_platform) {
     true, true, true => true,
     _ => false
   }
 }
 
-fn platform0() -> Rect {
-  rect(0, 148, 256, 16)
-}
-
-fn platform1() -> Rect {
-  rect(28, 116, 52, 12)
-}
-
-fn platform2() -> Rect {
-  rect(108, 94, 58, 12)
-}
-
-fn platform3() -> Rect {
-  rect(180, 76, 50, 12)
-}
-
-fn spike_rect() -> Rect {
-  rect(92, 140, 24, 8)
-}
+const platform0: Rect = rect(0, 148, 256, 16);
+const platform1: Rect = rect(28, 116, 52, 12);
+const platform2: Rect = rect(108, 94, 58, 12);
+const platform3: Rect = rect(180, 76, 50, 12);
+const spike_rect: Rect = rect(92, 140, 24, 8);
 
 fn land_y_for_collider(
   transform: Transform2d,
@@ -734,10 +629,10 @@ fn land_y_for_collider(
 ) -> i32 {
   let x = transform.x + collider.offset_x;
   let y = transform.y + collider.offset_y;
-  let p3 = platform3();
-  let p2 = platform2();
-  let p1 = platform1();
-  let p0 = platform0();
+  let p3 = platform3;
+  let p2 = platform2;
+  let p1 = platform1;
+  let p0 = platform0;
   let landed_p3 = landed_on_rect(
     x,
     y,
@@ -766,11 +661,7 @@ fn land_y_for_collider(
     collider.h,
     p0
   );
-  match landed_p3,
-    landed_p2,
-    landed_p1,
-    landed_p0
-  {
+  match (landed_p3, landed_p2, landed_p1, landed_p0) {
     true, _, _, _ => p3.y - collider.h - collider.offset_y,
     false, true, _, _ => p2.y - collider.h - collider.offset_y,
     false, false, true, _ => p1.y - collider.h - collider.offset_y,
@@ -779,7 +670,7 @@ fn land_y_for_collider(
   }
 }
 
-fn velocity_for_row(row: struct({
+fn apply_velocity_input(row: struct({
   velocity: Velocity2d,
   gravity: Gravity2d,
   player_control: PlayerControl,
@@ -789,10 +680,11 @@ fn velocity_for_row(row: struct({
   let controlled = row.player_control.enabled > 0;
   let jump_pressed = row.input.jump > 0;
   let on_ground = row.grounded.value > 0;
-  let jump_now = match controlled,
+  let jump_now = match (
+    controlled,
     jump_pressed,
     on_ground
-  {
+  ) {
     true, true, true => true,
     _ => false
   };
@@ -810,7 +702,7 @@ fn velocity_for_row(row: struct({
   }
 }
 
-fn transform_for_motion(row: struct({
+fn move_transform(row: struct({
   transform: Transform2d,
   velocity: Velocity2d,
   input: FrameInput
@@ -829,11 +721,11 @@ fn transform_for_motion(row: struct({
   }
 }
 
-fn clear_grounded_row(row: struct({grounded: Grounded})) -> struct({grounded: Grounded}) {
-  {grounded: not_grounded()}
+fn clear_grounded(row: struct({grounded: Grounded})) -> struct({grounded: Grounded}) {
+  {grounded: not_grounded}
 }
 
-fn clear_sound_row(row: struct({
+fn clear_sound(row: struct({
   player_state: PlayerState,
   player_control: PlayerControl
 })) -> struct({player_state: PlayerState}) {
@@ -843,42 +735,10 @@ fn clear_sound_row(row: struct({
         lives: row.player_state.lives,
         mode: row.player_state.mode,
         collected: row.player_state.collected,
-        sound: sound_none()
+        sound: sound_none
       },
       false => row.player_state,
     },
-  }
-}
-
-fn velocity_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(velocity_q, velocity_for_row);
-  }
-}
-
-fn movement_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(movement_q, transform_for_motion);
-  }
-}
-
-fn clear_grounded_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(grounded_q, clear_grounded_row);
-  }
-}
-
-fn physics_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    velocity_system();
-    movement_system();
-    clear_grounded_system();
-  }
-}
-
-fn clear_sound_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(clear_sound_q, clear_sound_row);
   }
 }
 
@@ -891,9 +751,7 @@ fn resolved_ground_y(row: struct({
 })) -> i32 {
   let collides = row.collider.active > 0;
   let falls = row.gravity.value > 0;
-  match collides,
-    falls
-  {
+  match (collides, falls) {
     true, true => land_y_for_collider(
       row.transform,
       row.collider
@@ -973,14 +831,6 @@ fn resolved_collision_velocity(row: struct({
   }
 }
 
-fn collision_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(collision_velocity_q, resolved_collision_velocity);
-    ecs.map(collision_grounded_q, resolved_grounded);
-    ecs.map(collision_transform_q, resolved_collision_transform);
-  }
-}
-
 fn patrol_dir(row: struct({
   transform: Transform2d,
   velocity: Velocity2d,
@@ -989,10 +839,7 @@ fn patrol_dir(row: struct({
   let active = row.patrol.active > 0;
   let at_left_edge = row.transform.x <= row.patrol.min_x;
   let at_right_edge = row.transform.x >= row.patrol.max_x;
-  match active,
-    at_left_edge,
-    at_right_edge
-  {
+  match (active, at_left_edge, at_right_edge) {
     true, true, _ => 1,
     true, false, true => 0 - 1,
     _ => row.patrol.dir
@@ -1038,22 +885,13 @@ fn updated_patrol_state(row: struct({
   }
 }
 
-fn patrol_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(patrol_velocity_q, updated_patrol_velocity);
-    ecs.map(patrol_state_q, updated_patrol_state);
-  }
-}
-
 fn choose_player_found(
   current: i32,
   index: EntityId,
   world: World
 ) -> i32 {
   let is_player = world.player_control[index].enabled > 0;
-  match current > 0,
-    is_player
-  {
+  match (current > 0, is_player) {
     false, true => 1,
     _, _ => current,
   }
@@ -1148,7 +986,7 @@ fn choose_player_sound(
 fn player_sound_for_world(world: World) -> asset.Handle(#sound) {
   ecs.fold_entities(
     world,
-    sound_none(),
+    sound_none,
     choose_player_sound
   )
 }
@@ -1183,11 +1021,12 @@ fn collectible_touched(
     player_rect,
     rect_for_entity(transform, collider_value)
   );
-  match player_exists,
+  match (
+    player_exists,
     active_collectible,
     active_collider,
     touches_player
-  {
+  ) {
     true, true, true, true => true,
     _ => false,
   }
@@ -1211,11 +1050,12 @@ fn collect_delta_entity(
       world.collider[index]
     )
   );
-  let collected = match player_exists,
+  let collected = match (
+    player_exists,
     active_collectible,
     active_collider,
     touches_player
-  {
+  ) {
     true, true, true, true => true,
     _ => false,
   };
@@ -1235,10 +1075,10 @@ fn collect_delta(world: World) -> CollectDelta {
   match player_found(world) > 0 {
     true => ecs.fold_entities(
       world,
-      CollectDelta {score: 0, sound: sound_none()},
+      CollectDelta {score: 0, sound: sound_none},
       collect_delta_entity
     ),
-    false => CollectDelta {score: 0, sound: sound_none()},
+    false => CollectDelta {score: 0, sound: sound_none},
   }
 }
 
@@ -1264,10 +1104,11 @@ fn hazard_entity(
       world.collider[index]
     )
   );
-  let hazard = match patrolling,
+  let hazard = match (
+    patrolling,
     active_collider,
     touches_player
-  {
+  ) {
     true, true, true => true,
     _ => false,
   };
@@ -1300,9 +1141,7 @@ fn update_player_collect(
   let is_player = row.player_control.enabled > 0;
   let collected = delta.score > 0;
   {
-    player_state: match is_player,
-      collected
-    {
+    player_state: match (is_player, collected) {
       true, true => PlayerState {
         lives: row.player_state.lives,
         mode: row.player_state.mode,
@@ -1353,15 +1192,7 @@ fn update_collectible_sprite(row: struct({
   let hidden = row.collectible.collected > 0;
   {
     sprite: Sprite2d {
-      atlas: row.sprite.atlas,
-      sx: row.sprite.sx,
-      sy: row.sprite.sy,
-      sw: row.sprite.sw,
-      sh: row.sprite.sh,
-      w: row.sprite.w,
-      h: row.sprite.h,
-      flip_x: row.sprite.flip_x,
-      z: row.sprite.z,
+      ... row.sprite,
       visible: match hidden {
         true => 0,
         false => row.sprite.visible,
@@ -1370,18 +1201,8 @@ fn update_collectible_sprite(row: struct({
   }
 }
 
-fn collect_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map_with_world(player_collect_q, update_player_collect);
-    ecs.map_with_world(collectible_q, update_collectible);
-    ecs.map(collectible_sprite_q, update_collectible_sprite);
-  }
-}
-
 fn combine_hurt(current: bool, next: bool) -> bool {
-  match current,
-    next
-  {
+  match (current, next) {
     true, _ => true,
     false, value => value,
   }
@@ -1396,15 +1217,13 @@ fn player_hurt(
     transform,
     collider_value
   );
-  let spike = spike_rect();
+  let spike = spike_rect;
   let touches_spike = overlaps(player_rect, spike);
   let fell = transform.y > 180;
   let hurt = hazard_scan(
     player_rect,
     snapshot,
-    match touches_spike,
-      fell
-    {
+    match (touches_spike, fell) {
       true, _ => true,
       false, true => true,
       false, false => false,
@@ -1423,7 +1242,7 @@ fn reset_lives(state: PlayerState) -> PlayerState {
     lives: lives,
     mode: mode,
     collected: state.collected,
-    sound: sound_hurt()
+    sound: sound_hurt
   }
 }
 
@@ -1442,9 +1261,7 @@ fn reset_player_transform(
     world
   );
   {
-    transform: match is_player,
-      hurt
-    {
+    transform: match (is_player, hurt) {
       true, true => Transform2d {x: 24, y: 104, z: 5},
       _, _ => row.transform,
     }
@@ -1467,9 +1284,7 @@ fn reset_player_velocity(
     world
   );
   {
-    velocity: match is_player,
-      hurt
-    {
+    velocity: match (is_player, hurt) {
       true, true => Velocity2d {x: 0, y: 0},
       _, _ => row.velocity,
     }
@@ -1492,9 +1307,7 @@ fn reset_player_grounded(
     world
   );
   {
-    grounded: match is_player,
-      hurt
-    {
+    grounded: match (is_player, hurt) {
       true, true => Grounded {value: 0},
       _, _ => row.grounded,
     }
@@ -1517,21 +1330,10 @@ fn reset_player_state(
     world
   );
   {
-    player_state: match is_player,
-      hurt
-    {
+    player_state: match (is_player, hurt) {
       true, true => reset_lives(row.player_state),
       _, _ => row.player_state,
     }
-  }
-}
-
-fn hazard_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map_with_world(hazard_state_q, reset_player_state);
-    ecs.map_with_world(hazard_velocity_q, reset_player_velocity);
-    ecs.map_with_world(hazard_grounded_q, reset_player_grounded);
-    ecs.map_with_world(hazard_transform_q, reset_player_transform);
   }
 }
 
@@ -1542,27 +1344,19 @@ fn update_win_state(row: struct({
   let is_player = row.player_control.enabled > 0;
   let won = row.player_state.collected >= 4;
   {
-    player_state: match is_player,
-      won
-    {
+    player_state: match (is_player, won) {
       true, true => PlayerState {
         lives: row.player_state.lives,
         mode: mode_win,
         collected: row.player_state.collected,
-        sound: sound_win()
+        sound: sound_win
       },
       _, _ => row.player_state,
     },
   }
 }
 
-fn win_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(win_q, update_win_state);
-  }
-}
-
-fn animate_sprite_row(row: struct({
+fn animate_sprite(row: struct({
   sprite: Sprite2d,
   velocity: Velocity2d,
   grounded: Grounded,
@@ -1573,55 +1367,81 @@ fn animate_sprite_row(row: struct({
   let is_patrol = row.patrol.active > 0;
   {
     sprite: Sprite2d {
-      atlas: row.sprite.atlas,
-      sx: match is_player,
+      ... row.sprite,
+      sx: match (
+        is_player,
         row.grounded.value == 0,
         row.velocity.y < 0,
         row.velocity.x == 0
-      {
+      ) {
         true, true, true, _ => 64,
         true, true, false, _ => 96,
         true, false, _, true => 0,
         true, false, _, false => 32,
         false, _, _, _ => row.sprite.sx,
       },
-      sy: row.sprite.sy,
-      sw: row.sprite.sw,
-      sh: row.sprite.sh,
-      w: row.sprite.w,
-      h: row.sprite.h,
-      flip_x: match is_player,
+      flip_x: match (
+        is_player,
         is_patrol,
         row.velocity.x < 0
-      {
+      ) {
         true, _, true => 1,
         true, _, false => 0,
         false, true, true => 1,
         false, true, false => 0,
         false, false, _ => row.sprite.flip_x,
-      },
-      z: row.sprite.z,
-      visible: row.sprite.visible
+      }
     }
-  }
-}
-
-fn animation_system() -> GameSystems {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(animation_q, animate_sprite_row);
   }
 }
 
 fn gameplay_systems() -> GameSystems {
   do @monad(ecs.System(World, FrameInput)) {
-    clear_sound_system();
-    patrol_system();
-    physics_system();
-    collision_system();
-    hazard_system();
-    collect_system();
-    win_system();
-    animation_system();
+    ecs.map(clear_sound_q, clear_sound);
+    ecs.map(patrol_velocity_q, updated_patrol_velocity);
+    ecs.map(patrol_state_q, updated_patrol_state);
+    ecs.map(velocity_q, apply_velocity_input);
+    ecs.map(movement_q, move_transform);
+    ecs.map(grounded_q, clear_grounded);
+    ecs.map(
+      collision_velocity_q,
+      resolved_collision_velocity
+    );
+    ecs.map(collision_grounded_q, resolved_grounded);
+    ecs.map(
+      collision_transform_q,
+      resolved_collision_transform
+    );
+    ecs.map_with_world(
+      hazard_state_q,
+      reset_player_state
+    );
+    ecs.map_with_world(
+      hazard_velocity_q,
+      reset_player_velocity
+    );
+    ecs.map_with_world(
+      hazard_grounded_q,
+      reset_player_grounded
+    );
+    ecs.map_with_world(
+      hazard_transform_q,
+      reset_player_transform
+    );
+    ecs.map_with_world(
+      player_collect_q,
+      update_player_collect
+    );
+    ecs.map_with_world(
+      collectible_q,
+      update_collectible
+    );
+    ecs.map(
+      collectible_sprite_q,
+      update_collectible_sprite
+    );
+    ecs.map(win_q, update_win_state);
+    ecs.map(animation_q, animate_sprite);
   }
 }
 
@@ -1638,17 +1458,18 @@ pub fn step_world(world: World, input: FrameInput) -> World {
 }
 
 fn play_sound(sound: asset.Handle(#sound)) -> i32 !{audio} {
-  match asset.same(sound, sound_jump()),
-    asset.same(sound, sound_coin()),
-    asset.same(sound, sound_hurt()),
-    asset.same(sound, sound_power()),
-    asset.same(sound, sound_win())
-  {
-    true, _, _, _, _ => audio.play(sound_jump()),
-    false, true, _, _, _ => audio.play(sound_coin()),
-    false, false, true, _, _ => audio.play(sound_hurt()),
-    false, false, false, true, _ => audio.play(sound_power()),
-    false, false, false, false, true => audio.play(sound_win()),
+  match (
+    asset.same(sound, sound_jump),
+    asset.same(sound, sound_coin),
+    asset.same(sound, sound_hurt),
+    asset.same(sound, sound_power),
+    asset.same(sound, sound_win)
+  ) {
+    true, _, _, _, _ => audio.play(sound_jump),
+    false, true, _, _, _ => audio.play(sound_coin),
+    false, false, true, _, _ => audio.play(sound_hurt),
+    false, false, false, true, _ => audio.play(sound_power),
+    false, false, false, false, true => audio.play(sound_win),
     false, false, false, false, false => 0
   }
 }
@@ -1721,7 +1542,7 @@ fn draw_tile(
   canvas.draw_sprite(
     canvas_handle,
     {
-      atlas: atlas_world(),
+      atlas: atlas_world,
       sx: tile * 16,
       sy: 0,
       sw: 16,
@@ -1748,7 +1569,7 @@ fn draw_level(canvas_handle: i32) -> i32 !{gpu} {
   let spike = canvas.draw_sprite(
     canvas_handle,
     {
-      atlas: atlas_platforms(),
+      atlas: atlas_platforms,
       sx: 0,
       sy: 16,
       sw: 16,
@@ -1775,7 +1596,7 @@ pub fn render_world(
     width,
     height
   );
-  let music = audio.music(music_theme(), 1);
+  let music = audio.music(music_theme, 1);
   let level = draw_level(canvas_handle);
   let entities = draw_entities(canvas_handle, world);
   let sound = play_sound(player_sound_for_world(world));

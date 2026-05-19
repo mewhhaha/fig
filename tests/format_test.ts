@@ -52,10 +52,8 @@ pub fn main()->i32!{time}{clock()}`,
   },
   {
     name: "inline anonymous struct annotations",
-    input:
-      "fn sum(row:struct({x:i32,y:i32}))->struct({x:i32,y:i32}){row}",
-    expected:
-      "fn sum(row: struct({x: i32, y: i32})) -> struct({x: i32, y: i32}) {\n  row\n}\n",
+    input: "fn sum(row:struct({x:i32,y:i32}))->struct({x:i32,y:i32}){row}",
+    expected: "fn sum(row: struct({x: i32, y: i32})) -> struct({x: i32, y: i32}) {\n  row\n}\n",
   },
   {
     name: "multiline anonymous struct annotations",
@@ -160,6 +158,13 @@ pub fn main()->i32!{time}{clock()}`,
       "fn both(a:bool,b:bool)->bool{match a{true=>match b{true=>false,\nfalse=>true},\nfalse=>match b{true=>true,false=>false}}}",
     expected:
       "fn both(a: bool, b: bool) -> bool {\n  match a {\n    true => match b {\n      true => false,\n      false => true\n    },\n    false => match b {\n      true => true,\n      false => false\n    }\n  }\n}\n",
+  },
+  {
+    name: "multi value match heads normalize to tuple syntax",
+    input:
+      "fn both(a:bool,b:bool)->bool{match a,b{true,false=>true,_,_=>false}} fn already(a:bool,b:bool)->bool{match (a,b){true,false=>true,_,_=>false}}",
+    expected:
+      "fn both(a: bool, b: bool) -> bool {\n  match (a, b) {\n    true, false => true,\n    _, _ => false\n  }\n}\n\nfn already(a: bool, b: bool) -> bool {\n  match (a, b) {\n    true, false => true,\n    _, _ => false\n  }\n}\n",
   },
   {
     name: "comments around punctuation sensitive contexts",
@@ -319,6 +324,13 @@ defaults:@field(defaults,#key)
       "const movement_query_token: ecs.query(game_world, movement_query) = {}\nconst render_query_token: ecs.query(game_world, render_query) = {}\nfn default_components() -> i32 {\n  0\n}\n",
     expected:
       "const movement_query_token: ecs\n  .query(game_world, movement_query) = {}\nconst render_query_token: ecs\n  .query(game_world, render_query) = {}\n\nfn default_components() -> i32 {\n  0\n}\n",
+  },
+  {
+    name: "top-level do expression semicolon stays attached",
+    input:
+      "const movement_q = do @applicative(ecs.Query(World, FrameInput)) { transform <- ecs.write(#transform); pure({transform}) }\n\n;\n\nfn next() -> i32 { 1 }",
+    expected:
+      "const movement_q = do @applicative(ecs.Query(\n  World,\n  FrameInput\n)) {\n  transform <- ecs.write(#transform);\n  pure({transform})\n};\n\nfn next() -> i32 {\n  1\n}\n",
   },
   {
     name: "ecs style static shapes and field helpers",
@@ -640,6 +652,22 @@ type SyntaxSignature = [kind: "rule", name: string, children: SyntaxSignature[]]
 
 function signatureFor(node: ParseNode): SyntaxSignature {
   if (node.kind === "rule") {
+    if (node.name === "MatchValues") {
+      const paren = node.children.find((child): child is Extract<ParseNode, { kind: "rule" }> =>
+        child.kind === "rule" && child.name === "MatchValuesParen"
+      );
+      if (paren) {
+        return [
+          "rule",
+          node.name,
+          paren.children
+            .filter((child) =>
+              !(child.kind === "literal" && (child.value === "(" || child.value === ")"))
+            )
+            .map((child) => signatureFor(child)),
+        ];
+      }
+    }
     return ["rule", node.name, node.children.map((child) => signatureFor(child))];
   }
   return [node.kind, node.kind === "token" ? node.name : node.value, terminalText(node)];

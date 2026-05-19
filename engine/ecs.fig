@@ -719,7 +719,7 @@ fn System::pure(value: Systems(world_t, input_t)) -> System(
 
 fn System::bind(
   value: System(world_t, input_t),
-  const step: fn(value: System(world_t, input_t)) -> System(
+  const step: fn(value: Systems(world_t, input_t)) -> System(
     world_t,
     input_t
   )
@@ -747,14 +747,16 @@ type fn QueryRowFor(access: const) -> type {
 }
 
 fn query_row(
+  const row_type: type,
   const fields,
   systems: Systems(world_t, input_t),
   index: BatchIndex(capacity),
-  row: row_t
-) -> row_t {
+  row: row_type
+) -> row_type {
   match @shape_count(fields) {
     0 => row,
     _ => query_row_nonempty(
+      row_type,
       fields,
       systems,
       index,
@@ -764,12 +766,14 @@ fn query_row(
 }
 
 fn query_row_nonempty(
+  const row_type: type,
   const fields,
   systems: Systems(world_t, input_t),
   index: BatchIndex(capacity),
-  row: row_t
-) -> row_t {
+  row: row_type
+) -> row_type {
   let base = query_row(
+    row_type,
     @shape_tail(fields),
     systems,
     index,
@@ -861,6 +865,7 @@ fn fold_loop(
       step(
         acc_then,
         query_row(
+          row_t,
           @type_slots(row_t),
           systems_then,
           i,
@@ -997,6 +1002,7 @@ fn set_field_with_world_loop(
         @field(
           step(
             query_row(
+              row_t,
               @type_slots(row_t),
               systems,
               i,
@@ -1114,6 +1120,7 @@ fn set_field_loop(
         i,
         @field(
           step(query_row(
+            row_t,
             @type_slots(row_t),
             systems_then,
             i,

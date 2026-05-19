@@ -634,13 +634,13 @@ export function inlayHintsAt(result: AnalysisResult, range: Range): InlayHint[] 
       visitBlock(expr, localTypes);
       return;
     }
+    if (expr.kind === "const_fn") return;
     for (const child of childExprs(expr)) visitExpr(child, localTypes);
   };
   for (const decl of result.program.declarations) {
+    if (decl.kind === "fn" && (decl.imported || decl.generated)) continue;
     if (decl.kind === "fn") {
       visitBlock(decl.body, new Map(decl.params.map((param) => [param.name, param.type])));
-    } else if (decl.kind === "let" || decl.kind === "const") {
-      visitExpr(decl.value);
     }
   }
   return hints;
@@ -1340,8 +1340,11 @@ function inlayHintForLet(
   const type = stmt.type ?? expressionTypeFromProgram(stmt.value, result.program, localTypes);
   if (!type) return undefined;
   const range = rangeFromSpan(spanForStatementName(stmt, stmt.name), result.mapper) ??
-    rangeFromFound(findNameRange(result.document.text, stmt.name), result.mapper);
+    rangeFromFound(findStatementNameRange(result.document.text, stmt), result.mapper);
   if (!range) return undefined;
+  if (!rangeLooksLikeLetBinding(result.document.text, result.mapper, range, stmt.name)) {
+    return undefined;
+  }
   return {
     position: range.end,
     label: `: ${displayType(type)}`,
@@ -1349,11 +1352,24 @@ function inlayHintForLet(
   };
 }
 
+function rangeLooksLikeLetBinding(
+  source: string,
+  mapper: PositionMapper,
+  range: Range,
+  name: string,
+): boolean {
+  const start = mapper.offsetAt(range.start);
+  const lineStart = source.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+  const prefix = source.slice(lineStart, start);
+  return new RegExp(`\\blet\\s+$`).test(prefix) &&
+    source.slice(start, start + name.length) === name;
+}
+
 function hasExplicitLetAnnotation(
   result: AnalysisResult,
   stmt: Extract<Statement, { kind: "let" }>,
 ) {
-  const found = findNameRange(result.document.text, stmt.name);
+  const found = findStatementNameRange(result.document.text, stmt);
   const start = stmt.nameSpan?.end ?? found?.end ?? stmt.span?.start;
   if (start === undefined) return false;
   const nextEquals = result.document.text.indexOf("=", start);
@@ -1366,6 +1382,20 @@ function hasExplicitLetAnnotation(
   const between = result.document.text.slice(start, end);
   const equals = between.indexOf("=");
   return (equals >= 0 ? between.slice(0, equals) : between).includes(":");
+}
+
+function findStatementNameRange(
+  source: string,
+  stmt: Extract<Statement, { kind: "let" }>,
+): { start: number; end: number } | undefined {
+  if (stmt.nameSpan) return stmt.nameSpan;
+  if (stmt.span) {
+    const found = findNameRange(source.slice(stmt.span.start, stmt.span.end), stmt.name);
+    return found
+      ? { start: stmt.span.start + found.start, end: stmt.span.start + found.end }
+      : undefined;
+  }
+  return findNameRange(source, stmt.name);
 }
 
 function symbolsForStatement(

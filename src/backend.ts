@@ -219,6 +219,10 @@ interface ReturnProjectionPlan {
 interface LayoutEnv {
   types: Map<string, TypeDecl>;
   constShapes: Map<string, Extract<Expr, { kind: "shape" }>>;
+  constRuntimeValues: Map<string, Expr>;
+  constRuntimeTypes: Map<string, string | undefined>;
+  constFunctionFields: Map<string, string>;
+  topLevelValues: Set<string>;
   constNumbers: Map<string, number>;
 }
 
@@ -385,7 +389,10 @@ function backendFixedArrayPlanning(
     fixedArrayTransformerAliases: new Map(),
     nextDataOffset: 1024,
   };
-  const reachableProjectedFns = removeUnreachablePrivateFunctions(projectedRuntimeFns);
+  const reachableProjectedFns = removeUnreachablePrivateFunctions(
+    projectedRuntimeFns,
+    new Set(layouts.constFunctionFields.values()),
+  );
   const functions = addOptimizedExportClones(
     reachableProjectedFns,
     (fn) => scratchWorthyFixedArrayTargets(fn.body, baseCtx).size > 0,
@@ -486,7 +493,10 @@ export function lowerProgramToBackendArtifact(
     fixedArrayTransformerAliases: new Map(),
     nextDataOffset: 1024,
   };
-  const reachableProjectedFns = removeUnreachablePrivateFunctions(projectedRuntimeFns);
+  const reachableProjectedFns = removeUnreachablePrivateFunctions(
+    projectedRuntimeFns,
+    new Set(layouts.constFunctionFields.values()),
+  );
   const functions = addOptimizedExportClones(
     reachableProjectedFns,
     (fn) => scratchWorthyFixedArrayTargets(fn.body, baseCtx).size > 0,
@@ -774,11 +784,16 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
   );
   const functionResultSlots = flattenType(fn.returnType, fnCtx.layouts);
   const rawBody = [...prologue, ...scratchPrologue, ...packedPrologue, ...loweredBody];
-  const body = cleanupInstrs(rawBody, fnCtx);
+  const body = safeCleanupInstrs(rawBody, fnCtx);
   const bodyLocals = instrLocalNames(body);
   const useCounts = instrLocalUseCounts(body);
+  const declaredLocals = [...collectIrLocals(fn.body, fnCtx), ...fnCtx.tempLocals];
+  const declaredLocalNames = new Set(declaredLocals.map((local) => local.name));
+  const loweredOnlyLocals = [...bodyLocals]
+    .filter((name) => !paramNames.has(name) && !declaredLocalNames.has(name))
+    .map((name): BackendLocal => ({ name, type: "i32" }));
   const locals = uniqueBackendLocals(
-    [...collectIrLocals(fn.body, fnCtx), ...fnCtx.tempLocals].filter((local) =>
+    [...declaredLocals, ...loweredOnlyLocals].filter((local) =>
       (!paramNames.has(local.name) && bodyLocals.has(local.name)) ||
       local.name.startsWith("__simd_tmp") ||
       local.name.startsWith("__tail_tmp") ||
@@ -2139,6 +2154,15 @@ function cleanupInstrs(
   return cleaned;
 }
 
+function safeCleanupInstrs(
+  instrs: Instr[],
+  ctx?: LowerContext,
+  allowDeadLocalRoundtrip = true,
+): Instr[] {
+  const cleaned = cleanupInstrs(instrs, ctx, allowDeadLocalRoundtrip);
+  return hasObviousStackUnderflow(cleaned) ? instrs : cleaned;
+}
+
 function canAliasLocalCopyInStraightLine(
   future: Instr[],
   source: string,
@@ -2569,6 +2593,38 @@ function instrStackEffect(instr: Instr): { pops: number; pushes: number } | unde
     default:
       return undefined;
   }
+}
+
+function hasObviousStackUnderflow(instrs: Instr[]): boolean {
+  let height = 0;
+  for (const instr of instrs) {
+    if (instr.op === "if") {
+      height -= 1;
+      if (height < 0) return true;
+      if (
+        hasObviousStackUnderflow(instr.thenBody) ||
+        hasObviousStackUnderflow(instr.elseBody)
+      ) {
+        return true;
+      }
+      height = 0;
+      continue;
+    }
+    if (instr.op === "block" || instr.op === "loop") {
+      if (hasObviousStackUnderflow(instr.body)) return true;
+      height = 0;
+      continue;
+    }
+    const effect = instrStackEffect(instr);
+    if (!effect) {
+      height = 0;
+      continue;
+    }
+    height -= effect.pops;
+    if (height < 0) return true;
+    height += effect.pushes;
+  }
+  return false;
 }
 
 function foldForwardedTempBranch(
@@ -3152,7 +3208,8 @@ function inlineTrivialConstBackendFunctions(functions: BackendFunction[]): Backe
   }
   if (!constants.size) return functions;
   return functions.map((fn) => {
-    const body = cleanupInstrs(replaceTrivialConstBackendCalls(fn.body, constants));
+    const replaced = replaceTrivialConstBackendCalls(fn.body, constants);
+    const body = safeCleanupInstrs(replaced);
     const used = instrLocalNames(body);
     return {
       ...fn,
@@ -3362,11 +3419,8 @@ function lowerStatement(
   if (projectedReturn) {
     const targets = projectedReturn.suffixes.map((suffix) => `${stmt.name}$${suffix}`);
     for (const target of targets) locals.add(target);
-    const inlined = stmt.value.kind === "call"
-      ? lowerPrivateProductCallInline(stmt.value, ctx, locals)
-      : undefined;
     return [
-      ...(inlined ?? lowerExpr(stmt.value, ctx, locals, projectedReturn.type)),
+      ...lowerExpr(stmt.value, ctx, locals, projectedReturn.type),
       ...targets.toReversed().map((target): Instr => ({ op: "local.set", name: target })),
     ];
   }
@@ -5690,7 +5744,9 @@ function isIndexCursorNextCallee(name: string): boolean {
 }
 
 function constSpecializedCursorBound(name: string, layouts: LayoutEnv): Expr | undefined {
-  const match = name.match(/(?:index_cursor_next|IndexCursor_next|IndexCursor__next)__([A-Za-z0-9_]+)/);
+  const match = name.match(
+    /(?:index_cursor_next|IndexCursor_next|IndexCursor__next)__([A-Za-z0-9_]+)/,
+  );
   const value = match?.[1];
   if (!value) return undefined;
   if (/^[0-9]+$/.test(value)) return { kind: "literal", literalKind: "number", value };
@@ -5767,6 +5823,7 @@ function lowerExpr(
       if (builder) return builder;
       const inlined = lowerPrivateProductCallInline(expr, ctx, locals, {
         deadProductArgs: contextDeadProductArgIndexes(expr, ctx),
+        expectedType,
       });
       if (inlined) return inlined;
       const scalarTailLoopInlined = lowerPrivateScalarTailLoopCallInline(
@@ -5778,19 +5835,26 @@ function lowerExpr(
       if (scalarTailLoopInlined) return scalarTailLoopInlined;
       const scalarInlined = lowerPrivateScalarCallInline(expr, ctx, locals, expectedType);
       if (scalarInlined) return scalarInlined;
-      const callee = ctx.signatures.get(expr.callee.name);
+      const calleeName = ctx.layouts.constFunctionFields.get(expr.callee.name) ?? expr.callee.name;
+      const callee = ctx.signatures.get(calleeName);
       if (!callee) {
         if (!hasRuntimeEffect(expr, ctx.functions)) return [{ op: "const", type: "i32", value: 0 }];
         throw new Error(`backend missing runtime callable value: ${expr.callee.name}`);
       }
-      const argOffset = Math.max(0, expr.args.length - callee.params.length);
+      const trailingConstArgs = Math.max(0, expr.args.length - callee.params.length);
+      const skipTrailingConstArgs = trailingConstArgs > 0 &&
+        expr.args.slice(callee.params.length).every((arg) =>
+          arg.kind === "var" && ctx.functions.has(arg.name)
+        );
+      const argOffset = skipTrailingConstArgs ? 0 : trailingConstArgs;
+      const callArgs = skipTrailingConstArgs ? expr.args.slice(0, callee.params.length) : expr.args;
       const loweredCall: Instr[] = [
-        ...expr.args.flatMap((arg, index) =>
+        ...callArgs.flatMap((arg, index) =>
           index < argOffset
             ? []
             : lowerExpr(arg, ctx, locals, callee.params[index - argOffset]?.type)
         ),
-        { op: "call", name: expr.callee.name },
+        { op: "call", name: calleeName },
       ];
       const projected = lowerProjectedCallResult(
         loweredCall,
@@ -6122,41 +6186,44 @@ function lowerEcsSpawnComponentsCall(
     if (!arrayArgs) return [];
     const [capacity, itemType] = arrayArgs;
     const itemSlots = flattenType(itemType, ctx.layouts);
-    return Array.from({ length: capacity }, (_, item) =>
-      itemSlots.map((itemSlot, slotIndex): Instr[] => [
-        ...lowerExpr(entity, ctx, locals, "i32"),
-        { op: "const", type: "i32", value: item },
-        { op: "binary", wasm: "i32.eq" },
-        {
-          op: "if",
-          results: [itemSlot.wat],
-          thenBody: lowerFlattenedValueSlot(
-            {
-              kind: "field",
-              value: entityValues,
-              key: { kind: "literal", literalKind: "literalType", value: `#${slot.label}` },
-            },
-            itemType,
-            slotIndex,
-            ctx,
-            locals,
-          ),
-          elseBody: lowerFlattenedValueSlot(
-            {
-              kind: "var",
-              name: `${
-                (replacedWorld?.source ?? world).kind === "var"
-                  ? ((replacedWorld?.source ?? world) as Extract<Expr, { kind: "var" }>).name
-                  : "world"
-              }.${slot.label}[${item}]`,
-            },
-            itemType,
-            slotIndex,
-            ctx,
-            locals,
-          ),
-        },
-      ]).flat()).flat();
+    return Array.from(
+      { length: capacity },
+      (_, item) =>
+        itemSlots.map((itemSlot, slotIndex): Instr[] => [
+          ...lowerExpr(entity, ctx, locals, "i32"),
+          { op: "const", type: "i32", value: item },
+          { op: "binary", wasm: "i32.eq" },
+          {
+            op: "if",
+            results: [itemSlot.wat],
+            thenBody: lowerFlattenedValueSlot(
+              {
+                kind: "field",
+                value: entityValues,
+                key: { kind: "literal", literalKind: "literalType", value: `#${slot.label}` },
+              },
+              itemType,
+              slotIndex,
+              ctx,
+              locals,
+            ),
+            elseBody: lowerFlattenedValueSlot(
+              {
+                kind: "var",
+                name: `${
+                  (replacedWorld?.source ?? world).kind === "var"
+                    ? ((replacedWorld?.source ?? world) as Extract<Expr, { kind: "var" }>).name
+                    : "world"
+                }.${slot.label}[${item}]`,
+              },
+              itemType,
+              slotIndex,
+              ctx,
+              locals,
+            ),
+          },
+        ]).flat(),
+    ).flat();
   });
 }
 
@@ -6468,8 +6535,38 @@ function lowerProjectedCallResult(
     if (!expected.suffix) return undefined;
     return actualSlots.findIndex((actual) => actual.suffix === expected.suffix);
   });
-  if (indexes.some((index) => index === undefined || index < 0)) return undefined;
+  if (indexes.some((index) => index === undefined || index < 0)) {
+    const nestedIndexes = nestedProjectedSlotIndexes(
+      actualType,
+      expectedType,
+      actualSlots,
+      expectedSlots,
+      ctx,
+    );
+    if (!nestedIndexes) return undefined;
+    return lowerFlattenedSlotsViaTemps(body, actualSlots, nestedIndexes, ctx, locals);
+  }
   return lowerFlattenedSlotsViaTemps(body, actualSlots, indexes as number[], ctx, locals);
+}
+
+function nestedProjectedSlotIndexes(
+  actualType: string,
+  expectedType: string,
+  actualSlots: LayoutSlot[],
+  expectedSlots: LayoutSlot[],
+  ctx: LowerContext,
+): number[] | undefined {
+  const fields = productFieldTypes(actualType, ctx.layouts);
+  if (!fields) return undefined;
+  for (const field of fields) {
+    if (compactTypeSource(field.type) !== compactTypeSource(expectedType)) continue;
+    const indexes = expectedSlots.map((expected) => {
+      const suffix = expected.suffix ? `${field.label}$${expected.suffix}` : field.label;
+      return actualSlots.findIndex((actual) => actual.suffix === suffix);
+    });
+    if (indexes.every((index) => index >= 0)) return indexes;
+  }
+  return undefined;
 }
 
 function lowerPipeBind(
@@ -6500,7 +6597,7 @@ function lowerPrivateProductCallInline(
   expr: Extract<Expr, { kind: "call" }>,
   ctx: LowerContext,
   locals: Set<string>,
-  options: { deadProductArgs?: Set<number> } = {},
+  options: { deadProductArgs?: Set<number>; expectedType?: string } = {},
 ): Instr[] | undefined {
   if (ctx.optMode !== "release" || expr.callee.kind !== "var") return undefined;
   if (!ctx.currentFn) return undefined;
@@ -6510,6 +6607,7 @@ function lowerPrivateProductCallInline(
   }
   if (isFixedArrayProtocolHelper(callee, ctx)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
+  if (callee.params.some((param) => param.name.startsWith("__state"))) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
   if (flattenType(callee.returnType, ctx.layouts).length <= 1) return undefined;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
@@ -6677,6 +6775,9 @@ function lowerPrivateProductCallInline(
   const body = tailCalls.hasOnlyTailDirectSelfCalls
     ? lowerTailLoopBlock(renamed.body, renamed, inlineCtx, locals)
     : lowerBlock(renamed.body, inlineCtx, locals, renamed.returnType);
+  const projectedBody = options.expectedType
+    ? lowerProjectedCallResult(body, renamed.returnType, options.expectedType, ctx, locals)
+    : undefined;
   const scratchPrologue = [...(scratchArrays?.values() ?? [])].flatMap((plan) =>
     lowerScratchArrayInit(plan)
   );
@@ -6716,7 +6817,7 @@ function lowerPrivateProductCallInline(
     ...scratchPrologue,
     ...directPackedPrologue,
     ...packedPrologue,
-    ...(forwarded ?? body),
+    ...(forwarded ?? projectedBody ?? body),
   ];
 }
 
@@ -9337,7 +9438,12 @@ function productSlotsForType(
     }
   }
   const trailingArg = trailingTypeCallArg(declSource);
-  if (trailingArg && compactTypeSource(trailingArg) !== compactTypeSource(declSource)) {
+  if (
+    trailingArg &&
+    !layouts.types.has(typeName(declSource)) &&
+    splitTypeArgs(trailingArg).length === 1 &&
+    compactTypeSource(trailingArg) !== compactTypeSource(declSource)
+  ) {
     const trailingSlots = productSlotsForType(trailingArg, layouts);
     if (trailingSlots) return trailingSlots;
   }
@@ -9358,9 +9464,10 @@ function productSlotsForType(
       if (slots) return slots;
     }
   }
-  const resolvedStructArgs = resolved && compactTypeSource(resolved) !== compactTypeSource(declSource)
-    ? typeCallArgs(resolved, "struct")
-    : undefined;
+  const resolvedStructArgs =
+    resolved && compactTypeSource(resolved) !== compactTypeSource(declSource)
+      ? typeCallArgs(resolved, "struct")
+      : undefined;
   if (!resolvedStructArgs) return undefined;
   const shape = constShapeFromTypeArg(resolvedStructArgs, layouts);
   if (shape) {
@@ -9440,9 +9547,9 @@ function evalBackendTypeBool(
   if (expr.callee.name === "type_has_slot" && expr.args.length === 2) {
     const type = renderBackendTypeExprWithBindings(expr.args[0]!, bindings);
     const label = expr.args[1]?.kind === "type_literal" ? expr.args[1].value : undefined;
-    return Boolean(type && label && productSlotsForType(type, layouts)?.some((slot) =>
-      slot.label === label
-    ));
+    return Boolean(
+      type && label && productSlotsForType(type, layouts)?.some((slot) => slot.label === label),
+    );
   }
   if (expr.callee.name === "type_is_product" && expr.args.length === 1) {
     const type = renderBackendTypeExprWithBindings(expr.args[0]!, bindings);
@@ -9510,7 +9617,9 @@ function typeShapeSlots(
     label: slot.label,
     position: slot.position,
     type: renderBackendTypeExprWithBindings(slot.type, bindings) ?? "i32",
-    repeat: slot.repeat ? substituteTypeBindings(renderBackendCountExpr(slot.repeat), bindings) : undefined,
+    repeat: slot.repeat
+      ? substituteTypeBindings(renderBackendCountExpr(slot.repeat), bindings)
+      : undefined,
   }));
 }
 
@@ -9823,6 +9932,27 @@ function lowerVar(
   if (exactScratch) return lowerScratchArrayMaterialize(exactScratch, ctx, locals);
   const base = baseName(name);
   const projection = projectionSuffix(name);
+  const exactConst = ctx.layouts.constRuntimeValues.get(name);
+  if (exactConst) {
+    return lowerExpr(
+      exactConst,
+      ctx,
+      locals,
+      expectedType ?? ctx.layouts.constRuntimeTypes.get(name),
+    );
+  }
+  if (projection) {
+    const baseConst = ctx.layouts.constRuntimeValues.get(base);
+    const projectedConst = baseConst ? projectConstRuntimeValue(baseConst, projection) : undefined;
+    if (projectedConst) return lowerExpr(projectedConst, ctx, locals, expectedType);
+  }
+  if (ctx.layouts.topLevelValues.has(name)) {
+    return flattenType(expectedType, ctx.layouts).map((slot): Instr => ({
+      op: "const",
+      type: slot.wat,
+      value: 0,
+    }));
+  }
   const packed = packedPlanForName(name, ctx.packedArrays);
   if (packed) {
     const packedPath = packed.name === base
@@ -9871,7 +10001,14 @@ function lowerVar(
     const projected = flattenType(expectedType, layouts).map((slot) =>
       slot.suffix ? `${direct}$${slot.suffix}` : direct
     ).filter((slot) => locals.has(slot));
-    const fallback = projected.length ? projected : prefixed;
+    const unwrappedProjected = flattenType(expectedType, layouts).map((slot) =>
+      slot.suffix ? `${base}$${slot.suffix}` : base
+    ).filter((slot) => locals.has(slot));
+    const fallback = projected.length
+      ? projected
+      : unwrappedProjected.length
+      ? unwrappedProjected
+      : prefixed;
     return (fallback.length ? fallback : [direct]).map((slot) => ({
       op: "local.get",
       name: slot,
@@ -9880,8 +10017,25 @@ function lowerVar(
   const slots = flattenType(expectedType, layouts).map((slot) =>
     slot.suffix ? `${base}$${slot.suffix}` : base
   );
-  const present = slots.filter((slot) => locals.has(slot));
+  let present = slots.filter((slot) => locals.has(slot));
+  if (!present.length) {
+    const localType = varType(name, ctx);
+    if (localType && localType !== expectedType) {
+      present = flattenType(localType, layouts).map((slot) =>
+        slot.suffix ? `${base}$${slot.suffix}` : base
+      ).filter((slot) => locals.has(slot));
+    }
+  }
   return (present.length ? present : [base]).map((slot) => ({ op: "local.get", name: slot }));
+}
+
+function projectConstRuntimeValue(expr: Expr, projection: string): Expr | undefined {
+  const [head, ...tail] = projection.split("$");
+  if (!head) return expr;
+  if (expr.kind !== "shape" && expr.kind !== "product_constructor") return undefined;
+  const slot = expr.slots.findLast((item) => item.label === head);
+  if (!slot) return undefined;
+  return tail.length ? projectConstRuntimeValue(slot.value, tail.join("$")) : slot.value;
 }
 
 function scratchPlanForName(
@@ -9962,7 +10116,10 @@ function lowerShapeStorage(
       );
     if (projectable) {
       return layout.flatMap((lane) => {
-        const slot = slots.find((item, index) => (item.label ?? String(index)) === lane.suffix);
+        const slot = findLastSlot(
+          slots,
+          (item, index) => (item.label ?? String(index)) === lane.suffix,
+        );
         return slot ? lowerExpr(slot.value, ctx, locals, lane.type) : [];
       });
     }
@@ -9974,13 +10131,17 @@ function lowerShapeStorage(
     if (!lane.fields?.length) return [];
     if (lane.fields.length === 1) {
       const field = lane.fields[0];
-      const slot = slots.find((item, index) => (item.label ?? String(index)) === field.name);
+      const slot = findLastSlot(
+        slots,
+        (item, index) => (item.label ?? String(index)) === field.name,
+      );
       return slot ? lowerExpr(slot.value, ctx, locals, field.type) : [];
     }
     const wat = lane.wat;
     return lane.fields.flatMap((field, index) => {
-      const slot = slots.find((item, itemIndex) =>
-        (item.label ?? String(itemIndex)) === field.name
+      const slot = findLastSlot(
+        slots,
+        (item, itemIndex) => (item.label ?? String(itemIndex)) === field.name,
       );
       if (!slot) return [];
       const value = lowerExpr(slot.value, ctx, locals, field.type);
@@ -9994,6 +10155,17 @@ function lowerShapeStorage(
   });
 }
 
+function findLastSlot<t>(
+  slots: t[],
+  predicate: (slot: t, index: number) => boolean,
+): t | undefined {
+  for (let index = slots.length - 1; index >= 0; index--) {
+    const slot = slots[index]!;
+    if (predicate(slot, index)) return slot;
+  }
+  return undefined;
+}
+
 function expandSpreadSlots(
   slots: { label?: string; value: Expr; spread?: boolean; index?: Expr }[],
   expectedType: string | undefined,
@@ -10002,6 +10174,8 @@ function expandSpreadSlots(
 ): { label?: string; value: Expr }[] | undefined {
   if (!slots.some((slot) => slot.spread)) return undefined;
   if (slots.some((slot) => slot.index)) return undefined;
+  const productExpanded = expandProductSpreadSlots(slots, expectedType, ctx);
+  if (productExpanded) return productExpanded;
   const itemTypes = shapeSlotTypes(expectedType, ctx.layouts);
   const expanded: { label?: string; value: Expr }[] = [];
   for (const slot of slots) {
@@ -10034,6 +10208,58 @@ function expandSpreadSlots(
       ? { ...slot.value, inferredType: "i32" }
       : slot.value,
   }));
+}
+
+function expandProductSpreadSlots(
+  slots: { label?: string; value: Expr; spread?: boolean; index?: Expr }[],
+  expectedType: string | undefined,
+  ctx: LowerContext,
+): { label?: string; value: Expr }[] | undefined {
+  const fixedTargetSlots = productSlotsForType(expectedType, ctx.layouts)?.filter((slot) =>
+    slot.label
+  );
+  let outputOrder = fixedTargetSlots?.map((slot) => slot.label!).filter(Boolean) ?? [];
+  const values = new Map<string, Expr>();
+  const targetLabels = new Set(outputOrder);
+  const hasProductCue = !!fixedTargetSlots?.length || slots.some((slot) => slot.label);
+  let sawProductSource = false;
+
+  for (const slot of slots) {
+    if (slot.spread) {
+      const sourceType = exprTypeWithLocals(slot.value, ctx);
+      const sourceSlots = productSlotsForType(sourceType, ctx.layouts)?.filter((item) =>
+        item.label
+      );
+      if (!sourceSlots) return hasProductCue ? [] : undefined;
+      sawProductSource = true;
+      for (const sourceSlot of sourceSlots) {
+        const label = sourceSlot.label!;
+        if (fixedTargetSlots?.length && !targetLabels.has(label)) continue;
+        if (!fixedTargetSlots?.length && !targetLabels.has(label)) {
+          targetLabels.add(label);
+          outputOrder.push(label);
+        }
+        values.set(label, {
+          kind: "field",
+          value: slot.value,
+          key: { kind: "literal", literalKind: "literalType", value: `#${label}` },
+        });
+      }
+      continue;
+    }
+    if (!slot.label) return hasProductCue ? [] : undefined;
+    if (!targetLabels.has(slot.label)) {
+      targetLabels.add(slot.label);
+      outputOrder.push(slot.label);
+    }
+    values.set(slot.label, slot.value);
+  }
+
+  if (!hasProductCue && !sawProductSource) return undefined;
+  if (!outputOrder.length) return undefined;
+  return outputOrder
+    .map((label) => ({ label, value: values.get(label) }))
+    .filter((slot): slot is { label: string; value: Expr } => !!slot.value);
 }
 
 function lowerFixedCollectionUpdate(
@@ -11179,7 +11405,10 @@ function lowerPatternTest(
   return [{ op: "drop" }, { op: "const", type: "i32", value: 0 }];
 }
 
-function removeUnreachablePrivateFunctions(functions: FnDecl[]): FnDecl[] {
+function removeUnreachablePrivateFunctions(
+  functions: FnDecl[],
+  extraRoots = new Set<string>(),
+): FnDecl[] {
   const byName = new Map(functions.map((fn) => [fn.name, fn]));
   const reachable = new Set<string>();
   const visit = (name: string) => {
@@ -11190,6 +11419,7 @@ function removeUnreachablePrivateFunctions(functions: FnDecl[]): FnDecl[] {
     for (const called of calledFunctions(fn.body)) visit(called);
   };
   for (const fn of functions) if (isCurrentModulePublic(fn)) visit(fn.name);
+  for (const name of extraRoots) visit(name);
   return functions.filter((fn) => isCurrentModulePublic(fn) || reachable.has(fn.name));
 }
 
@@ -13103,6 +13333,35 @@ interface PackedField {
 }
 
 function createLayoutEnv(program: Program): LayoutEnv {
+  const functionNames = new Set(
+    program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn").map((decl) =>
+      decl.name
+    ),
+  );
+  const constShapes = new Map(
+    program.declarations.filter((
+      decl,
+    ): decl is ConstDecl & { value: Extract<Expr, { kind: "shape" }> } =>
+      decl.kind === "const" && decl.value.kind === "shape" && !decl.value.inferredType
+    )
+      .map((decl) => [decl.name, decl.value as Extract<Expr, { kind: "shape" }>]),
+  );
+  const runtimeConstDecls = program.declarations.filter((
+    decl,
+  ): decl is ConstDecl =>
+    decl.kind === "const" &&
+    (decl.value.kind === "literal" ||
+      decl.value.kind === "product_constructor" ||
+      (decl.value.kind === "shape" && !!decl.value.inferredType))
+  );
+  const constFunctionFields = new Map<string, string>();
+  for (const [name, shape] of constShapes) {
+    for (const slot of shape.slots) {
+      if (!slot.label || slot.value.kind !== "var") continue;
+      if (!functionNames.has(slot.value.name)) continue;
+      constFunctionFields.set(`${name}.${slot.label}`, slot.value.name);
+    }
+  }
   return {
     types: new Map(
       program.declarations.filter((decl): decl is TypeDecl => decl.kind === "type").map((decl) => [
@@ -13110,13 +13369,16 @@ function createLayoutEnv(program: Program): LayoutEnv {
         decl,
       ]),
     ),
-    constShapes: new Map(
-      program.declarations.filter((
-        decl,
-      ): decl is ConstDecl & { value: Extract<Expr, { kind: "shape" }> } =>
-        decl.kind === "const" && decl.value.kind === "shape"
-      )
-        .map((decl) => [decl.name, decl.value as Extract<Expr, { kind: "shape" }>]),
+    constShapes,
+    constRuntimeValues: new Map(runtimeConstDecls.map((decl) => [decl.name, decl.value])),
+    constRuntimeTypes: new Map(runtimeConstDecls.map((decl) => [
+      decl.name,
+      decl.type ?? (decl.value.kind === "shape" ? decl.value.inferredType : undefined),
+    ])),
+    constFunctionFields,
+    topLevelValues: new Set(
+      program.declarations.filter((decl) => decl.kind === "let" || decl.kind === "const")
+        .map((decl) => decl.name),
     ),
     constNumbers: new Map(
       program.declarations.filter((
@@ -13498,6 +13760,7 @@ function renderBackendTypeProofArg(expr: Expr): string | undefined {
 
 function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
   if (expr.kind === "var") return varType(expr.name, ctx);
+  if (expr.kind === "index") return indexedItemType(expr, ctx);
   if (expr.kind === "call") {
     if (expr.callee.kind === "var") {
       const known = backendFunctionByName(expr.callee.name, ctx)?.returnType;
@@ -13523,8 +13786,37 @@ function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
       }
     }
   }
-  if (expr.kind === "shape" && expr.inferredType) return expr.inferredType;
+  if (expr.kind === "shape") {
+    if (expr.inferredType) return expr.inferredType;
+    const spreadType = inferBackendProductSpreadShapeType(expr, ctx);
+    if (spreadType) return spreadType;
+  }
   return exprType(expr, ctx.functions);
+}
+
+function inferBackendProductSpreadShapeType(
+  expr: Extract<Expr, { kind: "shape" }>,
+  ctx: LowerContext,
+): string | undefined {
+  if (!expr.slots.some((slot) => slot.spread) || expr.slots.some((slot) => slot.index)) {
+    return undefined;
+  }
+  const merged = new Map<string, string>();
+  for (const slot of expr.slots) {
+    if (slot.spread) {
+      const sourceType = exprTypeWithLocals(slot.value, ctx);
+      const sourceSlots = productSlotsForType(sourceType, ctx.layouts);
+      if (!sourceSlots) return undefined;
+      for (const sourceSlot of sourceSlots) {
+        if (sourceSlot.label) merged.set(sourceSlot.label, sourceSlot.type);
+      }
+      continue;
+    }
+    if (!slot.label) return undefined;
+    merged.set(slot.label, exprTypeWithLocals(slot.value, ctx) ?? "i32");
+  }
+  if (!merged.size) return undefined;
+  return `struct({${[...merged].map(([label, type]) => `${label}: ${type}`).join(", ")}})`;
 }
 
 function backendFunctionByName(name: string, ctx: LowerContext): FnDecl | undefined {

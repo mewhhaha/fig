@@ -10,7 +10,6 @@ const {
 const tick_millis: fn() -> i32 !{time} = @effect("tick_millis");
 const input_axis_x: fn() -> i32 !{event} = @effect("input_axis_x");
 const input_pressed: fn() -> i32 !{event} = @effect("input_pressed");
-
 const entity_capacity: count = 4;
 
 type fn Transform2d() -> type {
@@ -95,14 +94,19 @@ type fn SpriteAnimationRow() -> type {
   struct(SpriteAnimationRow)
 }
 
-let movement_q = do @applicative(ecs.Query(World, FrameInput)) {
+const movement_q = do @applicative(ecs.Query(
+  World,
+  FrameInput
+)) {
   transform <- ecs.write(#transform);
   velocity <- ecs.read(#velocity);
   input <- ecs.res();
   pure({transform, velocity, input})
 };
-
-let sprite_animation_q = do @applicative(ecs.Query(World, FrameInput)) {
+const sprite_animation_q = do @applicative(ecs.Query(
+  World,
+  FrameInput
+)) {
   sprite <- ecs.write(#sprite);
   input <- ecs.res();
   pure({sprite, input})
@@ -127,9 +131,7 @@ fn read_frame_input() -> FrameInput !{time, event} {
   }
 }
 
-fn moved_transform(
-  row: MovementRow
-) -> struct({transform: Transform2d}) {
+fn moved_transform(row: MovementRow) -> struct({transform: Transform2d}) {
   {
     transform: Transform2d {
       x: row.transform.x
@@ -137,15 +139,16 @@ fn moved_transform(
         * row.input.axis_x
         * row.input.dt_ms
         / 16,
-      y: row.transform.y + row.velocity.y * row.input.dt_ms / 16,
+      y: row.transform.y
+        + row.velocity.y
+        * row.input.dt_ms
+        / 16,
       z: row.transform.z
     }
   }
 }
 
-fn animated_sprite(
-  row: SpriteAnimationRow
-) -> struct({sprite: Sprite2d}) {
+fn animated_sprite(row: SpriteAnimationRow) -> struct({sprite: Sprite2d}) {
   {
     sprite: Sprite2d {
       w: row.sprite.w,
@@ -161,7 +164,10 @@ fn movement_system() -> ecs.System(World, FrameInput) {
   }
 }
 
-fn sprite_animation_system() -> ecs.System(World, FrameInput) {
+fn sprite_animation_system() -> ecs.System(
+  World,
+  FrameInput
+) {
   do @monad(ecs.System(World, FrameInput)) {
     ecs.map(sprite_animation_q, animated_sprite);
   }
@@ -308,12 +314,20 @@ fn build_demo_world() -> World {
       Transform2d {x: 24, y: 8, z: 1}
     ),
     velocity: ecs.batch_set(
-      ecs.batch_set(world.velocity, first, Velocity2d {x: 4, y: 0}),
+      ecs.batch_set(
+        world.velocity,
+        first,
+        Velocity2d {x: 4, y: 0}
+      ),
       second,
       Velocity2d {x: 4, y: 0}
     ),
     sprite: ecs.batch_set(
-      ecs.batch_set(world.sprite, first, Sprite2d {w: 16, h: 16, color: 1}),
+      ecs.batch_set(
+        world.sprite,
+        first,
+        Sprite2d {w: 16, h: 16, color: 1}
+      ),
       second,
       Sprite2d {w: 16, h: 16, color: 2}
     )

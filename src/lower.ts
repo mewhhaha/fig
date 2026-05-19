@@ -1067,7 +1067,8 @@ function lowerExpr(node: Node): Expr {
 }
 
 function lowerMatchValues(node: Node): Expr {
-  const values = named(node).filter(is("Expr"));
+  const source = optional(node, "MatchValuesParen") ?? node;
+  const values = named(source).filter(is("Expr"));
   if (values.length === 1) return lowerExpr(values[0]);
   return {
     kind: "shape",

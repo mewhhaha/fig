@@ -88,9 +88,8 @@ export function formatSource(source: string): string {
     ...comments,
   ].sort((a, b) => startOf(a) - startOf(b));
   const matchBraceStarts = collectMatchBraceStarts(items);
-  const matchValueCommaStarts = collectMatchValueCommaStarts(parsed.tree);
+  const multiMatchValueParens = collectMultiMatchValueParens(parsed.tree);
   const matchPatternCommaStarts = collectMatchPatternCommaStarts(parsed.tree);
-  const multiMatchBraceStarts = collectMultiMatchBraceStarts(parsed.tree);
   const collectionDelimiterStarts = collectCollectionDelimiterStarts(parsed.tree);
   const flatBraceCandidateStarts = collectFlatBraceCandidateStarts(parsed.tree, normalized);
 
@@ -132,9 +131,7 @@ export function formatSource(source: string): string {
           nextTopLevelDecl: topLevelDecl,
           items,
           rightIndex: index,
-          matchValueCommaStarts,
           matchPatternCommaStarts,
-          multiMatchBraceStarts,
         });
       } else {
         writer.lineStart();
@@ -163,6 +160,27 @@ export function formatSource(source: string): string {
       if (!writer.atLineStart()) writer.newline();
       writer.dedent();
       writer.lineStart();
+    } else if (
+      previousToken && multiMatchValueParens.closeBeforeStarts.has(token.token.span.start)
+    ) {
+      if (closingDelimiter?.delimiter === "(" && closingDelimiter.broken) {
+        if (!writer.atLineStart()) writer.newline();
+        writer.dedent();
+        writer.lineStart();
+      }
+      writer.raw(")");
+      if (closingDelimiter?.delimiter === "(") delimiterContexts.pop();
+      previousToken = { ...previousToken, text: ")" };
+      separate(writer, previousToken, token, {
+        braceMode: braceModes.at(-1),
+        delimiterContext: delimiterContexts.at(-1),
+        topLevel: braceModes.length === 0 && delimiterContexts.length === 0,
+        previousTopLevelDecl,
+        nextTopLevelDecl: topLevelDecl,
+        items,
+        rightIndex: index,
+        matchPatternCommaStarts,
+      });
     } else if (previousToken) {
       separate(writer, previousToken, token, {
         braceMode: braceModes.at(-1),
@@ -172,14 +190,27 @@ export function formatSource(source: string): string {
         nextTopLevelDecl: topLevelDecl,
         items,
         rightIndex: index,
-        matchValueCommaStarts,
         matchPatternCommaStarts,
-        multiMatchBraceStarts,
       });
     } else {
       writer.lineStart();
     }
 
+    if (multiMatchValueParens.openBeforeStarts.has(token.token.span.start)) {
+      writer.raw("(");
+      const closeBeforeStart = multiMatchValueParens.closeBeforeStartByOpenBeforeStart.get(
+        token.token.span.start,
+      );
+      const shouldBreak = closeBeforeStart !== undefined &&
+        syntheticGroupWouldOverflow(writer, items, index, closeBeforeStart);
+      delimiterContexts.push({
+        delimiter: "(",
+        broken: shouldBreak,
+        indented: shouldBreak,
+        commaBreaks: true,
+      });
+      if (shouldBreak) writer.breakAfterOpenDelimiter();
+    }
     writer.raw(token.text);
 
     if (token.text === "{") {
@@ -258,9 +289,11 @@ export function formatSource(source: string): string {
       braceModes.pop();
       delimiterContexts.pop();
       if (braceModes.length === 0 && delimiterContexts.length === 0) {
-        const nextDecl = nextTopLevelDecl(items, index, topLevelDeclByStart);
-        if (shouldBlankBeforeNextTopLevelDecl(previousTopLevelDecl, nextDecl)) writer.blankLine();
-        else if (nextDecl) writer.newline();
+        if (nextTokenText(items, index) !== ";") {
+          const nextDecl = nextTopLevelDecl(items, index, topLevelDeclByStart);
+          if (shouldBlankBeforeNextTopLevelDecl(previousTopLevelDecl, nextDecl)) writer.blankLine();
+          else if (nextDecl) writer.newline();
+        }
       } else if (nextStartsDeclaration(items, item)) writer.blankLine();
     } else if (token.text === "}") {
       braceModes.pop();
@@ -295,9 +328,7 @@ interface SeparateContext {
   nextTopLevelDecl?: TopLevelDecl;
   items?: item[];
   rightIndex?: number;
-  matchValueCommaStarts?: Set<number>;
   matchPatternCommaStarts?: Set<number>;
-  multiMatchBraceStarts?: Set<number>;
 }
 
 interface ImportBindingDecl {
@@ -386,6 +417,12 @@ function descendantTokens(node: ParseNode, name: string): Extract<ParseNode, { k
   );
 }
 
+function firstDescendantToken(node: ParseNode): Extract<ParseNode, { kind: "token" }> | undefined {
+  return descendants(node).find((child): child is Extract<ParseNode, { kind: "token" }> =>
+    child.kind === "token"
+  );
+}
+
 function descendants(node: ParseNode): ParseNode[] {
   if (node.kind !== "rule") return [];
   return node.children.flatMap((child) => [child, ...descendants(child)]);
@@ -421,10 +458,6 @@ function separate(
     return;
   }
   if (left.text === ",") {
-    if (context.matchValueCommaStarts?.has(left.token.span.start)) {
-      writer.continuationLineBreak();
-      return;
-    }
     if (context.matchPatternCommaStarts?.has(left.token.span.start)) {
       writer.space();
       return;
@@ -453,10 +486,6 @@ function separate(
     return;
   }
   if (delimiterContext?.delimiter === "<" && (left.text === "<" || right.text === ">")) return;
-  if (right.text === "{" && context.multiMatchBraceStarts?.has(right.token.span.start)) {
-    writer.newline();
-    return;
-  }
   if (right.text === "[" && opensBracketWithoutSpace(left)) return;
   if (left.text === "{" && delimiterContext?.delimiter === "{" && !delimiterContext.broken) return;
   if (left.text === "{" || left.text === ";") {
@@ -469,6 +498,10 @@ function separate(
   }
   if (left.text === "}" && declarationKeywords.has(right.text)) {
     writer.blankLine();
+    return;
+  }
+  if (left.text === "match" && right.text === "(") {
+    writer.space();
     return;
   }
   if (right.text === "(" && opensParenWithoutSpace(left)) return;
@@ -669,6 +702,13 @@ function nextTopLevelDecl(
   return next ? declsByStart.get(next.token.span.start) : undefined;
 }
 
+function nextTokenText(items: item[], index: number): string | undefined {
+  const next = items.slice(index + 1).find((item) => item.kind === "token") as
+    | TokenItem
+    | undefined;
+  return next?.text;
+}
+
 function shouldBlankBeforeNextTopLevelDecl(
   previous: TopLevelDecl | undefined,
   next: TopLevelDecl | undefined,
@@ -755,19 +795,36 @@ function collectMatchBraceStarts(items: item[]): Set<number> {
   return starts;
 }
 
-function collectMatchValueCommaStarts(root: RuleParseNode | null): Set<number> {
-  const starts = new Set<number>();
-  if (!root) return starts;
-  for (const node of descendantRules(root, "MatchValues")) {
-    const exprCount = node.children.filter((child) =>
+interface MultiMatchValueParens {
+  openBeforeStarts: Set<number>;
+  closeBeforeStarts: Set<number>;
+  closeBeforeStartByOpenBeforeStart: Map<number, number>;
+}
+
+function collectMultiMatchValueParens(root: RuleParseNode | null): MultiMatchValueParens {
+  const openBeforeStarts = new Set<number>();
+  const closeBeforeStarts = new Set<number>();
+  const closeBeforeStartByOpenBeforeStart = new Map<number, number>();
+  if (!root) return { openBeforeStarts, closeBeforeStarts, closeBeforeStartByOpenBeforeStart };
+  for (const node of descendantRules(root, "MatchExpr")) {
+    const values = node.children.find((child): child is RuleParseNode =>
+      child.kind === "rule" && child.name === "MatchValues"
+    );
+    const exprCount = values?.children.filter((child) =>
       child.kind === "rule" && child.name === "Expr"
-    ).length;
+    ).length ?? 0;
     if (exprCount <= 1) continue;
-    for (const child of node.children) {
-      if (child.kind === "literal" && child.value === ",") starts.add(child.span.start);
+    const firstValueToken = values ? firstDescendantToken(values) : undefined;
+    const brace = node.children.find((child) => child.kind === "literal" && child.value === "{");
+    if (firstValueToken) openBeforeStarts.add(firstValueToken.span.start);
+    if (brace) {
+      closeBeforeStarts.add(brace.span.start);
+      if (firstValueToken) {
+        closeBeforeStartByOpenBeforeStart.set(firstValueToken.span.start, brace.span.start);
+      }
     }
   }
-  return starts;
+  return { openBeforeStarts, closeBeforeStarts, closeBeforeStartByOpenBeforeStart };
 }
 
 function collectMatchPatternCommaStarts(root: RuleParseNode | null): Set<number> {
@@ -781,23 +838,6 @@ function collectMatchPatternCommaStarts(root: RuleParseNode | null): Set<number>
     for (const child of node.children) {
       if (child.kind === "literal" && child.value === ",") starts.add(child.span.start);
     }
-  }
-  return starts;
-}
-
-function collectMultiMatchBraceStarts(root: RuleParseNode | null): Set<number> {
-  const starts = new Set<number>();
-  if (!root) return starts;
-  for (const node of descendantRules(root, "MatchExpr")) {
-    const values = node.children.find((child): child is RuleParseNode =>
-      child.kind === "rule" && child.name === "MatchValues"
-    );
-    const exprCount = values?.children.filter((child) =>
-      child.kind === "rule" && child.name === "Expr"
-    ).length ?? 0;
-    if (exprCount <= 1) continue;
-    const brace = node.children.find((child) => child.kind === "literal" && child.value === "{");
-    if (brace) starts.add(brace.span.start);
   }
   return starts;
 }
@@ -851,6 +891,38 @@ function groupWouldOverflow(writer: Writer, items: item[], openIndex: number): b
   }
 
   return false;
+}
+
+function syntheticGroupWouldOverflow(
+  writer: Writer,
+  items: item[],
+  firstIndex: number,
+  closeBeforeStart: number,
+): boolean {
+  let depth = 0;
+  let hasComma = false;
+  let flatLength = 1;
+  let previous: TokenItem | undefined;
+
+  for (let index = firstIndex; index < items.length; index++) {
+    const item = items[index];
+    if (startOf(item) >= closeBeforeStart) break;
+    if (item.kind === "comment") return false;
+
+    if (item.text === "(" || item.text === "[" || item.text === "{") {
+      depth++;
+    } else if ((item.text === ")" || item.text === "]" || item.text === "}") && depth > 0) {
+      depth--;
+    }
+
+    if (item.text === "," && depth === 0) hasComma = true;
+    if (previous) flatLength += flatSeparatorLength(previous, item);
+    flatLength += item.text.length;
+    previous = item;
+  }
+
+  return hasComma &&
+    (writer.wouldOverflow(" ".repeat(flatLength)) || writer.currentColumn() + flatLength > 55);
 }
 
 function groupHasLineBreak(source: string, items: item[], openIndex: number): boolean {
