@@ -256,6 +256,8 @@ const BRANCH_MEMORIES: BackendMemory[] = [
   { name: "fig_buffers", exportName: "fig_buffers", minPages: 1 },
 ];
 
+const HEAP_MIN_PAGES = 16;
+
 const SIMD_DOT4_I32_HELPER = "__fig_dot4_i32";
 
 function isCurrentModulePublic(fn: FnDecl): boolean {
@@ -532,6 +534,7 @@ export function lowerProgramToBackendArtifact(
   const needsTemporalMemory = functions.some((fn) => usesTemporalIntrinsic(fn.body, ctx.functions));
   const needsBranchMemory = memoryModel !== "temporal" &&
     functions.some((fn) => usesBranchIntrinsic(fn.body, ctx.functions));
+  const needsHeapMemory = functions.some((fn) => usesHeapArrayIntrinsic(fn.body, ctx.functions));
   if (memoryModel !== "temporal" && needsTemporalMemory) {
     throw new CompileError([{
       code: "backend.temporal_in_branch_mode",
@@ -552,6 +555,7 @@ export function lowerProgramToBackendArtifact(
       needsTemporalMemory,
       needsBranchMemory,
       needsScratchMemory,
+      needsHeapMemory,
     ),
     data: [],
     branchHints: options.branchHints ?? optMode === "release",
@@ -580,12 +584,26 @@ function backendMemories(
   needsTemporalMemory: boolean,
   needsBranchMemory: boolean,
   needsScratchMemory: boolean,
+  needsHeapMemory: boolean,
 ): BackendMemory[] {
+  const withHeapCapacity = (memories: BackendMemory[]) =>
+    memories.map((memory) =>
+      memory.name === "fig_objects"
+        ? { ...memory, minPages: Math.max(memory.minPages, HEAP_MIN_PAGES) }
+        : memory
+    );
+  const heapObjects = { ...BRANCH_MEMORIES[0]!, minPages: HEAP_MIN_PAGES };
   if (memoryModel === "temporal") {
-    if (needsTemporalMemory) return TEMPORAL_MEMORIES;
+    if (needsTemporalMemory) {
+      return needsHeapMemory ? withHeapCapacity(TEMPORAL_MEMORIES) : TEMPORAL_MEMORIES;
+    }
+    if (needsHeapMemory && needsScratchMemory) return [heapObjects, TEMPORAL_MEMORIES[2]!];
+    if (needsHeapMemory) return [heapObjects];
     return needsScratchMemory ? [TEMPORAL_MEMORIES[2]!] : [];
   }
-  if (needsBranchMemory) return BRANCH_MEMORIES;
+  if (needsBranchMemory) return needsHeapMemory ? withHeapCapacity(BRANCH_MEMORIES) : BRANCH_MEMORIES;
+  if (needsHeapMemory && needsScratchMemory) return [heapObjects, BRANCH_MEMORIES[1]!];
+  if (needsHeapMemory) return [heapObjects];
   return needsScratchMemory ? [BRANCH_MEMORIES[1]!] : [];
 }
 
@@ -5769,7 +5787,7 @@ function lowerExpr(
   locals: Set<string>,
   expectedType?: string,
 ): Instr[] {
-  const folded = constFold(expr);
+  const folded = constFold(expr, ctx);
   if (folded !== expr) return lowerExpr(folded, ctx, locals, expectedType);
   switch (expr.kind) {
     case "do":
@@ -5807,10 +5825,8 @@ function lowerExpr(
         const replaced = lowerReplaceFieldCall(expr, ctx, locals, expectedType);
         if (replaced) return replaced;
       }
-      if (expr.callee.name.endsWith("spawn_components")) {
-        const spawned = lowerEcsSpawnComponentsCall(expr, ctx, locals, expectedType);
-        if (spawned) return spawned;
-      }
+      const heapArray = lowerHeapArrayIntrinsic(expr, ctx, locals, expectedType);
+      if (heapArray) return heapArray;
       const branch = lowerBranchIntrinsic(expr, ctx, locals);
       if (branch) return branch;
       const temporal = lowerTemporalIntrinsic(expr, ctx, locals);
@@ -5838,7 +5854,16 @@ function lowerExpr(
       const calleeName = ctx.layouts.constFunctionFields.get(expr.callee.name) ?? expr.callee.name;
       const callee = ctx.signatures.get(calleeName);
       if (!callee) {
-        if (!hasRuntimeEffect(expr, ctx.functions)) return [{ op: "const", type: "i32", value: 0 }];
+        if (!hasRuntimeEffect(expr, ctx.functions)) {
+          const fallbackSlots = flattenType(expectedType, ctx.layouts);
+          return (fallbackSlots.length ? fallbackSlots : [{ wat: "i32" as const }]).map((
+            slot,
+          ): Instr => ({
+            op: "const",
+            type: slot.wat,
+            value: 0,
+          }));
+        }
         throw new Error(`backend missing runtime callable value: ${expr.callee.name}`);
       }
       const trailingConstArgs = Math.max(0, expr.args.length - callee.params.length);
@@ -5897,6 +5922,11 @@ function lowerExpr(
       return lowerPipeBind(expr, ctx, locals, expectedType);
     case "match":
       {
+        const foldedValue = constFold(expr.value, ctx);
+        if (foldedValue.kind === "literal") {
+          const selected = expr.arms.find((arm) => patternMatchesLiteral(arm.pattern, foldedValue));
+          if (selected) return lowerExpr(selected.value, ctx, locals, expectedType);
+        }
         const refinedTry = lowerRefinedDomainTryMatch(
           expr.value,
           expr.arms,
@@ -5937,7 +5967,7 @@ function lowerExpr(
       return [];
     case "field":
       {
-        const keyExpr = constFold(expr.key);
+        const keyExpr = constFold(expr.key, ctx);
         if (expr.value.kind === "var" && keyExpr.kind === "literal") {
           const key = keyExpr.value.replace(/^#/, "").replace(/^"|"$/g, "");
           return lowerVar(`${expr.value.name}.${key}`, ctx, locals, expectedType);
@@ -6038,6 +6068,19 @@ function lowerExpr(
             expectedType,
           );
         }
+        const prefix = `${expr.value.name}$`;
+        const labels = new Set(
+          [...locals].flatMap((local) => {
+            if (!local.startsWith(prefix)) return [];
+            const rest = local.slice(prefix.length);
+            const label = rest.split("$")[0];
+            return label ? [label] : [];
+          }),
+        );
+        if (labels.size === 1) {
+          const [label] = [...labels];
+          return lowerVar(`${expr.value.name}.${label}`, ctx, locals, expectedType);
+        }
       }
       throw new Error(
         `backend cannot lower unresolved @field in ${ctx.currentFn?.name ?? "<unknown>"}${
@@ -6098,10 +6141,11 @@ function lowerReplaceFieldCall(
   if (expr.args.length !== 3) return undefined;
   const [source, key, value] = expr.args;
   if (!source || !key || !value) return undefined;
-  const label = key.kind === "literal" && key.literalKind === "literalType"
-    ? key.value.replace(/^#/, "")
-    : key.kind === "literal" && key.literalKind === "string"
-    ? key.value.replace(/^"|"$/g, "")
+  const foldedKey = constFold(key, ctx);
+  const label = foldedKey.kind === "literal" && foldedKey.literalKind === "literalType"
+    ? foldedKey.value.replace(/^#/, "")
+    : foldedKey.kind === "literal" && foldedKey.literalKind === "string"
+    ? foldedKey.value.replace(/^"|"$/g, "")
     : undefined;
   if (!label) return undefined;
   const sourceType = exprTypeWithLocals(source, ctx);
@@ -6575,7 +6619,7 @@ function lowerPipeBind(
   locals: Set<string>,
   expectedType?: string,
 ): Instr[] {
-  const valueType = exprType(expr.value, ctx.functions);
+  const valueType = exprTypeWithLocals(expr.value, ctx) ?? exprType(expr.value, ctx.functions);
   const bindings = flattenBinding(expr.name, valueType, ctx.layouts);
   for (const binding of bindings) locals.add(binding.name);
   let bodyCtx = ctx;
@@ -6584,7 +6628,7 @@ function lowerPipeBind(
     bodyCtx = ctxWithLocalScalarFact(ctx, bindings[0].name, fact);
   }
   return [
-    ...lowerExpr(expr.value, ctx, locals),
+    ...lowerExpr(expr.value, ctx, locals, valueType),
     ...bindings.map((binding) => binding.name).toReversed().map((name): Instr => ({
       op: "local.set",
       name,
@@ -7619,18 +7663,46 @@ function renamePattern(pattern: ParamPattern, renames: Map<string, string>): Par
   }
 }
 
-function constFold(expr: Expr): Expr {
-  if (expr.kind === "call" && expr.callee.kind === "var" && expr.args[0]?.kind === "shape") {
+function constFold(expr: Expr, ctx?: LowerContext, seen = new Set<string>()): Expr {
+  if (expr.kind === "var" && ctx && expr.name.endsWith("()")) {
+    const fnName = expr.name.slice(0, -2);
+    if (seen.has(fnName)) return expr;
+    const fn = ctx.functions.get(fnName);
+    if (fn?.returnType === "const" && fn.params.length === 0 && fn.body.expr) {
+      return constFold(fn.body.expr, ctx, new Set([...seen, fnName]));
+    }
+  }
+  if (expr.kind === "call" && expr.callee.kind === "var") {
+    const args = expr.args.map((arg) => constFold(arg, ctx, seen));
+    const foldedCall = args.some((arg, index) => arg !== expr.args[index])
+      ? { ...expr, args }
+      : expr;
+    const shapeArg = args[0]?.kind === "shape" ? args[0] : undefined;
+    if (ctx && expr.callee.name === "@type_slots" && args[0]) {
+      const type = renderBackendTypeProofArg(args[0]);
+      const slots = type ? productSlotsForType(type, ctx.layouts) : undefined;
+      if (slots) return shapeExprFromLayoutSlots(slots);
+    }
+    if (expr.callee.name === "@shape_omit" && shapeArg && args[1]?.kind === "shape") {
+      const omitted = new Set(args[1].slots.flatMap((slot) => slot.label ? [slot.label] : []));
+      return {
+        ...shapeArg,
+        slots: shapeArg.slots.filter((slot) => !slot.label || !omitted.has(slot.label))
+          .map((slot, position) => ({ ...slot, position })),
+      };
+    }
     if (expr.callee.name === "@shape_count") {
+      if (!shapeArg) return foldedCall;
       return {
         kind: "literal",
         literalKind: "number",
-        value: String(expr.args[0].slots.length),
+        value: String(shapeArg.slots.length),
         inferredType: "i32",
       };
     }
     if (expr.callee.name === "@shape_first_key") {
-      const label = expr.args[0].slots[0]?.label;
+      if (!shapeArg) return foldedCall;
+      const label = shapeArg.slots[0]?.label;
       if (label) {
         return {
           kind: "literal",
@@ -7640,26 +7712,30 @@ function constFold(expr: Expr): Expr {
       }
     }
     if (expr.callee.name === "@shape_tail") {
+      if (!shapeArg) return foldedCall;
       return {
-        ...expr.args[0],
-        slots: expr.args[0].slots.slice(1).map((slot, position) => ({ ...slot, position })),
+        ...shapeArg,
+        slots: shapeArg.slots.slice(1).map((slot, position) => ({ ...slot, position })),
       };
     }
     if (expr.callee.name === "@shape_slot") {
-      const key = expr.args[1] ? constFold(expr.args[1]) : undefined;
+      if (!shapeArg) return foldedCall;
+      const key = args[1];
       if (key?.kind === "literal") {
         const label = key.value.replace(/^#/, "").replace(/^"|"$/g, "");
-        const slot = expr.args[0].slots.find((item) => item.label === label);
+        const slot = shapeArg.slots.find((item) => item.label === label);
         if (slot) return slot.value;
       }
     }
+    return foldedCall;
   }
   if (expr.kind !== "binary") return expr;
-  const left = expr.left;
-  const right = expr.right;
-  if (left.kind !== "literal" || right.kind !== "literal") return expr;
+  const left = constFold(expr.left, ctx, seen);
+  const right = constFold(expr.right, ctx, seen);
+  const foldedBinary = left !== expr.left || right !== expr.right ? { ...expr, left, right } : expr;
+  if (left.kind !== "literal" || right.kind !== "literal") return foldedBinary;
   if (left.literalKind !== "number" || right.literalKind !== "number") {
-    return expr;
+    return foldedBinary;
   }
   const a = Number.parseInt(left.value, 10);
   const b = Number.parseInt(right.value, 10);
@@ -7671,6 +7747,21 @@ function constFold(expr: Expr): Expr {
     literalKind: ["==", "!=", "<", "<=", ">", ">="].includes(expr.op) ? "bool" : "number",
     value: typeof value === "boolean" ? String(value) : String(value),
     inferredType: typeof value === "boolean" ? "bool" : left.inferredType ?? "i32",
+  };
+}
+
+function shapeExprFromLayoutSlots(slots: ShapeTypeSlot[]): Extract<Expr, { kind: "shape" }> {
+  return {
+    kind: "shape",
+    slots: slots.flatMap((slot, position) =>
+      slot.label
+        ? [{
+          label: slot.label,
+          position,
+          value: { kind: "var", name: slot.type } as Expr,
+        }]
+        : []
+    ),
   };
 }
 
@@ -7701,6 +7792,12 @@ function foldBinary(op: string, a: number, b: number): number | boolean | undefi
   }
 }
 
+function patternMatchesLiteral(pattern: MatchArm["pattern"], literal: Extract<Expr, { kind: "literal" }>): boolean {
+  if (pattern.kind === "wildcard") return true;
+  if (pattern.kind !== "literal") return false;
+  return pattern.literalKind === literal.literalKind && pattern.value === literal.value;
+}
+
 function lowerLiteral(
   expr: Extract<Expr, { kind: "literal" }>,
   ctx: LowerContext,
@@ -7729,6 +7826,9 @@ function lowerLiteral(
     }];
   }
   if (expr.literalKind === "char") {
+    return [{ op: "const", type: "i32", value: literalExprRuntimeValue(expr) ?? 0 }];
+  }
+  if (expr.literalKind === "literalType") {
     return [{ op: "const", type: "i32", value: literalExprRuntimeValue(expr) ?? 0 }];
   }
   throw new Error(`backend does not support ${expr.literalKind} literals yet`);
@@ -9187,7 +9287,6 @@ function fixedArrayLetChainSwapCall(
   ) return undefined;
   if (firstLet.value.kind !== "index" || secondLet.value.kind !== "index") return undefined;
   if (fn.body.expr?.kind !== "var" || fn.body.expr.name !== secondSet.name) return undefined;
-  if (firstSet.name !== secondSet.name) return undefined;
 
   const source = substituteExpr(firstLet.value.target, substitutions);
   if (source.kind !== "var") return undefined;
@@ -9714,6 +9813,8 @@ function renderBackendTypeExpr(expr: import("./core_ast.ts").TypeExpr): string {
   switch (expr.kind) {
     case "type_ref":
       return expr.name;
+    case "type_hole":
+      return "_";
     case "type_static_ref":
       return `@${expr.name}`;
     case "type_fn":
@@ -10014,7 +10115,7 @@ function lowerVar(
       name: slot,
     }));
   }
-  const slots = flattenType(expectedType, layouts).map((slot) =>
+  const slots = flattenType(expectedType ?? varType(name, ctx), layouts).map((slot) =>
     slot.suffix ? `${base}$${slot.suffix}` : base
   );
   let present = slots.filter((slot) => locals.has(slot));
@@ -10630,7 +10731,7 @@ function lowerMatchArms(
   locals: Set<string>,
   expectedType?: string,
 ): Instr[] {
-  const foldedValue = constFold(value);
+  const foldedValue = constFold(value, ctx);
   if (foldedValue.kind === "literal") {
     const selected = arms.find((candidate) =>
       literalPatternMatches(candidate.pattern, foldedValue)
@@ -12879,6 +12980,438 @@ function shuffleI32Lanes(lanes: number[]): number[] {
   return lanes.flatMap((lane) => [0, 1, 2, 3].map((byte) => lane * 4 + byte));
 }
 
+interface HeapItemSlot {
+  slot: LayoutSlot;
+  offset: number;
+  align: number;
+}
+
+interface HeapItemLayout {
+  itemType: string;
+  slots: HeapItemSlot[];
+  stride: number;
+}
+
+function lowerHeapArrayIntrinsic(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var") return undefined;
+  const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
+  if (!id?.startsWith("heap_array_")) return undefined;
+  const itemType = heapArrayItemTypeFromCall(expr, id, ctx, expectedType);
+  if (!itemType) {
+    throw new Error(
+      `backend cannot infer heap array item type in ${ctx.currentFn?.name ?? "<unknown>"}`,
+    );
+  }
+  const layout = heapItemLayout(itemType, ctx.layouts);
+  const args = heapArrayRuntimeArgs(expr, ctx);
+  switch (id) {
+    case "heap_array_new":
+      return lowerHeapArrayNew(args[0], layout, ctx, locals);
+    case "heap_array_ensure_capacity":
+      return lowerHeapArrayEnsureCapacity(args[0], args[1], layout, ctx, locals);
+    case "heap_array_get":
+      return lowerHeapArrayGet(args[0], args[1], layout, ctx, locals);
+    case "heap_array_set":
+      return lowerHeapArraySet(args[0], args[1], args[2], layout, ctx, locals);
+    case "heap_array_push":
+      return lowerHeapArrayPush(args[0], args[1], layout, ctx, locals);
+    default:
+      return undefined;
+  }
+}
+
+function heapArrayRuntimeArgs(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+): Expr[] {
+  const calleeName = expr.callee.kind === "var" ? expr.callee.name : undefined;
+  const callee = calleeName ? ctx.functions.get(calleeName) : undefined;
+  if (callee && calleeName && !calleeName.startsWith("@")) return runtimeCallArgs(expr, callee);
+  return expr.args.slice(1);
+}
+
+function heapArrayItemTypeFromCall(
+  expr: Extract<Expr, { kind: "call" }>,
+  id: string,
+  ctx: LowerContext,
+  expectedType?: string,
+): string | undefined {
+  const directIntrinsic = expr.callee.kind === "var" && expr.callee.name.startsWith("@");
+  const explicit = directIntrinsic && expr.args[0] ? renderBackendTypeProofArg(expr.args[0]) : undefined;
+  if (explicit) return explicit;
+  const callee = expr.callee.kind === "var" ? backendFunctionByName(expr.callee.name, ctx) : undefined;
+  const returnType = callee?.returnType
+    ? specializeCallReturnType(expr, callee.returnType, ctx) ?? callee.returnType
+    : undefined;
+  if (id === "heap_array_get") return expectedType ?? returnType;
+  return heapArrayItemType(returnType) ?? heapArrayItemType(expectedType);
+}
+
+function heapArrayItemType(type: string | undefined): string | undefined {
+  if (!type) return undefined;
+  const args = typeCallArgs(type, "HeapArray");
+  return args ? splitTypeArgs(args)[0]?.trim() : undefined;
+}
+
+function heapItemLayout(itemType: string, layouts: LayoutEnv): HeapItemLayout {
+  itemType = canonicalHeapItemType(itemType, layouts);
+  const slots = flattenType(itemType, layouts);
+  let offset = 0;
+  let maxAlign = 4;
+  const heapSlots = slots.map((slot): HeapItemSlot => {
+    const align = valueTypeByteSize(slot.wat);
+    maxAlign = Math.max(maxAlign, align);
+    offset = alignTo(offset, align);
+    const item = { slot, offset, align };
+    offset += valueTypeByteSize(slot.wat);
+    return item;
+  });
+  return {
+    itemType,
+    slots: heapSlots,
+    stride: Math.max(1, alignTo(offset, maxAlign)),
+  };
+}
+
+function canonicalHeapItemType(itemType: string, layouts: LayoutEnv): string {
+  const trimmed = itemType.trim();
+  if (trimmed.includes("(")) return trimmed;
+  const decl = layouts.types.get(typeName(trimmed));
+  return decl && decl.params.length === 0 ? `${trimmed}()` : trimmed;
+}
+
+function lowerHeapArrayNew(
+  capacity: Expr | undefined,
+  layout: HeapItemLayout,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const cap = heapTemp(ctx, locals, "cap");
+  const capExpr = capacity ?? staticIndexExpr(0);
+  return [
+    ...lowerExpr(capExpr, ctx, locals, "i32"),
+    { op: "local.set", name: cap },
+    ...lowerHeapAlloc([
+      { op: "local.get", name: cap },
+      { op: "const", type: "i32", value: layout.stride },
+      { op: "binary", wasm: "i32.mul" },
+    ], ctx, locals),
+    { op: "const", type: "i32", value: 0 },
+    { op: "local.get", name: cap },
+  ];
+}
+
+function lowerHeapArrayEnsureCapacity(
+  array: Expr | undefined,
+  neededCapacity: Expr | undefined,
+  layout: HeapItemLayout,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const arr = cacheHeapArray(array, layout.itemType, ctx, locals, "ensure_arr");
+  const needed = heapTemp(ctx, locals, "needed");
+  const newCap = heapTemp(ctx, locals, "new_cap");
+  const newPtr = heapTemp(ctx, locals, "new_ptr");
+  return [
+    ...arr.prefix,
+    ...lowerExpr(neededCapacity ?? staticIndexExpr(0), ctx, locals, "i32"),
+    { op: "local.set", name: needed },
+    { op: "local.get", name: needed },
+    { op: "local.get", name: arr.cap },
+    { op: "binary", wasm: "i32.le_s" },
+    {
+      op: "if",
+      results: ["i32", "i32", "i32"],
+      thenBody: [
+        { op: "local.get", name: arr.ptr },
+        { op: "local.get", name: arr.len },
+        { op: "local.get", name: arr.cap },
+      ],
+      elseBody: [
+        ...lowerHeapArrayGrowthCapacity(arr.cap, needed, newCap),
+        ...lowerHeapAlloc([
+          { op: "local.get", name: newCap },
+          { op: "const", type: "i32", value: layout.stride },
+          { op: "binary", wasm: "i32.mul" },
+        ], ctx, locals),
+        { op: "local.set", name: newPtr },
+        ...lowerHeapArrayCopy(newPtr, arr.ptr, arr.len, layout),
+        { op: "local.get", name: newPtr },
+        { op: "local.get", name: arr.len },
+        { op: "local.get", name: newCap },
+      ],
+    },
+  ];
+}
+
+function lowerHeapArrayGet(
+  array: Expr | undefined,
+  index: Expr | undefined,
+  layout: HeapItemLayout,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const arr = cacheHeapArray(array, layout.itemType, ctx, locals, "get_arr");
+  const item = heapTemp(ctx, locals, "get_index");
+  return [
+    ...arr.prefix,
+    ...lowerExpr(index ?? staticIndexExpr(0), ctx, locals, "i32"),
+    { op: "local.set", name: item },
+    ...layout.slots.flatMap(({ slot, offset, align }) => [
+      ...lowerHeapItemAddress(arr.ptr, item, layout.stride, offset),
+      { op: "load", type: slot.wat, align, offset: 0 },
+    ] as Instr[]),
+  ];
+}
+
+function lowerHeapArraySet(
+  array: Expr | undefined,
+  index: Expr | undefined,
+  value: Expr | undefined,
+  layout: HeapItemLayout,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const arr = cacheHeapArray(array, layout.itemType, ctx, locals, "set_arr");
+  const item = heapTemp(ctx, locals, "set_index");
+  const values = cacheHeapValue(value, layout, ctx, locals, "set_value");
+  return [
+    ...arr.prefix,
+    ...lowerExpr(index ?? staticIndexExpr(0), ctx, locals, "i32"),
+    { op: "local.set", name: item },
+    ...values.prefix,
+    ...lowerHeapArrayStores(arr.ptr, item, values.names, layout),
+    { op: "local.get", name: arr.ptr },
+    { op: "local.get", name: arr.len },
+    { op: "local.get", name: arr.cap },
+  ];
+}
+
+function lowerHeapArrayPush(
+  array: Expr | undefined,
+  value: Expr | undefined,
+  layout: HeapItemLayout,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const arr = cacheHeapArray(array, layout.itemType, ctx, locals, "push_arr");
+  const values = cacheHeapValue(value, layout, ctx, locals, "push_value");
+  const newCap = heapTemp(ctx, locals, "push_cap");
+  const newPtr = heapTemp(ctx, locals, "push_ptr");
+  return [
+    ...arr.prefix,
+    ...values.prefix,
+    { op: "local.get", name: arr.len },
+    { op: "local.get", name: arr.cap },
+    { op: "binary", wasm: "i32.lt_s" },
+    {
+      op: "if",
+      results: ["i32", "i32", "i32"],
+      thenBody: [
+        ...lowerHeapArrayStores(arr.ptr, arr.len, values.names, layout),
+        { op: "local.get", name: arr.ptr },
+        { op: "local.get", name: arr.len },
+        { op: "const", type: "i32", value: 1 },
+        { op: "binary", wasm: "i32.add" },
+        { op: "local.get", name: arr.cap },
+      ],
+      elseBody: [
+        ...lowerHeapArrayGrowthCapacity(arr.cap, undefined, newCap),
+        ...lowerHeapAlloc([
+          { op: "local.get", name: newCap },
+          { op: "const", type: "i32", value: layout.stride },
+          { op: "binary", wasm: "i32.mul" },
+        ], ctx, locals),
+        { op: "local.set", name: newPtr },
+        ...lowerHeapArrayCopy(newPtr, arr.ptr, arr.len, layout),
+        ...lowerHeapArrayStores(newPtr, arr.len, values.names, layout),
+        { op: "local.get", name: newPtr },
+        { op: "local.get", name: arr.len },
+        { op: "const", type: "i32", value: 1 },
+        { op: "binary", wasm: "i32.add" },
+        { op: "local.get", name: newCap },
+      ],
+    },
+  ];
+}
+
+function cacheHeapArray(
+  array: Expr | undefined,
+  itemType: string,
+  ctx: LowerContext,
+  locals: Set<string>,
+  label: string,
+): { prefix: Instr[]; ptr: string; len: string; cap: string } {
+  const names = ["ptr", "len", "cap"].map((field) => heapTemp(ctx, locals, `${label}_${field}`));
+  return {
+    prefix: [
+      ...lowerExpr(array ?? { kind: "literal", literalKind: "number", value: "0" }, ctx, locals, `HeapArray(${itemType})`),
+      ...names.toReversed().map((name): Instr => ({ op: "local.set", name })),
+    ],
+    ptr: names[0]!,
+    len: names[1]!,
+    cap: names[2]!,
+  };
+}
+
+function cacheHeapValue(
+  value: Expr | undefined,
+  layout: HeapItemLayout,
+  ctx: LowerContext,
+  locals: Set<string>,
+  label: string,
+): { prefix: Instr[]; names: string[] } {
+  const names = layout.slots.map(({ slot }, index) => {
+    const suffix = slot.suffix ? slot.suffix.replace(/[^A-Za-z0-9_]/g, "_") : String(index);
+    const name = heapTemp(ctx, locals, `${label}_${suffix}`);
+    return name;
+  });
+  return {
+    prefix: [
+      ...lowerExpr(value ?? staticIndexExpr(0), ctx, locals, layout.itemType),
+      ...names.toReversed().map((name): Instr => ({ op: "local.set", name })),
+    ],
+    names,
+  };
+}
+
+function lowerHeapArrayStores(
+  ptr: string,
+  index: string,
+  valueNames: string[],
+  layout: HeapItemLayout,
+): Instr[] {
+  return layout.slots.flatMap(({ slot, offset, align }, slotIndex) => [
+    ...lowerHeapItemAddress(ptr, index, layout.stride, offset),
+    { op: "local.get", name: valueNames[slotIndex] ?? valueNames[0] ?? "__heap_missing" },
+    { op: "store", type: slot.wat, align, offset: 0 },
+  ] as Instr[]);
+}
+
+function lowerHeapArrayCopy(
+  destPtr: string,
+  srcPtr: string,
+  len: string,
+  layout: HeapItemLayout,
+): Instr[] {
+  return [
+    { op: "local.get", name: destPtr },
+    { op: "local.get", name: srcPtr },
+    { op: "local.get", name: len },
+    { op: "const", type: "i32", value: layout.stride },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "memory.copy" },
+  ];
+}
+
+function lowerHeapItemAddress(
+  ptr: string,
+  index: string,
+  stride: number,
+  offset: number,
+): Instr[] {
+  const instrs: Instr[] = [
+    { op: "local.get", name: ptr },
+    { op: "local.get", name: index },
+    { op: "const", type: "i32", value: stride },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "binary", wasm: "i32.add" },
+  ];
+  if (offset !== 0) {
+    instrs.push(
+      { op: "const", type: "i32", value: offset },
+      { op: "binary", wasm: "i32.add" },
+    );
+  }
+  return instrs;
+}
+
+function lowerHeapArrayGrowthCapacity(
+  currentCap: string,
+  neededCap: string | undefined,
+  target: string,
+): Instr[] {
+  const doubled: Instr[] = [
+    { op: "local.get", name: currentCap },
+    { op: "const", type: "i32", value: 2 },
+    { op: "binary", wasm: "i32.mul" },
+    { op: "local.tee", name: target },
+    { op: "const", type: "i32", value: 1 },
+    { op: "binary", wasm: "i32.lt_s" },
+    {
+      op: "if",
+      results: ["i32"],
+      thenBody: [{ op: "const", type: "i32", value: 1 }],
+      elseBody: [{ op: "local.get", name: target }],
+    },
+    { op: "local.set", name: target },
+  ];
+  if (!neededCap) return doubled;
+  return [
+    ...doubled,
+    { op: "local.get", name: target },
+    { op: "local.get", name: neededCap },
+    { op: "binary", wasm: "i32.lt_s" },
+    {
+      op: "if",
+      results: ["i32"],
+      thenBody: [{ op: "local.get", name: neededCap }],
+      elseBody: [{ op: "local.get", name: target }],
+    },
+    { op: "local.set", name: target },
+  ];
+}
+
+function lowerHeapAlloc(bytes: Instr[], ctx: LowerContext, locals: Set<string>): Instr[] {
+  const size = heapTemp(ctx, locals, "alloc_size");
+  const current = heapTemp(ctx, locals, "alloc_current");
+  const next = heapTemp(ctx, locals, "alloc_next");
+  return [
+    ...bytes,
+    { op: "const", type: "i32", value: 15 },
+    { op: "binary", wasm: "i32.add" },
+    { op: "const", type: "i32", value: -16 },
+    { op: "binary", wasm: "i32.and" },
+    { op: "local.set", name: size },
+    { op: "const", type: "i32", value: 0 },
+    { op: "load", type: "i32", align: 4, offset: 0 },
+    { op: "local.tee", name: current },
+    { op: "const", type: "i32", value: 0 },
+    { op: "binary", wasm: "i32.eq" },
+    {
+      op: "if",
+      results: ["i32"],
+      thenBody: [{ op: "const", type: "i32", value: 16 }],
+      elseBody: [{ op: "local.get", name: current }],
+    },
+    { op: "local.set", name: current },
+    { op: "local.get", name: current },
+    { op: "local.get", name: size },
+    { op: "binary", wasm: "i32.add" },
+    { op: "local.set", name: next },
+    { op: "const", type: "i32", value: 0 },
+    { op: "local.get", name: next },
+    { op: "store", type: "i32", align: 4, offset: 0 },
+    { op: "local.get", name: current },
+  ];
+}
+
+function heapTemp(ctx: LowerContext, locals: Set<string>, label: string): string {
+  const name = `__heap_${label}${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name, type: "i32" });
+  locals.add(name);
+  return name;
+}
+
+function alignTo(value: number, align: number): number {
+  return Math.ceil(value / align) * align;
+}
+
 function lowerTemporalIntrinsic(
   expr: Extract<Expr, { kind: "call" }>,
   ctx: LowerContext,
@@ -14414,6 +14947,51 @@ function usesBranchIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
   return visit(expr);
 }
 
+function usesHeapArrayIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {
+  const visit = (item: Expr | Statement | undefined): boolean => {
+    if (!item) return false;
+    switch (item.kind) {
+      case "do":
+        return visit(item.expr);
+      case "let":
+        return visit(item.value);
+      case "destructure_let":
+        return visit(item.value);
+      case "proof_const":
+      case "literal":
+      case "var":
+      case "placeholder":
+        return false;
+      case "const_fn":
+        return visit(item.body);
+      case "call":
+        return (item.callee.kind === "var" &&
+          isHeapArrayIntrinsic(item.callee.name, functions)) ||
+          visit(item.callee) || item.args.some(visit);
+      case "index":
+        return visit(item.target) || visit(item.index);
+      case "binary":
+        return visit(item.left) || visit(item.right);
+      case "pipe_bind":
+        return visit(item.value) || visit(item.body);
+      case "match":
+        return visit(item.value) || item.arms.some((arm) => visit(arm.value));
+      case "shape":
+      case "product_constructor":
+        return item.slots.some((slot) => visit(slot.value));
+      case "range":
+        return visit(item.start) || visit(item.end);
+      case "static_for_slots":
+        return visit(item.value);
+      case "field":
+        return visit(item.value) || visit(item.key);
+      case "block":
+        return item.statements.some(visit) || visit(item.expr);
+    }
+  };
+  return visit(expr);
+}
+
 function isTemporalIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
   if (
     name === "@temporal_alloc" || name === "@temporal_handle" ||
@@ -14436,6 +15014,19 @@ function isBranchIntrinsic(name: string, functions: Map<string, FnDecl>): boolea
   return id === "branch_handle" || id === "branch_handle_ptr" ||
     id === "branch_mark" || id === "branch_is_branched" ||
     id === "branch_ensure_editable" || id === "branch_materialize";
+}
+
+function isHeapArrayIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
+  if (
+    name === "@heap_array_new" || name === "@heap_array_ensure_capacity" ||
+    name === "@heap_array_get" || name === "@heap_array_set" ||
+    name === "@heap_array_push"
+  ) return true;
+  const fn = functions.get(name);
+  const id = fn ? intrinsicWrapperId(fn) : undefined;
+  return id === "heap_array_new" || id === "heap_array_ensure_capacity" ||
+    id === "heap_array_get" || id === "heap_array_set" ||
+    id === "heap_array_push";
 }
 
 function localDecls(locals: BackendLocal[]): number[] {

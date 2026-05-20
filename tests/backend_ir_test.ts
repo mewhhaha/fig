@@ -973,7 +973,7 @@ Deno.test("release inlines generated pure const-function helpers", async () => {
     }
 
     pub fn main(seed: i32) -> i32 {
-      do @monad(Id) {
+      do @monad(Id(_)) {
         x <- get(seed);
         let y = x + 3;
         z <- add_id(y);
@@ -1054,6 +1054,127 @@ Deno.test("public exports inline single-use private scalar tail loops", async ()
     new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 5050);
+});
+
+Deno.test("private scalar tail-continuation helpers expose self-tail loops", async () => {
+  const source = `
+    fn sum_continue(n: i32, acc: i32) -> i32 {
+      match n == 0 {
+        true => acc,
+        false => sum(n - 1, acc + n + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8)
+      }
+    }
+    fn sum(n: i32, acc: i32) -> i32 {
+      sum_continue(n, acc)
+    }
+    pub fn main() -> i32 { sum(4, 0) }
+  `;
+  const wat = await watFromSource(source, { optMode: "release" });
+  const sum = wat.match(/\(func \$sum[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(/\bloop\b/.test(sum));
+  assert(!wat.includes("call $sum_continue"));
+  assert(!sum.includes("call $sum"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 154);
+});
+
+Deno.test("transparent monad-stack tail continuation lowers to a loop", async () => {
+  const source = `
+    const monad = @import("prelude.monad");
+
+    type fn Error() -> type { i32 }
+    type fn Env() -> type { i32 }
+    type fn Store() -> type { i32 }
+
+    type fn Either(error: type, value: type) -> type { value }
+    fn Either::pure(value: a) -> Either(error, a) { value }
+    fn Either::bind(
+      value: Either(error, a),
+      const f: fn(x: a) -> Either(error, b)
+    ) -> Either(error, b) {
+      match value == 0 { true => 0, false => f(value) }
+    }
+
+    type fn Stack(value: type) -> type {
+      Either(Error, monad.Reader(Env, monad.State(Store, value)))
+    }
+    fn Stack::pure(value: a) -> Stack(a) {
+      Either::pure(monad.Reader::pure(monad.State::pure(value)))
+    }
+    fn Stack::bind(value: Stack(a), const f: fn(x: a) -> Stack(b)) -> Stack(b) {
+      Either::bind(value, f)
+    }
+
+    fn pack(env: Env, store: Store) -> i32 { store * 8 + env }
+    fn frame_env(frame: i32) -> Env { frame % 8 }
+    fn frame_store(frame: i32) -> Store { frame / 8 }
+
+    fn start(env: Env, store: Store) -> Stack(i32) { Stack::pure(pack(env, store)) }
+    fn ask_frame(frame: i32) -> Stack(i32) {
+      let env: monad.Reader(Env, Env) = monad.Reader::ask(frame_env(frame));
+      Stack::pure(pack(env, frame_store(frame)))
+    }
+    fn get_frame(frame: i32) -> Stack(i32) {
+      let store: monad.State(Store, Store) = monad.State::get(frame_store(frame));
+      Stack::pure(pack(frame_env(frame), store))
+    }
+    fn bump_frame(frame: i32) -> Stack(i32) {
+      Stack::pure(pack(frame_env(frame), frame_store(frame) + frame_env(frame)))
+    }
+    fn guard_frame(frame: i32) -> Stack(i32) {
+      match frame_store(frame) < 2000000000 { true => Stack::pure(frame), false => 0 }
+    }
+    fn put_frame(frame: i32) -> Stack(i32) {
+      let stored: monad.State(Store, Store) = monad.State::put(frame_store(frame), frame_store(frame));
+      Stack::pure(pack(frame_env(frame), stored))
+    }
+
+    fn stack_step(env: Env, store: Store) -> Stack(i32) {
+      do @monad(Stack(_)) {
+        frame <- start(env, store);
+        asked <- ask_frame(frame);
+        current <- get_frame(asked);
+        bumped <- bump_frame(current);
+        checked <- guard_frame(bumped);
+        put_frame(checked)
+      }
+    }
+
+    fn stack_continue(i: i32, limit: i32, env: Env, stepped: Stack(i32)) -> Stack(i32) {
+      match stepped == 0 {
+        true => 0,
+        false => stack_loop(i + 1, limit, env, frame_store(stepped))
+      }
+    }
+
+    fn stack_loop(i: i32, limit: i32, env: Env, store: Store) -> Stack(i32) {
+      match i < limit {
+        true => stack_continue(i, limit, env, stack_step(env, store)),
+        false => Stack::pure(pack(env, store))
+      }
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      let env: Env = 3;
+      let done = stack_loop(0, limit, env, seed);
+      match done == 0 { true => 0, false => frame_store(done) }
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const stackLoop = wat.match(/\(func \$stack_loop[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(/\bloop\b/.test(stackLoop));
+  assert(!stackLoop.includes("call $stack_loop"));
+  assert(!wat.includes("call $stack_continue"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1, 4), 13);
 });
 
 Deno.test("tail-loop lowering skips unchanged scalar parameters", async () => {
@@ -1501,16 +1622,16 @@ Deno.test("packed fixed-array swap stays loop-lowered without helpers", async ()
   assertEquals((instance.exports.main as CallableFunction)(), 4321);
 });
 
-Deno.test("user let-shadowed fixed-array edit chain lowers like helper swap", async () => {
+Deno.test("user fixed-array edit chain lowers like helper swap", async () => {
   const source = `
     const layout = @import("prelude.layout");
     type fn Perm4() -> type { layout.InlineArray(4, u3) }
     fn user_swap(xs: Perm4, left: i32, right: i32) -> Perm4 {
       let a = xs[left];
       let b = xs[right];
-      let xs: Perm4 = [...xs, [left]: b];
-      let xs: Perm4 = [...xs, [right]: a];
-      xs
+      let with_left: Perm4 = [...xs, [left]: b];
+      let swapped: Perm4 = [...with_left, [right]: a];
+      swapped
     }
     fn reverse_loop(xs: Perm4, left: i32, right: i32) -> Perm4 {
       match left < right {

@@ -922,6 +922,8 @@ function referencedDeclarationNames(
       case "type_static_ref":
         add(expr.name);
         return;
+      case "type_hole":
+        return;
       case "type_call":
         visitTypeExpr(expr.callee);
         expr.args.forEach(visitTypeExpr);
@@ -1382,6 +1384,7 @@ function collectTypeBlockNames(block: TypeBlock): string[] {
 
 function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>): Declaration {
   if (decl.kind === "fn") {
+    const locals = paramLocalNames(decl.params);
     return withMeta(decl, {
       ...decl,
       imported: true,
@@ -1400,10 +1403,11 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
         pattern: param.pattern ? qualifyParamPattern(param.pattern, alias, names) : undefined,
       })),
       returnType: decl.returnType ? qualifyTypeSource(decl.returnType, alias, names) : undefined,
-      body: qualifyExpr(decl.body, alias, names) as FnDecl["body"],
+      body: qualifyExpr(decl.body, alias, names, locals) as FnDecl["body"],
     });
   }
   if (decl.kind === "contract") {
+    const locals = paramLocalNames(decl.params);
     return withMeta(decl, {
       ...decl,
       name: qualifyName(decl.name, alias),
@@ -1419,7 +1423,7 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
         type: qualifyTypeSource(param.type, alias, names),
         pattern: param.pattern ? qualifyParamPattern(param.pattern, alias, names) : undefined,
       })),
-      body: qualifyExpr(decl.body, alias, names) as typeof decl.body,
+      body: qualifyExpr(decl.body, alias, names, locals) as typeof decl.body,
     });
   }
   if (decl.kind === "type") return qualifyTypeDecl(decl, alias, names);
@@ -1470,54 +1474,126 @@ function qualifyTypeBlock(block: TypeBlock, alias: string, names: Set<string>): 
   });
 }
 
-function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
+function paramLocalNames(params: { name: string; pattern?: ParamPattern }[]): Set<string> {
+  const locals = new Set<string>();
+  for (const param of params) {
+    locals.add(param.name);
+    collectParamPatternBindings(param.pattern, locals);
+  }
+  return locals;
+}
+
+function collectParamPatternBindings(pattern: ParamPattern | undefined, locals: Set<string>): void {
+  if (!pattern) return;
+  if (pattern.kind === "binding") {
+    locals.add(pattern.name);
+    return;
+  }
+  if (pattern.kind === "tuple") {
+    for (const item of pattern.items) collectParamPatternBindings(item, locals);
+    return;
+  }
+  if (pattern.kind === "constructor") {
+    for (const item of pattern.args) collectParamPatternBindings(item, locals);
+  }
+}
+
+function withLocal(locals: Set<string>, name: string): Set<string> {
+  const next = new Set(locals);
+  next.add(name);
+  return next;
+}
+
+function withLocals(locals: Set<string>, names: string[]): Set<string> {
+  const next = new Set(locals);
+  for (const name of names) next.add(name);
+  return next;
+}
+
+function isLocalReference(name: string, locals: Set<string>): boolean {
+  for (const local of locals) {
+    if (name === local || name.startsWith(`${local}.`) || name.startsWith(`${local}::`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function qualifyReferenceExpr(
+  name: string,
+  alias: string,
+  names: Set<string>,
+  locals: Set<string>,
+): string {
+  if ((name.includes(".") || name.includes("::")) && names.has(name)) {
+    return qualifyReference(name, alias, names);
+  }
+  return isLocalReference(name, locals) ? name : qualifyReference(name, alias, names);
+}
+
+function qualifyExpr(
+  expr: Expr,
+  alias: string,
+  names: Set<string>,
+  locals: Set<string> = new Set(),
+): Expr {
   switch (expr.kind) {
     case "do":
       return withMeta(expr, {
         ...expr,
-        statements: expr.statements.map((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
-            stmt.kind === "destructure_let"
-            ? { ...stmt, value: qualifyExpr(stmt.value, alias, names) }
-            : stmt
-        ),
-        expr: expr.expr ? qualifyExpr(expr.expr, alias, names) : undefined,
+        strategy: {
+          ...expr.strategy,
+          effect: qualifyTypeExpr(expr.strategy.effect, alias, names),
+        },
+        ...qualifyDoBody(expr.statements, expr.expr, alias, names, locals),
       });
     case "var":
-      return withMeta(expr, { ...expr, name: qualifyReference(expr.name, alias, names) });
+      return withMeta(expr, {
+        ...expr,
+        name: qualifyReferenceExpr(expr.name, alias, names, locals),
+      });
     case "call":
       return withMeta(expr, {
         ...expr,
-        callee: qualifyExpr(expr.callee, alias, names),
-        args: expr.args.map((arg) => qualifyExpr(arg, alias, names)),
+        callee: qualifyExpr(expr.callee, alias, names, locals),
+        args: expr.args.map((arg) => qualifyExpr(arg, alias, names, locals)),
       });
     case "const_fn":
-      return withMeta(expr, { ...expr, body: qualifyExpr(expr.body, alias, names) });
+      return withMeta(expr, {
+        ...expr,
+        body: qualifyExpr(expr.body, alias, names, withLocals(locals, expr.params)),
+      });
     case "index":
       return withMeta(expr, {
         ...expr,
-        target: qualifyExpr(expr.target, alias, names),
-        index: qualifyExpr(expr.index, alias, names),
+        target: qualifyExpr(expr.target, alias, names, locals),
+        index: qualifyExpr(expr.index, alias, names, locals),
       });
     case "binary":
       return withMeta(expr, {
         ...expr,
-        left: qualifyExpr(expr.left, alias, names),
-        right: qualifyExpr(expr.right, alias, names),
+        left: qualifyExpr(expr.left, alias, names, locals),
+        right: qualifyExpr(expr.right, alias, names, locals),
       });
     case "pipe_bind":
       return withMeta(expr, {
         ...expr,
-        value: qualifyExpr(expr.value, alias, names),
-        body: qualifyExpr(expr.body, alias, names),
+        value: qualifyExpr(expr.value, alias, names, locals),
+        body: qualifyExpr(expr.body, alias, names, withLocal(locals, expr.name)),
       });
     case "match":
       return withMeta(expr, {
         ...expr,
-        value: qualifyExpr(expr.value, alias, names),
-        arms: expr.arms.map((arm) =>
-          withMeta(arm, { ...arm, value: qualifyExpr(arm.value, alias, names) })
-        ),
+        value: qualifyExpr(expr.value, alias, names, locals),
+        arms: expr.arms.map((arm) => {
+          const armLocals = new Set(locals);
+          collectParamPatternBindings(arm.pattern, armLocals);
+          return withMeta(arm, {
+            ...arm,
+            pattern: qualifyParamPattern(arm.pattern, alias, names),
+            value: qualifyExpr(arm.value, alias, names, armLocals),
+          });
+        }),
       });
     case "shape":
       return withMeta(expr, {
@@ -1525,70 +1601,141 @@ function qualifyExpr(expr: Expr, alias: string, names: Set<string>): Expr {
         slots: expr.slots.map((slot) =>
           withMeta(slot, {
             ...slot,
-            value: qualifyExpr(slot.value, alias, names),
+            index: slot.index ? qualifyExpr(slot.index, alias, names, locals) : undefined,
+            value: qualifyExpr(slot.value, alias, names, locals),
           })
         ),
       });
-    case "static_for_slots":
+    case "static_for_slots": {
+      const valueLocals = withLocal(locals, expr.iterator);
+      const nextValueLocals = expr.valueIterator
+        ? withLocal(valueLocals, expr.valueIterator)
+        : valueLocals;
       return withMeta(expr, {
         ...expr,
-        source: qualifyStaticForSource(expr.source, alias, names),
-        value: qualifyExpr(expr.value, alias, names),
+        source: qualifyStaticForSource(expr.source, alias, names, locals),
+        value: qualifyExpr(expr.value, alias, names, nextValueLocals),
       });
+    }
     case "product_constructor":
       return withMeta(expr, {
         ...expr,
-        constructor: qualifyReference(expr.constructor, alias, names),
+        constructor: qualifyReferenceExpr(expr.constructor, alias, names, locals),
         slots: expr.slots.map((slot) =>
           withMeta(slot, {
             ...slot,
-            value: qualifyExpr(slot.value, alias, names),
+            index: slot.index ? qualifyExpr(slot.index, alias, names, locals) : undefined,
+            value: qualifyExpr(slot.value, alias, names, locals),
           })
         ),
       });
     case "range":
       return withMeta(expr, {
         ...expr,
-        start: qualifyExpr(expr.start, alias, names),
-        end: qualifyExpr(expr.end, alias, names),
+        start: qualifyExpr(expr.start, alias, names, locals),
+        end: qualifyExpr(expr.end, alias, names, locals),
       });
     case "field":
       return withMeta(expr, {
         ...expr,
-        value: qualifyExpr(expr.value, alias, names),
-        key: qualifyExpr(expr.key, alias, names),
+        value: qualifyExpr(expr.value, alias, names, locals),
+        key: qualifyExpr(expr.key, alias, names, locals),
       });
     case "block":
-      return withMeta(expr, {
-        ...expr,
-        statements: expr.statements.map((stmt) => {
-          if (stmt.kind === "let") {
-            return withMeta(stmt, {
-              ...stmt,
-              type: stmt.type ? qualifyTypeSource(stmt.type, alias, names) : undefined,
-              value: qualifyExpr(stmt.value, alias, names),
-            });
-          }
-          if (stmt.kind === "destructure_let") {
-            return withMeta(stmt, { ...stmt, value: qualifyExpr(stmt.value, alias, names) });
-          }
-          if (stmt.kind === "proof_const") {
-            return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
-          }
-          return stmt;
-        }),
-        expr: expr.expr ? qualifyExpr(expr.expr, alias, names) : undefined,
-      });
+      return withMeta(expr, { ...expr, ...qualifyBlockBody(expr, alias, names, locals) });
     case "literal":
     case "placeholder":
       return expr;
   }
 }
 
+function qualifyBlockBody(
+  block: Extract<Expr, { kind: "block" }>,
+  alias: string,
+  names: Set<string>,
+  locals: Set<string>,
+): Pick<Extract<Expr, { kind: "block" }>, "statements" | "expr"> {
+  let currentLocals = new Set(locals);
+  const statements = block.statements.map((stmt) => {
+    if (stmt.kind === "let") {
+      const qualified = withMeta(stmt, {
+        ...stmt,
+        type: stmt.type ? qualifyTypeSource(stmt.type, alias, names) : undefined,
+        value: qualifyExpr(stmt.value, alias, names, currentLocals),
+      });
+      currentLocals = withLocal(currentLocals, stmt.name);
+      return qualified;
+    }
+    if (stmt.kind === "destructure_let") {
+      const qualified = withMeta(stmt, {
+        ...stmt,
+        value: qualifyExpr(stmt.value, alias, names, currentLocals),
+      });
+      currentLocals = withLocals(currentLocals, stmt.names);
+      return qualified;
+    }
+    return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
+  });
+  return {
+    statements,
+    expr: block.expr ? qualifyExpr(block.expr, alias, names, currentLocals) : undefined,
+  };
+}
+
+function qualifyDoBody(
+  statements: Extract<Expr, { kind: "do" }>["statements"],
+  expr: Expr | undefined,
+  alias: string,
+  names: Set<string>,
+  locals: Set<string>,
+): Pick<Extract<Expr, { kind: "do" }>, "statements" | "expr"> {
+  let currentLocals = new Set(locals);
+  const qualifiedStatements = statements.map((stmt) => {
+    if (stmt.kind === "do_bind") {
+      const qualified = withMeta(stmt, {
+        ...stmt,
+        value: qualifyExpr(stmt.value, alias, names, currentLocals),
+      });
+      currentLocals = withLocal(currentLocals, stmt.name);
+      return qualified;
+    }
+    if (stmt.kind === "do_expr") {
+      return withMeta(stmt, {
+        ...stmt,
+        value: qualifyExpr(stmt.value, alias, names, currentLocals),
+      });
+    }
+    if (stmt.kind === "let") {
+      const qualified = withMeta(stmt, {
+        ...stmt,
+        type: stmt.type ? qualifyTypeSource(stmt.type, alias, names) : undefined,
+        value: qualifyExpr(stmt.value, alias, names, currentLocals),
+      });
+      currentLocals = withLocal(currentLocals, stmt.name);
+      return qualified;
+    }
+    if (stmt.kind === "destructure_let") {
+      const qualified = withMeta(stmt, {
+        ...stmt,
+        value: qualifyExpr(stmt.value, alias, names, currentLocals),
+      });
+      currentLocals = withLocals(currentLocals, stmt.names);
+      return qualified;
+    }
+    return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
+  });
+  return {
+    statements: qualifiedStatements,
+    expr: expr ? qualifyExpr(expr, alias, names, currentLocals) : undefined,
+  };
+}
+
 function qualifyTypeExpr(expr: TypeExpr, alias: string, names: Set<string>): TypeExpr {
   switch (expr.kind) {
     case "type_ref":
       return withMeta(expr, { ...expr, name: qualifyReference(expr.name, alias, names) });
+    case "type_hole":
+      return expr;
     case "type_call":
       return withMeta(expr, {
         ...expr,
@@ -1638,14 +1785,15 @@ function qualifyStaticForSource(
   source: StaticForSource,
   alias: string,
   names: Set<string>,
+  locals: Set<string> = new Set(),
 ): StaticForSource {
   return source.kind === "range"
     ? withMeta(source, {
       ...source,
-      start: qualifyExpr(source.start, alias, names),
-      end: qualifyExpr(source.end, alias, names),
+      start: qualifyExpr(source.start, alias, names, locals),
+      end: qualifyExpr(source.end, alias, names, locals),
     })
-    : withMeta(source, { ...source, shape: qualifyExpr(source.shape, alias, names) });
+    : withMeta(source, { ...source, shape: qualifyExpr(source.shape, alias, names, locals) });
 }
 
 function qualifyTypeShape(shape: TypeShape, alias: string, names: Set<string>): TypeShape {
@@ -1725,7 +1873,10 @@ function qualifyTypeSource(source: string, alias: string, names: Set<string>): s
   let result = source;
   for (const name of [...names].sort((a, b) => b.length - a.length)) {
     result = result.replace(
-      new RegExp(`(?<![A-Za-z0-9_.])${escapeRegExp(name)}(?![A-Za-z0-9_])`, "g"),
+      new RegExp(
+        `(?<![A-Za-z0-9_.#])${escapeRegExp(name)}(?![A-Za-z0-9_])(?!\\s*:(?!:))`,
+        "g",
+      ),
       qualifyName(name, alias),
     );
   }

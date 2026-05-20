@@ -1,0 +1,53 @@
+type fn State(state: type, value: type) -> type {
+  value
+}
+
+fn State::pure(value: a) -> State(state, a) {
+  value
+}
+
+fn State::bind(
+  value: State(state, a),
+  const f: fn(x: a) -> State(state, b)
+) -> State(state, b) {
+  f(value)
+}
+
+fn State::get(state_value: state) -> State(state, state) {
+  state_value
+}
+
+fn State::put(_current: state, state_value: state) -> State(state, state) {
+  state_value
+}
+
+fn State::modify(state_value: state, const f: fn(x: state) -> state) -> State(state, state) {
+  f(state_value)
+}
+
+fn State::inspect(state_value: state, const f: fn(x: state) -> a) -> State(state, a) {
+  f(state_value)
+}
+
+type fn Reader(env: type, value: type) -> type {
+  value
+}
+
+fn Reader::pure(value: a) -> Reader(env, a) {
+  value
+}
+
+fn Reader::bind(
+  value: Reader(env, a),
+  const f: fn(x: a) -> Reader(env, b)
+) -> Reader(env, b) {
+  f(value)
+}
+
+fn Reader::ask(env_value: env) -> Reader(env, env) {
+  env_value
+}
+
+fn Reader::asks(env_value: env, const f: fn(x: env) -> a) -> Reader(env, a) {
+  f(env_value)
+}

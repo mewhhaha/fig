@@ -1,0 +1,67 @@
+const option = @import("prelude.option");
+
+fn view(
+  root: root,
+  const getter: fn(root: root) -> value
+) -> value {
+  getter(root)
+}
+
+fn set(
+  root: root,
+  value: value,
+  const setter: fn(root: root, value: value) -> root
+) -> root {
+  setter(root, value)
+}
+
+fn over(
+  root: root,
+  const getter: fn(root: root) -> value,
+  const setter: fn(root: root, value: value) -> root,
+  const step: fn(value: value) -> value
+) -> root {
+  setter(root, step(getter(root)))
+}
+
+fn preview(
+  root: root,
+  const getter: fn(root: root) -> option.core.Option(value)
+) -> option.core.Option(value) {
+  getter(root)
+}
+
+fn view_or(
+  root: root,
+  fallback: value,
+  const getter: fn(root: root) -> option.core.Option(value)
+) -> value {
+  option.core.Option::unwrap_or(
+    getter(root),
+    fallback
+  )
+}
+
+fn set_optional(
+  root: root,
+  value: value,
+  const getter: fn(root: root) -> option.core.Option(value),
+  const setter: fn(root: root, value: value) -> root
+) -> root {
+  match getter(root) {
+    Some => setter(root, value),
+    None => root,
+  }
+}
+
+fn over_optional(
+  root: root,
+  const getter: fn(root: root) -> option.core.Option(value),
+  const setter: fn(root: root, value: value) -> root,
+  const step: fn(value: value) -> value
+) -> root {
+  match getter(root) {
+    Some(value) => setter(root, step(value)),
+    None => root,
+  }
+}

@@ -1,5 +1,6 @@
 const array = @import("prelude.array_static");
 const fun = @import("prelude.function");
+const monad = @import("prelude.monad");
 const operators = @import("prelude.operators");
 const option = @import("prelude.option");
 const result = @import("prelude.result");

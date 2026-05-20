@@ -22,8 +22,8 @@ fn Vec2::score(point: Vec2) -> i32 {
 
 pub fn main() -> i32 {
   let point: Vec2 = Vec2 {x: 1, y: 2};
-  let moved = Vec2::translate(point, 10, 0);
-  let moved = Vec2::translate(moved, 0, 20);
+  let moved_x = Vec2::translate(point, 10, 0);
+  let moved_xy = Vec2::translate(moved_x, 0, 20);
   let words: Words4 = <1, 2, 3, 4>;
-  Vec2::score(point) + Vec2::score(moved) + words[0]
+  Vec2::score(point) + Vec2::score(moved_xy) + words[0]
 }

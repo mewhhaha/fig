@@ -1,0 +1,2217 @@
+const ecs = @import("engine.ecs");
+const canvas = @import("web.canvas");
+const audio = @import("web.audio");
+const asset = @import("web.asset");
+const core = @import("prelude.core");
+const entity_capacity: count = 12;
+const level_y_offset: i32 = 160;
+const level_min_x: i32 = 0 - 16;
+const level_max_x: i32 = 860;
+const killzone_y: i32 = level_y_offset + 141;
+const player_slot: count = 0;
+const input_key_left: i32 = 1;
+const input_key_right: i32 = 2;
+const input_key_jump: i32 = 3;
+const input_key_restart: i32 = 4;
+
+type fn EntityId() -> type {
+  ecs.EntityId()
+}
+
+const atlas_world = canvas.texture(1);
+const atlas_knight = canvas.texture(2);
+const atlas_coin = canvas.texture(3);
+const atlas_fruit = canvas.texture(4);
+const atlas_slime = canvas.texture(5);
+const atlas_platforms = canvas.texture(6);
+const sound_none = audio.sound(0);
+const sound_jump = audio.sound(1);
+const sound_coin = audio.sound(2);
+const sound_hurt = audio.sound(3);
+const sound_power = audio.sound(4);
+const sound_win = audio.sound(5);
+const music_theme = audio.music_track(1);
+const mode_play: i32 = 0;
+const mode_dead: i32 = 1;
+const mode_win: i32 = 2;
+
+type fn Transform2d() -> type {
+  let Transform2d = {x: i32, y: i32, z: i32};
+  struct(Transform2d)
+}
+
+type fn Velocity2d() -> type {
+  let Velocity2d = {
+    x: i32,
+    y: i32
+  };
+  struct(Velocity2d)
+}
+
+type fn Gravity2d() -> type {
+  let Gravity2d = {value: i32};
+  struct(Gravity2d)
+}
+
+type fn Grounded() -> type {
+  let Grounded = {value: i32};
+  struct(Grounded)
+}
+
+type fn PlayerControl() -> type {
+  let PlayerControl = {
+    enabled: i32,
+    speed: i32,
+    jump_impulse: i32
+  };
+  struct(PlayerControl)
+}
+
+type fn Sprite2d() -> type {
+  let Sprite2d = {
+    atlas: asset.Handle(#texture),
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+    w: i32,
+    h: i32,
+    flip_x: i32,
+    z: i32,
+    visible: i32
+  };
+  struct(Sprite2d)
+}
+
+type fn Animation2d() -> type {
+  let Animation2d = {
+    clock_ms: i32
+  };
+  struct(Animation2d)
+}
+
+type fn Collider2d() -> type {
+  let Collider2d = {
+    offset_x: i32,
+    offset_y: i32,
+    w: i32,
+    h: i32,
+    active: i32
+  };
+  struct(Collider2d)
+}
+
+type fn Patrol2d() -> type {
+  let Patrol2d = {
+    active: i32,
+    dir: i32,
+    min_x: i32,
+    max_x: i32
+  };
+  struct(Patrol2d)
+}
+
+type fn Collectible() -> type {
+  let Collectible = {
+    active: i32,
+    collected: i32,
+    sound: asset.Handle(#sound),
+    value: i32
+  };
+  struct(Collectible)
+}
+
+type fn PlayerState() -> type {
+  let PlayerState = {
+    lives: i32,
+    mode: i32,
+    collected: i32,
+    sound: asset.Handle(#sound)
+  };
+  struct(PlayerState)
+}
+
+type fn FrameInput() -> type {
+  let FrameInput = {
+    dt_ms: i32,
+    axis_x: i32,
+    jump: i32,
+    restart: i32
+  };
+  struct(FrameInput)
+}
+
+type fn InputState() -> type {
+  let InputState = {
+    key_left: i32,
+    key_right: i32,
+    key_jump: i32,
+    key_restart: i32,
+    pointer_active: i32,
+    pointer_axis_x: i32,
+    pointer_jump: i32
+  };
+  struct(InputState)
+}
+
+type fn Rect() -> type {
+  let Rect = {x: i32, y: i32, w: i32, h: i32};
+  struct(Rect)
+}
+
+const components = ecs.components({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  gravity: Gravity2d,
+  grounded: Grounded,
+  player_control: PlayerControl,
+  sprite: Sprite2d,
+  animation: Animation2d,
+  collider: Collider2d,
+  patrol: Patrol2d,
+  collectible: Collectible,
+  player_state: PlayerState,
+  input_state: InputState
+});
+
+type fn World() -> type {
+  let ExpectedWorld = @type_slots(ecs.World(components));
+  let World = {
+    entities: ecs.Batch(i32),
+    len: i32,
+    transform: ecs.Batch(Transform2d),
+    velocity: ecs.Batch(Velocity2d),
+    gravity: ecs.Batch(Gravity2d),
+    grounded: ecs.Batch(Grounded),
+    player_control: ecs.Batch(PlayerControl),
+    sprite: ecs.Batch(Sprite2d),
+    animation: ecs.Batch(Animation2d),
+    collider: ecs.Batch(Collider2d),
+    patrol: ecs.Batch(Patrol2d),
+    collectible: ecs.Batch(Collectible),
+    player_state: ecs.Batch(PlayerState),
+    input_state: ecs.Batch(InputState)
+  };
+  let WorldMatchesEcs = @require(
+    World == ExpectedWorld,
+    "brackeys platformer World must match ecs.World"
+  );
+  struct(World)
+}
+
+type fn GameSystems() -> type {
+  ecs.System(World, FrameInput)
+}
+
+type fn EntitySeed() -> type {
+  let EntitySeed = {
+    transform: Transform2d,
+    velocity: Velocity2d,
+    gravity: Gravity2d,
+    grounded: Grounded,
+    player_control: PlayerControl,
+    sprite: Sprite2d,
+    animation: Animation2d,
+    collider: Collider2d,
+    patrol: Patrol2d,
+    collectible: Collectible,
+    player_state: PlayerState,
+    input_state: InputState
+  };
+  struct(EntitySeed)
+}
+
+type fn CollectDelta() -> type {
+  let CollectDelta = {
+    score: i32,
+    sound: asset.Handle(#sound)
+  };
+  struct(CollectDelta)
+}
+
+fn CollectDelta::empty() -> CollectDelta {
+  CollectDelta {score: 0, sound: sound_none}
+}
+
+fn CollectDelta::append(
+  left: CollectDelta,
+  right: CollectDelta
+) -> CollectDelta {
+  CollectDelta {
+    score: left.score + right.score,
+    sound: match right.score > 0 {
+      true => right.sound,
+      false => left.sound,
+    }
+  }
+}
+
+type fn VelocityRow() -> type {
+  struct({
+    velocity: Velocity2d,
+    gravity: Gravity2d,
+    player_control: PlayerControl,
+    grounded: Grounded,
+    input: FrameInput
+  })
+}
+
+const velocity_q: ecs.Query(
+  World,
+  FrameInput,
+  VelocityRow
+) = ecs.query(VelocityRow);
+
+type fn MovementRow() -> type {
+  struct({transform: Transform2d, velocity: Velocity2d, input: FrameInput})
+}
+
+const movement_q: ecs.Query(
+  World,
+  FrameInput,
+  MovementRow
+) = ecs.query(MovementRow);
+
+type fn GroundedRow() -> type {
+  struct({grounded: Grounded})
+}
+
+const grounded_q: ecs.Query(
+  World,
+  FrameInput,
+  GroundedRow
+) = ecs.query(GroundedRow);
+
+type fn CollisionVelocityRow() -> type {
+  struct({
+    transform: Transform2d,
+    velocity: Velocity2d,
+    gravity: Gravity2d,
+    grounded: Grounded,
+    collider: Collider2d,
+    input: FrameInput
+  })
+}
+
+const collision_velocity_q: ecs.Query(
+  World,
+  FrameInput,
+  CollisionVelocityRow
+) = ecs.query(CollisionVelocityRow);
+
+type fn CollisionGroundedRow() -> type {
+  struct({
+    transform: Transform2d,
+    velocity: Velocity2d,
+    gravity: Gravity2d,
+    grounded: Grounded,
+    collider: Collider2d,
+    input: FrameInput
+  })
+}
+
+const collision_grounded_q: ecs.Query(
+  World,
+  FrameInput,
+  CollisionGroundedRow
+) = ecs.query(CollisionGroundedRow);
+
+type fn CollisionTransformRow() -> type {
+  struct({
+    transform: Transform2d,
+    velocity: Velocity2d,
+    gravity: Gravity2d,
+    grounded: Grounded,
+    collider: Collider2d,
+    input: FrameInput
+  })
+}
+
+const collision_transform_q: ecs.Query(
+  World,
+  FrameInput,
+  CollisionTransformRow
+) = ecs.query(CollisionTransformRow);
+
+type fn PatrolVelocityRow() -> type {
+  struct({transform: Transform2d, velocity: Velocity2d, patrol: Patrol2d})
+}
+
+const patrol_velocity_q: ecs.Query(
+  World,
+  FrameInput,
+  PatrolVelocityRow
+) = ecs.query(PatrolVelocityRow);
+
+type fn PatrolStateRow() -> type {
+  struct({transform: Transform2d, velocity: Velocity2d, patrol: Patrol2d})
+}
+
+const patrol_state_q: ecs.Query(
+  World,
+  FrameInput,
+  PatrolStateRow
+) = ecs.query(PatrolStateRow);
+
+type fn PlayerStateRow() -> type {
+  struct({player_state: PlayerState, player_control: PlayerControl})
+}
+
+const clear_sound_q: ecs.Query(
+  World,
+  FrameInput,
+  PlayerStateRow
+) = ecs.query(PlayerStateRow);
+const player_collect_q: ecs
+  .Query(World, FrameInput, PlayerStateRow) = ecs
+  .query(PlayerStateRow);
+const win_q: ecs
+  .Query(World, FrameInput, PlayerStateRow) = ecs
+  .query(PlayerStateRow);
+
+type fn CollectibleRow() -> type {
+  struct({collectible: Collectible, transform: Transform2d, collider: Collider2d})
+}
+
+const collectible_q: ecs.Query(
+  World,
+  FrameInput,
+  CollectibleRow
+) = ecs.query(CollectibleRow);
+
+type fn CollectibleSpriteRow() -> type {
+  struct({sprite: Sprite2d, collectible: Collectible, transform: Transform2d, collider: Collider2d})
+}
+
+const collectible_sprite_q: ecs.Query(
+  World,
+  FrameInput,
+  CollectibleSpriteRow
+) = ecs.query(CollectibleSpriteRow);
+
+type fn HazardTransformRow() -> type {
+  struct({transform: Transform2d, player_control: PlayerControl, collider: Collider2d})
+}
+
+const hazard_transform_q: ecs.Query(
+  World,
+  FrameInput,
+  HazardTransformRow
+) = ecs.query(HazardTransformRow);
+
+type fn HazardVelocityRow() -> type {
+  struct({
+    velocity: Velocity2d,
+    player_control: PlayerControl,
+    transform: Transform2d,
+    collider: Collider2d
+  })
+}
+
+const hazard_velocity_q: ecs.Query(
+  World,
+  FrameInput,
+  HazardVelocityRow
+) = ecs.query(HazardVelocityRow);
+
+type fn HazardGroundedRow() -> type {
+  struct({
+    grounded: Grounded,
+    player_control: PlayerControl,
+    transform: Transform2d,
+    collider: Collider2d
+  })
+}
+
+const hazard_grounded_q: ecs.Query(
+  World,
+  FrameInput,
+  HazardGroundedRow
+) = ecs.query(HazardGroundedRow);
+
+type fn HazardStateRow() -> type {
+  struct({
+    player_state: PlayerState,
+    player_control: PlayerControl,
+    transform: Transform2d,
+    collider: Collider2d
+  })
+}
+
+const hazard_state_q: ecs.Query(
+  World,
+  FrameInput,
+  HazardStateRow
+) = ecs.query(HazardStateRow);
+
+type fn AnimationTickRow() -> type {
+  struct({animation: Animation2d, input: FrameInput})
+}
+
+const animation_tick_q: ecs.Query(
+  World,
+  FrameInput,
+  AnimationTickRow
+) = ecs.query(AnimationTickRow);
+
+type fn AnimationRow() -> type {
+  struct({
+    sprite: Sprite2d,
+    animation: Animation2d,
+    velocity: Velocity2d,
+    grounded: Grounded,
+    player_control: PlayerControl,
+    patrol: Patrol2d
+  })
+}
+
+const animation_q: ecs.Query(
+  World,
+  FrameInput,
+  AnimationRow
+) = ecs.query(AnimationRow);
+const not_grounded: Grounded = Grounded {value: 0};
+
+fn sprite_region(
+  atlas: asset.Handle(#texture),
+  sx: i32,
+  sy: i32,
+  sw: i32,
+  sh: i32,
+  w: i32,
+  h: i32,
+  z: i32
+) -> Sprite2d {
+  Sprite2d {
+    atlas: atlas,
+    sx: sx,
+    sy: sy,
+    sw: sw,
+    sh: sh,
+    w: w,
+    h: h,
+    flip_x: 0,
+    z: z,
+    visible: 1
+  }
+}
+
+fn sprite(
+  atlas: asset.Handle(#texture),
+  sw: i32,
+  sh: i32,
+  w: i32,
+  h: i32,
+  z: i32
+) -> Sprite2d {
+  sprite_region(atlas, 0, 0, sw, sh, w, h, z)
+}
+
+fn collider(
+  offset_x: i32,
+  offset_y: i32,
+  w: i32,
+  h: i32
+) -> Collider2d {
+  Collider2d {offset_x: offset_x, offset_y: offset_y, w: w, h: h, active: 1}
+}
+
+fn patrol(dir: i32, min_x: i32, max_x: i32) -> Patrol2d {
+  Patrol2d {active: 1, dir: dir, min_x: min_x, max_x: max_x}
+}
+
+fn collectible(
+  sound: asset.Handle(#sound),
+  value: i32
+) -> Collectible {
+  Collectible {active: 1, collected: 0, sound: sound, value: value}
+}
+
+const no_input_state: InputState = InputState {
+  key_left: 0,
+  key_right: 0,
+  key_jump: 0,
+  key_restart: 0,
+  pointer_active: 0,
+  pointer_axis_x: 0,
+  pointer_jump: 0
+};
+
+fn player_state(lives: i32) -> PlayerState {
+  PlayerState {lives: lives, mode: mode_play, collected: 0, sound: sound_none}
+}
+
+fn empty_world() -> World {
+  {
+    entities: ecs.batch_with_capacity(
+      i32,
+      entity_capacity
+    ),
+    len: 0,
+    transform: ecs.batch_with_capacity(
+      Transform2d,
+      entity_capacity
+    ),
+    velocity: ecs.batch_with_capacity(
+      Velocity2d,
+      entity_capacity
+    ),
+    gravity: ecs.batch_with_capacity(
+      Gravity2d,
+      entity_capacity
+    ),
+    grounded: ecs.batch_with_capacity(
+      Grounded,
+      entity_capacity
+    ),
+    player_control: ecs.batch_with_capacity(
+      PlayerControl,
+      entity_capacity
+    ),
+    sprite: ecs.batch_with_capacity(
+      Sprite2d,
+      entity_capacity
+    ),
+    animation: ecs.batch_with_capacity(
+      Animation2d,
+      entity_capacity
+    ),
+    collider: ecs.batch_with_capacity(
+      Collider2d,
+      entity_capacity
+    ),
+    patrol: ecs.batch_with_capacity(
+      Patrol2d,
+      entity_capacity
+    ),
+    collectible: ecs.batch_with_capacity(
+      Collectible,
+      entity_capacity
+    ),
+    player_state: ecs.batch_with_capacity(
+      PlayerState,
+      entity_capacity
+    ),
+    input_state: ecs.batch_with_capacity(
+      InputState,
+      entity_capacity
+    )
+  }
+}
+
+fn entity_seed(
+  transform: Transform2d,
+  sprite: Sprite2d,
+  collider: Collider2d
+) -> EntitySeed {
+  EntitySeed {
+    ... @empty(EntitySeed),
+    transform: transform,
+    sprite: sprite,
+    collider: collider
+  }
+}
+
+fn player_entity_at(x: i32, y: i32) -> EntitySeed {
+  EntitySeed {
+    ... entity_seed(
+      Transform2d {x: x, y: y, z: 5},
+      sprite(atlas_knight, 32, 32, 32, 32, 5),
+      collider(11, 18, 10, 10)
+    ),
+    gravity: Gravity2d {value: 900},
+    player_control: PlayerControl {enabled: 1, speed: 130, jump_impulse: 300},
+    player_state: player_state(3)
+  }
+}
+
+fn player_entity() -> EntitySeed {
+  player_entity_at(18, 169)
+}
+
+fn slime_entity_at(
+  x: i32,
+  y: i32,
+  min_x: i32,
+  max_x: i32
+) -> EntitySeed {
+  EntitySeed {
+    ... entity_seed(
+      Transform2d {x: x, y: y, z: 4},
+      sprite_region(
+        atlas_slime,
+        0,
+        24,
+        24,
+        24,
+        24,
+        24,
+        4
+      ),
+      collider(7, 10, 10, 14)
+    ),
+    velocity: Velocity2d {x: 0 - 60, y: 0},
+    patrol: patrol(0 - 1, min_x, max_x)
+  }
+}
+
+fn slime_entity() -> EntitySeed {
+  slime_entity_at(517, 217, 496, 560)
+}
+
+fn coin_entity(x: i32, y: i32) -> EntitySeed {
+  EntitySeed {
+    ... entity_seed(
+      Transform2d {x: x, y: y, z: 4},
+      sprite(atlas_coin, 16, 16, 16, 16, 4),
+      collider(3, 3, 10, 10)
+    ),
+    collectible: collectible(sound_coin, 1)
+  }
+}
+
+pub fn init_world() -> World {
+  let world: World = empty_world();
+  do @monad(ecs.Command(World)) {
+    ecs.spawn(player_entity());
+    ecs.spawn(slime_entity());
+    ecs.spawn(coin_entity(65, 220));
+    ecs.spawn(coin_entity(209, 221));
+    ecs.spawn(coin_entity(224, 221));
+    ecs.spawn(coin_entity(96, 108));
+    ecs.spawn(coin_entity(495, 189));
+    ecs.spawn(coin_entity(749, 127));
+    ecs.spawn(coin_entity(768, 127));
+    ecs.spawn(coin_entity(787, 127));
+    ecs.spawn(coin_entity(576, 44));
+  }
+}
+
+fn clamp(value: i32, low: i32, high: i32) -> i32 {
+  let below = value < low;
+  let above = value > high;
+  match (below, above) {
+    true, _ => low,
+    false, true => high,
+    false, false => value
+  }
+}
+
+fn bool_i32(value: bool) -> i32 {
+  match value {
+    true => 1,
+    false => 0
+  }
+}
+
+fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+  Rect {x: x, y: y, w: w, h: h}
+}
+
+fn rect_for_entity(
+  transform: Transform2d,
+  collider: Collider2d
+) -> Rect {
+  rect(
+    transform.x + collider.offset_x,
+    transform.y + collider.offset_y,
+    collider.w,
+    collider.h
+  )
+}
+
+fn overlaps(a: Rect, b: Rect) -> bool {
+  let a_left_of_b_right = a.x < b.x + b.w;
+  let b_left_of_a_right = b.x < a.x + a.w;
+  let a_above_b_bottom = a.y < b.y + b.h;
+  let b_above_a_bottom = b.y < a.y + a.h;
+  match (
+    a_left_of_b_right,
+    b_left_of_a_right,
+    a_above_b_bottom,
+    b_above_a_bottom
+  ) {
+    true, true, true, true => true,
+    _ => false
+  }
+}
+
+fn horizontal_overlap_rect(
+  x: i32,
+  w: i32,
+  platform: Rect
+) -> bool {
+  let right_of_left_edge = x + w > platform.x;
+  let left_of_right_edge = x < platform.x + platform.w;
+  match (right_of_left_edge, left_of_right_edge) {
+    true, true => true,
+    _ => false
+  }
+}
+
+fn landed_on_rect(
+  x: i32,
+  y: i32,
+  previous_y: i32,
+  w: i32,
+  h: i32,
+  platform: Rect
+) -> bool {
+  let horizontal = horizontal_overlap_rect(
+    x,
+    w,
+    platform
+  );
+  let reaches_platform = y + h >= platform.y;
+  let was_above_platform = previous_y + h <= platform.y;
+  match (
+    horizontal,
+    reaches_platform,
+    was_above_platform
+  ) {
+    true, true, true => true,
+    _ => false
+  }
+}
+
+const no_land_y: i32 = 100000;
+const level_solid_count: count = 44;
+const level_solid_tile: i32 = 0;
+const level_solid_platform: i32 = 1;
+const spike_rect: Rect = rect(0, 10000, 0, 0);
+
+type fn LevelSolid() -> type {
+  let LevelSolid = {
+    kind: i32,
+    bounds: Rect
+  };
+  struct(LevelSolid)
+}
+
+fn tile_solid(x: i32, y: i32, w: i32) -> LevelSolid {
+  LevelSolid {
+    kind: level_solid_tile,
+    bounds: rect(x, y, w, 16)
+  }
+}
+
+fn scene_platform(x: i32, y: i32, w: i32) -> LevelSolid {
+  LevelSolid {
+    kind: level_solid_platform,
+    bounds: rect(x, y, w, 8)
+  }
+}
+
+fn level_solid(index: i32) -> LevelSolid {
+  match index {
+    0 => tile_solid(480, 0, 16),
+    1 => tile_solid(464, 16, 16),
+    2 => tile_solid(608, 48, 16),
+    3 => tile_solid(656, 48, 16),
+    4 => tile_solid(496, 64, 112),
+    5 => tile_solid(624, 64, 16),
+    6 => tile_solid(640, 80, 16),
+    7 => tile_solid(128, 96, 16),
+    8 => tile_solid(672, 96, 16),
+    9 => tile_solid(816, 96, 16),
+    10 => tile_solid(80, 128, 32),
+    11 => tile_solid(272, 128, 16),
+    12 => tile_solid(64, 144, 16),
+    13 => tile_solid(192, 144, 32),
+    14 => tile_solid(704, 144, 112),
+    15 => tile_solid(832, 144, 16),
+    16 => tile_solid(112, 160, 16),
+    17 => tile_solid(144, 160, 48),
+    18 => tile_solid(224, 160, 16),
+    19 => tile_solid(256, 160, 16),
+    20 => tile_solid(592, 160, 16),
+    21 => tile_solid(688, 160, 16),
+    22 => tile_solid(240, 176, 16),
+    23 => tile_solid(544, 176, 16),
+    24 => tile_solid(288, 192, 32),
+    25 => tile_solid(592, 192, 16),
+    26 => tile_solid(16, 208, 32),
+    27 => tile_solid(320, 208, 32),
+    28 => tile_solid(480, 208, 32),
+    29 => tile_solid(544, 208, 16),
+    30 => tile_solid(640, 208, 32),
+    31 => tile_solid(0, 224, 16),
+    32 => tile_solid(144, 224, 16),
+    33 => tile_solid(560, 224, 16),
+    34 => tile_solid(624, 224, 16),
+    35 => tile_solid(0 - 16, 240, 16),
+    36 => tile_solid(48, 240, 96),
+    37 => tile_solid(160, 240, 16),
+    38 => tile_solid(208, 240, 32),
+    39 => tile_solid(512, 240, 32),
+    40 => tile_solid(576, 240, 16),
+    41 => tile_solid(608, 240, 16),
+    42 => scene_platform(16, 165, 32),
+    43 => scene_platform(354, 208, 32),
+    _ => tile_solid(0, 0, 0),
+  }
+}
+
+fn min_i32(a: i32, b: i32) -> i32 {
+  match a < b {
+    true => a,
+    false => b
+  }
+}
+
+fn land_y_candidate(
+  best: i32,
+  x: i32,
+  y: i32,
+  previous_y: i32,
+  w: i32,
+  h: i32,
+  offset_y: i32,
+  platform: Rect
+) -> i32 {
+  let landed = landed_on_rect(
+    x,
+    y,
+    previous_y,
+    w,
+    h,
+    platform
+  );
+  let candidate = platform.y - h - offset_y;
+  match (landed, best == no_land_y) {
+    true, true => candidate,
+    true, false => min_i32(best, candidate),
+    false, _ => best
+  }
+}
+
+fn land_y_for_solid_loop(
+  index: i32,
+  x: i32,
+  y: i32,
+  previous_y: i32,
+  collider: Collider2d,
+  best: i32
+) -> i32 {
+  match index < level_solid_count {
+    true => land_y_for_solid_loop(
+      index + 1,
+      x,
+      y,
+      previous_y,
+      collider,
+      land_y_candidate(
+        best,
+        x,
+        y,
+        previous_y,
+        collider.w,
+        collider.h,
+        collider.offset_y,
+        level_solid(index).bounds
+      )
+    ),
+    false => best,
+  }
+}
+
+fn land_y_for_collider(
+  transform: Transform2d,
+  velocity: Velocity2d,
+  collider: Collider2d,
+  dt: i32
+) -> i32 {
+  let x = transform.x + collider.offset_x;
+  let y = transform.y + collider.offset_y;
+  let previous_y = y - velocity.y * dt / 1000;
+  land_y_for_solid_loop(
+    0,
+    x,
+    y,
+    previous_y,
+    collider,
+    no_land_y
+  )
+}
+
+fn apply_velocity_input(row: struct({
+  velocity: Velocity2d,
+  gravity: Gravity2d,
+  player_control: PlayerControl,
+  grounded: Grounded,
+  input: FrameInput
+})) -> struct({velocity: Velocity2d}) {
+  let dt = clamp(row.input.dt_ms, 1, 32);
+  let controlled = row.player_control.enabled > 0;
+  let jump_pressed = row.input.jump > 0;
+  let on_ground = row.grounded.value > 0;
+  let jump_now = match (
+    controlled,
+    jump_pressed,
+    on_ground
+  ) {
+    true, true, true => true,
+    _ => false
+  };
+  {
+    velocity: Velocity2d {
+      x: match controlled {
+        true => clamp(row.input.axis_x, 0 - 1, 1) * row.player_control.speed,
+        false => row.velocity.x,
+      },
+      y: match jump_now {
+        true => 0 - row.player_control.jump_impulse,
+        false => row.velocity.y + row.gravity.value * dt
+          / 1000,
+      }
+    }
+  }
+}
+
+fn move_transform(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  input: FrameInput
+})) -> struct({transform: Transform2d}) {
+  let dt = clamp(row.input.dt_ms, 1, 32);
+  {
+    transform: Transform2d {
+      x: clamp(
+        row.transform.x + row.velocity.x * dt / 1000,
+        level_min_x,
+        level_max_x
+      ),
+      y: row.transform.y + row.velocity.y * dt / 1000,
+      z: row.transform.z
+    }
+  }
+}
+
+fn clear_grounded(row: struct({grounded: Grounded})) -> struct({grounded: Grounded}) {
+  {grounded: not_grounded}
+}
+
+fn clear_sound(row: struct({
+  player_state: PlayerState,
+  player_control: PlayerControl
+})) -> struct({player_state: PlayerState}) {
+  {
+    player_state: match row.player_control.enabled > 0 {
+      true => PlayerState {
+        lives: row.player_state.lives,
+        mode: row.player_state.mode,
+        collected: row.player_state.collected,
+        sound: sound_none
+      },
+      false => row.player_state,
+    },
+  }
+}
+
+fn resolved_ground_y(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  gravity: Gravity2d,
+  grounded: Grounded,
+  collider: Collider2d,
+  input: FrameInput
+})) -> i32 {
+  let dt = clamp(row.input.dt_ms, 1, 32);
+  let collides = row.collider.active > 0;
+  let falling = row.velocity.y >= 0;
+  match (collides, falling) {
+    true, true => match land_y_for_collider(
+      row.transform,
+      row.velocity,
+      row.collider,
+      dt
+    ) == no_land_y {
+      true => row.transform.y,
+      false => land_y_for_collider(
+        row.transform,
+        row.velocity,
+        row.collider,
+        dt
+      )
+    },
+    _ => row.transform.y
+  }
+}
+
+fn did_land(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  gravity: Gravity2d,
+  grounded: Grounded,
+  collider: Collider2d,
+  input: FrameInput
+})) -> bool {
+  let dt = clamp(row.input.dt_ms, 1, 32);
+  let collides = row.collider.active > 0;
+  let falling = row.velocity.y >= 0;
+  match (collides, falling) {
+    true, true => land_y_for_collider(
+      row.transform,
+      row.velocity,
+      row.collider,
+      dt
+    ) != no_land_y,
+    _, _ => false
+  }
+}
+
+fn resolved_velocity_y(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  gravity: Gravity2d,
+  grounded: Grounded,
+  collider: Collider2d,
+  input: FrameInput
+})) -> i32 {
+  match (row.grounded.value > 0, did_land(row)) {
+    true, _ => 0,
+    false, true => 0,
+    false, false => row.velocity.y,
+  }
+}
+
+fn resolved_grounded(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  gravity: Gravity2d,
+  grounded: Grounded,
+  collider: Collider2d,
+  input: FrameInput
+})) -> struct({grounded: Grounded}) {
+  {
+    grounded: Grounded {
+      value: match did_land(row) {
+        true => 1,
+        false => row.grounded.value,
+      }
+    }
+  }
+}
+
+fn resolved_collision_transform(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  gravity: Gravity2d,
+  grounded: Grounded,
+  collider: Collider2d,
+  input: FrameInput
+})) -> struct({transform: Transform2d}) {
+  {
+    transform: Transform2d {
+      x: row.transform.x,
+      y: resolved_ground_y(row),
+      z: row.transform.z
+    }
+  }
+}
+
+fn resolved_collision_velocity(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  gravity: Gravity2d,
+  grounded: Grounded,
+  collider: Collider2d,
+  input: FrameInput
+})) -> struct({velocity: Velocity2d}) {
+  {
+    velocity: Velocity2d {
+      x: row.velocity.x,
+      y: resolved_velocity_y(row)
+    }
+  }
+}
+
+fn patrol_dir(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  patrol: Patrol2d
+})) -> i32 {
+  let active = row.patrol.active > 0;
+  let at_left_edge = row.transform.x <= row.patrol.min_x;
+  let at_right_edge = row.transform.x >= row.patrol.max_x;
+  match (active, at_left_edge, at_right_edge) {
+    true, true, _ => 1,
+    true, false, true => 0 - 1,
+    _ => row.patrol.dir
+  }
+}
+
+fn patrol_velocity_x(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  patrol: Patrol2d
+})) -> i32 {
+  match row.patrol.active > 0 {
+    true => patrol_dir(row) * 60,
+    false => row.velocity.x,
+  }
+}
+
+fn updated_patrol_velocity(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  patrol: Patrol2d
+})) -> struct({velocity: Velocity2d}) {
+  {
+    velocity: Velocity2d {
+      x: patrol_velocity_x(row),
+      y: row.velocity.y
+    }
+  }
+}
+
+fn updated_patrol_state(row: struct({
+  transform: Transform2d,
+  velocity: Velocity2d,
+  patrol: Patrol2d
+})) -> struct({patrol: Patrol2d}) {
+  {
+    patrol: Patrol2d {
+      active: row.patrol.active,
+      dir: patrol_dir(row),
+      min_x: row.patrol.min_x,
+      max_x: row.patrol.max_x
+    }
+  }
+}
+
+fn player_found(world: World) -> i32 {
+  match world.len > player_slot {
+    true => 1,
+    false => 0
+  }
+}
+
+fn player_rect_for_world(world: World) -> Rect {
+  rect_for_entity(
+    ecs.batch_get(world.transform, player_slot),
+    ecs.batch_get(world.collider, player_slot)
+  )
+}
+
+fn player_x_for_world(world: World) -> i32 {
+  match world.len > player_slot {
+    true => ecs.batch_get(world.transform, player_slot).x,
+    false => 0
+  }
+}
+
+fn player_y_for_world(world: World) -> i32 {
+  match world.len > player_slot {
+    true => ecs.batch_get(world.transform, player_slot).y,
+    false => 0
+  }
+}
+
+fn player_mode_for_world(world: World) -> i32 {
+  match world.len > player_slot {
+    true => ecs.batch_get(
+      world.player_state,
+      player_slot
+    ).mode,
+    false => mode_play
+  }
+}
+
+fn player_sound_for_world(world: World) -> asset.Handle(#sound) {
+  match world.len > player_slot {
+    true => ecs.batch_get(
+      world.player_state,
+      player_slot
+    ).sound,
+    false => sound_none
+  }
+}
+
+fn player_collected_for_world(world: World) -> i32 {
+  match world.len > player_slot {
+    true => ecs.batch_get(
+      world.player_state,
+      player_slot
+    ).collected,
+    false => 0
+  }
+}
+
+fn input_state_for_world(world: World) -> InputState {
+  match world.len > player_slot {
+    true => ecs.batch_get(
+      world.input_state,
+      player_slot
+    ),
+    false => no_input_state
+  }
+}
+
+fn input_axis_for_state(input_state: InputState) -> i32 {
+  match input_state.pointer_active > 0 {
+    true => clamp(input_state.pointer_axis_x, 0 - 1, 1),
+    false => match (
+      input_state.key_left > 0,
+      input_state.key_right > 0
+    ) {
+      true, false => 0 - 1,
+      false, true => 1,
+      _, _ => 0,
+    }
+  }
+}
+
+fn input_jump_for_state(input_state: InputState) -> i32 {
+  match (
+    input_state.key_jump > 0,
+    input_state.pointer_active > 0,
+    input_state.pointer_jump > 0
+  ) {
+    true, _, _ => 1,
+    false, true, true => 1,
+    _, _, _ => 0,
+  }
+}
+
+fn input_restart_for_state(input_state: InputState) -> i32 {
+  match input_state.key_restart > 0 {
+    true => 1,
+    false => 0
+  }
+}
+
+fn input_state_with_key(
+  input_state: InputState,
+  key: i32,
+  value: i32
+) -> InputState {
+  match key {
+    1 => InputState {... input_state, key_left: value},
+    2 => InputState {... input_state, key_right: value},
+    3 => InputState {... input_state, key_jump: value},
+    4 => InputState {... input_state, key_restart: value},
+    _ => input_state,
+  }
+}
+
+fn frame_input_for_world(world: World, dt_ms: i32) -> FrameInput {
+  let input_state = input_state_for_world(world);
+  FrameInput {
+    dt_ms: dt_ms,
+    axis_x: input_axis_for_state(input_state),
+    jump: input_jump_for_state(input_state),
+    restart: input_restart_for_state(input_state)
+  }
+}
+
+fn set_input_state(
+  world: World,
+  input_state: InputState
+) -> World {
+  World {
+    ... world,
+    input_state: ecs.batch_set(
+      world.input_state,
+      player_slot,
+      input_state
+    )
+  }
+}
+
+fn collectible_touched(
+  collectible_value: Collectible,
+  transform: Transform2d,
+  collider_value: Collider2d,
+  world: World
+) -> bool {
+  let found = player_found(world);
+  let player_rect = player_rect_for_world(world);
+  let player_exists = found > 0;
+  let active_collectible = collectible_value.active > 0;
+  let active_collider = collider_value.active > 0;
+  let touches_player = overlaps(
+    player_rect,
+    rect_for_entity(transform, collider_value)
+  );
+  match (
+    player_exists,
+    active_collectible,
+    active_collider,
+    touches_player
+  ) {
+    true, true, true, true => true,
+    _ => false,
+  }
+}
+
+fn collect_delta_for_entity(
+  index: EntityId,
+  world: World
+) -> CollectDelta {
+  let found = player_found(world);
+  let player_rect = player_rect_for_world(world);
+  let player_exists = found > 0;
+  let active_collectible = ecs.batch_get(
+    world.collectible,
+    index
+  ).active > 0;
+  let active_collider = ecs.batch_get(
+    world.collider,
+    index
+  ).active > 0;
+  let touches_player = overlaps(
+    player_rect,
+    rect_for_entity(
+      ecs.batch_get(world.transform, index),
+      ecs.batch_get(world.collider, index)
+    )
+  );
+  let collected = match (
+    player_exists,
+    active_collectible,
+    active_collider,
+    touches_player
+  ) {
+    true, true, true, true => true,
+    _ => false,
+  };
+  match collected {
+    true => CollectDelta {
+      score: ecs.batch_get(world.collectible, index).value,
+      sound: ecs.batch_get(world.collectible, index).sound
+    },
+    false => CollectDelta::empty(),
+  }
+}
+
+fn collect_delta(world: World) -> CollectDelta {
+  match player_found(world) > 0 {
+    true => ecs.fold_map_entities(
+      world,
+      CollectDelta::empty(),
+      collect_delta_for_entity,
+      CollectDelta::append
+    ),
+    false => CollectDelta::empty(),
+  }
+}
+
+type fn HazardScan() -> type {
+  let HazardScan = {
+    player_rect: Rect,
+    hurt: bool
+  };
+  struct(HazardScan)
+}
+
+fn HazardScan::append(
+  left: HazardScan,
+  right: HazardScan
+) -> HazardScan {
+  HazardScan {
+    player_rect: left.player_rect,
+    hurt: combine_hurt(left.hurt, right.hurt)
+  }
+}
+
+fn hazard_scan_start(player_rect: Rect, initial: bool) -> HazardScan {
+  HazardScan {player_rect: player_rect, hurt: initial}
+}
+
+fn hazard_entity(
+  scan: HazardScan,
+  index: EntityId,
+  world: World
+) -> HazardScan {
+  let patrolling = ecs.batch_get(world.patrol, index).active
+    > 0;
+  let active_collider = ecs.batch_get(
+    world.collider,
+    index
+  ).active > 0;
+  let touches_player = overlaps(
+    scan.player_rect,
+    rect_for_entity(
+      ecs.batch_get(world.transform, index),
+      ecs.batch_get(world.collider, index)
+    )
+  );
+  let hazard = match (
+    patrolling,
+    active_collider,
+    touches_player
+  ) {
+    true, true, true => true,
+    _ => false,
+  };
+  HazardScan {
+    player_rect: scan.player_rect,
+    hurt: combine_hurt(scan.hurt, hazard)
+  }
+}
+
+fn hazard_scan(
+  player_rect: Rect,
+  world: World,
+  initial: bool
+) -> bool {
+  ecs.fold_entities(
+    world,
+    hazard_scan_start(player_rect, initial),
+    hazard_entity
+  ).hurt
+}
+
+fn update_player_collect(
+  row: struct({
+    player_state: PlayerState,
+    player_control: PlayerControl
+  }),
+  world: World
+) -> struct({player_state: PlayerState}) {
+  let delta = collect_delta(world);
+  let is_player = row.player_control.enabled > 0;
+  let collected = delta.score > 0;
+  {
+    player_state: match (is_player, collected) {
+      true, true => PlayerState {
+        lives: row.player_state.lives,
+        mode: row.player_state.mode,
+        collected: row.player_state.collected + delta.score,
+        sound: delta.sound
+      },
+      _, _ => row.player_state,
+    },
+  }
+}
+
+fn update_collectible(
+  row: struct({
+    collectible: Collectible,
+    transform: Transform2d,
+    collider: Collider2d
+  }),
+  world: World
+) -> struct({collectible: Collectible}) {
+  let collected = collectible_touched(
+    row.collectible,
+    row.transform,
+    row.collider,
+    world
+  );
+  {
+    collectible: Collectible {
+      active: match collected {
+        true => 0,
+        false => row.collectible.active,
+      },
+      collected: match collected {
+        true => 1,
+        false => row.collectible.collected,
+      },
+      sound: row.collectible.sound,
+      value: row.collectible.value
+    }
+  }
+}
+
+fn update_collectible_sprite(row: struct({
+  sprite: Sprite2d,
+  collectible: Collectible,
+  transform: Transform2d,
+  collider: Collider2d
+})) -> struct({sprite: Sprite2d}) {
+  let hidden = row.collectible.collected > 0;
+  {
+    sprite: Sprite2d {
+      atlas: row.sprite.atlas,
+      sx: row.sprite.sx,
+      sy: row.sprite.sy,
+      sw: row.sprite.sw,
+      sh: row.sprite.sh,
+      w: row.sprite.w,
+      h: row.sprite.h,
+      flip_x: row.sprite.flip_x,
+      z: row.sprite.z,
+      visible: match hidden {
+        true => 0,
+        false => row.sprite.visible,
+      }
+    }
+  }
+}
+
+fn combine_hurt(current: bool, next: bool) -> bool {
+  match (current, next) {
+    true, _ => true,
+    false, value => value,
+  }
+}
+
+fn player_hurt(
+  transform: Transform2d,
+  collider_value: Collider2d,
+  snapshot: World
+) -> bool {
+  let player_rect = rect_for_entity(
+    transform,
+    collider_value
+  );
+  let spike = spike_rect;
+  let touches_spike = overlaps(player_rect, spike);
+  let fell = transform.y
+    + collider_value.offset_y
+    + collider_value.h
+    > killzone_y;
+  let hurt = hazard_scan(
+    player_rect,
+    snapshot,
+    match (touches_spike, fell) {
+      true, _ => true,
+      false, true => true,
+      false, false => false,
+    }
+  );
+  hurt
+}
+
+fn reset_lives(state: PlayerState) -> PlayerState {
+  let lives = state.lives - 1;
+  let mode = match lives <= 0 {
+    true => mode_dead,
+    false => mode_play
+  };
+  PlayerState {
+    lives: lives,
+    mode: mode,
+    collected: state.collected,
+    sound: sound_hurt
+  }
+}
+
+fn reset_player_transform(
+  row: struct({
+    transform: Transform2d,
+    player_control: PlayerControl,
+    collider: Collider2d
+  }),
+  world: World
+) -> struct({transform: Transform2d}) {
+  let is_player = row.player_control.enabled > 0;
+  let hurt = player_hurt(
+    row.transform,
+    row.collider,
+    world
+  );
+  {
+    transform: match (is_player, hurt) {
+      true, true => Transform2d {x: 18, y: 169, z: 5},
+      _, _ => row.transform,
+    }
+  }
+}
+
+fn reset_player_velocity(
+  row: struct({
+    velocity: Velocity2d,
+    player_control: PlayerControl,
+    transform: Transform2d,
+    collider: Collider2d
+  }),
+  world: World
+) -> struct({velocity: Velocity2d}) {
+  let is_player = row.player_control.enabled > 0;
+  let hurt = player_hurt(
+    row.transform,
+    row.collider,
+    world
+  );
+  {
+    velocity: match (is_player, hurt) {
+      true, true => Velocity2d {x: 0, y: 0},
+      _, _ => row.velocity,
+    }
+  }
+}
+
+fn reset_player_grounded(
+  row: struct({
+    grounded: Grounded,
+    player_control: PlayerControl,
+    transform: Transform2d,
+    collider: Collider2d
+  }),
+  world: World
+) -> struct({grounded: Grounded}) {
+  let is_player = row.player_control.enabled > 0;
+  let hurt = player_hurt(
+    row.transform,
+    row.collider,
+    world
+  );
+  {
+    grounded: match (is_player, hurt) {
+      true, true => Grounded {value: 0},
+      _, _ => row.grounded,
+    }
+  }
+}
+
+fn reset_player_state(
+  row: struct({
+    player_state: PlayerState,
+    player_control: PlayerControl,
+    transform: Transform2d,
+    collider: Collider2d
+  }),
+  world: World
+) -> struct({player_state: PlayerState}) {
+  let is_player = row.player_control.enabled > 0;
+  let hurt = player_hurt(
+    row.transform,
+    row.collider,
+    world
+  );
+  {
+    player_state: match (is_player, hurt) {
+      true, true => reset_lives(row.player_state),
+      _, _ => row.player_state,
+    }
+  }
+}
+
+fn update_win_state(row: struct({
+  player_state: PlayerState,
+  player_control: PlayerControl
+})) -> struct({player_state: PlayerState}) {
+  let is_player = row.player_control.enabled > 0;
+  let won = row.player_state.collected >= 9;
+  {
+    player_state: match (is_player, won) {
+      true, true => PlayerState {
+        lives: row.player_state.lives,
+        mode: mode_win,
+        collected: row.player_state.collected,
+        sound: sound_win
+      },
+      _, _ => row.player_state,
+    },
+  }
+}
+
+fn animation_clock(row: struct({
+  animation: Animation2d,
+  input: FrameInput
+})) -> i32 {
+  (row.animation.clock_ms + clamp(
+    row.input.dt_ms,
+    1,
+    32
+  )) % 1600
+}
+
+fn advance_animation(row: struct({
+  animation: Animation2d,
+  input: FrameInput
+})) -> struct({animation: Animation2d}) {
+  {
+    animation: Animation2d {
+      clock_ms: animation_clock(row)
+    }
+  }
+}
+
+fn animation_frame(clock_ms: i32, frames: i32) -> i32 {
+  (clock_ms / 100) % frames
+}
+
+fn player_run_sx(frame: i32) -> i32 {
+  match frame < 8 {
+    true => frame * 32,
+    false =>(frame - 8) * 32,
+  }
+}
+
+fn player_run_sy(frame: i32) -> i32 {
+  match frame < 8 {
+    true => 64,
+    false => 96,
+  }
+}
+
+fn animate_sprite(row: struct({
+  sprite: Sprite2d,
+  animation: Animation2d,
+  velocity: Velocity2d,
+  grounded: Grounded,
+  player_control: PlayerControl,
+  patrol: Patrol2d
+})) -> struct({sprite: Sprite2d}) {
+  let clock = row.animation.clock_ms;
+  let is_player = row.player_control.enabled > 0;
+  let is_patrol = row.patrol.active > 0;
+  let is_coin = asset.same(
+    row.sprite.atlas,
+    atlas_coin
+  );
+  let player_air = row.grounded.value == 0;
+  let player_running = row.velocity.x != 0;
+  let player_idle_frame = animation_frame(clock, 4) * 32;
+  let player_run_frame = animation_frame(clock, 16);
+  let slime_frame = animation_frame(clock, 4) * 24;
+  let coin_frame = animation_frame(clock, 12) * 16;
+  let next_sx = match is_player {
+    true => match player_air {
+      true => 64,
+      false => match player_running {
+        true => player_run_sx(player_run_frame),
+        false => player_idle_frame,
+      },
+    },
+    false => match is_patrol {
+      true => slime_frame,
+      false => match is_coin {
+        true => coin_frame,
+        false => row.sprite.sx,
+      },
+    },
+  };
+  let next_sy = match is_player {
+    true => match player_air {
+      true => 160,
+      false => match player_running {
+        true => player_run_sy(player_run_frame),
+        false => 0,
+      },
+    },
+    false => match is_patrol {
+      true => 24,
+      false => match is_coin {
+        true => 0,
+        false => row.sprite.sy,
+      },
+    },
+  };
+  let next_flip_x = match (
+    is_player,
+    is_patrol,
+    row.velocity.x < 0,
+    row.velocity.x > 0
+  ) {
+    true, _, true, _ => 1,
+    true, _, _, true => 0,
+    true, _, false, false => row.sprite.flip_x,
+    false, true, true, _ => 1,
+    false, true, _, true => 0,
+    false, true, false, false => row.sprite.flip_x,
+    false, false, _, _ => row.sprite.flip_x,
+  };
+  {
+    sprite: Sprite2d {
+      atlas: row.sprite.atlas,
+      sx: next_sx,
+      sy: next_sy,
+      sw: row.sprite.sw,
+      sh: row.sprite.sh,
+      w: row.sprite.w,
+      h: row.sprite.h,
+      flip_x: next_flip_x,
+      z: row.sprite.z,
+      visible: row.sprite.visible
+    }
+  }
+}
+
+fn patrol_systems(systems: GameSystems) -> GameSystems {
+  systems
+    \s -> ecs.map(s, clear_sound_q, clear_sound)
+    \s -> ecs.map(
+    s,
+    patrol_velocity_q,
+    updated_patrol_velocity
+  )
+    \s -> ecs.map(
+    s,
+    patrol_state_q,
+    updated_patrol_state
+  )
+}
+
+fn movement_systems(systems: GameSystems) -> GameSystems {
+  systems
+    \s -> ecs.map(s, velocity_q, apply_velocity_input)
+    \s -> ecs.map(s, movement_q, move_transform)
+    \s -> ecs.map(s, grounded_q, clear_grounded)
+    \s -> ecs.map(
+    s,
+    collision_grounded_q,
+    resolved_grounded
+  )
+    \s -> ecs.map(
+    s,
+    collision_transform_q,
+    resolved_collision_transform
+  )
+    \s -> ecs.map(
+    s,
+    collision_velocity_q,
+    resolved_collision_velocity
+  )
+}
+
+fn hazard_systems(systems: GameSystems) -> GameSystems {
+  systems
+    \s -> ecs.map_with_world(
+    s,
+    hazard_state_q,
+    reset_player_state
+  )
+    \s -> ecs.map_with_world(
+    s,
+    hazard_velocity_q,
+    reset_player_velocity
+  )
+    \s -> ecs.map_with_world(
+    s,
+    hazard_grounded_q,
+    reset_player_grounded
+  )
+    \s -> ecs.map_with_world(
+    s,
+    hazard_transform_q,
+    reset_player_transform
+  )
+}
+
+fn collectible_systems(systems: GameSystems) -> GameSystems {
+  systems
+    \s -> ecs.map_with_world(
+    s,
+    player_collect_q,
+    update_player_collect
+  )
+    \s -> ecs.map_with_world(
+    s,
+    collectible_q,
+    update_collectible
+  )
+    \s -> ecs.map(
+    s,
+    collectible_sprite_q,
+    update_collectible_sprite
+  ) \s -> ecs.map(s, win_q, update_win_state)
+}
+
+fn animation_systems(systems: GameSystems) -> GameSystems {
+  systems
+    \s -> ecs.map(
+    s,
+    animation_tick_q,
+    advance_animation
+  ) \s -> ecs.map(s, animation_q, animate_sprite)
+}
+
+fn gameplay_systems(systems: GameSystems) -> GameSystems {
+  systems
+    \s -> patrol_systems(s)
+    \s -> movement_systems(s)
+    \s -> hazard_systems(s)
+    \s -> collectible_systems(s)
+    \s -> animation_systems(s)
+}
+
+fn step_game_world(world: World, input: FrameInput) -> World {
+  let current = match input.restart > 0 {
+    true => set_input_state(
+      init_world(),
+      input_state_for_world(world)
+    ),
+    false => world
+  };
+  let active = player_mode_for_world(current) == mode_play;
+  match active {
+    true => ecs.run(current, input, gameplay_systems),
+    false => current,
+  }
+}
+
+fn input_down(value: i32) -> i32 {
+  match value > 0 {
+    true => 1,
+    false => 0
+  }
+}
+
+pub fn input_key(world: World, key: i32, down: i32) -> World {
+  let input_state = input_state_for_world(world);
+  let value = input_down(down);
+  set_input_state(
+    world,
+    input_state_with_key(input_state, key, value)
+  )
+}
+
+pub fn input_pointer(
+  world: World,
+  axis_x: i32,
+  jump: i32,
+  active: i32
+) -> World {
+  let input_state = input_state_for_world(world);
+  set_input_state(
+    world,
+    InputState {
+      ... input_state,
+      pointer_active: input_down(active),
+      pointer_axis_x: clamp(axis_x, 0 - 1, 1),
+      pointer_jump: input_down(jump)
+    }
+  )
+}
+
+pub fn step_world(world: World, dt_ms: i32) -> World {
+  step_game_world(
+    world,
+    frame_input_for_world(world, dt_ms)
+  )
+}
+
+fn play_sound(sound: asset.Handle(#sound)) -> i32 !{audio} {
+  match (
+    asset.same(sound, sound_jump),
+    asset.same(sound, sound_coin),
+    asset.same(sound, sound_hurt),
+    asset.same(sound, sound_power),
+    asset.same(sound, sound_win)
+  ) {
+    true, _, _, _, _ => audio.play(sound_jump),
+    false, true, _, _, _ => audio.play(sound_coin),
+    false, false, true, _, _ => audio.play(sound_hurt),
+    false, false, false, true, _ => audio.play(sound_power),
+    false, false, false, false, true => audio.play(sound_win),
+    false, false, false, false, false => 0
+  }
+}
+
+fn draw_sprite_entity(
+  canvas_handle: i32,
+  transform: Transform2d,
+  sprite_value: Sprite2d
+) -> i32 !{gpu} {
+  match sprite_value.visible > 0 {
+    true => canvas.draw_sprite(
+      canvas_handle,
+      {
+        atlas: sprite_value.atlas,
+        sx: sprite_value.sx,
+        sy: sprite_value.sy,
+        sw: sprite_value.sw,
+        sh: sprite_value.sh,
+        dx: transform.x,
+        dy: transform.y,
+        dw: sprite_value.w,
+        dh: sprite_value.h,
+        flip_x: sprite_value.flip_x,
+        z: sprite_value.z
+      }
+    ),
+    false => 0,
+  }
+}
+
+fn draw_entities_loop(
+  canvas_handle: i32,
+  world: World,
+  index: i32,
+  drawn: i32
+) -> i32 !{gpu} {
+  match index < world.len {
+    true => draw_entities_loop(
+      canvas_handle,
+      world,
+      index + 1,
+      drawn + draw_sprite_entity(
+        canvas_handle,
+        ecs.batch_get(world.transform, index),
+        ecs.batch_get(world.sprite, index)
+      )
+    ),
+    false => drawn,
+  }
+}
+
+fn draw_entities(canvas_handle: i32, world: World) -> i32 !{gpu} {
+  draw_entities_loop(canvas_handle, world, 0, 0)
+}
+
+fn draw_tile(
+  canvas_handle: i32,
+  sx: i32,
+  sy: i32,
+  x: i32,
+  y: i32
+) -> i32 !{gpu} {
+  canvas.draw_sprite(
+    canvas_handle,
+    {
+      atlas: atlas_world,
+      sx: sx,
+      sy: sy,
+      sw: 16,
+      sh: 16,
+      dx: x,
+      dy: y,
+      dw: 16,
+      dh: 16,
+      flip_x: 0,
+      z: 1
+    }
+  )
+}
+
+fn draw_tile_run(
+  canvas_handle: i32,
+  x: i32,
+  y: i32,
+  w: i32
+) -> i32 !{gpu} {
+  match w <= 0 {
+    true => 0,
+    false => draw_tile(canvas_handle, 0, 0, x, y) + draw_tile_run(
+      canvas_handle,
+      x + 16,
+      y,
+      w - 16
+    ),
+  }
+}
+
+fn draw_platform(
+  canvas_handle: i32,
+  x: i32,
+  y: i32,
+  w: i32
+) -> i32 !{gpu} {
+  canvas.draw_sprite(
+    canvas_handle,
+    {
+      atlas: atlas_platforms,
+      sx: 16,
+      sy: 0,
+      sw: 32,
+      sh: 9,
+      dx: x,
+      dy: y,
+      dw: w,
+      dh: 9,
+      flip_x: 0,
+      z: 2
+    }
+  )
+}
+
+fn draw_hazard(canvas_handle: i32, x: i32, y: i32) -> i32 !{gpu} {
+  canvas.draw_sprite(
+    canvas_handle,
+    {
+      atlas: atlas_world,
+      sx: 32,
+      sy: 192,
+      sw: 16,
+      sh: 16,
+      dx: x,
+      dy: y,
+      dw: 24,
+      dh: 16,
+      flip_x: 0,
+      z: 3
+    }
+  )
+}
+
+fn draw_level_solid(canvas_handle: i32, index: i32) -> i32 !{gpu} {
+  let solid = level_solid(index);
+  let bounds = solid.bounds;
+  match solid.kind == level_solid_platform {
+    true => draw_platform(
+      canvas_handle,
+      bounds.x,
+      bounds.y,
+      bounds.w
+    ),
+    false => draw_tile_run(
+      canvas_handle,
+      bounds.x,
+      bounds.y,
+      bounds.w
+    ),
+  }
+}
+
+fn draw_level_loop(
+  canvas_handle: i32,
+  index: i32,
+  drawn: i32
+) -> i32 !{gpu} {
+  match index < level_solid_count {
+    true => draw_level_loop(
+      canvas_handle,
+      index + 1,
+      drawn + draw_level_solid(canvas_handle, index)
+    ),
+    false => drawn,
+  }
+}
+
+fn draw_level(canvas_handle: i32) -> i32 !{gpu} {
+  draw_level_loop(canvas_handle, 0, 0)
+}
+
+pub fn render_world(
+  target: i32,
+  width: i32,
+  height: i32,
+  world: World
+) -> i32 !{canvas, gpu, audio} {
+  let canvas_handle = canvas.gpu_begin_frame(
+    target,
+    width,
+    height
+  );
+  let music = audio.music(music_theme, 1);
+  let level = draw_level(canvas_handle);
+  let entities = draw_entities(canvas_handle, world);
+  let sound = play_sound(player_sound_for_world(world));
+  let presented = canvas.gpu_present(canvas_handle);
+  canvas_handle
+    + music
+    + level
+    + entities
+    + sound
+    + presented
+}
+
+pub fn world_len(world: World) -> i32 {
+  world.len
+}
+
+pub fn player_x(world: World) -> i32 {
+  player_x_for_world(world)
+}
+
+pub fn player_y(world: World) -> i32 {
+  player_y_for_world(world)
+}
+
+pub fn coin_count(world: World) -> i32 {
+  player_collected_for_world(world)
+}
+
+pub fn input_axis(world: World) -> i32 {
+  input_axis_for_state(input_state_for_world(world))
+}
+
+pub fn input_jump(world: World) -> i32 {
+  input_jump_for_state(input_state_for_world(world))
+}

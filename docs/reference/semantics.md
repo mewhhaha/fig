@@ -8,19 +8,30 @@ remains valid. Heap values use hidden branch handles and copy-before-write when 
 observed through multiple logical values, but pointer identity is not part of the ordinary value
 semantics.
 
-Repeated `let` bindings are the canonical surface form for carrying the latest version of a value:
+Local `let` names are unique within a statement block. Use fresh names for pure intermediate
+values:
 
 ```fig
-let world = step(world);
-let world = update_player(world);
-world
+let stepped = step(world);
+let updated = update_player(stepped);
+updated
 ```
 
-The right-hand side sees the previous `world`; subsequent expressions see the new one.
+Ordinary local `let` statements are dependency-ordered pure bindings, not temporal update steps.
+When a sequence is intentionally ordered, make that ordering explicit with a monad:
+
+```fig
+let world = do @monad(State(World, _)) {
+  step();
+  update_player();
+}
+```
+
+The strategy type is always written at its real arity. `_` marks the carried value type inferred
+from the block; it does not stand for the threaded state type.
 
 The source language does not expose borrow, fork, frozen-reference, pointer, or explicit memory
-tokens. Reusing a value is ordinary Fig code; use shadowing when a name should represent a newer
-logical value. Product-return destructuring still uses multi-bind:
+tokens. Reusing a value is ordinary Fig code. Product-return destructuring still uses multi-bind:
 
 ```fig
 let left, right = split(value);

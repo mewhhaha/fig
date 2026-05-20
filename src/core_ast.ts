@@ -190,6 +190,7 @@ export interface ShapeTypeSlot extends AstNodeMeta {
 
 export type TypeExpr =
   | ({ kind: "type_ref"; name: string } & AstNodeMeta)
+  | ({ kind: "type_hole" } & AstNodeMeta)
   | ({ kind: "type_call"; callee: TypeExpr; args: TypeExpr[] } & AstNodeMeta)
   | ({ kind: "type_static_ref"; name: string } & AstNodeMeta)
   | ({ kind: "type_fn"; source: string } & AstNodeMeta)

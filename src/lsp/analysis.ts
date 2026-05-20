@@ -612,12 +612,13 @@ export function documentSymbols(result: AnalysisResult): DocumentSymbol[] {
 export function inlayHintsAt(result: AnalysisResult, range: Range): InlayHint[] {
   if (!result.program) return [];
   const hints: InlayHint[] = [];
+  const letSearchStarts = new Map<string, number>();
   const visitBlock = (expr: Expr | undefined, localTypes = new Map<string, string>()) => {
     if (!expr || expr.kind !== "block") return;
     const blockTypes = new Map(localTypes);
     for (const stmt of expr.statements) {
       if (stmt.kind === "let") {
-        const hint = inlayHintForLet(result, stmt, blockTypes);
+        const hint = inlayHintForLet(result, stmt, blockTypes, letSearchStarts);
         if (hint && positionInRange(hint.position, range)) hints.push(hint);
         visitExpr(stmt.value, blockTypes);
         recordStatementTypes(stmt, result.program!, blockTypes);
@@ -1333,18 +1334,20 @@ function inlayHintForLet(
   result: AnalysisResult,
   stmt: Statement,
   localTypes: Map<string, string>,
+  searchStarts: Map<string, number>,
 ): InlayHint | undefined {
-  if (stmt.kind !== "let" || hasExplicitLetAnnotation(result, stmt)) {
+  if (stmt.kind !== "let") {
+    return undefined;
+  }
+  const nameSpan = findInlayLetNameRange(result, stmt, searchStarts);
+  const range = rangeFromFound(nameSpan, result.mapper);
+  if (!range) return undefined;
+  if (hasExplicitLetAnnotation(result, stmt, nameSpan)) return undefined;
+  if (!rangeLooksLikeLetBinding(result.document.text, result.mapper, range, stmt.name)) {
     return undefined;
   }
   const type = stmt.type ?? expressionTypeFromProgram(stmt.value, result.program, localTypes);
   if (!type) return undefined;
-  const range = rangeFromSpan(spanForStatementName(stmt, stmt.name), result.mapper) ??
-    rangeFromFound(findStatementNameRange(result.document.text, stmt), result.mapper);
-  if (!range) return undefined;
-  if (!rangeLooksLikeLetBinding(result.document.text, result.mapper, range, stmt.name)) {
-    return undefined;
-  }
   return {
     position: range.end,
     label: `: ${displayType(type)}`,
@@ -1368,8 +1371,9 @@ function rangeLooksLikeLetBinding(
 function hasExplicitLetAnnotation(
   result: AnalysisResult,
   stmt: Extract<Statement, { kind: "let" }>,
+  nameRange?: { start: number; end: number },
 ) {
-  const found = findStatementNameRange(result.document.text, stmt);
+  const found = nameRange ?? findStatementNameRange(result.document.text, stmt);
   const start = stmt.nameSpan?.end ?? found?.end ?? stmt.span?.start;
   if (start === undefined) return false;
   const nextEquals = result.document.text.indexOf("=", start);
@@ -1382,6 +1386,42 @@ function hasExplicitLetAnnotation(
   const between = result.document.text.slice(start, end);
   const equals = between.indexOf("=");
   return (equals >= 0 ? between.slice(0, equals) : between).includes(":");
+}
+
+function findInlayLetNameRange(
+  result: AnalysisResult,
+  stmt: Extract<Statement, { kind: "let" }>,
+  searchStarts: Map<string, number>,
+): { start: number; end: number } | undefined {
+  const exact = spanForStatementName(stmt, stmt.name);
+  if (exact) {
+    searchStarts.set(stmt.name, exact.end);
+    return { start: exact.start, end: exact.end };
+  }
+  const found = findNextLetNameRange(
+    result.document.text,
+    stmt.name,
+    searchStarts.get(stmt.name) ?? 0,
+  );
+  if (found) searchStarts.set(stmt.name, found.end);
+  return found;
+}
+
+function findNextLetNameRange(
+  source: string,
+  name: string,
+  from: number,
+): { start: number; end: number } | undefined {
+  const pattern = new RegExp(`\\blet\\s+(${escapeRegExp(name)})(?![A-Za-z0-9_])`, "g");
+  pattern.lastIndex = from;
+  const match = pattern.exec(source);
+  if (!match || match.index === undefined) return undefined;
+  const start = match.index + match[0].length - name.length;
+  return { start, end: start + name.length };
+}
+
+function escapeRegExp(source: string): string {
+  return source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function findStatementNameRange(
@@ -2363,6 +2403,7 @@ function checkedAstHoverAt(
         visitTypeExpr(expr.right);
         break;
       case "type_ref":
+      case "type_hole":
       case "type_static_ref":
       case "type_fn":
       case "type_operator":
@@ -3059,6 +3100,8 @@ function renderTypeExprHover(expr: TypeExpr): string {
   switch (expr.kind) {
     case "type_ref":
       return expr.name;
+    case "type_hole":
+      return "_";
     case "type_static_ref":
       return `@${expr.name}`;
     case "type_call":
@@ -3102,6 +3145,8 @@ function typeExprKindHover(expr: TypeExpr): string {
   switch (expr.kind) {
     case "type_ref":
       return "type reference";
+    case "type_hole":
+      return "type hole";
     case "type_static_ref":
       return "static type reference";
     case "type_call":

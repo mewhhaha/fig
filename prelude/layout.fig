@@ -12,6 +12,15 @@ type fn InlineArrayList(n: count, a: type) {
   struct(InlineArrayList)
 }
 
+type fn HeapArray(a: type) -> type {
+  let HeapArray = {
+    ptr: i32,
+    len: i32,
+    cap: i32
+  };
+  struct(HeapArray)
+}
+
 type fn Collector(target: type, item: type, builder: type) {
   let Start = fn() -> builder;
   let Push = fn(builder: builder, item: item) -> builder;
@@ -26,6 +35,58 @@ type fn Collector(target: type, item: type, builder: type) {
 
 fn InlineArrayList::nil(const a: type) -> InlineArrayList(0, a) {
   []
+}
+
+fn HeapArray::new(
+  const a: type,
+  initial_capacity: i32
+) -> HeapArray(a) {
+  @heap_array_new(a, initial_capacity)
+}
+
+fn HeapArray::empty(const a: type) -> HeapArray(a) {
+  HeapArray::new(a, 0)
+}
+
+fn HeapArray::ensure_capacity(
+  const a: type,
+  xs: HeapArray(a),
+  needed_capacity: i32
+) -> HeapArray(a) {
+  @heap_array_ensure_capacity(a, xs, needed_capacity)
+}
+
+fn HeapArray::get(
+  const a: type,
+  xs: HeapArray(a),
+  index: i32
+) -> a {
+  @heap_array_get(a, xs, index)
+}
+
+fn HeapArray::set(
+  const a: type,
+  xs: HeapArray(a),
+  index: i32,
+  value: a
+) -> HeapArray(a) {
+  @heap_array_set(a, xs, index, value)
+}
+
+fn HeapArray::push(
+  const a: type,
+  xs: HeapArray(a),
+  value: a
+) -> HeapArray(a) {
+  @heap_array_push(a, xs, value)
+}
+
+fn HeapArray::len(const a: type, xs: HeapArray(a)) -> i32 {
+  xs.len
+}
+
+fn HeapArray::capacity(const a: type, xs: HeapArray(a)) -> i32 {
+  xs.cap
 }
 
 fn InlineArray::from_list(const n: count, const a: type, xs: InlineArrayList(n, a)) -> InlineArray(n, a) {

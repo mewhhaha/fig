@@ -26,17 +26,26 @@ without adding runtime proof parameters.
 ## Branch-Bit Memory Model
 
 Fig source uses Branch-Bit values. Ordinary values are immutable and reusable: passing a value to a
-function does not consume it, and repeated `let` bindings are the surface form for carrying a newer
-logical version of the same name.
+function does not consume it. Local `let` names are unique within a block, so pure update chains use
+fresh names for each logical version.
 
 ```fig
-let world = step(world);
-let world = integrate(world);
-world
+let stepped = step(world);
+let integrated = integrate(stepped);
+integrated
 ```
 
-The right-hand side sees the previous binding, and later expressions see the new one. Product-return
-destructuring still uses multi-bind:
+When source order is the point of the computation, use explicit do notation with the effect type
+written at its real arity:
+
+```fig
+let world = do @monad(State(World, _)) {
+  step();
+  integrate();
+}
+```
+
+Product-return destructuring still uses multi-bind:
 
 ```fig
 let left, right = split(value);
@@ -131,7 +140,7 @@ The harness compiles each scenario to Wasm, validates the result, runs the expor
 times, and reports timing plus WAT-shape counters. Current scenarios cover:
 
 - Scalar n-way reuse.
-- Product shadowing and repeated product updates.
+- Product reuse and repeated product updates.
 - A 1k-iteration tail-recursive product loop.
 - `InlineArray.tabulate` plus `InlineArray.map` builder loops.
 - Iterator filter/map/collect into `CompactArray`.

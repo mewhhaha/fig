@@ -80,4 +80,4 @@ The next useful work is to make the server behave more like a mature daily-use L
   spans.
 - Tighten member completion filtering with checked receiver types.
 - Add broader protocol fixtures for aliased imports, generated members, malformed documents, and
-  shadowing edge cases.
+  local-binding edge cases.

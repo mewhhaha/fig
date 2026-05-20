@@ -34,16 +34,13 @@ const components = ecs.components({
 });
 
 type fn World() -> type {
-  let ExpectedWorld = @type_slots(ecs.World(
-    entity_capacity,
-    components
-  ));
+  let ExpectedWorld = @type_slots(ecs.World(components));
   let World = {
-    entities: ecs.Batch(entity_capacity, EntityId),
+    entities: ecs.Batch(i32),
     len: i32,
-    transform: ecs.Batch(entity_capacity, Transform2d),
-    velocity: ecs.Batch(entity_capacity, Velocity2d),
-    sprite: ecs.Batch(entity_capacity, Sprite2d)
+    transform: ecs.Batch(Transform2d),
+    velocity: ecs.Batch(Velocity2d),
+    sprite: ecs.Batch(Sprite2d)
   };
   let WorldMatchesEcs = @require(
     World == ExpectedWorld,
@@ -53,7 +50,7 @@ type fn World() -> type {
 }
 
 type fn EntityId() -> type {
-  ecs.BatchIndex(entity_capacity)
+  ecs.EntityId()
 }
 
 type fn FrameInput() -> type {
@@ -96,7 +93,8 @@ type fn SpriteAnimationRow() -> type {
 
 const movement_q = do @applicative(ecs.Query(
   World,
-  FrameInput
+  FrameInput,
+  _
 )) {
   transform <- ecs.write(#transform);
   velocity <- ecs.read(#velocity);
@@ -105,7 +103,8 @@ const movement_q = do @applicative(ecs.Query(
 };
 const sprite_animation_q = do @applicative(ecs.Query(
   World,
-  FrameInput
+  FrameInput,
+  _
 )) {
   sprite <- ecs.write(#sprite);
   input <- ecs.res();
@@ -113,7 +112,13 @@ const sprite_animation_q = do @applicative(ecs.Query(
 };
 
 fn empty_world() -> World {
-  @empty(World)
+  {
+    entities: ecs.batch_with_capacity(i32, entity_capacity),
+    len: 0,
+    transform: ecs.batch_with_capacity(Transform2d, entity_capacity),
+    velocity: ecs.batch_with_capacity(Velocity2d, entity_capacity),
+    sprite: ecs.batch_with_capacity(Sprite2d, entity_capacity)
+  }
 }
 
 fn entity_index(raw: i32) -> EntityId {
@@ -190,16 +195,16 @@ fn render_system(world: World, input: FrameInput) -> RenderBatch {
     batch,
     0 < world.len,
     RenderItem2d {
-      transform: world.transform[0],
-      sprite: world.sprite[0]
+      transform: ecs.batch_get(world.transform, 0),
+      sprite: ecs.batch_get(world.sprite, 0)
     }
   )
     \batch -> append_visible_render_item(
     batch,
     1 < world.len,
     RenderItem2d {
-      transform: world.transform[1],
-      sprite: world.sprite[1]
+      transform: ecs.batch_get(world.transform, 1),
+      sprite: ecs.batch_get(world.sprite, 1)
     }
   )
 }
@@ -236,11 +241,11 @@ fn append_visible_render_item(
 
 fn render_item_at(
   world: World,
-  index: ecs.BatchIndex(entity_capacity)
+  index: i32
 ) -> RenderItem2d {
   RenderItem2d {
-    transform: world.transform[index],
-    sprite: world.sprite[index]
+    transform: ecs.batch_get(world.transform, index),
+    sprite: ecs.batch_get(world.sprite, index)
   }
 }
 

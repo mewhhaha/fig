@@ -42,7 +42,6 @@
 (Bool) @constant.builtin
 (Comment) @comment
 (Placeholder) @operator
-"_" @keyword
 "do" @keyword
 "else" @keyword
 "if" @keyword

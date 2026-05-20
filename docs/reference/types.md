@@ -15,6 +15,9 @@ fn(x: i32) -> i32
 type
 ```
 
+The `_` token is not a general inferred type annotation. It is reserved for direct arguments in
+`do` strategy type calls, such as `Option(_)` or `State(World, _)`.
+
 Primitive scalar types currently include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`,
 and unsigned widths `u1` through `u64`.
 

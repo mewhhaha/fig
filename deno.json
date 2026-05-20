@@ -18,8 +18,10 @@
     "lsp": "deno run --allow-read src/lsp/main.ts",
     "bench:const": "deno run --allow-read scripts/bench_const_params.ts",
     "bench:range-fold": "deno run --allow-read scripts/bench_range_fold_compile.ts",
+    "bench:monad-stack": "deno run --allow-read scripts/bench_monad_stack.ts",
     "bench:memory-model": "deno run --allow-read scripts/bench_memory_model.ts",
     "bench:ecs-compare": "deno run --allow-read --allow-write --allow-run scripts/bench_ecs_compare.ts",
+    "brackeys:dev": "deno run --allow-read --allow-net scripts/brackeys_dev_server.ts",
     "snapshots": "deno test --allow-read --allow-write tests/wat_snapshot_test.ts",
     "smoke": "deno run --allow-read --allow-write src/cli.ts run examples/hello.fig",
     "helix": "deno run --allow-read --allow-write --allow-run scripts/build_helix_parser.ts && env FIG_HELIX_CONFIG=$PWD/helix/config/helix FIG_HELIX_RUNTIME=$PWD/helix/runtime deno run --allow-read --allow-write --allow-env scripts/install_helix.ts && env XDG_CONFIG_HOME=$PWD/helix/config HELIX_RUNTIME=$PWD/helix/runtime hx --health fig"

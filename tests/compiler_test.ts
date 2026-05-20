@@ -332,6 +332,65 @@ Deno.test("static literal expansion and const-label field access lower", async (
   assertEquals((instance.exports.main as CallableFunction)(), 34);
 });
 
+Deno.test("heap arrays grow and preserve scalar items", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+
+    pub fn main(seed: i32) -> i32 {
+      let xs0 = layout.HeapArray::new(i32, 2);
+      let xs1 = layout.HeapArray::push(i32, xs0, seed);
+      let xs2 = layout.HeapArray::push(i32, xs1, seed + 1);
+      let xs3 = layout.HeapArray::push(i32, xs2, seed + 2);
+      layout.HeapArray::get(i32, xs3, 0) +
+        layout.HeapArray::get(i32, xs3, 1) +
+        layout.HeapArray::get(i32, xs3, 2) +
+        layout.HeapArray::capacity(i32, xs3)
+    }
+  `;
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as (seed: number) => number)(10), 37);
+});
+
+Deno.test("heap arrays store flattened product items", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+
+    type fn Pair() -> type {
+      let Pair = {left: i32, right: i32};
+      struct(Pair)
+    }
+
+    pub fn main(seed: i32) -> i32 {
+      let xs0 = layout.HeapArray::new(Pair, 1);
+      let xs1 = layout.HeapArray::push(
+        Pair,
+        xs0,
+        Pair {left: seed, right: seed + 1}
+      );
+      let xs2 = layout.HeapArray::push(
+        Pair,
+        xs1,
+        Pair {left: seed + 2, right: seed + 3}
+      );
+      let xs3 = layout.HeapArray::set(
+        Pair,
+        xs2,
+        0,
+        Pair {left: seed + 4, right: seed + 5}
+      );
+      let a = layout.HeapArray::get(Pair, xs3, 0);
+      let b = layout.HeapArray::get(Pair, xs3, 1);
+      a.left + a.right + b.left + b.right + layout.HeapArray::capacity(Pair, xs3)
+    }
+  `;
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as (seed: number) => number)(10), 56);
+});
+
 Deno.test("specialized const-label field access lowers from expected type", async () => {
   const source = `
     type fn Left() -> type {
@@ -1521,7 +1580,7 @@ Deno.test("ecs query map derives system input from query context", async () => {
         struct(Position)
       }
       type fn GameWorld() -> type {
-        let GameWorld = {positions: ecs.Batch(2, Position)};
+        let GameWorld = {positions: ecs.Batch(Position)};
         struct(GameWorld)
       }
       type fn FrameInput() -> type {
@@ -1532,7 +1591,7 @@ Deno.test("ecs query map derives system input from query context", async () => {
         let PositionRow = {positions: Position, input: FrameInput};
         struct(PositionRow)
       }
-      const positions_q = do @applicative(ecs.Query(GameWorld, FrameInput)) {
+      const positions_q = do @applicative(ecs.Query(GameWorld, FrameInput, _)) {
         positions <- ecs.write(#positions);
         input <- ecs.res();
         pure(PositionRow {positions, input})
@@ -1569,7 +1628,7 @@ Deno.test("ecs fused fill iterator maps and folds without materialized batch", a
       }
 
       fn move_position(
-        index: ecs.BatchIndex(128),
+        index: i32,
         item: Position,
         velocity: Velocity
       ) -> Position {
@@ -1631,18 +1690,18 @@ Deno.test("ecs query applicative map lowers to fused read input update", async (
       });
 
       type fn World() -> type {
-        let Expected = @type_slots(ecs.World(4, components));
+        let Expected = @type_slots(ecs.World(components));
         let World = {
-          entities: ecs.Batch(4, ecs.BatchIndex(4)),
+          entities: ecs.Batch(i32),
           len: i32,
-          positions: ecs.Batch(4, Position),
-          velocities: ecs.Batch(4, Velocity)
+          positions: ecs.Batch(Position),
+          velocities: ecs.Batch(Velocity)
         };
         let Matches = @require(World == Expected, "test World must match ecs.World");
         struct(World)
       }
 
-      const movement_q = do @applicative(ecs.Query(World, FrameInput)) {
+      const movement_q = do @applicative(ecs.Query(World, FrameInput, _)) {
         positions <- ecs.write(#positions);
         velocities <- ecs.read(#velocities);
         input <- ecs.res();
@@ -1677,7 +1736,8 @@ Deno.test("ecs query applicative map lowers to fused read input update", async (
 
       pub fn main(seed: i32) -> i32 {
         let world = ecs.run(seed_world(seed), FrameInput {dt: 1}, movement_system);
-        world.positions[0].x + world.positions[0].y
+        let first = ecs.batch_get(world.positions, 0);
+        first.x + first.y
       }
     `;
   const instance = new WebAssembly.Instance(
@@ -1708,17 +1768,17 @@ Deno.test("ecs system monad sequences query map systems", async () => {
       const components = ecs.components({positions: Position});
 
       type fn World() -> type {
-        let Expected = @type_slots(ecs.World(4, components));
+        let Expected = @type_slots(ecs.World(components));
         let Shape = {
-          entities: ecs.Batch(4, ecs.BatchIndex(4)),
+          entities: ecs.Batch(i32),
           len: i32,
-          positions: ecs.Batch(4, Position)
+          positions: ecs.Batch(Position)
         };
         let Matches = @require(Shape == Expected, "test World must match ecs.World");
         struct(Shape)
       }
 
-      const positions_q = do @applicative(ecs.Query(World, FrameInput)) {
+      const positions_q = do @applicative(ecs.Query(World, FrameInput, _)) {
         positions <- ecs.write(#positions);
         input <- ecs.res();
         pure({positions, input})
@@ -1747,7 +1807,7 @@ Deno.test("ecs system monad sequences query map systems", async () => {
 
       pub fn main(seed: i32) -> i32 {
         let world = ecs.run(seed_world(seed), FrameInput {dt: 2}, twice_system);
-        world.positions[0].x
+        ecs.batch_get(world.positions, 0).x
       }
     `;
   const instance = new WebAssembly.Instance(
@@ -1781,12 +1841,12 @@ Deno.test("ecs spawn lowers generic component rows", async () => {
       });
 
       type fn World() -> type {
-        let Expected = @type_slots(ecs.World(4, components));
+        let Expected = @type_slots(ecs.World(components));
         let World = {
-          entities: ecs.Batch(4, ecs.BatchIndex(4)),
+          entities: ecs.Batch(i32),
           len: i32,
-          positions: ecs.Batch(4, Position),
-          velocities: ecs.Batch(4, Velocity)
+          positions: ecs.Batch(Position),
+          velocities: ecs.Batch(Velocity)
         };
         let Matches = @require(World == Expected, "test World must match ecs.World");
         struct(World)
@@ -1794,10 +1854,10 @@ Deno.test("ecs spawn lowers generic component rows", async () => {
 
       fn seed_world() -> World {
         {
-          entities: ecs.batch_fill(4, 0),
+          entities: ecs.batch_with_capacity(i32, 4),
           len: 0,
-          positions: ecs.batch_fill(4, Position {x: 0}),
-          velocities: ecs.batch_fill(4, Velocity {dx: 0})
+          positions: ecs.batch_with_capacity(Position, 4),
+          velocities: ecs.batch_with_capacity(Velocity, 4)
         }
       }
 
@@ -1809,7 +1869,9 @@ Deno.test("ecs spawn lowers generic component rows", async () => {
             velocities: Velocity {dx: 2}
           });
         };
-        spawned.len + spawned.positions[0].x + spawned.velocities[0].dx
+        spawned.len +
+          ecs.batch_get(spawned.positions, 0).x +
+          ecs.batch_get(spawned.velocities, 0).dx
       }
     `;
   const instance = new WebAssembly.Instance(
@@ -1883,7 +1945,7 @@ Deno.test.ignore("ecs query set rejects missing world fields", async () => {
         struct(Shape)
       }
 
-      const bad_q = do @applicative(ecs.Query(World, FrameInput)) {
+      const bad_q = do @applicative(ecs.Query(World, FrameInput, _)) {
         missing <- ecs.write(#missing);
         input <- ecs.res();
         pure({missing, input})
@@ -2460,6 +2522,91 @@ Deno.test("namespace source imports qualify values and types", async () => {
   );
 });
 
+Deno.test("namespace source imports do not qualify type annotation field labels", async () => {
+  const modules = new Map([
+    [
+      "labels.lib",
+      `
+        fn value(seed: i32) -> i32 { seed + 1 }
+        pub fn read(row: struct({value: i32})) -> i32 {
+          row.value + value(2)
+        }
+      `,
+    ],
+  ]);
+  const resolveModule = (specifier: string) => modules.get(specifier);
+
+  const source = `
+    const labels = @import("labels.lib");
+    pub fn main() -> i32 { labels.read({value: 4}) }
+  `;
+  const checked = await checkSource(source, { resolveModule });
+  const readDecl = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "labels.read"
+  );
+  assertEquals(readDecl?.params[0]?.type, "struct({value: i32})");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 7);
+});
+
+Deno.test("namespace source imports requalify nested declarations shadowed by parameter names", async () => {
+  const modules = new Map([
+    [
+      "asset.lib",
+      `
+        type fn Handle(kind: const) -> type {
+          let Handle = {id: i32};
+          struct(Handle)
+        }
+        fn handle(const kind: const, id: i32) -> Handle(kind) {
+          Handle {id: id}
+        }
+        fn id(value: Handle(kind)) -> i32 { value.id }
+      `,
+    ],
+    [
+      "canvas.lib",
+      `
+        const asset = @import("asset.lib");
+        fn texture(id: i32) -> asset.Handle(#texture) {
+          asset.handle(#texture, id)
+        }
+        fn draw(canvas: i32, sprite: struct({atlas: asset.Handle(#texture)})) -> i32 {
+          canvas + asset.id(sprite.atlas)
+        }
+      `,
+    ],
+    [
+      "game.lib",
+      `
+        const canvas = @import("canvas.lib");
+        pub fn use(canvas: i32) -> i32 {
+          canvas.draw(canvas, {atlas: canvas.texture(4)})
+        }
+      `,
+    ],
+  ]);
+  const resolveModule = (specifier: string) => modules.get(specifier);
+  const source = `
+    const game = @import("game.lib");
+    pub fn main() -> i32 { game.use(3) }
+  `;
+
+  const checked = await checkSource(source, { resolveModule });
+  const textureDecl = checked.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "game.canvas.texture"
+  );
+  assertEquals(textureDecl?.returnType, "game.canvas.asset.Handle(#texture)");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 7);
+});
+
 Deno.test("destructured source imports select exact declarations", async () => {
   const modules = new Map([
     [
@@ -2593,6 +2740,33 @@ Deno.test("namespace source imports preserve same-name recursive function clause
     ),
   );
   assertEquals((instance.exports.main as () => number)(), 6);
+});
+
+Deno.test("namespace source imports qualify do strategy effects", async () => {
+  const modules = new Map([
+    [
+      "module.effect",
+      `
+        type fn Id(a: type) -> type { a }
+        fn Id::pure(value: a) -> Id(a) { value }
+        fn Id::bind(value: Id(a), const step: fn(value: a) -> Id(b)) -> Id(b) {
+          step(value)
+        }
+        pub fn value() -> Id(i32) {
+          do @monad(Id(_)) { pure(3) }
+        }
+      `,
+    ],
+  ]);
+  const resolveModule = (specifier: string) => modules.get(specifier);
+
+  await checkSource(
+    `
+      const effect = @import("module.effect");
+      pub fn main() -> i32 { 1 }
+    `,
+    { resolveModule },
+  );
 });
 
 Deno.test("pruneImports keeps reachable imported declarations and drops unused imported work", async () => {
@@ -3002,7 +3176,7 @@ Deno.test("rejects removed ownership and explicit memory forms", async () => {
   await assertThrowsCompile("fn bad(x: i32) -> i32 { @freeze(x) }", "primitive.unknown");
 });
 
-Deno.test("allows shadowing and temporal local reuse", async () => {
+Deno.test("rejects local shadowing and preserves dependency ordering", async () => {
   await checkSource(`
     fn sink(x: i32) -> i32 { x }
     pub fn main() -> i32 {
@@ -3018,32 +3192,74 @@ Deno.test("allows shadowing and temporal local reuse", async () => {
       b
     }
   `);
-  const instance = new WebAssembly.Instance(
-    new WebAssembly.Module(
-      await wasmFromSource(`
-        pub fn main() -> i32 {
-          let x = 1;
-          let x = x + 1;
-          let x = x * 10;
-          x
-        }
-      `),
-    ),
-  );
-  assertEquals((instance.exports.main as () => number)(), 20);
-  await checkSource(`
+  await assertThrowsCompile(
+    `
     pub fn main() -> i32 {
       let x = 1;
       let x = 2;
       x
     }
-  `);
+  `,
+    "type.duplicate_local",
+  );
+  await assertThrowsCompile(
+    `
+    fn pair() -> [i32, i32] { [1, 2] }
+    pub fn main() -> i32 {
+      let x = 1;
+      let x, y = pair();
+      x + y
+    }
+  `,
+    "type.duplicate_local",
+  );
   await assertThrowsCompile(
     `
     fn pair() -> [i32, i32] { [1, 2] }
     pub fn main() -> i32 {
       let x, x = pair();
       x
+    }
+  `,
+    "type.duplicate_local",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Proof(t: type) -> type { t }
+    pub fn main() -> i32 {
+      const proof = Proof(i32);
+      const proof = Proof(i32);
+      1
+    }
+  `,
+    "type.duplicate_local",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Id(a: type) -> type { a }
+    fn Id::pure(value: a) -> Id(a) { value }
+    fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }
+    pub fn main() -> Id(i32) {
+      do @monad(Id(_)) {
+        let x = 1;
+        let x = 2;
+        pure(x)
+      }
+    }
+  `,
+    "type.duplicate_local",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Id(a: type) -> type { a }
+    fn Id::pure(value: a) -> Id(a) { value }
+    fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }
+    pub fn main() -> Id(i32) {
+      do @monad(Id(_)) {
+        x <- Id::pure(1);
+        x <- Id::pure(2);
+        pure(x)
+      }
     }
   `,
     "type.duplicate_local",
@@ -3281,6 +3497,75 @@ Deno.test("const function literals specialize const fn parameters", async () => 
   );
 });
 
+Deno.test("generic const fn callbacks preserve product runtime parameters", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+    fn over(
+      root: root,
+      const getter: fn(root: root) -> value,
+      const setter: fn(root: root, value: value) -> root,
+      const step: fn(value: value) -> value
+    ) -> root {
+      setter(root, step(getter(root)))
+    }
+
+    type fn Point() -> type { let Point = {x: i32, y: i32}; struct(Point) }
+    fn point_x(root: Point) -> i32 { root.x }
+    fn set_point_x(root: Point, value: i32) -> Point { Point {... root, x: value} }
+    fn inc(value: i32) -> i32 { value + 1 }
+
+    pub fn main() -> i32 {
+      over(Point {x: 1, y: 2}, point_x, set_point_x, inc).x
+    }
+  `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 2);
+});
+
+Deno.test("generic fold map with product accumulator and const callbacks lowers", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Pair() -> type { let Pair = {x: i32, y: i32}; struct(Pair) }
+
+    fn fold_map(
+      index: i32,
+      limit: i32,
+      acc: acc_t,
+      const map_step: fn(index: i32) -> mapped_t,
+      const reduce_step: fn(acc: acc_t, item: mapped_t) -> acc_t
+    ) -> acc_t {
+      match index < limit {
+        true => fold_map(
+          index + 1,
+          limit,
+          reduce_step(acc, map_step(index)),
+          map_step,
+          reduce_step
+        ),
+        false => acc,
+      }
+    }
+
+    fn make_pair(index: i32) -> Pair { Pair {x: index + 1, y: 10} }
+    fn append_pair(acc: Pair, item: Pair) -> Pair {
+      Pair {x: acc.x + item.x, y: acc.y + item.y}
+    }
+
+    pub fn main() -> i32 {
+      fold_map(0, 3, Pair {x: 0, y: 0}, make_pair, append_pair).x
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 6);
+});
+
 Deno.test("static product function slots lower to direct calls", async () => {
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -3309,7 +3594,7 @@ Deno.test("do monad lowers through generated capturing const functions", async (
     fn a() -> Id(i32) { 1 }
     fn b(x: i32) -> Id(i32) { x + 2 }
     pub fn main() -> Id(i32) {
-      do @monad(Id) {
+      do @monad(Id(_)) {
         x <- a();
         let k = x + 1;
         y <- b(k);
@@ -3336,7 +3621,7 @@ Deno.test("do monad lowers through generated capturing const functions", async (
     `
     type fn Id(a: type) -> type { a }
     pub fn main() -> Id(i32) {
-      do @monad(Id) {
+      do @monad(Id(_)) {
         x <- 1;
       }
     }
@@ -3355,7 +3640,7 @@ Deno.test("do monad expression statements lower like bind-right", async () => {
     fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }
     fn action(seed: i32) -> Id(i32) { seed + 1 }
     pub fn main() -> Id(i32) {
-      do @monad(Id) {
+      do @monad(Id(_)) {
         action(1);
         y <- action(2);
         pure(y)
@@ -3374,17 +3659,17 @@ Deno.test("do monad parameterized effect dispatches through outer type function"
     new WebAssembly.Module(
       await wasmFromSource(
         `
-    type fn State(state: type) -> type { state }
-    fn State::pure(value: state) -> State(state) { value }
+    type fn State(state: type, value: type) -> type { value }
+    fn State::pure(value: a) -> State(state, a) { value }
     fn State::bind(
-      value: State(state),
-      const step: fn(value: state) -> State(state)
-    ) -> State(state) {
+      value: State(state, a),
+      const step: fn(value: a) -> State(state, b)
+    ) -> State(state, b) {
       step(value)
     }
-    fn action(seed: i32) -> State(i32) { seed + 1 }
-    pub fn main() -> State(i32) {
-      do @monad(State(i32)) {
+    fn action(seed: i32) -> State(i32, i32) { seed + 1 }
+    pub fn main() -> State(i32, i32) {
+      do @monad(State(i32, _)) {
         action(1);
         y <- action(2);
         pure(y)
@@ -3403,17 +3688,17 @@ Deno.test("do monad parameterized state threads in-scope state implicitly", asyn
     new WebAssembly.Module(
       await wasmFromSource(
         `
-    type fn State(state: type) -> type { state }
-    fn State::pure(value: state) -> State(state) { value }
+    type fn State(state: type, value: type) -> type { value }
+    fn State::pure(value: a) -> State(state, a) { value }
     fn State::bind(
-      value: State(state),
-      const step: fn(value: state) -> State(state)
-    ) -> State(state) {
+      value: State(state, a),
+      const step: fn(value: a) -> State(state, b)
+    ) -> State(state, b) {
       step(value)
     }
-    fn bump(state: i32, amount: i32) -> State(i32) { state + amount }
-    fn run_state(state: i32) -> State(i32) {
-      do @monad(State(i32)) {
+    fn bump(state: i32, amount: i32) -> State(i32, i32) { state + amount }
+    fn run_state(state: i32) -> State(i32, i32) {
+      do @monad(State(i32, _)) {
         bump(2);
         bump(3);
       }
@@ -3531,17 +3816,17 @@ Deno.test("state-threaded do monad lowers through bind and pure", async () => {
     new WebAssembly.Module(
       await wasmFromSource(
         `
-    type fn State(state: type) -> type { state }
-    fn State::pure(value: state) -> State(state) { value }
+    type fn State(state: type, value: type) -> type { value }
+    fn State::pure(value: a) -> State(state, a) { value }
     fn State::bind(
-      value: State(state),
-      const step: fn(value: state) -> State(state)
-    ) -> State(state) {
+      value: State(state, a),
+      const step: fn(value: a) -> State(state, b)
+    ) -> State(state, b) {
       step(value) + 100
     }
-    fn bump(state: i32, amount: i32) -> State(i32) { state + amount }
-    fn run_state(state: i32) -> State(i32) {
-      do @monad(State(i32)) {
+    fn bump(state: i32, amount: i32) -> State(i32, i32) { state + amount }
+    fn run_state(state: i32) -> State(i32, i32) {
+      do @monad(State(i32, _)) {
         bump(2);
         bump(3);
       }
@@ -3562,13 +3847,93 @@ Deno.test("do monad requires strategy evidence members", async () => {
     fn Broken::bind(value: Broken(a), const f: fn(x: a) -> Broken(b)) -> Broken(b) { f(value) }
     fn action() -> Broken(i32) { 1 }
     pub fn main() -> Broken(i32) {
-      do @monad(Broken) {
+      do @monad(Broken(_)) {
         x <- action();
         action()
       }
     }
   `,
     "do.missing_strategy_proof",
+  );
+});
+
+Deno.test("do monad strategy requires explicit constructor arity", async () => {
+  await assertThrowsCompile(
+    `
+    type fn State(state: type, value: type) -> type { value }
+    fn State::pure(value: a) -> State(state, a) { value }
+    fn State::bind(value: State(state, a), const f: fn(x: a) -> State(state, b)) -> State(state, b) { f(value) }
+    type fn World() -> type { i32 }
+    pub fn main() -> State(World, i32) {
+      do @monad(State(World)) {
+        pure(1)
+      }
+    }
+  `,
+    "do.strategy_arity",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Option(a: type) -> type { a }
+    fn Option::pure(value: a) -> Option(a) { value }
+    fn Option::bind(value: Option(a), const f: fn(x: a) -> Option(b)) -> Option(b) { f(value) }
+    pub fn main() -> Option(i32) {
+      do @monad(Option) { pure(1) }
+    }
+  `,
+    "do.strategy_type",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Box(a: type) -> type { a }
+    fn Box::pure(value: a) -> Box(a) { value }
+    fn Box::bind(value: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) { f(value) }
+    pub fn main() -> Box(i32) {
+      do @monad(Box) { pure(1) }
+    }
+  `,
+    "do.strategy_type",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Box(a: type) -> type { a }
+    fn Box::pure(value: a) -> Box(a) { value }
+    fn Box::bind(value: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) { f(value) }
+    pub fn main() -> Box(i32) {
+      do @monad(_) { pure(1) }
+    }
+  `,
+    "do.strategy_type",
+  );
+  await assertThrowsCompile(
+    `
+    type fn State(state: type, value: type) -> type { value }
+    fn State::pure(value: a) -> State(state, a) { value }
+    fn State::bind(value: State(state, a), const f: fn(x: a) -> State(state, b)) -> State(state, b) { f(value) }
+    fn bump(state: i32) -> State(i32, i32) { state + 1 }
+    fn main(state: i32) -> State(i32, i32) {
+      do @monad(State(_, _)) {
+        bump();
+      }
+    }
+  `,
+    "do.state_type_hole",
+  );
+});
+
+Deno.test("type holes are rejected outside do strategy arguments", async () => {
+  await assertThrowsCompile(
+    `
+    fn main(x: _) -> i32 { 1 }
+  `,
+    "type.hole_context",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Bad() -> type { _ }
+    fn main() -> i32 { 1 }
+  `,
+    "type.hole_context",
   );
 });
 
@@ -3587,7 +3952,7 @@ Deno.test("do monad uses satisfies for inherited applicative proof", async () =>
     fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) { f(v.value) }
 
     pub fn main() -> Box(i32) {
-      do @monad(Box) {
+      do @monad(Box(_)) {
         x <- Box::pure(1);
         pure(2)
       }
@@ -3615,7 +3980,7 @@ Deno.test("do applicative supports query-style bind then final expression", asyn
     fn Query::map(const f: fn(x: a) -> Query(b), value: Query(a)) -> Query(b) { f(value) }
     fn each(query: i32) -> Query(i32) { query }
     pub fn main() -> i32 {
-      do @applicative(Query) {
+      do @applicative(Query(_)) {
         row <- each(4);
         pure(row + 1)
       }
@@ -3639,7 +4004,7 @@ Deno.test("do applicative supports multiple query-style binds when effect has bi
     fn Query::bind(value: Query(a), const f: fn(x: a) -> Query(b)) -> Query(b) { f(value) }
     fn each(query: i32) -> Query(i32) { query }
     pub fn main() -> i32 {
-      do @applicative(Query) {
+      do @applicative(Query(_)) {
         x <- each(4);
         y <- each(6);
         pure(x + y)
@@ -3676,7 +4041,7 @@ Deno.test("anonymous record values infer structural product types", async () => 
       row.x + empty.x
     }
     pub fn main() -> i32 {
-      let q = do @applicative(Query) {
+      let q = do @applicative(Query(_)) {
         x <- each(7);
         pure({x})
       };
@@ -5206,6 +5571,30 @@ Deno.test("optimization plan lowers large refined finite recursion structurally"
   );
 });
 
+Deno.test("optimization plan records tail-exposure helper inlining", async () => {
+  const checked = await checkSource(`
+    fn sum_continue(n: i32, acc: i32) -> i32 {
+      match n == 0 {
+        true => acc,
+        false => sum(n - 1, acc + n + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8)
+      }
+    }
+    fn sum(n: i32, acc: i32) -> i32 {
+      sum_continue(n, acc)
+    }
+    pub fn main() -> i32 { sum(4, 0) }
+  `);
+
+  const plan = summarizeOptimizationPlan(checked.program, { optMode: "release" });
+  assert(
+    plan.decisions.some((decision) =>
+      decision.target === "sum_continue" &&
+      decision.action === "call.inline.tail_exposure" &&
+      decision.evidence?.caller === "sum"
+    ),
+  );
+});
+
 Deno.test("optimization plan recurrence and inline actions match release WAT shape", async () => {
   const source = `
     fn inc(x: i32) -> i32 { x + 1 }
@@ -6467,7 +6856,7 @@ Deno.test("generic assumed rewrites instantiate from do strategy proofs", async 
     }
     fn inc(x: i32) -> i32 { x + 1 }
     pub fn main() -> i32 {
-      do @monad(A) {
+      do @monad(A(_)) {
         A::bind(A::zero(), inc)
       }
     }

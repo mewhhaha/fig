@@ -1202,6 +1202,28 @@ Deno.test("LSP inlay hints render inferred local let types", async () => {
   assertEquals(firstHintOnly.map((hint) => hint.label), [": range_i32"]);
 });
 
+Deno.test("LSP inlay hints place repeated unspanned local names once per source binding", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "pub fn a(x: i32) -> i32 { let flag = x > 0; match flag { true => 1, false => 0 } }",
+    "pub fn b(x: i32) -> i32 { let flag = x > 1; match flag { true => 1, false => 0 } }",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const hints = inlayHintsAt(result, {
+    start: { line: 0, character: 0 },
+    end: { line: 2, character: 0 },
+  });
+  assertEquals(hints.map((hint) => hint.label), [": bool", ": bool"]);
+  assertEquals(hints.map((hint) => hint.position), [
+    { line: 0, character: 34 },
+    { line: 1, character: 34 },
+  ]);
+});
+
 Deno.test("LSP inlay hints ignore type-block shape declarations", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();

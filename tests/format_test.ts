@@ -328,9 +328,9 @@ defaults:@field(defaults,#key)
   {
     name: "top-level do expression semicolon stays attached",
     input:
-      "const movement_q = do @applicative(ecs.Query(World, FrameInput)) { transform <- ecs.write(#transform); pure({transform}) }\n\n;\n\nfn next() -> i32 { 1 }",
+      "const movement_q = do @applicative(ecs.Query(World, FrameInput, _)) { transform <- ecs.write(#transform); pure({transform}) }\n\n;\n\nfn next() -> i32 { 1 }",
     expected:
-      "const movement_q = do @applicative(ecs.Query(\n  World,\n  FrameInput\n)) {\n  transform <- ecs.write(#transform);\n  pure({transform})\n};\n\nfn next() -> i32 {\n  1\n}\n",
+      "const movement_q = do @applicative(ecs.Query(\n  World,\n  FrameInput,\n  _\n)) {\n  transform <- ecs.write(#transform);\n  pure({transform})\n};\n\nfn next() -> i32 {\n  1\n}\n",
   },
   {
     name: "ecs style static shapes and field helpers",

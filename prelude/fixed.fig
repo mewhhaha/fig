@@ -38,9 +38,9 @@ fn Array::swap(
 ) -> Array(n, a) {
   let a_left = xs[left];
   let a_right = xs[right];
-  let xs: Array(n, a) = [...xs, [left]: a_right];
-  let xs: Array(n, a) = [...xs, [right]: a_left];
-  xs
+  let with_left: Array(n, a) = [...xs, [left]: a_right];
+  let swapped: Array(n, a) = [...with_left, [right]: a_left];
+  swapped
 }
 
 fn Array::fold_indices(

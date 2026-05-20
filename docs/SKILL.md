@@ -17,7 +17,7 @@ summarizes the current supported surface.
 - Use `docs/reference/types.md` for primitive, function, tuple, shape/product/union, repeat, and
   constructor types.
 - Use `docs/reference/expressions.md` for calls, constructors, tuples, collections, match,
-  operators, pipe-bind, `$`, shadowing, and destructuring.
+  operators, pipe-bind, `$`, local bindings, and destructuring.
 - Use `docs/reference/type-functions.md` for type blocks, result kinds, parameters, `struct`,
   `union`, `operator`, and type matches.
 - Use `docs/reference/builtins.md` for every `@...` compiler builtin and backend intrinsic.
@@ -159,7 +159,7 @@ Parameter forms include:
 - `name: Type`
 - `const name: Type` for static function/dictionary/type parameters.
 - Literal clauses such as `fn Choose(1: i32) -> i32 { 10 }` ordered before broader clauses.
-- `_ : Type` placeholders.
+- Wildcard parameters such as `_: Type`.
 - Pattern identifiers for sum variants and tuple destructuring in supported clause contexts.
 
 Multiple clauses with the same function name are ordered and checked for compatible arity and return
@@ -412,6 +412,29 @@ pub fn main() -> i32 {
 }
 ```
 
+Do notation requires the strategy to spell the effect at its declared arity. Use `_` only for the
+value type argument inferred by the block:
+
+```fig
+pub fn from_option() -> Option(i32) {
+  do @monad(Option(_)) {
+    x <- some(1);
+    pure(x + 1)
+  }
+}
+
+pub fn from_state(world: World) -> State(World, World) {
+  do @monad(State(World, _)) {
+    step();
+    update_player();
+  }
+}
+```
+
+Do not write bare or partial strategies such as `do @monad(Box)`, `do @monad(Option)`, or
+`do @monad(State(World))`. `_` is not a general type annotation placeholder; it is accepted only as
+a direct argument inside a do-strategy type call.
+
 Define applicative-like types with `map`, `pure`, and `apply`:
 
 ```fig
@@ -502,20 +525,29 @@ Current expression syntax resolves user-defined binary operators through visible
 usually `#infix`, `#infixl`, or `#infixr`. The prelude exposes common operator descriptors in
 `prelude.operators` and through `prelude.std`.
 
-## Branch-Bit Values and Shadowing
+## Branch-Bit Values and Local Bindings
 
 Fig uses Branch-Bit values: ordinary values are immutable, reusable, and can be passed to multiple
-functions without explicit borrowing or copying syntax. Repeated `let` bindings are the canonical
-way to carry the latest logical version of a value:
+functions without explicit borrowing or copying syntax. Local names must be unique within a block;
+use fresh names for pure intermediate values:
 
 ```fig
-let world = step(world);
-let world = update_player(world);
-world
+let stepped = step(world);
+let updated = update_player(stepped);
+updated
 ```
 
-The right-hand side sees the previous binding, and later expressions see the new one. Product-return
-destructuring uses multi-bind:
+Use `do @monad(State(T, _))` for ordered state transitions:
+
+```fig
+let world = do @monad(State(World, _)) {
+  step();
+  update_player();
+}
+```
+
+Use explicit `Reader` helpers such as `Reader::ask(env)` and `Reader::asks(env, f)` for read-only
+context flows. Product-return destructuring uses multi-bind:
 
 ```fig
 let first, second = make_pair();
@@ -576,6 +608,7 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
 - `prelude.array_static`: Fixed `lane4_i32` helpers, map/zip/fold/reduce, checked get, bounds, range
   iterators, compact arrays, and iterator map/filter/fold/collect.
 - `prelude.function`: `functor`, `applicative`, `monad`, `fmap`, `bind`, `pipe`, `flip`.
+- `prelude.monad`: `State(S, A)` and explicit `Reader(R, A)` helpers.
 - `prelude.operators`: common operator descriptors.
 - `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, and `prelude.schedule`.
 - `prelude.geometry2d`: Fixed 2D vector, color, vertex, quad, and geometry helpers.

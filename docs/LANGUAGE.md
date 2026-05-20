@@ -11,7 +11,7 @@ truth: use `grammar.ebnf`, `src/check.ts`, `src/primitives.ts`, and the tested f
 2. [Types](reference/types.md) covers primitive types, function types, shapes, products, unions,
    repeats, and constructors.
 3. [Expressions](reference/expressions.md) covers calls, constructors, match, operators, pipe-bind,
-   `$`, shadowing, and destructuring.
+   `$`, local bindings, and destructuring.
 4. [Type Functions](reference/type-functions.md) covers type blocks, result kinds, type parameters,
    `struct`, `union`, `operator`, and static matches.
 5. [Builtins](reference/builtins.md) lists every compiler builtin and backend intrinsic.

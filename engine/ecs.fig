@@ -1,32 +1,57 @@
 const layout = @import("prelude.layout");
+const default_capacity = 1024;
 
-type fn InlineArray(n: count, component: type) -> type {
-  let InlineArray = {n*component};
-  struct(InlineArray)
+type fn Batch(component: type) -> type {
+  layout.HeapArray(component)
 }
 
-type fn Batch(capacity: count, component: type) -> type {
-  layout.InlineArray(capacity, component)
+type fn BatchIndex() -> type {
+  i32
 }
 
-type fn BatchIndex(capacity: count) -> type {
-  layout.core.Index(capacity)
+type fn EntityId() -> type {
+  i32
 }
 
 type fn BatchFillIter(capacity: count, component: type) -> type {
   component
 }
 
-fn batch_capacity(batch: Batch(capacity, component)) -> i32 {
-  capacity
+fn batch_capacity(batch: Batch(component)) -> i32 {
+  layout.HeapArray::capacity(component, batch)
 }
 
-fn batch_fill(
-const capacity: count, value: component) -> Batch(
-  capacity,
-  component
-) {
-  layout.InlineArray::fill(capacity, component, value)
+fn batch_with_capacity(
+  const component: type,
+  capacity: i32
+) -> Batch(component) {
+  layout.HeapArray::new(component, capacity)
+}
+
+fn batch_fill(const capacity: count, value: component) -> Batch(component) {
+  batch_fill_loop(
+    capacity,
+    0,
+    layout.HeapArray::new(component, capacity),
+    value
+  )
+}
+
+fn batch_fill_loop(
+  const capacity: count,
+  index: i32,
+  batch: Batch(component),
+  value: component
+) -> Batch(component) {
+  match index < capacity {
+    true => batch_fill_loop(
+      capacity,
+      index + 1,
+      layout.HeapArray::push(component, batch, value),
+      value
+    ),
+    false => batch,
+  }
 }
 
 fn batch_fill_iter(
@@ -37,362 +62,382 @@ fn batch_fill_iter(
 }
 
 fn batch_set(
-  batch: Batch(capacity, component),
-  index: BatchIndex(capacity),
+  batch: Batch(component),
+  index: i32,
   value: component
-) -> Batch(capacity, component) {
-  layout.InlineArray::set(
-    capacity,
-    component,
-    batch,
-    index,
-    value
-  )
+) -> Batch(component) {
+  layout.HeapArray::set(component, batch, index, value)
+}
+
+fn batch_get(batch: Batch(component), index: i32) -> component {
+  layout.HeapArray::get(component, batch, index)
 }
 
 fn batch_map(
-  batch: Batch(capacity, component),
+  batch: Batch(component),
   const step: fn(item: component) -> result
-) -> Batch(capacity, result) {
-  layout.InlineArray::map(
-    capacity,
-    component,
-    result,
+) -> Batch(result) {
+  batch_map_loop(
+    0,
     batch,
+    layout.HeapArray::new(result, batch.len),
     step
   )
 }
 
+fn batch_map_loop(
+  index: i32,
+  batch: Batch(component),
+  out: Batch(result),
+  const step: fn(item: component) -> result
+) -> Batch(result) {
+  match index < batch.len {
+    true => batch_map_loop(
+      index + 1,
+      batch,
+      layout.HeapArray::push(
+        result,
+        out,
+        step(layout.HeapArray::get(
+          component,
+          batch,
+          index
+        ))
+      ),
+      step
+    ),
+    false => out,
+  }
+}
+
 fn batch_map_with_state(
-  batch: Batch(capacity, component),
+  batch: Batch(component),
   state_value: state,
   const step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: component,
     state_value: state
   ) -> result
-) -> Batch(capacity, result) {
-  layout.InlineArray::imap_with_state(
-    capacity,
-    component,
-    result,
-    state,
+) -> Batch(result) {
+  batch_map_with_state_loop(
+    0,
     batch,
+    layout.HeapArray::new(result, batch.len),
     state_value,
     step
   )
 }
 
-fn batch_map2_with_state(
-  write_batch: Batch(capacity, write_component),
-  read_batch: Batch(capacity, read_component),
+fn batch_map_with_state_loop(
+  index: i32,
+  batch: Batch(component),
+  out: Batch(result),
   state_value: state,
   const step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
+    item: component,
+    state_value: state
+  ) -> result
+) -> Batch(result) {
+  match index < batch.len {
+    true => batch_map_with_state_loop(
+      index + 1,
+      batch,
+      layout.HeapArray::push(
+        result,
+        out,
+        step(
+          index,
+          layout.HeapArray::get(
+            component,
+            batch,
+            index
+          ),
+          state_value
+        )
+      ),
+      state_value,
+      step
+    ),
+    false => out,
+  }
+}
+
+fn batch_map2_with_state(
+  write_batch: Batch(write_component),
+  read_batch: Batch(read_component),
+  state_value: state,
+  const step: fn(
+    index: i32,
     item: write_component,
     read: read_component,
     state_value: state
   ) -> write_component
-) -> Batch(capacity, write_component) {
+) -> Batch(write_component) {
   batch_map2_with_state_loop(
-    layout.core.IndexCursor::start(capacity),
-    layout.InlineArrayBuilder::start(
-      capacity,
-      write_component
-    ),
+    0,
     write_batch,
     read_batch,
+    layout.HeapArray::new(
+      write_component,
+      write_batch.len
+    ),
     state_value,
     step
   )
 }
 
 fn batch_map2_with_state_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  builder: layout.InlineArrayBuilder(
-    capacity,
-    write_component
-  ),
-  write_batch: Batch(capacity, write_component),
-  read_batch: Batch(capacity, read_component),
+  index: i32,
+  write_batch: Batch(write_component),
+  read_batch: Batch(read_component),
+  out: Batch(write_component),
   state_value: state,
   const step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: write_component,
     read: read_component,
     state_value: state
   ) -> write_component
-) -> Batch(capacity, write_component) {
-  let builder_then = builder;
-  let builder_else = builder;
-  let write_then = write_batch;
-  let write_else = write_batch;
-  let read_then = read_batch;
-  let read_else = read_batch;
-  let state_then = state_value;
-  let state_else = state_value;
-  let write_current = write_then;
-  let write_next = write_then;
-  let read_current = read_then;
-  let read_next = read_then;
-  let state_call = state_then;
-  let state_next = state_then;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => batch_map2_with_state_loop(
-      next,
-      layout.InlineArrayBuilder::push(
-        capacity,
+) -> Batch(write_component) {
+  match index < write_batch.len {
+    true => batch_map2_with_state_loop(
+      index + 1,
+      write_batch,
+      read_batch,
+      layout.HeapArray::push(
         write_component,
-        builder_then,
-        i,
+        out,
         step(
-          i,
-          write_current[i],
-          read_current[i],
-          state_call
+          index,
+          layout.HeapArray::get(
+            write_component,
+            write_batch,
+            index
+          ),
+          layout.HeapArray::get(
+            read_component,
+            read_batch,
+            index
+          ),
+          state_value
         )
       ),
-      write_next,
-      read_next,
-      state_next,
+      state_value,
       step
     ),
-    Done => layout.InlineArrayBuilder::finish(
-      capacity,
-      write_component,
-      builder_else
-    ),
+    false => out,
   }
 }
 
 fn batch_map3_with_state(
-  write_batch: Batch(capacity, write_component),
-  read_a_batch: Batch(capacity, read_a_component),
-  read_b_batch: Batch(capacity, read_b_component),
+  write_batch: Batch(write_component),
+  read_a_batch: Batch(read_a_component),
+  read_b_batch: Batch(read_b_component),
   state_value: state,
   const step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: write_component,
     read_a: read_a_component,
     read_b: read_b_component,
     state_value: state
   ) -> write_component
-) -> Batch(capacity, write_component) {
+) -> Batch(write_component) {
   batch_map3_with_state_loop(
-    layout.core.IndexCursor::start(capacity),
-    layout.InlineArrayBuilder::start(
-      capacity,
-      write_component
-    ),
+    0,
     write_batch,
     read_a_batch,
     read_b_batch,
+    layout.HeapArray::new(
+      write_component,
+      write_batch.len
+    ),
     state_value,
     step
   )
 }
 
 fn batch_map3_with_state_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  builder: layout.InlineArrayBuilder(
-    capacity,
-    write_component
-  ),
-  write_batch: Batch(capacity, write_component),
-  read_a_batch: Batch(capacity, read_a_component),
-  read_b_batch: Batch(capacity, read_b_component),
+  index: i32,
+  write_batch: Batch(write_component),
+  read_a_batch: Batch(read_a_component),
+  read_b_batch: Batch(read_b_component),
+  out: Batch(write_component),
   state_value: state,
   const step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: write_component,
     read_a: read_a_component,
     read_b: read_b_component,
     state_value: state
   ) -> write_component
-) -> Batch(capacity, write_component) {
-  let builder_then = builder;
-  let builder_else = builder;
-  let write_then = write_batch;
-  let write_next = write_batch;
-  let read_a_then = read_a_batch;
-  let read_a_next = read_a_batch;
-  let read_b_then = read_b_batch;
-  let read_b_next = read_b_batch;
-  let state_then = state_value;
-  let state_else = state_value;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => batch_map3_with_state_loop(
-      next,
-      layout.InlineArrayBuilder::push(
-        capacity,
+) -> Batch(write_component) {
+  match index < write_batch.len {
+    true => batch_map3_with_state_loop(
+      index + 1,
+      write_batch,
+      read_a_batch,
+      read_b_batch,
+      layout.HeapArray::push(
         write_component,
-        builder_then,
-        i,
+        out,
         step(
-          i,
-          write_then[i],
-          read_a_then[i],
-          read_b_then[i],
-          state_then
+          index,
+          layout.HeapArray::get(
+            write_component,
+            write_batch,
+            index
+          ),
+          layout.HeapArray::get(
+            read_a_component,
+            read_a_batch,
+            index
+          ),
+          layout.HeapArray::get(
+            read_b_component,
+            read_b_batch,
+            index
+          ),
+          state_value
         )
       ),
-      write_next,
-      read_a_next,
-      read_b_next,
-      state_then,
+      state_value,
       step
     ),
-    Done => layout.InlineArrayBuilder::finish(
-      capacity,
-      write_component,
-      builder_else
-    ),
+    false => out,
   }
 }
 
 fn batch_map4_with_state(
-  write_batch: Batch(capacity, write_component),
-  read_a_batch: Batch(capacity, read_a_component),
-  read_b_batch: Batch(capacity, read_b_component),
-  read_c_batch: Batch(capacity, read_c_component),
+  write_batch: Batch(write_component),
+  read_a_batch: Batch(read_a_component),
+  read_b_batch: Batch(read_b_component),
+  read_c_batch: Batch(read_c_component),
   state_value: state,
   const step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: write_component,
     read_a: read_a_component,
     read_b: read_b_component,
     read_c: read_c_component,
     state_value: state
   ) -> write_component
-) -> Batch(capacity, write_component) {
+) -> Batch(write_component) {
   batch_map4_with_state_loop(
-    layout.core.IndexCursor::start(capacity),
-    layout.InlineArrayBuilder::start(
-      capacity,
-      write_component
-    ),
+    0,
     write_batch,
     read_a_batch,
     read_b_batch,
     read_c_batch,
+    layout.HeapArray::new(
+      write_component,
+      write_batch.len
+    ),
     state_value,
     step
   )
 }
 
 fn batch_map4_with_state_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  builder: layout.InlineArrayBuilder(
-    capacity,
-    write_component
-  ),
-  write_batch: Batch(capacity, write_component),
-  read_a_batch: Batch(capacity, read_a_component),
-  read_b_batch: Batch(capacity, read_b_component),
-  read_c_batch: Batch(capacity, read_c_component),
+  index: i32,
+  write_batch: Batch(write_component),
+  read_a_batch: Batch(read_a_component),
+  read_b_batch: Batch(read_b_component),
+  read_c_batch: Batch(read_c_component),
+  out: Batch(write_component),
   state_value: state,
   const step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: write_component,
     read_a: read_a_component,
     read_b: read_b_component,
     read_c: read_c_component,
     state_value: state
   ) -> write_component
-) -> Batch(capacity, write_component) {
-  let builder_then = builder;
-  let builder_else = builder;
-  let write_then = write_batch;
-  let write_next = write_batch;
-  let read_a_then = read_a_batch;
-  let read_a_next = read_a_batch;
-  let read_b_then = read_b_batch;
-  let read_b_next = read_b_batch;
-  let read_c_then = read_c_batch;
-  let read_c_next = read_c_batch;
-  let state_then = state_value;
-  let state_else = state_value;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => batch_map4_with_state_loop(
-      next,
-      layout.InlineArrayBuilder::push(
-        capacity,
+) -> Batch(write_component) {
+  match index < write_batch.len {
+    true => batch_map4_with_state_loop(
+      index + 1,
+      write_batch,
+      read_a_batch,
+      read_b_batch,
+      read_c_batch,
+      layout.HeapArray::push(
         write_component,
-        builder_then,
-        i,
+        out,
         step(
-          i,
-          write_then[i],
-          read_a_then[i],
-          read_b_then[i],
-          read_c_then[i],
-          state_then
+          index,
+          layout.HeapArray::get(
+            write_component,
+            write_batch,
+            index
+          ),
+          layout.HeapArray::get(
+            read_a_component,
+            read_a_batch,
+            index
+          ),
+          layout.HeapArray::get(
+            read_b_component,
+            read_b_batch,
+            index
+          ),
+          layout.HeapArray::get(
+            read_c_component,
+            read_c_batch,
+            index
+          ),
+          state_value
         )
       ),
-      write_next,
-      read_a_next,
-      read_b_next,
-      read_c_next,
-      state_then,
+      state_value,
       step
     ),
-    Done => layout.InlineArrayBuilder::finish(
-      capacity,
-      write_component,
-      builder_else
-    ),
+    false => out,
   }
 }
 
 fn batch_fold(
-  batch: Batch(capacity, component),
+  batch: Batch(component),
   initial: accumulator,
   const step: fn(acc: accumulator, item: component) -> accumulator
 ) -> accumulator {
-  batch_fold_loop(
-    layout.core.IndexCursor::start(capacity),
-    batch,
-    initial,
-    step
-  )
+  batch_fold_loop(0, batch, initial, step)
 }
 
 fn batch_fold_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  batch: Batch(capacity, component),
+  index: i32,
+  batch: Batch(component),
   acc: accumulator,
   const step: fn(acc: accumulator, item: component) -> accumulator
 ) -> accumulator {
-  let batch_then = batch;
-  let batch_else = batch;
-  let acc_then = acc;
-  let acc_else = acc;
-  let batch_item = batch_then;
-  let batch_next = batch_then;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => batch_fold_loop(
-      next,
-      batch_next,
-      step(acc_then, batch_item[i]),
+  match index < batch.len {
+    true => batch_fold_loop(
+      index + 1,
+      batch,
+      step(
+        acc,
+        layout.HeapArray::get(component, batch, index)
+      ),
       step
     ),
-    Done => acc_else,
+    false => acc,
   }
 }
 
 fn batch_map_with_state_fold(
-  batch: Batch(capacity, component),
+  batch: Batch(component),
   state_value: state,
   initial: accumulator,
   const map_step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: component,
     state_value: state
   ) -> mapped,
   const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
 ) -> accumulator {
   batch_map_with_state_fold_loop(
-    layout.core.IndexCursor::start(capacity),
+    0,
     batch,
     state_value,
     initial,
@@ -402,38 +447,38 @@ fn batch_map_with_state_fold(
 }
 
 fn batch_map_with_state_fold_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  batch: Batch(capacity, component),
+  index: i32,
+  batch: Batch(component),
   state_value: state,
   acc: accumulator,
   const map_step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: component,
     state_value: state
   ) -> mapped,
   const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
 ) -> accumulator {
-  let batch_then = batch;
-  let batch_else = batch;
-  let state_then = state_value;
-  let state_else = state_value;
-  let acc_then = acc;
-  let acc_else = acc;
-  let batch_item = batch_then;
-  let batch_next = batch_then;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => batch_map_with_state_fold_loop(
-      next,
-      batch_next,
-      state_then,
+  match index < batch.len {
+    true => batch_map_with_state_fold_loop(
+      index + 1,
+      batch,
+      state_value,
       reduce_step(
-        acc_then,
-        map_step(i, batch_item[i], state_then)
+        acc,
+        map_step(
+          index,
+          layout.HeapArray::get(
+            component,
+            batch,
+            index
+          ),
+          state_value
+        )
       ),
       map_step,
       reduce_step
     ),
-    Done => acc_else,
+    false => acc,
   }
 }
 
@@ -443,14 +488,15 @@ fn batch_iter_map_with_state_fold(
   state_value: state,
   initial: accumulator,
   const map_step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: component,
     state_value: state
   ) -> mapped,
   const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
 ) -> accumulator {
   batch_fill_iter_map_with_state_fold_loop(
-    layout.core.IndexCursor::start(capacity),
+    capacity,
+    0,
     iter,
     state_value,
     initial,
@@ -460,36 +506,32 @@ fn batch_iter_map_with_state_fold(
 }
 
 fn batch_fill_iter_map_with_state_fold_loop(
-  cursor: layout.core.IndexCursor(capacity),
+  const capacity: count,
+  index: i32,
   value: component,
   state_value: state,
   acc: accumulator,
   const map_step: fn(
-    index: BatchIndex(capacity),
+    index: i32,
     item: component,
     state_value: state
   ) -> mapped,
   const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
 ) -> accumulator {
-  let value_then = value;
-  let value_else = value;
-  let state_then = state_value;
-  let state_else = state_value;
-  let acc_then = acc;
-  let acc_else = acc;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => batch_fill_iter_map_with_state_fold_loop(
-      next,
-      value_then,
-      state_then,
+  match index < capacity {
+    true => batch_fill_iter_map_with_state_fold_loop(
+      capacity,
+      index + 1,
+      value,
+      state_value,
       reduce_step(
-        acc_then,
-        map_step(i, value_then, state_then)
+        acc,
+        map_step(index, value, state_value)
       ),
       map_step,
       reduce_step
     ),
-    Done => acc_else,
+    false => acc,
   }
 }
 
@@ -498,57 +540,44 @@ fn fold_entities(
   initial: accumulator,
   const step: fn(
     acc: accumulator,
-    index: BatchIndex(capacity),
+    index: i32,
     world: world_t
   ) -> accumulator
 ) -> accumulator {
-  fold_entities_with_entities(
-    world.entities,
-    world,
-    initial,
-    step
-  )
+  fold_entities_loop(0, world, initial, step)
 }
 
 fn fold_entities_with_entities(
-  entities: Batch(capacity, BatchIndex(capacity)),
+  entities: Batch(i32),
   world: world_t,
   initial: accumulator,
   const step: fn(
     acc: accumulator,
-    index: BatchIndex(capacity),
+    index: i32,
     world: world_t
   ) -> accumulator
 ) -> accumulator {
-  fold_entities_loop(
-    layout.core.IndexCursor::start(capacity),
-    world,
-    initial,
-    step
-  )
+  fold_entities_loop(0, world, initial, step)
 }
 
 fn fold_entities_loop(
-  cursor: layout.core.IndexCursor(capacity),
+  index: i32,
   world: world_t,
   acc: accumulator,
   const step: fn(
     acc: accumulator,
-    index: BatchIndex(capacity),
+    index: i32,
     world: world_t
   ) -> accumulator
 ) -> accumulator {
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => match i < world.len {
-      true => fold_entities_loop(
-        next,
-        world,
-        step(acc, i, world),
-        step
-      ),
-      false => acc,
-    },
-    Done => acc,
+  match index < world.len {
+    true => fold_entities_loop(
+      index + 1,
+      world,
+      step(acc, index, world),
+      step
+    ),
+    false => acc,
   }
 }
 
@@ -556,38 +585,90 @@ fn components(const spec) -> const {
   spec
 }
 
-type fn ComponentBatchFor(
-  capacity: count,
-  component: type
-) -> type {
-  Batch(capacity, component)
+type fn ComponentBatchFor(component: type) -> type {
+  Batch(component)
 }
 
-type fn World(capacity: count, components: const) -> type {
+type fn World(components: const) -> type {
   let Base = {
-    entities: Batch(capacity, BatchIndex(capacity)),
+    entities: Batch(i32),
     len: i32
   };
   let Stores = @shape_map(
     components,
-    ComponentBatchFor(capacity)
+    ComponentBatchFor
   );
   let World = @shape_concat(Base, Stores);
   struct(World)
 }
 
-fn World::empty(
-  const capacity: count,
-  const spec: const
-) -> World(capacity, spec) {
-  @empty(World(capacity, spec))
+fn World::empty(const spec: const) -> World(spec) {
+  World::with_capacity(spec, default_capacity)
 }
 
-fn empty_world(
-  const capacity: count,
-  const spec: const
-) -> World(capacity, spec) {
-  World::empty(capacity, spec)
+fn World::with_capacity(
+  const spec: const,
+  initial_capacity: i32
+) -> World(spec) {
+  let base: World(spec) = @replace_field(
+    @empty(World(spec)),
+    #entities,
+    layout.HeapArray::new(i32, initial_capacity)
+  );
+  init_component_batches(
+    spec,
+    initial_capacity,
+    @replace_field(base, #len, 0)
+  )
+}
+
+fn empty_world(const spec: const) -> World(spec) {
+  World::empty(spec)
+}
+
+fn empty_world_with_capacity(
+  const spec: const,
+  initial_capacity: i32
+) -> World(spec) {
+  World::with_capacity(spec, initial_capacity)
+}
+
+fn init_component_batches(
+  const fields,
+  initial_capacity: i32,
+  world: world_t
+) -> world_t {
+  match @shape_count(fields) {
+    0 => world,
+    _ => init_component_batches_nonempty(
+      @shape_first_key(fields),
+      @shape_tail(fields),
+      @shape_slot(fields, @shape_first_key(fields)),
+      initial_capacity,
+      world
+    ),
+  }
+}
+
+fn init_component_batches_nonempty(
+  const field: const,
+  const rest,
+  const component: type,
+  initial_capacity: i32,
+  world: world_t
+) -> world_t {
+  init_component_batches(
+    rest,
+    initial_capacity,
+    @replace_field(
+      world,
+      field,
+      layout.HeapArray::new(
+        component,
+        initial_capacity
+      )
+    )
+  )
 }
 
 type fn Read(component: type) -> type {
@@ -636,28 +717,31 @@ type fn Res(resource: type) -> type {
   resource
 }
 
-fn read(
-const field: const) -> Query(world_t, input_t, component) {
+fn read(const field: const) -> Query(
+  world_t,
+  input_t,
+  component
+) {
   let world: world_t = @field;
-  let values: Batch(capacity, component) = @field(
-    world,
-    field
-  );
+  let values: Batch(component) = @field(world, field);
   0
 }
 
-fn write(
-const field: const) -> Query(world_t, input_t, component) {
+fn write(const field: const) -> Query(
+  world_t,
+  input_t,
+  component
+) {
   let world: world_t = @field;
-  let values: Batch(capacity, component) = @field(
-    world,
-    field
-  );
+  let values: Batch(component) = @field(world, field);
   0
 }
 
-fn has(
-const field: const) -> Query(world_t, input_t, bool) {
+fn has(const field: const) -> Query(
+  world_t,
+  input_t,
+  bool
+) {
   true
 }
 
@@ -665,7 +749,7 @@ fn res() -> Query(world_t, input_t, input_t) {
   0
 }
 
-fn entity() -> Query(world_t, input_t, BatchIndex(capacity)) {
+fn entity() -> Query(world_t, input_t, i32) {
   0
 }
 
@@ -673,13 +757,27 @@ fn snapshot() -> Query(world_t, input_t, world_t) {
   0
 }
 
-fn get(
-const field: const) -> Query(world_t, input_t, component) {
+fn query(const row: type) -> Query(
+  world_t,
+  input_t,
+  row
+) {
+  0
+}
+
+fn get(const field: const) -> Query(
+  world_t,
+  input_t,
+  component
+) {
   read(field)
 }
 
-fn without(
-const field: const) -> Query(world_t, input_t, bool) {
+fn without(const field: const) -> Query(
+  world_t,
+  input_t,
+  bool
+) {
   false
 }
 
@@ -746,11 +844,11 @@ type fn QueryRowFor(access: const) -> type {
   struct(access)
 }
 
-fn query_row(
+pub fn query_row(
   const row_type: type,
   const fields,
   systems: Systems(world_t, input_t),
-  index: BatchIndex(capacity),
+  index: i32,
   row: row_type
 ) -> row_type {
   match @shape_count(fields) {
@@ -765,11 +863,11 @@ fn query_row(
   }
 }
 
-fn query_row_nonempty(
+pub fn query_row_nonempty(
   const row_type: type,
   const fields,
   systems: Systems(world_t, input_t),
-  index: BatchIndex(capacity),
+  index: i32,
   row: row_type
 ) -> row_type {
   let base = query_row(
@@ -779,30 +877,34 @@ fn query_row_nonempty(
     index,
     row
   );
-  let value = match @shape_first_key(fields) {
-    #input => systems.input,
-    #entity => index,
-    #snapshot => systems.world,
-    _ => @field(
-      systems.world,
-      @shape_first_key(fields)
-    )[index],
-  };
-  @replace_field(
-    base,
-    @shape_first_key(fields),
-    value
-  )
+  match @shape_first_key(fields) {
+    #input => @replace_field(
+      base,
+      #input,
+      systems.input
+    ),
+    #entity => @replace_field(base, #entity, index),
+    #snapshot => @replace_field(
+      base,
+      #snapshot,
+      systems.world
+    ),
+    _ => @replace_field(
+      base,
+      @shape_first_key(fields),
+      layout.HeapArray::get(
+        @shape_slot(fields, @shape_first_key(fields)),
+        @field(
+          systems.world,
+          @shape_first_key(fields)
+        ),
+        index
+      )
+    ),
+  }
 }
 
 type fn PatchForQuery(row: type, patch: type) -> type {
-  let RowSlots = @type_slots(row);
-  let PatchSlots = @type_slots(patch);
-  let Matched = @shape_intersect(RowSlots, PatchSlots);
-  let PatchFieldsOk = @require(
-    @shape_count(Matched) == @shape_count(PatchSlots),
-    "ECS set patch field must be present in the query row"
-  );
   patch
 }
 
@@ -828,53 +930,110 @@ fn fold(
   initial: accumulator,
   const step: fn(acc: accumulator, row: row_t) -> accumulator
 ) -> accumulator {
-  fold_start(
+  fold_loop(0, systems, initial, step)
+}
+
+fn fold_map(
+  systems: Systems(world_t, input_t),
+  query: Query(world_t, input_t, row_t),
+  initial: accumulator,
+  const map_step: fn(row: row_t) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  fold_map_loop(
+    0,
     systems,
     initial,
-    step
+    map_step,
+    reduce_step
   )
 }
 
-fn fold_start(
+fn fold_map_loop(
+  index: i32,
   systems: Systems(world_t, input_t),
-  initial: accumulator,
-  const step: fn(acc: accumulator, row: row_t) -> accumulator
+  acc: accumulator,
+  const map_step: fn(row: row_t) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
 ) -> accumulator {
-  fold_loop(
-    layout.core.IndexCursor::start(capacity),
-    systems,
+  match index < systems.world.len {
+    true => fold_map_loop(
+      index + 1,
+      systems,
+      reduce_step(
+        acc,
+        map_step(query_row(
+          row_t,
+          @type_slots(row_t),
+          systems,
+          index,
+          @empty(row_t)
+        ))
+      ),
+      map_step,
+      reduce_step
+    ),
+    false => acc,
+  }
+}
+
+fn fold_map_entities(
+  world: world_t,
+  initial: accumulator,
+  const map_step: fn(index: i32, world: world_t) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  fold_map_entities_loop(
+    0,
+    world,
     initial,
-    step
+    map_step,
+    reduce_step
   )
+}
+
+fn fold_map_entities_loop(
+  index: i32,
+  world: world_t,
+  acc: accumulator,
+  const map_step: fn(index: i32, world: world_t) -> mapped,
+  const reduce_step: fn(acc: accumulator, item: mapped) -> accumulator
+) -> accumulator {
+  match index < world.len {
+    true => fold_map_entities_loop(
+      index + 1,
+      world,
+      reduce_step(acc, map_step(index, world)),
+      map_step,
+      reduce_step
+    ),
+    false => acc,
+  }
 }
 
 fn fold_loop(
-  cursor: layout.core.IndexCursor(capacity),
+  index: i32,
   systems: Systems(world_t, input_t),
   acc: accumulator,
   const step: fn(acc: accumulator, row: row_t) -> accumulator
 ) -> accumulator {
-  let systems_then = systems;
-  let systems_next = systems;
-  let acc_then = acc;
-  let acc_else = acc;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => fold_loop(
-      next,
-      systems_next,
+  match index < systems.world.len {
+    true => fold_loop(
+      index + 1,
+      systems,
       step(
-        acc_then,
+        acc,
         query_row(
           row_t,
           @type_slots(row_t),
-          systems_then,
-          i,
+          systems,
+          index,
           @empty(row_t)
         )
       ),
       step
     ),
-    Done => acc_else,
+    false => acc,
   }
 }
 
@@ -938,6 +1097,7 @@ fn set_fields_with_world_nonempty(
     systems,
     set_field_with_world(
       @shape_first_key(fields),
+      @shape_slot(fields, @shape_first_key(fields)),
       systems,
       world,
       step
@@ -948,12 +1108,15 @@ fn set_fields_with_world_nonempty(
 
 fn set_field_with_world(
   const field: const,
+  const component: type,
   systems: Systems(world_t, input_t),
   world: world_t,
   const step: fn(row: row_t, world: world_t) -> patch_t
 ) -> world_t {
-  let mapped = set_field_with_world_start(
+  let mapped = set_field_with_world_loop(
+    0,
     field,
+    component,
     @field(world, field),
     systems,
     step
@@ -961,68 +1124,37 @@ fn set_field_with_world(
   @replace_field(world, field, mapped)
 }
 
-fn set_field_with_world_start(
-  const field: const,
-  values: Batch(capacity, component),
-  systems: Systems(world_t, input_t),
-  const step: fn(row: row_t, world: world_t) -> patch_t
-) -> Batch(capacity, component) {
-  set_field_with_world_loop(
-    layout.core.IndexCursor::start(capacity),
-    layout.InlineArrayBuilder::start(
-      capacity,
-      component
-    ),
-    values,
-    systems,
-    field,
-    step
-  )
-}
-
 fn set_field_with_world_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  builder: layout.InlineArrayBuilder(capacity, component),
-  values: Batch(capacity, component),
-  systems: Systems(world_t, input_t),
+  index: i32,
   const field: const,
+  const component: type,
+  values: Batch(component),
+  systems: Systems(world_t, input_t),
   const step: fn(row: row_t, world: world_t) -> patch_t
-) -> Batch(capacity, component) {
-  let builder_then = builder;
-  let builder_else = builder;
-  let values_next = values;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => set_field_with_world_loop(
-      next,
-      layout.InlineArrayBuilder::push(
-        capacity,
-        component,
-        builder_then,
-        i,
-        @field(
-          step(
-            query_row(
-              row_t,
-              @type_slots(row_t),
-              systems,
-              i,
-              @empty(row_t)
-            ),
-            systems.world
-          ),
-          field
-        )
-      ),
-      values_next,
+) -> Batch(component) {
+  match index < systems.world.len {
+    true => query_row(
+      row_t,
+      @type_slots(row_t),
       systems,
+      index,
+      @empty(row_t)
+    )
+      \row_value -> step(row_value, systems.world)
+      \patch_value -> set_field_with_world_loop(
+      index + 1,
       field,
+      component,
+      layout.HeapArray::set(
+        component,
+        values,
+        index,
+        @field(patch_value, field)
+      ),
+      systems,
       step
     ),
-    Done => layout.InlineArrayBuilder::finish(
-      capacity,
-      component,
-      builder_else
-    ),
+    false => values,
   }
 }
 
@@ -1054,6 +1186,7 @@ fn set_fields_nonempty(
     systems,
     set_field(
       @shape_first_key(fields),
+      @shape_slot(fields, @shape_first_key(fields)),
       systems,
       world,
       step
@@ -1064,12 +1197,15 @@ fn set_fields_nonempty(
 
 fn set_field(
   const field: const,
+  const component: type,
   systems: Systems(world_t, input_t),
   world: world_t,
   const step: fn(row: row_t) -> patch_t
 ) -> world_t {
-  let mapped = set_field_start(
+  let mapped = set_field_loop(
+    0,
     field,
+    component,
     @field(world, field),
     systems,
     step
@@ -1077,68 +1213,37 @@ fn set_field(
   @replace_field(world, field, mapped)
 }
 
-fn set_field_start(
-  const field: const,
-  values: Batch(capacity, component),
-  systems: Systems(world_t, input_t),
-  const step: fn(row: row_t) -> patch_t
-) -> Batch(capacity, component) {
-  set_field_loop(
-    layout.core.IndexCursor::start(capacity),
-    layout.InlineArrayBuilder::start(
-      capacity,
-      component
-    ),
-    values,
-    systems,
-    field,
-    step
-  )
-}
-
 fn set_field_loop(
-  cursor: layout.core.IndexCursor(capacity),
-  builder: layout.InlineArrayBuilder(capacity, component),
-  values: Batch(capacity, component),
-  systems: Systems(world_t, input_t),
+  index: i32,
   const field: const,
+  const component: type,
+  values: Batch(component),
+  systems: Systems(world_t, input_t),
   const step: fn(row: row_t) -> patch_t
-) -> Batch(capacity, component) {
-  let builder_then = builder;
-  let builder_else = builder;
-  let values_then = values;
-  let values_next = values;
-  let systems_then = systems;
-  let systems_next = systems;
-  match layout.core.IndexCursor::next(capacity, cursor) {
-    Yield(i, next) => set_field_loop(
-      next,
-      layout.InlineArrayBuilder::push(
-        capacity,
-        component,
-        builder_then,
-        i,
-        @field(
-          step(query_row(
-            row_t,
-            @type_slots(row_t),
-            systems_then,
-            i,
-            @empty(row_t)
-          )),
-          field
-        )
-      ),
-      values_next,
-      systems_next,
+) -> Batch(component) {
+  match index < systems.world.len {
+    true => query_row(
+      row_t,
+      @type_slots(row_t),
+      systems,
+      index,
+      @empty(row_t)
+    )
+      \row_value -> step(row_value)
+      \patch_value -> set_field_loop(
+      index + 1,
       field,
+      component,
+      layout.HeapArray::set(
+        component,
+        values,
+        index,
+        @field(patch_value, field)
+      ),
+      systems,
       step
     ),
-    Done => layout.InlineArrayBuilder::finish(
-      capacity,
-      component,
-      builder_else
-    ),
+    false => values,
   }
 }
 
@@ -1155,75 +1260,106 @@ fn run(
 }
 
 fn WorldComponents(const world: type) -> const {
-  @shape_omit(@type_slots(world), {entities: true, len: true})
+  @shape_omit(
+    @type_slots(world),
+    {entities: true, len: true}
+  )
 }
 
 fn spawn(
   world: world_t,
-  entity_values: EntityRow(WorldComponents(world_t), row)
+  entity_values: EntityRow(
+    WorldComponents(world_t),
+    row
+  )
 ) -> Command(world_t) {
-  let entity = match layout.core.Index::try(
-    capacity,
-    world.len
-  ) {
-    Some(index) => index,
-    None => 0,
-  };
-  spawn_components(
-    @type_slots(row),
-    capacity,
+  let entity_id = world.len;
+  let with_entity: world_t = @replace_field(
     @replace_field(
       world,
-      #len,
-      world.len + 1
+      #entities,
+      layout.HeapArray::push(
+        i32,
+        world.entities,
+        entity_id
+      )
     ),
-    entity,
-    entity_values
-  )
-}
-
-fn spawn_with_entities(
-  entities: Batch(capacity, BatchIndex(capacity)),
-  world: world_t,
-  entity_values: EntityRow(WorldComponents(world_t), row)
-) -> Command(world_t) {
-  let entity = match layout.core.Index::try(
-    capacity,
-    world.len
-  ) {
-    Some(index) => index,
-    None => 0,
-  };
-  let with_entity: world_t = @replace_field(
-    world,
-    #entities,
-    layout.InlineArray::set(
-      capacity,
-      BatchIndex(capacity),
-      entities,
-      entity,
-      entity
-    )
-  );
-  let spawned: world_t = @replace_field(
-    with_entity,
     #len,
     world.len + 1
   );
   spawn_components(
     @type_slots(row),
-    capacity,
-    spawned,
-    entity,
+    with_entity,
+    entity_id,
     entity_values
+  )
+}
+
+fn spawn_with_entities(
+  entities: Batch(i32),
+  world: world_t,
+  entity_values: EntityRow(
+    WorldComponents(world_t),
+    row
+  )
+) -> Command(world_t) {
+  let entity_id = world.len;
+  let with_entity: world_t = @replace_field(
+    @replace_field(
+      world,
+      #entities,
+      layout.HeapArray::push(i32, entities, entity_id)
+    ),
+    #len,
+    world.len + 1
+  );
+  spawn_components(
+    @type_slots(row),
+    with_entity,
+    entity_id,
+    entity_values
+  )
+}
+
+fn spawn_default_components(
+  const fields,
+  world: world_t
+) -> world_t {
+  match @shape_count(fields) {
+    0 => world,
+    _ => spawn_default_components_nonempty(
+      @shape_first_key(fields),
+      @shape_tail(fields),
+      @shape_slot(fields, @shape_first_key(fields)),
+      world
+    ),
+  }
+}
+
+fn spawn_default_components_nonempty(
+  const field: const,
+  const rest,
+  const component: type,
+  world: world_t
+) -> world_t {
+  spawn_default_components(
+    rest,
+    @replace_field(
+      world,
+      field,
+      layout.HeapArray::push(
+        component,
+        @field(world, field),
+        @empty(component)
+      )
+    )
   )
 }
 
 fn spawn_components(
   const fields,
-  const capacity: count,
   world: world_t,
-  entity: BatchIndex(capacity),
+  entity: i32,
   entity_values: row_t
 ) -> Command(world_t) {
   match @shape_count(fields) {
@@ -1232,7 +1368,6 @@ fn spawn_components(
       @shape_first_key(fields),
       @shape_tail(fields),
       @shape_slot(fields, @shape_first_key(fields)),
-      capacity,
       world,
       entity,
       entity_values
@@ -1244,27 +1379,21 @@ fn spawn_components_nonempty(
   const field: const,
   const rest,
   const component: type,
-  const capacity: count,
   world: world_t,
-  entity: BatchIndex(capacity),
+  entity: i32,
   entity_values: row_t
 ) -> Command(world_t) {
-  let next_batch = layout.InlineArray::set(
-    capacity,
-    component,
-    @field(world, field),
-    entity,
-    @field(entity_values, field)
-  );
-  let next_world: world_t = @replace_field(
-    world,
-    field,
-    next_batch
-  );
   spawn_components(
     rest,
-    capacity,
-    next_world,
+    @replace_field(
+      world,
+      field,
+      layout.HeapArray::push(
+        component,
+        @field(world, field),
+        @field(entity_values, field)
+      )
+    ),
     entity,
     entity_values
   )

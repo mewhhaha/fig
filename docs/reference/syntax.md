@@ -222,7 +222,13 @@ match maybe {
 }
 ```
 
-There is no assignment statement; bind updated values with `let` shadowing.
+There is no assignment statement. Use fresh local names for pure intermediate values, or use
+`do @monad(State(T, _))` when source order represents an ordered state transition.
+
+Do-strategy annotations must use a fully applied type constructor with `_` for inferred value
+positions: `do @monad(Option(_))`, `do @monad(Box(_))`, `do @monad(State(World, _))`, and
+`do @monad(Reader(Env, _))`. Bare constructors such as `@monad(Option)` or partial calls such as
+`@monad(State(World))` are invalid.
 
 ## Literals
 

@@ -163,7 +163,7 @@ Deno.test("highlight query separates do bind arrows and comparison operators", a
   parser.setLanguage(language);
   const source = `
 fn main(a: i32, b: i32) -> i32 {
-  do @monad(Id) {
+  do @monad(Id(_)) {
     row <- each(4);
     if a < b { 1 } else { 2 }
   }

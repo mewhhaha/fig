@@ -84,21 +84,54 @@ Pipe-bind evaluates the left side, binds it, and evaluates the next atom:
 
 The placeholder pipe-bind form is retained for compatibility, but named pipe-bind variables are the
 preferred form. Pipe-bind is intended for short one-step value flow. For state machines or
-update-heavy code, block `let` shadowing usually makes the same lowering shape easier to inspect.
+update-heavy code, use fresh block-local names for pure values or an explicit
+`do @monad(State(T, _))` sequence for ordered state transitions.
 
-## Shadowing and Destructuring
+## Do Strategies
 
-Local `let` bindings may shadow earlier bindings in the same block. The initializer sees the
-previous binding, and later expressions see the new binding:
+`do` blocks name their sequencing strategy with a static builtin and an explicit effect type call:
 
 ```fig
-let x = 1;
-let x = x + 1;
-x // 2
+do @monad(Option(_)) {
+  x <- maybe_value();
+  pure(x + 1)
+}
+
+do @monad(State(World, _)) {
+  step();
+  update_player();
+}
 ```
 
-This is the preferred style for update-heavy code because it keeps values immutable while allowing a
-name to track the latest logical version.
+The strategy must be a type call whose argument count matches the declared type function arity.
+Use `_` only for the value type positions the `do` block should infer. For example, unary monads use
+`Option(_)` or `Box(_)`; binary monads use `State(World, _)` or `Reader(Env, _)`.
+
+Bare or partially applied strategy constructors are rejected:
+
+```fig
+do @monad(Option) { ... }       // invalid: missing Option value argument
+do @monad(Box) { ... }          // invalid: missing Box value argument
+do @monad(State(World)) { ... } // invalid: State has arity 2
+```
+
+`_` is not a general type placeholder. It is only valid as a direct argument inside a do-strategy
+type call, and state-threaded `do` blocks require the state argument to be concrete, such as
+`State(World, _)` rather than `State(_, _)`.
+
+## Local Bindings and Destructuring
+
+Local `let` bindings must use unique names within the same block. Initializers are
+dependency-ordered, so a later binding can feed an earlier statement when there is no cycle:
+
+```fig
+let next = start + 1;
+let start = 1;
+next // 2
+```
+
+Use fresh names for pure intermediate values. Use `do @monad(State(T, _))` when the source order is the
+meaning of the computation.
 
 Tuple and product results can be destructured with multi-bind:
 
@@ -153,14 +186,14 @@ let xs: [i32; 3] = [1, 2, 3];
 let ys: [i32; 3] = [...xs, [1]: 32];
 ```
 
-Repeated `let` shadowing plus fixed-array spread is the canonical source form for edit chains:
+Fresh local names plus fixed-array spread are the canonical source form for pure edit chains:
 
 ```fig
 let a = xs[left];
 let b = xs[right];
-let xs = [...xs, [left]: b];
-let xs = [...xs, [right]: a];
-xs
+let with_left = [...xs, [left]: b];
+let swapped = [...with_left, [right]: a];
+swapped
 ```
 
 Angle-bracket collection literals are target-typed and lower through collector members on the

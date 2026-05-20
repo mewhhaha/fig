@@ -576,7 +576,7 @@ const figScenarios: FigScenario[] = [
       }
 
       pub fn main(seed: i32) -> i32 {
-        do @monad(Id) {
+        do @monad(Id(_)) {
           x <- get(seed);
           let y = x + 3;
           z <- add_id(y);
@@ -605,7 +605,7 @@ const figScenarios: FigScenario[] = [
       }
 
       pub fn main(seed: i32) -> i32 {
-        do @applicative(Id) {
+        do @applicative(Id(_)) {
           x <- get(seed);
           let y = x + 3;
           y * 2

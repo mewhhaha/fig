@@ -141,6 +141,62 @@ Deno.test("engine playground frame builds, ticks, and renders visible sprites", 
   assertEquals(drawCalls[0]?.slice(1), [20, 8, 16, 16, 1, 2]);
 });
 
+Deno.test("brackeys player keeps last facing direction while idle", async () => {
+  const source = await Deno.readTextFile("examples/brackeys_platformer.fig");
+  const module = new WebAssembly.Module(
+    await wasmFromSource(source, { resolveModule, optMode: "release" }),
+  );
+
+  const playerFlipAfter = (axis0: number, axis1: number) => {
+    const drawCalls: number[][] = [];
+    const instance = new WebAssembly.Instance(module, {
+      env: {
+        clock: () => 1n,
+        random: () => 2,
+        tick_millis: () => 16,
+        input_axis_x: () => 0,
+        input_pressed: () => 0,
+        canvas_init: () => 1,
+        gpu_create_shader: () => 1,
+        gpu_create_pipeline: () => 1,
+        gpu_upload_vertices: () => 1,
+        gpu_draw_quads: () => 1,
+        gpu_begin_frame: () => 1,
+        gpu_draw_rect: () => 1,
+        gpu_draw_sprite: (...args: number[]) => {
+          drawCalls.push(args);
+          return 1;
+        },
+        gpu_present: () => 1,
+        event_poll: () => 0,
+        audio_play: () => 1,
+        audio_music: () => 1,
+      },
+    });
+    const initWorld = instance.exports.init_world as () => number[];
+    const stepWorld = instance.exports.step_world as (
+      ...args: number[]
+    ) => number[];
+    const inputKey = instance.exports.input_key as (
+      ...args: number[]
+    ) => number[];
+    const renderWorld = instance.exports.render_world as (
+      ...args: number[]
+    ) => number;
+    let world = initWorld();
+    if (axis0 !== 0) world = inputKey(...world, axis0 < 0 ? 1 : 2, 1);
+    world = stepWorld(...world, 16);
+    if (axis0 !== 0) world = inputKey(...world, axis0 < 0 ? 1 : 2, 0);
+    if (axis1 !== 0) world = inputKey(...world, axis1 < 0 ? 1 : 2, 1);
+    world = stepWorld(...world, 16);
+    renderWorld(1, 288, 162, ...world);
+    return drawCalls.find((args) => args[1] === 2)?.[10];
+  };
+
+  assertEquals(playerFlipAfter(-1, 0), 1);
+  assertEquals(playerFlipAfter(1, 0), 0);
+});
+
 Deno.test("host effect imports are emitted in WAT and wasm", async () => {
   const source = await Deno.readTextFile("examples/effects.fig");
   const wat = await watFromSource(source, { resolveModule });

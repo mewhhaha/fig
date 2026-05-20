@@ -517,7 +517,10 @@ function lowerTypeExpr(node: Node): TypeExpr {
       return { kind: "type_shape", ...spanOnly(expr), shape: lowerTypeTuple(expr) };
     case "TypeBuilderName":
       return { kind: "type_ref", ...meta(expr, expr), name: expr.text };
+    case "TypeHole":
+      return { kind: "type_hole", ...spanOnly(expr) };
     case "TypePrimary":
+      if (expr.text.trim() === "_") return { kind: "type_hole", ...spanOnly(expr) };
       if (optional(expr, "TypeQualifiedTail")) {
         return { kind: "type_ref", ...spanOnly(expr), name: expr.text.replace(/\s+/g, "") };
       }

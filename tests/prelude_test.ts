@@ -34,6 +34,89 @@ Deno.test("functional prelude checks functor and monad examples", async () => {
   await checkSource(source, { resolveModule });
 });
 
+Deno.test("monad prelude exposes typed State pure bind and do sequencing", async () => {
+  const source = `
+    const monads = @import("prelude.monad");
+
+    type fn World() -> type {
+      let World = {tick: i32};
+      struct(World)
+    }
+
+    fn add_two(x: i32) -> monads.State(i32, i32) {
+      x + 2
+    }
+
+    fn step(world: World) -> monads.State(World, World) {
+      World {...world, tick: world.tick + 1}
+    }
+
+    fn update_player(world: World) -> monads.State(World, World) {
+      World {...world, tick: world.tick + 10}
+    }
+
+    fn run_world(world: World) -> monads.State(World, World) {
+      do @monad(monads.State(World, _)) {
+        step();
+        update_player();
+      }
+    }
+
+    fn do_value() -> monads.State(i32, i32) {
+      do @monad(monads.State(i32, _)) {
+        x <- monads.State::pure(4);
+        pure(x + 6)
+      }
+    }
+
+    pub fn main() -> i32 {
+      let seed: monads.State(i32, i32) = monads.State::pure(3);
+      let bound = monads.State::bind(seed, add_two);
+      let world = run_world(World {tick: 1});
+      bound + do_value() + world.tick
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 27);
+});
+
+Deno.test("monad prelude exposes explicit Reader helpers", async () => {
+  const source = `
+    const monads = @import("prelude.monad");
+
+    fn triple(x: i32) -> i32 {
+      x * 3
+    }
+
+    fn plus_five(x: i32) -> monads.Reader(i32, i32) {
+      monads.Reader::pure(x + 5)
+    }
+
+    fn do_reader() -> monads.Reader(i32, i32) {
+      do @monad(monads.Reader(i32, _)) {
+        x <- monads.Reader::ask(4);
+        y <- monads.Reader::asks(5, triple);
+        pure(x + y)
+      }
+    }
+
+    pub fn main() -> i32 {
+      let asked = monads.Reader::ask(7);
+      let asked_mapped = monads.Reader::asks(3, triple);
+      let bound = monads.Reader::bind(asked, plus_five);
+      bound + asked_mapped + do_reader()
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 40);
+});
+
 Deno.test("static array prelude checks map zip_with and fold", async () => {
   const source = await Deno.readTextFile("examples/prelude_array_static.fig");
   const checked = await checkSource(source, { resolveModule });
@@ -615,6 +698,37 @@ Deno.test("prelude tuple methods extract swap and map", async () => {
     `,
     { resolveModule },
   );
+});
+
+Deno.test("prelude optic helpers view set over and optional focuses", async () => {
+  const wasm = await wasmFromSource(
+    `
+    const optic = @import("prelude.optic");
+    const option = @import("prelude.option");
+
+    fn id_value(root: i32) -> i32 { root }
+    fn replace_value(root: i32, value: i32) -> i32 { value }
+    fn inc(value: i32) -> i32 { value + 1 }
+    fn positive(root: i32) -> option.core.Option(i32) {
+      match root > 0 { true => option.some(root), false => option.none() }
+    }
+    type fn Point() -> type { let Point = {x: i32, y: i32}; struct(Point) }
+    fn point_x(root: Point) -> i32 { root.x }
+    fn set_point_x(root: Point, value: i32) -> Point { Point {... root, x: value} }
+
+    pub fn main() -> i32 {
+      optic.view(optic.over(1, id_value, replace_value, inc), id_value) +
+        optic.view_or(0, 7, positive) +
+        optic.view(
+          optic.over(Point {x: 4, y: 5}, point_x, set_point_x, inc),
+          point_x
+        )
+    }
+    `,
+    { resolveModule },
+  );
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
+  assertEquals((instance.exports.main as () => number)(), 14);
 });
 
 Deno.test("prelude scalar and function helpers check", async () => {

@@ -255,7 +255,7 @@ function scenarioPrelude(): string {
       }
 
       fn move_position(
-        index: ecs.BatchIndex(128),
+        index: i32,
         item: Position,
         input: FrameInput
       ) -> Position {

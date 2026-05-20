@@ -23,7 +23,7 @@ expose it as `array.layout` through its own namespace import.
 
 | Import                 | Role                                                                                                      |
 | ---------------------- | --------------------------------------------------------------------------------------------------------- |
-| `prelude.std`          | Common merged pure surface for functions, operators, options/results, tuples, arrays, and schedules.      |
+| `prelude.std`          | Common merged pure surface for functions, monads, operators, options/results, tuples, arrays, and schedules. |
 | `prelude.core`         | Core static contracts, option/result roots, tuples, and index proofs.                                     |
 | `prelude.fixed`        | Canonical fixed-size value arrays and direct spread/update/edit helpers.                                  |
 | `prelude.fixed_build`  | Builder fallback for constructing fixed values when direct slots are not convenient.                      |
@@ -32,6 +32,7 @@ expose it as `array.layout` through its own namespace import.
 | `prelude.layout`       | Scalar, lane, tile, matrix, fixed inline-array layouts, and collector members.                            |
 | `prelude.array_static` | Fixed inline array, lane, range iterator, map/zip/fold/reduce, checked get, and compact array helpers.    |
 | `prelude.function`     | Function composition and typeclass-like `functor`, `applicative`, and `monad` helpers.                    |
+| `prelude.monad`        | Binary `State(S, A)` and explicit `Reader(R, A)` helpers for ordered flows.                               |
 | `prelude.operators`    | Operator descriptors for arithmetic, comparison, boolean, append, functor, applicative, and monad syntax. |
 | `prelude.option`       | Pure option constructors and helpers.                                                                     |
 | `prelude.result`       | Pure result constructors and helpers.                                                                     |

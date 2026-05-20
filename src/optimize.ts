@@ -280,6 +280,7 @@ export type RewriteRuleId =
   | "call.inline.private_scalar"
   | "call.inline.private_product"
   | "call.inline.generated_const_fn"
+  | "call.inline.tail_exposure"
   | "call.inline.skip_public"
   | "call.inline.skip_effectful"
   | "call.inline.skip_recursive"
@@ -349,6 +350,11 @@ export const OPTIMIZATION_RULES: readonly OptimizationRule[] = [
     id: "call.inline.private_scalar",
     phase: "plan",
     structuralMatcher: "private pure scalar helper within inline budget",
+  },
+  {
+    id: "call.inline.tail_exposure",
+    phase: "plan",
+    structuralMatcher: "single-use private pure scalar helper exposing caller self-tail recursion",
   },
 ] as const;
 
@@ -1626,6 +1632,29 @@ function buildOptimizationPlan(
     }
   }
 
+  for (const candidate of tailExposureInlineCandidates(program, functions, summaries, scope)) {
+    const plan = plans.get(candidate.helper.name);
+    if (plan?.actions.some((action) => action.kind === "inline")) continue;
+    const action: PlannedAction = {
+      kind: "inline",
+      target: candidate.helper.name,
+      reason: candidate.reason,
+      rule: "call.inline.tail_exposure",
+    };
+    addAction(candidate.helper.name, action, {
+      pass: "plan.inline.tail_exposure",
+      action: "call.inline.tail_exposure",
+      reason: candidate.reason,
+      evidence: {
+        caller: candidate.caller.name,
+        helperCallCount: candidate.summary.callCount,
+        astCost: candidate.summary.astCost,
+        returnClass: candidate.summary.returnClass,
+      },
+      beforeCost: candidate.summary.astCost,
+    });
+  }
+
   for (const recurrence of recurrences.values()) {
     const action = chooseRecurrenceAction(recurrence, functions, profile);
     const rule: RewriteRuleId = action.kind === "unfold_recurrence"
@@ -1798,6 +1827,83 @@ function chooseInlineAction(
     reason,
     evidence,
   };
+}
+
+function tailExposureInlineCandidates(
+  program: Program,
+  functions: Map<string, FnDecl>,
+  summaries: Map<string, FunctionSummary>,
+  scope?: OptimizationScope,
+): {
+  helper: FnDecl;
+  caller: FnDecl;
+  summary: FunctionSummary;
+  reason: string;
+}[] {
+  const valueUses = functionValueUses(program, functions);
+  const candidates: {
+    helper: FnDecl;
+    caller: FnDecl;
+    summary: FunctionSummary;
+    reason: string;
+  }[] = [];
+  const visibleFunctions = [...functions.values()].filter((fn) =>
+    !scope || scope.reachableFunctions.has(fn.name)
+  );
+  for (const helper of visibleFunctions) {
+    const summary = summaries.get(helper.name);
+    if (!summary || !tailExposureHelperEligible(helper, summary, valueUses, functions)) {
+      continue;
+    }
+    for (const caller of visibleFunctions) {
+      if (caller.name === helper.name || caller.primitiveId || caller.effects.length) continue;
+      if (directSelfCalls(caller.body, caller.name, true).nonTail) continue;
+      if (!tailCallsFunction(caller.body, helper.name)) continue;
+      if (!tailCallsFunction(helper.body, caller.name)) continue;
+      candidates.push({
+        helper,
+        caller,
+        summary,
+        reason:
+          `single-use private pure scalar helper exposes tail call back to ${caller.name}`,
+      });
+    }
+  }
+  return candidates;
+}
+
+function tailExposureHelperEligible(
+  fn: FnDecl,
+  summary: FunctionSummary,
+  valueUses: Set<string>,
+  functions: Map<string, FnDecl>,
+): boolean {
+  return !summary.isPublic &&
+    !summary.isPrimitive &&
+    summary.isPure &&
+    summary.effectClass === "pure" &&
+    isScalarLikeRuntimeReturn(fn, summary) &&
+    summary.recursiveKind === "none" &&
+    summary.callCount === 1 &&
+    !valueUses.has(fn.name) &&
+    !hasRuntimeEffect(fn.body, functions);
+}
+
+function isScalarLikeRuntimeReturn(fn: FnDecl, summary: FunctionSummary): boolean {
+  if (summary.returnClass === "scalar") return true;
+  if (summary.returnClass !== "flat_product" || summary.slotCountEstimate !== 1) return false;
+  const type = fn.returnType;
+  if (!type) return false;
+  if (!/^[A-Za-z_][A-Za-z0-9_.]*\([^,{}]*\)$/.test(type.trim())) return false;
+  return !/\bstruct\s*\(|[,{}]|\bInlineArray(?:List|Builder)?\b|\bBuffer\b|\bString\b|\bBytes\b|fn\s*\(/.test(
+    type,
+  );
+}
+
+function tailCallsFunction(block: BlockExpr, target: string): boolean {
+  const calls = recursiveCallDetails(block, new Set([target]), target, true)
+    .filter((call) => call.target === target);
+  return calls.length > 0 && calls.every((call) => call.tail);
 }
 
 function chooseRecurrenceAction(
