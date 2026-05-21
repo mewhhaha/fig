@@ -24,14 +24,14 @@ x}
     expected: "/// docs\n// plain\nfn main() -> i32 {\n  let x = 1; // keep\n  // inside\n  x\n}\n",
   },
   {
-    name: "imports effects consts and effect rows",
+    name: "imports external IO consts",
     input: `/// import docs
 const std=@import("prelude.std");
 /// effect docs
-const clock:fn()->i32!{time}=@effect("clock");
-pub fn main()->i32!{time}{clock()}`,
+const clock = @external("clock", fn(host:io) -> io(i32));
+pub fn main(host:io)->i32{clock(host)}`,
     expected:
-      '/// import docs\nconst std = @import("prelude.std");\n/// effect docs\nconst clock: fn() -> i32 !{time} = @effect("clock");\n\npub fn main() -> i32 !{time} {\n  clock()\n}\n',
+      '/// import docs\nconst std = @import("prelude.std");\n/// effect docs\nconst clock = @external(\n  "clock",\n  fn(host: io) -> io(i32)\n);\n\npub fn main(host: io) -> i32 {\n  clock(host)\n}\n',
   },
   {
     name: "destructured source imports",
@@ -44,11 +44,6 @@ pub fn main()->i32!{time}{clock()}`,
       `const std=@import("prelude.std");const limit=4;type fn Sized(a:type)->struct{let Row={value:a};struct(Row)}`,
     expected:
       'const std = @import("prelude.std");\nconst limit = 4;\n\ntype fn Sized(a: type) -> struct {\n  let Row = {value: a};\n  struct(Row)\n}\n',
-  },
-  {
-    name: "empty and multi item effect rows",
-    input: "fn pure()->i32!{}{1} fn work()->i32!{ time ,gpu }{2}",
-    expected: "fn pure() -> i32 !{} {\n  1\n}\n\nfn work() -> i32 !{time, gpu} {\n  2\n}\n",
   },
   {
     name: "inline anonymous struct annotations",
@@ -214,9 +209,9 @@ _=>2 // fallback
   {
     name: "wgsl fenced text helpers",
     input:
-      'const canvas=@import("web.canvas");const shader:string=```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;pub fn main()->i32!{gpu}{canvas.gpu_create_shader(canvas.shader_id(shader))}',
+      'const canvas=@import("web.canvas");const shader:string=```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;pub fn main(host:io)->i32{canvas.gpu_create_shader(host,canvas.shader_id(shader))}',
     expected:
-      'const canvas = @import("web.canvas");\nconst shader: string = ```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;\n\npub fn main() -> i32 !{gpu} {\n  canvas.gpu_create_shader(canvas.shader_id(shader))\n}\n',
+      'const canvas = @import("web.canvas");\nconst shader: string = ```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;\n\npub fn main(host: io) -> i32 {\n  canvas.gpu_create_shader(\n    host,\n    canvas.shader_id(shader)\n  )\n}\n',
   },
   {
     name: "destructuring and local proof consts",
@@ -411,7 +406,7 @@ Deno.test("formatter corpus parses and is idempotent", async () => {
 
 Deno.test("formatter preserves syntax for messy whitespace snippets", async () => {
   const snippets = [
-    "fn main( ) -> i32 !{ time } { let point = { x : 1 , y : 2 } ; point . x }",
+    "fn main( ) -> i32 { let point = { x : 1 , y : 2 } ; point . x }",
     "fn main(xs:{3*i32} )->i32{ xs [ 0 ] + f ( { x : 1 } ) . x }",
     "type fn Shaped( a : type ) -> type { let Out = @shape_concat ( Base , { x : a } ) ; struct ( Out ) }",
     "fn make()->World{World { component_next : { next : 0 } , defaults : @field ( defaults , #key ) }}",
@@ -427,7 +422,7 @@ Deno.test("formatter preserves syntax for generated whitespace and comment varia
     "fn Choose(x: i32) -> i32 { match x { 0 => 1, _ => 2 } }",
     "type fn Row(a: type, b: type) -> struct { let Row = {left: a, right: b}; struct(Row) }",
     "fn make() -> World { World {defaults: @field(defaults, #key)} }",
-    "fn work() -> i32 !{time, gpu} { clock() + 1 }",
+    "fn work() -> i32 { clock() + 1 }",
   ];
 
   for (const snippet of snippets) {
@@ -457,7 +452,7 @@ Deno.test("formatter preserves literals in syntax-sensitive locations", async ()
     "fn main() -> string { let text = ```line // not comment\nnext```; text }",
     "fn main() -> literal { let tag = #Widget; tag }",
     "fn main() -> f64 { let a = 1; let b = 2.5f64; a + b }",
-    "fn work() -> i32 !{time, gpu} { 1 }",
+    "fn work() -> i32 { 1 }",
   ];
 
   for (const snippet of snippets) await assertSafeFormat(snippet);

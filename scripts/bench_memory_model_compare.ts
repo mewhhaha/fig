@@ -1,9 +1,5 @@
-import {
-  compileArtifactsFromSource,
-  createCompileCache,
-  OPTIMIZE_PROFILES,
-  type OptimizeProfileName,
-} from "../src/mod.ts";
+import { compileArtifactsFromSource, createCompileCache } from "../src/mod.ts";
+import { OPTIMIZE_PROFILES, type OptimizeProfileName } from "../src/unstable.ts";
 
 interface FigScenario {
   name: ScenarioName;

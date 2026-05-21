@@ -117,6 +117,59 @@ Deno.test("monad prelude exposes explicit Reader helpers", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 40);
 });
 
+Deno.test("effect prelude exposes type-list membership proofs and Eff do", async () => {
+  const source = `
+    const effect = @import("prelude.effect");
+
+    type fn Env() -> type { i32 }
+
+    fn ask(env: Env) -> effect.Reader(effects, Env) {
+      env
+    }
+
+    fn bump(
+      value: i32
+    ) -> effect.WithAll({#reader, #state}, {#reader, #state}, i32) {
+      value + 1
+    }
+
+    fn program(env: Env) -> effect.Eff({#reader, #state}, i32) {
+      do @monad(effect.Eff({#reader, #state}, _)) {
+        x <- ask(env);
+        bump(x)
+      }
+    }
+
+    pub fn main() -> i32 {
+      program(4)
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 5);
+});
+
+Deno.test("effect prelude reports missing and duplicate effect proofs", async () => {
+  await assertThrowsCompile(
+    `
+      const effect = @import("prelude.effect");
+      fn bad(const _proof: effect.Member(#reader, {#state})) -> i32 { 0 }
+    `,
+    "type.require",
+    { resolveModule },
+  );
+  await assertThrowsCompile(
+    `
+      const effect = @import("prelude.effect");
+      fn bad(const _proof: effect.UniqueEffects({#reader, #reader})) -> i32 { 0 }
+    `,
+    "type.require",
+    { resolveModule },
+  );
+});
+
 Deno.test("static array prelude checks map zip_with and fold", async () => {
   const source = await Deno.readTextFile("examples/prelude_array_static.fig");
   const checked = await checkSource(source, { resolveModule });
@@ -809,7 +862,7 @@ Deno.test("prelude fig modules are pure", async () => {
       continue;
     }
     const source = await Deno.readTextFile(`prelude/${entry.name}`);
-    assert(!source.includes("@effect("), `${entry.name} declares a host effect`);
+    assert(!source.includes("@effect("), `${entry.name} declares a removed effect import`);
   }
 
   const std = await Deno.readTextFile("prelude/std.fig");
@@ -832,8 +885,8 @@ Deno.test("web canvas package exposes shader metadata and host imports", async (
 \`\`\`)
     }
 
-    pub fn main() -> i32 !{gpu} {
-      canvas.gpu_create_shader(canvas.shader_id(shader))
+    pub fn main(host: io) -> i32 {
+      canvas.gpu_create_shader(host, canvas.shader_id(shader))
     }
   `;
   const checked = await checkSource(source, { resolveModule });
@@ -880,9 +933,9 @@ Deno.test("prelude std exposes result option and static contracts", async () => 
 });
 
 Deno.test("prelude std supports user semigroup types with erased helper proof", async () => {
-  const wat = await watFromSource(
+  const wasm = await wasmFromSource(
     `
-    const merge = @import("prelude.std");
+    const core = @import("prelude.core");
 
     type fn Point() -> type {
       let Point = {x: i32, y: i32};
@@ -893,18 +946,50 @@ Deno.test("prelude std supports user semigroup types with erased helper proof", 
       Point {x: a.x + b.x, y: a.y + b.y}
     }
 
-    pub fn main() -> i32 {
-      let total = append(Point, Semigroup(Point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
+    pub fn main(seed: i32) -> i32 {
+      let total = core.append(
+        Point,
+        core.Semigroup(Point),
+        Point {x: seed, y: 2},
+        Point {x: 3, y: 4}
+      );
       total.x + total.y
     }
     `,
-    { resolveModule },
+    { resolveModule, optMode: "release" },
+  );
+  const wat = await watFromSource(
+    `
+    const core = @import("prelude.core");
+
+    type fn Point() -> type {
+      let Point = {x: i32, y: i32};
+      struct(Point)
+    }
+
+    fn Point::append(a: Point, b: Point) -> Point {
+      Point {x: a.x + b.x, y: a.y + b.y}
+    }
+
+    pub fn main(seed: i32) -> i32 {
+      let total = core.append(
+        Point,
+        core.Semigroup(Point),
+        Point {x: seed, y: 2},
+        Point {x: 3, y: 4}
+      );
+      total.x + total.y
+    }
+    `,
+    { resolveModule, optMode: "release" },
   );
 
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
   assert(!main.includes("call $append"));
   assert(!main.includes("call $append__"));
   assert(main.includes("i32.add"));
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
+  assertEquals((instance.exports.main as CallableFunction)(1), 10);
 });
 
 Deno.test("prelude std accepts user monoid contracts", async () => {
@@ -1146,10 +1231,27 @@ Deno.test("lane arithmetic patterns emit scalar arithmetic without helper calls"
   const wat = await watFromSource(
     `
     const merge = @import("prelude.std");
-    pub fn main() -> i32 {
-      let xs: Lane4I32 = <1, 2, 3, 4>;
-      let ys: Lane4I32 = <5, 6, 7, 8>;
-      let zs: Lane4I32 = [
+    pub fn main(seed: i32) -> i32 {
+      let xs: merge.array.layout.Lane4I32 = <seed, 2, 3, 4>;
+      let ys: merge.array.layout.Lane4I32 = <5, 6, 7, 8>;
+      let zs: merge.array.layout.Lane4I32 = [
+        (xs[0] + ys[0]) * 1,
+        (xs[1] + ys[1]) * 1,
+        (xs[2] + ys[2]) * 1,
+        (xs[3] + ys[3]) * 1
+      ];
+      zs[0] + zs[1] + zs[2] + zs[3]
+    }
+  `,
+    { resolveModule },
+  );
+  const wasm = await wasmFromSource(
+    `
+    const merge = @import("prelude.std");
+    pub fn main(seed: i32) -> i32 {
+      let xs: merge.array.layout.Lane4I32 = <seed, 2, 3, 4>;
+      let ys: merge.array.layout.Lane4I32 = <5, 6, 7, 8>;
+      let zs: merge.array.layout.Lane4I32 = [
         (xs[0] + ys[0]) * 1,
         (xs[1] + ys[1]) * 1,
         (xs[2] + ys[2]) * 1,
@@ -1170,6 +1272,8 @@ Deno.test("lane arithmetic patterns emit scalar arithmetic without helper calls"
   assert(!main.includes("call $lane4_dot_i32"));
   assert(main.includes("i32.add"));
   assert(!main.includes("i32.mul"));
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
+  assertEquals((instance.exports.main as CallableFunction)(1), 36);
 });
 
 Deno.test("Lane4I32 helper surface checks queries reductions transforms and shapes", async () => {

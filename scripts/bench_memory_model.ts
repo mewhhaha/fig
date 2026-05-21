@@ -2,9 +2,8 @@ import {
   compileArtifactsFromSource,
   type CompileTraceEvent,
   createCompileCache,
-  OPTIMIZE_PROFILES,
-  type OptimizeProfileName,
 } from "../src/mod.ts";
+import { OPTIMIZE_PROFILES, type OptimizeProfileName } from "../src/unstable.ts";
 
 interface Scenario {
   name: string;
@@ -785,7 +784,7 @@ function optimizerTouchedFunctions(trace: CompileTraceEvent[]): number {
   return trace
     .filter((event) => event.name.endsWith(".optimizeDecls"))
     .reduce((max, event) => {
-      const count = event.counters?.changedFunctions;
+      const count = event.counters?.optimizedFunctions ?? event.counters?.changedFunctions;
       return typeof count === "number" ? Math.max(max, count) : max;
     }, 0);
 }

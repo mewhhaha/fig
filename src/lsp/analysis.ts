@@ -99,7 +99,7 @@ interface MemberCompletionContext {
 
 const BUILTIN_COMPLETIONS: CompletionItem[] = [
   { label: "@import", kind: 3, detail: "source import" },
-  { label: "@effect", kind: 3, detail: "host effect import" },
+  { label: "@external", kind: 3, detail: "host IO import" },
   { label: "@require", kind: 3, detail: "compile-time requirement" },
   { label: "prelude.std", kind: 9, detail: "module" },
   { label: "prelude.option", kind: 9, detail: "module" },
@@ -1762,9 +1762,7 @@ function detailForDecl(
   if (decl.kind === "fn") {
     return `fn ${decl.name}(${
       decl.params.map((param) => `${param.name}: ${param.type}`).join(", ")
-    })${decl.returnType ? ` -> ${decl.returnType}` : ""}${
-      decl.effects.length ? ` !{${decl.effects.join(", ")}}` : ""
-    }`;
+    })${decl.returnType ? ` -> ${decl.returnType}` : ""}`;
   }
   if (decl.kind === "type") {
     return `type fn ${decl.name}(${
@@ -1781,9 +1779,7 @@ function detailForDecl(
 }
 
 function detailForEffectImport(item: EffectImport): string {
-  return `const ${item.name}: ${item.type}${
-    item.effects.length ? ` !{${item.effects.join(", ")}}` : ""
-  }`;
+  return `const ${item.name}: ${item.type}`;
 }
 
 function hoverForSymbol(

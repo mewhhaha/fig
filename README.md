@@ -5,6 +5,38 @@ WebAssembly output.
 
 See `docs/LANGUAGE.md` for the full core-language syntax, semantics, and compiler builtin reference.
 
+## Using The Package
+
+Use the compiler library from JSR:
+
+```ts
+import { checkSource, wasmFromSource } from "jsr:@mewhhaha/fig";
+```
+
+Run the CLI through the exported package entry point:
+
+```bash
+deno run --allow-read jsr:@mewhhaha/fig/cli check examples/hello.fig
+deno run --allow-read --allow-write jsr:@mewhhaha/fig/cli build examples/hello.fig
+```
+
+Run the language server over stdio through the LSP entry point:
+
+```bash
+deno run --allow-read jsr:@mewhhaha/fig/lsp
+```
+
+Download native `fig` binaries from GitHub Releases:
+
+```bash
+fig check examples/hello.fig
+fig build examples/hello.fig
+fig lsp
+fig version
+```
+
+Release archives are published at `https://github.com/mewhhaha/fig/releases` with `SHA256SUMS`.
+
 ## Type Function Surface
 
 Type functions currently cover several compile-time concepts:
@@ -17,6 +49,11 @@ Type functions currently cover several compile-time concepts:
   layout predicates.
 - Constructor-polymorphic helpers: generic functions can infer type constructors at call sites and
   use local proof consts such as `const Mapper = Functor(t);`.
+- Transparent effect capabilities: `prelude.effect` models tags such as `#reader`, `#state`, and
+  `#debug` as erased value contracts. Prefer APIs like
+  `fn ask(env: Env) ->
+  effect.Reader(effects, Env)` so callers rely on inference instead of
+  passing separate row and proof const arguments.
 - Value-layout modeling: examples encode products, sums, fixed inline buffers, compact arrays, and
   static constraints as compile-time type-function contracts.
 
@@ -119,18 +156,20 @@ model.
 `prelude.geometry2d` is a tiny pure playground layer for geometry-shaped programs. It provides
 integer `vec2`, `vec3`, packed `rgba8`, `vertex2d_i32`, `quad2d_i32`, and `geometry2d_i32` helpers.
 The first entry point is quad-first 2D rendering data: `emit_rect2d` and `emit_quad2d` produce fixed
-inline vertex geometry that can later be uploaded by host effects.
+inline vertex geometry that can later be uploaded by explicit host IO imports.
 
-Browser canvas, GPU, shader metadata, and event host effects live outside the prelude in
-`web.canvas`:
+Browser canvas, GPU, shader metadata, and event IO imports live outside the prelude in `web.canvas`:
 
 ```fig
 const canvas = @import("web.canvas");
 ```
 
+Host IO imports are declared with `@external("name", fn(host: io, ...) -> io(T))`. Runtime entry
+points pass the primitive `io` executor explicitly and use `do @io(_)` to sequence actions.
+
 ## Benchmarking
 
-Run the memory model benchmark harness with:
+From a source checkout, run the memory model benchmark harness with:
 
 ```bash
 deno run --allow-read scripts/bench_memory_model.ts 50000
@@ -151,7 +190,7 @@ The numbers are machine-local, but the important regressions to watch are extra 
 unexpected heap/memory operations, missing loops for recursive folds, or missing SIMD operations in
 the matrix kernel.
 
-To compare the same scenarios against idiomatic JavaScript and optimized Rust, run:
+From a source checkout, compare the same scenarios against idiomatic JavaScript and optimized Rust:
 
 ```bash
 deno run --allow-read --allow-write --allow-run scripts/bench_memory_model_compare.ts 50000
@@ -161,7 +200,8 @@ That script benchmarks Fig/Wasm, JavaScript running in the current V8 runtime, a
 with `rustc -C opt-level=3 -C target-cpu=native`. Rust inputs are passed through `black_box` so the
 pure kernels do not disappear into compile-time constants.
 
-To compare the dense ECS batch primitives against a similar optimized Rust fixed-array kernel, run:
+From a source checkout, compare the dense ECS batch primitives against a similar optimized Rust
+fixed-array kernel:
 
 ```bash
 deno task bench:ecs-compare -- 100000

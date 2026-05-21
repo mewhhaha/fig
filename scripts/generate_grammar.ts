@@ -1,13 +1,51 @@
-import { generate, parseGrammar, parseMetadata } from "@mewhhaha/baba";
+import { parseGrammar, parseMetadata } from "@mewhhaha/baba";
+import {
+  createLexicalSpec,
+  generateLexicalManifest,
+  generateTokenizerSource,
+  generateTreeSitterGrammar,
+  generateWorkbenchQueries,
+} from "@mewhhaha/baba/advanced";
 
 const grammarSource = await Deno.readTextFile("grammar.ebnf");
 const metadataSource = await Deno.readTextFile("baba.json");
 const grammar = parseGrammar(grammarSource);
 const metadata = parseMetadata(metadataSource);
-const bundle = generate(grammar, { name: "fig", metadata, preset: "workbench" });
+const spec = createLexicalSpec(grammar, { skipValidation: true });
+const queries = generateWorkbenchQueries(grammar, {
+  metadata,
+  skipValidation: true,
+});
+const files: Array<{ path: string; content: string }> = [
+  { path: "lexical.json", content: generateLexicalManifest(grammar, { spec }) },
+  {
+    path: "tokenizer.ts",
+    content: generateTokenizerSource(grammar, {
+      spec,
+      metadata,
+      skipValidation: true,
+    }),
+  },
+  {
+    path: "grammar.js",
+    content: generateTreeSitterGrammar(grammar, {
+      name: "fig",
+      metadata,
+      skipValidation: true,
+    }),
+  },
+  ...Object.entries(queries).map(([path, content]) => ({ path: `queries/${path}`, content })),
+];
 
-await Deno.remove("generated/baba-workbench", { recursive: true }).catch(() => {});
+const bundle = { files };
+
+/*
+ * Fig's grammar intentionally has tree-sitter conflicts such as do-bind vs expression statements.
+ * Baba's generated parser is predictive and rejects those shapes, so the compiler parser sources
+ * stay checked in until Baba exposes a non-predictive parser generator path.
+ */
 await Deno.mkdir("generated/baba-workbench", { recursive: true });
+
 for (const file of bundle.files) {
   const path = `generated/baba-workbench/${file.path}`;
   const slash = path.lastIndexOf("/");
@@ -61,7 +99,7 @@ for await (const entry of Deno.readDir("generated/baba-workbench/queries")) {
 
 const tokenKinds = [
   "import",
-  "effect",
+  "external",
   "type",
   "contract",
   "const",

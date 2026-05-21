@@ -1,0 +1,6 @@
+// expect: external.io_param
+const clock = @external("clock", fn() -> io(i32));
+
+pub fn main() -> i32 {
+  clock()
+}

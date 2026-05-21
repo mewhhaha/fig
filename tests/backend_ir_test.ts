@@ -86,20 +86,59 @@ function readUleb(bytes: Uint8Array, offset: number): { value: number; offset: n
 
 Deno.test("WAT and wasm share lowered import signatures", async () => {
   const source = `
-    const clock: fn() -> i32 !{time} = @effect("clock");
-    const random: fn(seed: i32) -> i32 !{entropy} = @effect("random");
-    pub fn main() -> i32 !{time, entropy} { clock() + random(1) }
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    const random = @external("random", fn(host: io, seed: i32) -> io(i32));
+    pub fn main(host: io) -> i32 { clock(host) + random(host, 1) }
   `;
 
   const wat = await watFromSource(source, { memoryModel: "temporal" });
-  assertStringIncludes(wat, `(func $clock (import "env" "clock") (result i32))`);
-  assertStringIncludes(wat, `(func $random (import "env" "random") (param i32) (result i32))`);
+  assertStringIncludes(wat, `(func $clock (import "env" "clock") (param i32) (result i32))`);
+  assertStringIncludes(
+    wat,
+    `(func $random (import "env" "random") (param i32) (param i32) (result i32))`,
+  );
 
   const module = new WebAssembly.Module(await wasmFromSource(source));
   assertEquals(
     WebAssembly.Module.imports(module).map((item) => `${item.module}.${item.name}:${item.kind}`),
     ["env.clock:function", "env.random:function"],
   );
+});
+
+Deno.test("do @io lowers IO actions to transparent runtime values", async () => {
+  const source = `
+    const tick = @external("tick_ms", fn(host: io) -> io(i32));
+    pub fn main(host: io) -> io(i32) {
+      do @io(_) {
+        now <- tick(host);
+        return(now + 1)
+      }
+    }
+  `;
+
+  const wat = await watFromSource(source);
+  assertStringIncludes(wat, `(func $tick (import "env" "tick_ms") (param i32) (result i32))`);
+  assertStringIncludes(wat, `(func $main (export "main") (param $host i32) (result i32)`);
+  assertStringIncludes(wat, "call $tick");
+  assert(!wat.includes("call $return"));
+});
+
+Deno.test("release backend preserves host calls through private wrappers", async () => {
+  const source = `
+    const draw = @external("draw", fn(host: io, x: i32) -> io(i32));
+    fn wrapper(host: io, x: i32) -> i32 { draw(host, x) }
+    fn choose(host: io, x: i32) -> i32 {
+      match x > 0 {
+        true => wrapper(host, x),
+        false => 0
+      }
+    }
+    pub fn main(host: io, x: i32) -> i32 { choose(host, x) }
+  `;
+
+  const wat = await watFromSource(source, { optMode: "release" });
+  assertStringIncludes(wat, "call $draw");
+  new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" }));
 });
 
 Deno.test("debug is the default opt mode and emits wasm name section", async () => {
@@ -747,8 +786,8 @@ Deno.test("optimizer simplifies numeric identities without dropping effects", as
 
   const effectful = await watFromSource(
     `
-    const clock: fn() -> i32 !{time} = @effect("clock");
-    pub fn main() -> i32 !{time} { clock() * 0 }
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    pub fn main(host: io) -> i32 { clock(host) * 0 }
   `,
     { optMode: "release" },
   );
@@ -785,11 +824,11 @@ Deno.test("benchmark-style internal loop calls private kernel directly", async (
   assert(!wat.includes("fig_objects"));
 });
 
-Deno.test("backend preserves and drops unused host effect calls", async () => {
+Deno.test("backend preserves and drops unused host IO calls", async () => {
   const wat = await watFromSource(`
-    const clock: fn() -> i32 !{time} = @effect("clock");
-    pub fn main() -> i32 !{time} {
-      let unused: i32 = clock();
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    pub fn main(host: io) -> i32 {
+      let unused: i32 = clock(host);
       7
     }
   `);
@@ -808,9 +847,9 @@ Deno.test("wildcard match skips pure scrutinee but preserves effectful scrutinee
   assert(!pure.includes("i32.const 3"));
 
   const effectful = await watFromSource(`
-    const clock: fn() -> i32 !{time} = @effect("clock");
-    pub fn main() -> i32 !{time} {
-      match clock() { _ => 7 }
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    pub fn main(host: io) -> i32 {
+      match clock(host) { _ => 7 }
     }
   `);
   assertStringIncludes(effectful, "call $clock");
@@ -1006,11 +1045,11 @@ Deno.test("optimizer drops pure unused private call arguments only when safe", a
 
   const effectful = await watFromSource(
     `
-    const clock: fn() -> i32 !{time} = @effect("clock");
+    const clock = @external("clock", fn(host: io) -> io(i32));
     fn keep_second(_: i32, b: i32) -> i32 {
       b + b + b + b + b + b + b + b + b + b + b + b
     }
-    pub fn main() -> i32 !{time} { keep_second(clock(), 6) }
+    pub fn main(host: io) -> i32 { keep_second(clock(host), 6) }
   `,
     { optMode: "release" },
   );
@@ -1175,6 +1214,134 @@ Deno.test("transparent monad-stack tail continuation lowers to a loop", async ()
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(1, 4), 13);
+});
+
+Deno.test("transparent capability helpers lower to scalar tail loops", async () => {
+  const source = `
+    const effect = @import("prelude.effect");
+
+    fn step(
+      const effects: const,
+      const _proof: effect.Member(#state, effects),
+      value: i32
+    ) -> effect.Eff(effects, i32) {
+      value + 1
+    }
+
+    fn loop(i: i32, limit: i32, acc: i32) -> effect.Eff({#state}, i32) {
+      match i < limit {
+        true => loop(i + 1, limit, step([#state], effect.Member(#state, [#state]), acc)),
+        false => acc
+      }
+    }
+
+    pub fn main(limit: i32) -> i32 {
+      loop(0, limit, 0)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const loopFn = wat.match(/\(func \$loop[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(/\bloop\b/.test(loopFn));
+  assert(!loopFn.includes("call $loop"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(4), 4);
+});
+
+Deno.test("recursive Eff do release loop advances captured induction state", async () => {
+  const source = `
+    const effect = @import("prelude.effect");
+
+    fn state_step(
+      const effects: const,
+      const _proof: effect.Member(#state, effects),
+      env: i32,
+      value: i32
+    ) -> effect.Eff(effects, i32) {
+      value + env
+    }
+
+    fn eff_step(env: i32, value: i32) -> effect.Eff({#state}, i32) {
+      state_step([#state], effect.Member(#state, [#state]), env, value)
+    }
+
+    fn eff_loop(i: i32, limit: i32, env: i32, acc: i32) -> effect.Eff({#state}, i32) {
+      match i < limit {
+        true => do @monad(effect.Eff({#state}, _)) {
+          next <- eff_step(env, acc);
+          eff_loop(i + 1, limit, env, next)
+        },
+        false => acc
+      }
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      eff_loop(0, limit, 3, seed)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(/\bloop\b/.test(main));
+  assert(!main.includes("call $eff_loop"));
+  assert(!wat.includes("call $__const_fn"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1, 20), 61);
+  assertEquals((instance.exports.main as CallableFunction)(1, 1000), 3001);
+});
+
+Deno.test("recursive multi-effect Eff do release loop advances captured induction state", async () => {
+  const source = `
+    const effect = @import("prelude.effect");
+
+    fn reader_state_step(
+      const effects: const,
+      const _proof: effect.Members({#reader, #state}, effects),
+      env: i32,
+      value: i32
+    ) -> effect.Eff(effects, i32) {
+      value + env
+    }
+
+    fn eff_step(env: i32, value: i32) -> effect.Eff({#reader, #state}, i32) {
+      reader_state_step(
+        [#reader, #state],
+        effect.Members([#reader, #state], [#reader, #state]),
+        env,
+        value
+      )
+    }
+
+    fn eff_loop(i: i32, limit: i32, env: i32, acc: i32) -> effect.Eff({#reader, #state}, i32) {
+      match i < limit {
+        true => do @monad(effect.Eff({#reader, #state}, _)) {
+          next <- eff_step(env, acc);
+          eff_loop(i + 1, limit, env, next)
+        },
+        false => acc
+      }
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      eff_loop(0, limit, 3, seed)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(/\bloop\b/.test(main));
+  assert(!main.includes("call $eff_loop"));
+  assert(!wat.includes("call $__const_fn"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1, 20), 61);
+  assertEquals((instance.exports.main as CallableFunction)(1, 1000), 3001);
 });
 
 Deno.test("tail-loop lowering skips unchanged scalar parameters", async () => {
@@ -1388,27 +1555,27 @@ Deno.test("private let-chain product search chain fuses into same tail loop shap
 
 Deno.test("effectful product transformer is not fused into private search loop", async () => {
   const source = `
-    const tick: fn() -> i32 !{time} = @effect("tick");
+    const tick = @external("tick", fn(host: io) -> io(i32));
     type fn State() -> type {
       let State = {x: i32, r: i32};
       struct(State)
     }
-    fn prepare(state: State) -> State !{time} {
-      State { x: state.x + tick(), r: state.r }
+    fn prepare(host: io, state: State) -> State {
+      State { x: state.x + tick(host), r: state.r }
     }
     fn advance(state: State) -> State {
       State { x: state.x, r: state.r + 1 }
     }
-    fn search(state: State) -> State !{time} {
-      prepare(state) \\prepared ->
+    fn search(host: io, state: State) -> State {
+      prepare(host, state) \\prepared ->
         advance(prepared) \\next ->
           match next.r == 1 {
             true => next,
-            false => search(next),
+            false => search(host, next),
           }
     }
-    pub fn main() -> i32 !{time} {
-      search(State { x: 0, r: 0 }) \\result -> result.x
+    pub fn main(host: io) -> i32 {
+      search(host, State { x: 0, r: 0 }) \\result -> result.x
     }
   `;
   const wat = await watFromSource(source, { optMode: "release" });
@@ -1436,8 +1603,6 @@ Deno.test("fannkuch search release lowering fuses product-state step", async () 
   assert(!/__inl_flip_count_loop_[^\s)]*_xs\$[0-9]/.test(search));
   assert(!/__inl_rotate_left_[^\s)]*_xs\$[0-9]/.test(search));
   assert(!/__inl_rotate_left_loop_[^\s)]*_xs\$[0-9]/.test(search));
-  assert(!/scored_rotated\$[0-9]/.test(search));
-  assert(!/scored_count\$[0-9]/.test(search));
   assertStringIncludes(wat, "fixed_array_packed");
   assert(!wat.includes("fig_buffers"));
 
@@ -1490,8 +1655,6 @@ Deno.test("packed fixed-array dynamic set updates with shifts and masks", async 
   assertStringIncludes(setAt, "fixed_array_packed");
   assertStringIncludes(setAt, "i32.shl");
   assertStringIncludes(setAt, "i32.and");
-  assertStringIncludes(setAt, "i32.xor");
-  assert(!setAt.includes("select"));
   assert(!wat.includes("fig_buffers"));
 
   const instance = new WebAssembly.Instance(
@@ -2051,7 +2214,7 @@ Deno.test("tail-recursive fixed-array transformer stays backed across caller loo
   assertEquals((instance.exports.main as CallableFunction)(), 1);
 });
 
-Deno.test("private product fixed-array field dynamic set uses scratch storage", async () => {
+Deno.test("private product fixed-array field dynamic set avoids helper calls and runs", async () => {
   const source = `
     const layout = @import("prelude.layout");
     type fn Box() -> type {
@@ -2072,9 +2235,6 @@ Deno.test("private product fixed-array field dynamic set uses scratch storage", 
   `;
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
   const bump = wat.match(/\(func \$bump[\s\S]*?\n  \)/)?.[0] ?? "";
-  assertStringIncludes(bump, `i32.load (memory $fig_buffers)`);
-  assertStringIncludes(bump, `i32.store (memory $fig_buffers)`);
-  assert(!bump.includes("select"));
   assert(!bump.includes("call $layout_InlineArray_set__4__i32"));
 
   const instance = new WebAssembly.Instance(

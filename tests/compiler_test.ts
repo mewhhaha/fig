@@ -7,18 +7,20 @@ import {
   compileWasmFromSource,
   createCompileCache,
   createCompilerPluginRegistry,
-  explainOptimization,
-  OPTIMIZE_PROFILES,
-  optimizeProgram,
   parse,
-  summarizeAbstractValues,
-  summarizeOptimizationPlan,
-  summarizeProgram,
-  summarizeRecurrences,
   tokenize,
   wasmFromSource,
   watFromSource,
 } from "../src/mod.ts";
+import {
+  explainOptimization,
+  OPTIMIZE_PROFILES,
+  optimizeProgram,
+  summarizeAbstractValues,
+  summarizeOptimizationPlan,
+  summarizeProgram,
+  summarizeRecurrences,
+} from "../src/unstable.ts";
 import { CompileError } from "../src/diagnostics.ts";
 import type { ConstDecl, Expr, FnDecl, Program, TypeDecl } from "../src/core_ast.ts";
 import type { CompilerPlugin } from "../src/plugins.ts";
@@ -237,10 +239,10 @@ Deno.test("unknown plugin annotations are diagnostics after parsing", async () =
 Deno.test("legacy host capability import annotation is rejected", async () => {
   await assertThrowsCompile(
     `
-      const clock: fn() -> i32 !{time} = @capability("clock");
-      pub fn main() -> i32 !{time} { clock() }
+      const clock = @capability("clock");
+      pub fn main() -> i32 { clock() }
     `,
-    "parse.lower",
+    "const.runtime_call",
   );
 });
 
@@ -930,7 +932,7 @@ Deno.test("static for statement blocks are rejected", async () => {
 
 Deno.test("parses language surface declarations and literals", async () => {
   const program = await parse(`
-    const clock: fn() -> i64 !{time} = @effect("clock");
+    const clock = @external("clock", fn(io: io) -> io(i64));
     type fn Id() { i32 }
     type fn Point() { let Point = {x: i32, y: i32}; struct(Point) }
     type fn Maybe(a: type) { let Nothing = {}; let Some = {value: a}; union(Nothing, Some) }
@@ -940,7 +942,7 @@ Deno.test("parses language surface declarations and literals", async () => {
     fn eql_point(a: Point, b: Point) -> bool { a.x == b.x }
     fn neq_point(a: Point, b: Point) -> bool { a.x != b.x }
     const point_eq: Eq(Point) = {eql: eql_point, neq: neq_point}
-    pub fn main() -> i32 !{} {
+    pub fn main() -> i32 {
       let xs: {3*i32} = [1, 2, 3];
       let point: Point = Point {x: 1, y: 2};
       let label = \`\`\`hello
@@ -949,7 +951,7 @@ world\`\`\`;
     }
   `);
   assertEquals(program.moduleName, undefined);
-  assertEquals(program.imports[0].effects, ["time"]);
+  assertEquals(program.imports[0].effects, []);
   assert(program.declarations.length >= 5);
 });
 
@@ -1337,7 +1339,6 @@ Deno.test("static type reflection exposes members functions scalars layouts and 
       @require(@type_fn_param_count(Expected) == 2, "function arity reflected");
       @require(@shape_slot(Params, #a) == Point, "function params reflected");
       @require(@type_fn_return(Expected) == bool, "function return reflected");
-      @require(@shape_count(@type_fn_effects(Expected)) == 0, "function effects reflected");
       @require(@type_is_scalar(u3), "u3 is scalar");
       @require(@type_scalar_carrier(u3) == #u3, "u3 carrier reflected");
       @require(@type_scalar_bit_width(u3) == 3, "u3 width reflected");
@@ -1361,6 +1362,71 @@ Deno.test("static type reflection exposes members functions scalars layouts and 
     }
     pub fn main(value: Reflected) -> i32 { value.x }
   `);
+});
+
+Deno.test("static type-list builtins support membership and row operations", async () => {
+  await checkSource(`
+    type fn Reader() -> type { i32 }
+    type fn State() -> type { i32 }
+
+    type fn TypeListProof(a: type) -> type {
+      let Fn = fn(x: i32) -> i32;
+      let Appended = @type_list_append([#reader,], [#state,]);
+      @require(@type_list_contains([#reader, #state], #reader), "literal member");
+      @require(@type_list_index([#reader, #state], #state) == 1, "literal index");
+      @require(
+        @type_list_contains(Appended, #state),
+        "append member"
+      );
+      @require(
+        @type_list_contains(@type_list_remove([#reader, #state], #reader), #reader) == false,
+        "remove member"
+      );
+      @require(
+        @type_list_is_unique(@type_list_unique([#reader, #reader, #state])),
+        "unique member"
+      );
+      @require(@type_list_contains([Reader, State], Reader), "type member");
+      @require(
+        @type_list_contains([Fn,], Fn),
+        "function type member"
+      );
+      a
+    }
+
+    fn use(const _proof: TypeListProof(i32)) -> i32 { 0 }
+    pub fn main() -> i32 { use(TypeListProof(i32)) }
+  `);
+});
+
+Deno.test("removed function effect reflection builtin is rejected", async () => {
+  const registry = createCompilerPluginRegistry();
+  assert(!registry.staticBuiltins.has("type_fn_effects"));
+});
+
+Deno.test("static type-list builtins report missing and malformed rows", async () => {
+  await assertThrowsCompile(
+    `
+      type fn Bad(a: type) -> type {
+        @type_list_index([#reader,], #state);
+        a
+      }
+      fn use(const _proof: Bad(i32)) -> i32 { 0 }
+      pub fn main() -> i32 { use(Bad(i32)) }
+    `,
+    "type.list_member",
+  );
+  await assertThrowsCompile(
+    `
+      type fn Bad(a: type) -> type {
+        @type_list_contains({reader: #reader}, #reader);
+        a
+      }
+      fn use(const _proof: Bad(i32)) -> i32 { 0 }
+      pub fn main() -> i32 { use(Bad(i32)) }
+    `,
+    "type.list_builtin_arg",
+  );
 });
 
 Deno.test("const evaluation supports extended static type reflection", async () => {
@@ -2196,9 +2262,8 @@ Deno.test("reports type function diagnostics", async () => {
   );
   await assertThrowsCompile(
     `
-    const host: fn() -> bool !{io} = @effect("host");
-    fn calls_host(t) -> bool !{io} { host() }
-    type fn Bad(t: type) { match calls_host(t) { true => i32, false => bool } }
+    const host_call = @external("host", fn(host: io) -> io(bool));
+    type fn Bad(t: type) { match host_call(t) { true => i32, false => bool } }
     fn f(x: Bad(i32)) -> i32 { 1 }
   `,
     "type.runtime_effect_call",
@@ -2395,7 +2460,7 @@ Deno.test("parser front end is Baba generated", async () => {
 Deno.test("tokenizes through Baba generated lexer", () => {
   const tokens = tokenize(`
     // comment
-    pub fn main() -> i32 !{} {
+    pub fn main() -> i32 {
       let text = \`\`\`hello
 world\`\`\`;
       #Tag 42 "ok" 'x' true zip ..
@@ -2411,8 +2476,6 @@ world\`\`\`;
       ["symbol", ")"],
       ["symbol", "->"],
       ["identifier", "i32"],
-      ["symbol", "!"],
-      ["symbol", "{}"],
       ["symbol", "{"],
       ["let", "let"],
       ["identifier", "text"],
@@ -2968,13 +3031,142 @@ Deno.test("namespace source imports qualify fields and type-block names", async 
   assert(!pairDecl?.body.statements.some((stmt) => stmt.name === "Pair"));
 });
 
-Deno.test("rejects pure calls to effectful host effects", async () => {
+Deno.test("rejects host IO imports without explicit IO parameter", async () => {
   await assertThrowsCompile(
     `
-    const clock: fn() -> i64 !{time} = @effect("clock");
+    const clock = @external("clock", fn() -> io(i64));
     pub fn main() -> i32 { clock() }
   `,
-    "effect.pure_host_call",
+    "external.io_param",
+  );
+});
+
+Deno.test("rejects external imports without IO action return", async () => {
+  await assertThrowsCompile(
+    `
+    const clock = @external("clock", fn(host: io) -> i64);
+    pub fn main(host: io) -> i64 { clock(host) }
+  `,
+    "external.io_return",
+  );
+});
+
+Deno.test("do @io unwraps IO actions and requires final IO action", async () => {
+  await checkSource(`
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    pub fn main(host: io) -> io(i32) {
+      do @io(_) {
+        now <- clock(host);
+        return(now + 1)
+      }
+    }
+  `);
+
+  await checkSource(`
+    fn done(value: i32) -> io(i32) { return(value) }
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    pub fn main(host: io) -> io(i32) {
+      do @io(_) {
+        now <- clock(host);
+        done(now + 1)
+      }
+    }
+  `);
+
+  await assertThrowsCompile(
+    `
+      const clock = @external("clock", fn(host: io) -> io(i32));
+      pub fn main(host: io) -> io(i32) {
+        do @io(_) {
+          now <- clock(host);
+          now
+        }
+      }
+    `,
+    "do.io_return",
+  );
+
+  await checkSource(`
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    pub fn main(host: io) -> io(i32) {
+      do @io(i32) {
+        now <- clock(host);
+        return(now + 1)
+      }
+    }
+  `);
+
+  await assertThrowsCompile(
+    `
+      const clock = @external("clock", fn(host: io) -> io(i32));
+      pub fn main(host: io) -> io(i32) {
+        do @io {
+          now <- clock(host);
+          return(now)
+        }
+      }
+    `,
+    "do.io_strategy_arity",
+  );
+
+  await assertThrowsCompile(
+    `
+      const clock = @external("clock", fn(host: io) -> io(i32));
+      pub fn main(host: io) -> io(i32) {
+        do @io(io(i32)) {
+          now <- clock(host);
+          return(now)
+        }
+      }
+    `,
+    "do.io_strategy_type",
+  );
+
+  await assertThrowsCompile(
+    `
+      const clock = @external("clock", fn(host: io) -> io(i32));
+      pub fn main(host: io) -> io(i32) {
+        do @io(bool) {
+          now <- clock(host);
+          return(now)
+        }
+      }
+    `,
+    "do.io_return_type",
+  );
+});
+
+Deno.test("return is a reserved IO compiler builtin", async () => {
+  await checkSource(`
+    fn done(value: i32) -> io(i32) { return(value) }
+    pub fn main(host: io) -> io(i32) { done(1) }
+  `);
+  await assertThrowsCompile(
+    "fn bad() -> io(i32) { return() }",
+    "io.return_arity",
+  );
+  await assertThrowsCompile(
+    "fn bad() -> i32 { return(1) }",
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    "fn return(x: i32) -> i32 { x }",
+    "name.reserved",
+  );
+  await assertThrowsCompile(
+    "fn bad() -> i32 { let return = 1; return }",
+    "name.reserved",
+  );
+});
+
+Deno.test("source function-effect syntax remains rejected", async () => {
+  await assertThrowsCompile(
+    `fn pure() -> i32 !{} { 1 }`,
+    "parse.syntax",
+  );
+  await assertThrowsCompile(
+    `fn tick() -> i32 !{time} { 1 }`,
+    "parse.syntax",
   );
 });
 
@@ -3081,9 +3273,10 @@ Deno.test("top-level const preserves phantom scalar return types", async () => {
 Deno.test("top-level const rejects impure unknown and runtime-dependent initializers", async () => {
   await assertThrowsCompile(
     `
-      const clock: fn() -> i32 !{time} = @effect("clock");
-      const x = clock();
-      pub fn main() -> i32 !{time} { clock() }
+      const clock = @external("clock", fn(host: io) -> io(i32));
+      const host = 0;
+      const x = clock(host);
+      pub fn main(host: io) -> i32 { clock(host) }
     `,
     "const.runtime_call",
   );
@@ -3141,11 +3334,18 @@ Deno.test("top-level const evaluates imported pure product helpers", async () =>
   assertEquals((instance.exports.main as () => number)(), 7);
 });
 
-Deno.test("accepts explicit effect rows for host effects", async () => {
+Deno.test("requires explicit IO values for host IO imports", async () => {
   await checkSource(`
-    const clock: fn() -> i32 !{time} = @effect("clock");
-    pub fn main() -> i32 !{time} { clock() }
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    pub fn main(host: io) -> i32 { clock(host) }
   `);
+  await assertThrowsCompile(
+    `
+      const clock = @external("clock", fn(host: io) -> io(i32));
+      pub fn main() -> i32 { clock(io) }
+    `,
+    "const.unknown_name",
+  );
 });
 
 Deno.test("temporal values allow reuse after calls", async () => {
@@ -4171,7 +4371,7 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
     type fn Point() { let Point = {x: i32, y: i32}; struct(Point) }
     type fn Box() { let Box = {value: i32}; struct(Box) }
     type fn Option(a: type) { let None = {}; let Some = {value: a}; union(None, Some) }
-    fn requires_product(t) -> bool !{io} { @type_is_product(t) }
+    fn requires_product(t) -> bool { @type_is_product(t) }
     type fn Eq(t: type) {
       let Eq = {eql: fn(a: t, b: t) -> bool, neq: fn(a: t, b: t) -> bool};
       match requires_product(t) {
@@ -5265,6 +5465,32 @@ Deno.test("optimizer treats narrow unsigned returns as scalar", async () => {
   assertEquals(summary?.returnClass, "scalar");
 });
 
+Deno.test("function summaries normalize transparent aliases without erasing products", async () => {
+  const checked = await checkSource(`
+    type fn Id(a: type) -> type { a }
+    type fn Box(a: type) -> type {
+      let Box = {value: a};
+      struct(Box)
+    }
+    fn scalar_id(x: i32) -> Id(i32) {
+      x
+    }
+    fn boxed(x: i32) -> Box(i32) {
+      {value: x}
+    }
+    pub fn main(seed: i32) -> i32 {
+      let box = boxed(seed);
+      scalar_id(seed) + box.value
+    }
+  `);
+
+  const summaries = summarizeProgram(checked.program, { optMode: "release" });
+  assertEquals(summaries.get("scalar_id")?.returnClass, "scalar");
+  assertEquals(summaries.get("scalar_id")?.slotCountEstimate, 1);
+  assertEquals(summaries.get("boxed")?.returnClass, "flat_product");
+  assertEquals(summaries.get("boxed")?.slotCountEstimate, 1);
+});
+
 Deno.test("optimizes repeated forwarding wrapper call sites", async () => {
   const checked = await checkSource(`
     type fn Box() { let Box = {value: i32}; struct(Box) }
@@ -5419,14 +5645,14 @@ Deno.test("optimizes tiny private pure helpers by inlining", async () => {
 
 Deno.test("function summaries classify purity calls returns and param effects", async () => {
   const checked = await checkSource(`
-    const clock: fn() -> i32 !{time} = @effect("clock");
+    const clock = @external("clock", fn(host: io) -> io(i32));
     fn score(x: i32) -> i32 { x + 1 }
     fn id(x: i32) -> i32 { x }
-    fn cached(x: i32) -> i32 !{read} { x }
-    fn update(x: i32) -> i32 !{state} { x }
-    fn current() -> i32 !{time} { 1 }
-    fn tick() -> i32 !{time} { clock() }
-    pub fn main() -> i32 { score(id(1)) }
+    fn cached(x: i32) -> i32 { x }
+    fn update(x: i32) -> i32 { x }
+    fn current() -> i32 { 1 }
+    fn tick(host: io) -> i32 { clock(host) }
+    pub fn main(host: io) -> i32 { score(id(1)) + tick(host) * 0 }
   `);
 
   const summaries = summarizeProgram(checked.program);
@@ -5438,9 +5664,9 @@ Deno.test("function summaries classify purity calls returns and param effects", 
   assertEquals(summaries.get("score")?.stackBehavior, "none");
   assertEquals(summaries.get("score")?.runtimeInstructionEstimate, summaries.get("score")?.astCost);
   assertEquals(summaries.get("id")?.paramEffects.get("x"), "alias_return");
-  assertEquals(summaries.get("cached")?.effectClass, "read_only");
-  assertEquals(summaries.get("update")?.effectClass, "state");
-  assertEquals(summaries.get("current")?.effectClass, "volatile");
+  assertEquals(summaries.get("cached")?.effectClass, "pure");
+  assertEquals(summaries.get("update")?.effectClass, "pure");
+  assertEquals(summaries.get("current")?.effectClass, "pure");
   assertEquals(summaries.get("tick")?.effectClass, "host");
   assertEquals(summaries.get("clock")?.effectClass, "host");
 });
@@ -5528,15 +5754,15 @@ Deno.test("optimizer folds matches proven by abstract refined-domain facts", asy
 
 Deno.test("optimization plan records structural inline recurrence and domain decisions", async () => {
   const checked = await checkSource(`
-    const clock: fn() -> i32 !{time} = @effect("clock");
+    const clock = @external("clock", fn(host: io) -> io(i32));
     fn inc(x: i32) -> i32 { x + 1 }
-    fn tick() -> i32 !{time} { clock() }
+    fn tick(host: io) -> i32 { clock(host) }
     fn small(i: i32(4), acc: i32) -> i32 { acc }
     fn small(i: i32(0..4), acc: i32) -> i32 { small(i + 1, acc + i) }
     fn always(i: i32(0..4)) -> i32 {
       match i < 4 { true => inc(i), false => 0 }
     }
-    pub fn main(i: i32(0..4)) -> i32 { always(i) + small(0, 0) }
+    pub fn main(host: io, i: i32(0..4)) -> i32 { always(i) + small(0, 0) + tick(host) * 0 }
   `);
 
   const plan = summarizeOptimizationPlan(checked.program, { optMode: "release" });
@@ -5814,6 +6040,40 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
   assert(!userWat.includes("call $my_fold_loop"));
 });
 
+Deno.test("release optimizer lowers generated tail recurrences before finite expansion", async () => {
+  const compileTrace: CompileTraceEvent[] = [];
+  const source = `
+    const range = @import("prelude.range");
+    fn add(acc: i32, x: i32) -> i32 { acc + x }
+    pub fn main(seed: i32) -> i32 {
+      range.RangeIter::fold(range.RangeI32::Iter(seed - seed .. 1000), 0, add)
+    }
+  `;
+
+  const artifact = await compileArtifactsFromSource(source, {
+    resolveModule: resolveProjectModule,
+    pruneImports: true,
+    optMode: "release",
+    compileTrace,
+  });
+  const lowerIndex = compileTrace.findIndex((event) =>
+    event.name === "opt.lowerTailRecurrenceClauseGroups"
+  );
+  const expandIndex = compileTrace.findIndex((event) =>
+    event.name === "opt.expandFiniteStaticRecurrences.initial"
+  );
+  const expand = compileTrace[expandIndex];
+  const optimizeDecls = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
+
+  assert(lowerIndex >= 0);
+  assert(expandIndex >= 0);
+  assert(lowerIndex < expandIndex);
+  assertEquals(expand?.counters?.changedFunctions, 0);
+  assertEquals(optimizeDecls?.counters?.optimizedFunctions, 5);
+  assertStringIncludes(artifact.wat, "loop");
+  assert(!artifact.wat.includes("call $range.RangeIter::fold_loop"));
+});
+
 Deno.test("optimizer scope traces only reachable imported runtime helpers", async () => {
   const compileTrace: CompileTraceEvent[] = [];
   const source = `
@@ -5832,12 +6092,80 @@ Deno.test("optimizer scope traces only reachable imported runtime helpers", asyn
   });
 
   const scope = compileTrace.find((event) => event.name === "opt.scope");
+  const analysis = compileTrace.find((event) => event.name === "opt.pass.0.analysis");
   const optimizeDecls = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
+  const foldFacts = compileTrace.find((event) => event.name === "opt.pass.0.foldAbstractFacts");
   assertEquals(scope?.counters?.reachableFunctions, 3);
-  assertEquals(optimizeDecls?.counters?.changedFunctions, 3);
+  assertEquals(analysis?.counters?.dirtyFunctions, 2);
+  assertEquals(analysis?.counters?.plannedActions, 2);
+  assertEquals(optimizeDecls?.counters?.optimizedFunctions, 2);
+  assertEquals(optimizeDecls?.counters?.visitedDeclarations, 2);
+  assertEquals(optimizeDecls?.counters?.changedFunctions, 1);
+  assertEquals(foldFacts?.counters?.visitedDeclarations, 2);
   const exports = WebAssembly.Module.exports(new WebAssembly.Module(artifact.wasm))
     .map((item) => item.name);
   assertEquals(exports, ["main"]);
+});
+
+Deno.test("optimizer cleanup second pass only revisits changed functions and callers", async () => {
+  const compileTrace: CompileTraceEvent[] = [];
+  const source = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn wrap(x: i32) -> i32 { inc(x) }
+    fn choose(x: i32) -> i32 {
+      match (x + 1) == (x + 1) {
+        true => wrap(x),
+        false => inc(x)
+      }
+    }
+    fn unused(x: i32) -> i32 { x + 100 }
+    pub fn main(x: i32) -> i32 { choose(x) }
+  `;
+
+  await compileArtifactsFromSource(source, { optMode: "release", compileTrace });
+
+  const pass0 = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
+  const analysis1 = compileTrace.find((event) => event.name === "opt.pass.1.analysis");
+  const next0 = compileTrace.find((event) => event.name === "opt.pass.0.dirtyNext");
+  const pass1 = compileTrace.find((event) => event.name === "opt.pass.1.optimizeDecls");
+  assert(pass0);
+  assert(analysis1);
+  assert(next0);
+  assert(pass1);
+  assertEquals(analysis1.counters?.dirtyFunctions, next0.counters?.nextDirtyFunctions);
+  assertEquals(pass1.counters?.dirtyFunctions, next0.counters?.nextDirtyFunctions);
+  assert(
+    (pass1.counters?.optimizedFunctions as number) < (pass0.counters?.optimizedFunctions as number),
+  );
+  assertEquals(pass1.counters?.visitedDeclarations, pass1.counters?.dirtyFunctions);
+  assertEquals(pass0.counters?.changedFunctions, 1);
+  assertEquals(pass1.counters?.dirtyFunctions, 2);
+});
+
+Deno.test("optimizer dirty pass tracks reachable top-level runtime declarations", async () => {
+  const compileTrace: CompileTraceEvent[] = [];
+  const source = `
+    let top = (1 + 1) * 1;
+    fn use(x: i32) -> i32 { x + 1 }
+    pub fn main() -> i32 { use(top) }
+  `;
+
+  await compileArtifactsFromSource(source, { optMode: "release", compileTrace });
+
+  const analysis0 = compileTrace.find((event) => event.name === "opt.pass.0.analysis");
+  const pass0 = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
+  const next0 = compileTrace.find((event) => event.name === "opt.pass.0.dirtyNext");
+  const pass1 = compileTrace.find((event) => event.name === "opt.pass.1.optimizeDecls");
+  assert(analysis0);
+  assert(pass0);
+  assert(next0);
+  assert(pass1);
+  assertEquals(analysis0.counters?.dirtyDeclarations, 1);
+  assertEquals(pass0.counters?.visitedDeclarations, 3);
+  assertEquals(pass0.counters?.changedDeclarations, 1);
+  assertEquals(next0.counters?.nextDirtyFunctions, 1);
+  assertEquals(next0.counters?.nextDirtyDeclarations, 1);
+  assertEquals(pass1.counters?.visitedDeclarations, 2);
 });
 
 Deno.test("optimizer extracts cheapest local equality candidates", async () => {
@@ -6102,10 +6430,10 @@ Deno.test("does not inline large private helpers above the cost budget", async (
 
 Deno.test("does not inline recursive or effectful helpers", async () => {
   const checked = await checkSource(`
-    const clock: fn() -> i32 !{time} = @effect("clock");
-    fn tick() -> i32 !{time} { clock() }
+    const clock = @external("clock", fn(host: io) -> io(i32));
+    fn tick(host: io) -> i32 { clock(host) }
     fn count(n: i32) -> i32 { match n { 0 => 0, _ => count(n - 1) } }
-    pub fn main() -> i32 !{time} { tick() + count(2) }
+    pub fn main(host: io) -> i32 { tick(host) + count(2) }
   `);
   const counts = countCalls(optimizeProgram(checked.program), { includeGenerated: false });
   assertEquals(counts.get("tick") ?? 0, 1);

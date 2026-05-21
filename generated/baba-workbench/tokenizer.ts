@@ -9,7 +9,6 @@ export interface Token {
 
 const keywords = new Set<string>([
   "_",
-  "capability",
   "const",
   "contract",
   "do",
@@ -30,6 +29,7 @@ const keywords = new Set<string>([
   "zip",
 ]);
 const symbols: string[] = [
+  "@external",
   "...",
   "<*>",
   "<$>",
@@ -52,7 +52,6 @@ const symbols: string[] = [
   ",",
   ";",
   ":",
-  "!",
   ".",
   "(",
   ")",

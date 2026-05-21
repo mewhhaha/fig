@@ -63,30 +63,39 @@ export function lowerProgram(
   const sourceImportConsts = decls.map(unwrap).filter(isSourceImportConst).map(
     lowerSourceImportConst,
   );
-  const effectConstImports = decls.map(unwrap).filter(isEffectConst).map(
-    lowerEffectConst,
+  const externalConstImports = decls.map(unwrap).filter(isExternalConst).map(
+    lowerExternalConst,
   );
+  const removedEffectConst = decls.map(unwrap).find(isEffectConst);
+  if (removedEffectConst) {
+    fail(
+      "external.effect_removed",
+      '@effect has been removed; use const name = @external("host_name", fn(host: io, ...) -> io(T))',
+      spanFor(removedEffectConst),
+    );
+  }
   const declarations = decls.filter((decl) => {
     const unwrapped = unwrap(decl);
-    return !isSourceImportConst(unwrapped) && !isEffectConst(unwrapped);
+    return !isSourceImportConst(unwrapped) && !isExternalConst(unwrapped) &&
+      !isEffectConst(unwrapped);
   }).map(lowerDecl);
   declarations.push(...lowerInlineTypeMemberFns(declarations));
   return hideAstMetadata({
     moduleName: undefined,
-    imports: effectConstImports,
+    imports: externalConstImports,
     sourceImports: sourceImportConsts,
     declarations,
   }) as Program;
 }
 
-function lowerEffectConst(node: Node): EffectImport {
+function lowerExternalConst(node: Node): EffectImport {
   const nameNode = named(node).find((child) => isIdentifier(child) || isFieldName(child));
   const name = bindingName(nameNode);
-  const type = only(node, "Type").text;
-  const effects = optional(node, "EffectRow")
-    ? named(only(node, "EffectRow")).filter(isIdentifier).map((id) => id.text)
-    : [];
-  return { kind: "import", ...meta(node, nameNode), name, type, effects };
+  const external = first(node, "ExternalConstValue");
+  const stringNode = first(external, "String");
+  const externalName = JSON.parse(stringNode.text);
+  const type = first(external, "FnType").text;
+  return { kind: "import", ...meta(node, nameNode), name, externalName, type, effects: [] };
 }
 
 function lowerSourceImportConst(node: Node): SourceImport {
@@ -125,7 +134,11 @@ function isSourceImportConst(node: Node): boolean {
 }
 
 function isEffectConst(node: Node): boolean {
-  return node.type === "ConstDecl" && isDeclarationBuiltinConst(node, "effect");
+  return node.type === "ConstDecl" && /@\s*effect\s*\(/.test(node.text);
+}
+
+function isExternalConst(node: Node): boolean {
+  return node.type === "ConstDecl" && isDeclarationBuiltinConst(node, "external");
 }
 
 function isDeclarationBuiltinConst(node: Node, name: string): boolean {
@@ -220,9 +233,7 @@ function lowerFn(node: Node): FnDecl {
       ? named(only(fn, "Params")).filter(is("Param")).map(lowerParam)
       : [],
     returnType,
-    effects: optional(fn, "EffectRow")
-      ? named(only(fn, "EffectRow")).filter(isIdentifier).map((id) => id.text)
-      : [],
+    effects: [],
     body: lowerBlock(only(fn, "Block")),
     ...(lowerBranchHint(optional(fn, "BranchHint")) ?? {}),
   };
@@ -1136,7 +1147,10 @@ function lowerDoExpr(node: Node): Expr {
     strategy: {
       ...spanOnly(strategy),
       name: first(strategy, "StaticBuiltin").text.replace(/^@/, ""),
-      effect: lowerTypeExpr(first(strategy, "TypeExpr")),
+      hasEffect: optional(strategy, "TypeExpr") !== undefined,
+      effect: optional(strategy, "TypeExpr")
+        ? lowerTypeExpr(first(strategy, "TypeExpr"))
+        : { kind: "type_ref", ...spanOnly(strategy), name: "io" },
     },
     statements,
     expr,

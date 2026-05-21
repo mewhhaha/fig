@@ -8,8 +8,7 @@ remains valid. Heap values use hidden branch handles and copy-before-write when 
 observed through multiple logical values, but pointer identity is not part of the ordinary value
 semantics.
 
-Local `let` names are unique within a statement block. Use fresh names for pure intermediate
-values:
+Local `let` names are unique within a statement block. Use fresh names for pure intermediate values:
 
 ```fig
 let stepped = step(world);
@@ -39,15 +38,41 @@ let left, right = split(value);
 
 ## Effects
 
-Effect rows are written as:
+Fig source functions are pure by default. Volatile host actions use the compiler primitive `io`:
+`@external` functions must take the `io` executor as their first parameter and return `io(T)`. Use
+`do @io(_)` or `do @io(T)` to sequence these runtime actions.
+
+Library-level effects are modeled with transparent value proofs from `prelude.effect`. The idiomatic
+shape is to put the proof on the returned value and let the capability list be inferred from the
+surrounding expected type:
 
 ```fig
-fn pure() -> i32 !{} { 1 }
-fn uses_clock() -> i32 !{time} { clock() }
+const effect = @import("prelude.effect");
+
+fn ask(env: Env) -> effect.Reader(effects, Env) {
+  env
+}
+
+fn bump(store: Store) -> effect.State(effects, Store) {
+  store + 1
+}
+
+fn program(env: Env, store: Store) -> effect.Eff({#reader, #state}, i32) {
+  do @monad(effect.Eff({#reader, #state}, _)) {
+    current <- ask(env);
+    next <- bump(store);
+    current + next
+  }
+}
 ```
 
-An effectful call is rejected unless the caller's effect row covers the callee effects. Host
-host effects declare their effect rows in the function type used by `@effect`.
+Avoid APIs that make callers write both a row argument and a proof argument, such as
+`ask([#reader, #state], effect.Member(#reader, [#reader, #state]), env)`, unless the function truly
+has no value or expected result type from which the row can be inferred.
+
+ECS code can use the same layering: use `do @applicative(ecs.Query(...))` to build a query,
+`do @monad(ecs.System(...))` to sequence systems, and an outer `do @monad(effect.Eff(...))` to
+sequence capability-checked operations that run those systems.
 
 ## Const Evaluation and Reflection
 
@@ -107,7 +132,7 @@ Deno. Safari/WebKit support is not required unless a task explicitly asks for it
 
 Prefer the browser and Deno supported subset when adding backend behavior. Heap-backed growable
 collections and allocation-backed append APIs are intentionally not part of the current standard
-prelude. Use fixed inline arrays and host effects for lower-level work.
+prelude. Use fixed inline arrays and host IO imports for lower-level work.
 
 The Branch-Bit runtime uses multiple internal memories for ordinary heap values: object data and
 large byte buffers. Branch code emits `fig_objects` and `fig_buffers` memories and currently packs

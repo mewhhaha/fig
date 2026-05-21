@@ -14,6 +14,7 @@ import {
 } from "./analysis.ts";
 import { formatSource } from "../format.ts";
 import { CompileError } from "../diagnostics.ts";
+import { FIG_VERSION } from "../version.ts";
 
 type RpcId = string | number | null;
 
@@ -56,7 +57,7 @@ export class FigLanguageServer {
             codeActionProvider: true,
             documentFormattingProvider: true,
           },
-          serverInfo: { name: "fig-lsp", version: "0.1.0" },
+          serverInfo: { name: "fig-lsp", version: FIG_VERSION },
         };
       case "initialized":
         return null;
@@ -173,7 +174,10 @@ export class FigLanguageServer {
     for (const result of results) this.publishDiagnostics(result, result.document.uri);
   }
 
-  private publishDiagnostics(result: Awaited<ReturnType<AnalysisCache["reanalyze"]>>, fallbackUri: string) {
+  private publishDiagnostics(
+    result: Awaited<ReturnType<AnalysisCache["reanalyze"]>>,
+    fallbackUri: string,
+  ) {
     if (!result) {
       this.publish({ uri: fallbackUri, diagnostics: [] });
       return;

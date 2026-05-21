@@ -127,3 +127,44 @@ fn empty(const t: type) -> Monoid(t) {
 Use contracted parameters when a value carries the type, contracted returns when constructing a
 value through a contract, local proof constants when a proof is needed only inside one body, and
 explicit `const` proof parameters when the caller must select or provide the proof.
+
+For effect-style APIs, prefer the same transparent-contract pattern. Do not require callers to pass
+a separate row const plus a separate proof when the row can be inferred from the expected result or
+from a value in the call. Define a proof type that returns the value type itself, then put that
+proof on the value:
+
+```fig
+const effect = @import("prelude.effect");
+
+fn ask(env: Env) -> effect.Reader(effects, Env) {
+  env
+}
+
+fn get(store: Store) -> effect.State(effects, Store) {
+  store
+}
+
+fn program(env: Env, store: Store) -> effect.Eff({#reader, #state}, i32) {
+  do @monad(effect.Eff({#reader, #state}, _)) {
+    current_env <- ask(env);
+    current_store <- get(store);
+    current_env + current_store
+  }
+}
+```
+
+The noisier fallback is still valid when there is no carrier value or expected type to infer from:
+
+```fig
+fn low_level(
+  const effects: const,
+  const _proof: effect.Member(#debug, effects),
+  value: i32
+) -> effect.Eff(effects, i32) {
+  value
+}
+```
+
+Use that form sparingly. Most user-facing APIs should expose contracted values such as
+`effect.Reader(effects, Env)`, `effect.State(effects, Store)`, `effect.Debug(effects, i32)`, or
+`effect.WithAll({#debug, #state}, effects, i32)`.

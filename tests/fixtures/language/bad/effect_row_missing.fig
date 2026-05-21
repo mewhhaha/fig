@@ -1,6 +1,0 @@
-// expect: effect.pure_host_call
-const clock: fn() -> i32 !{time} = @effect("clock");
-
-pub fn main() -> i32 {
-  clock()
-}

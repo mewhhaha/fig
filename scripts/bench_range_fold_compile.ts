@@ -2,23 +2,27 @@ import {
   compileArtifactsFromSource,
   type CompileTraceEvent,
   createCompileCache,
-  type OptimizeProfileName,
 } from "../src/mod.ts";
+import type { OptimizeProfileName } from "../src/unstable.ts";
 
 type Row = {
   scenario: string;
   profile: OptimizeProfileName;
-  parse_ms: string;
-  import_ms: string;
-  check_ms: string;
-  optimize_ms: string;
-  layout_ms: string;
-  lower_ms: string;
-  cleanup_ms: string;
-  wat_render_ms: string;
-  wasm_encode_ms: string;
-  total_with_wat_ms: string;
-  total_wasm_only_ms: string;
+  iterations: number;
+  parse_median_ms: string;
+  import_median_ms: string;
+  check_median_ms: string;
+  optimize_median_ms: string;
+  optimize_p90_ms: string;
+  layout_median_ms: string;
+  lower_median_ms: string;
+  cleanup_median_ms: string;
+  wat_render_median_ms: string;
+  wasm_encode_median_ms: string;
+  total_with_wat_median_ms: string;
+  total_with_wat_p90_ms: string;
+  total_wasm_only_median_ms: string;
+  total_wasm_only_p90_ms: string;
   wat_bytes: number;
   wasm_bytes: number;
   loops: number;
@@ -29,6 +33,28 @@ type Row = {
   optimizer_touched_functions: number;
 };
 
+type Sample = {
+  trace: CompileTraceEvent[];
+  parseMs: number;
+  importMs: number;
+  checkMs: number;
+  optimizeMs: number;
+  layoutMs: number;
+  lowerMs: number;
+  cleanupMs: number;
+  watRenderMs: number;
+  wasmEncodeMs: number;
+  totalWithWatMs: number;
+  totalWasmOnlyMs: number;
+  watBytes: number;
+  wasmBytes: number;
+  loops: number;
+  recursiveCalls: number;
+  functionCalls: number;
+};
+
+const warmupIterations = 1;
+const measuredIterations = 7;
 const cache = createCompileCache();
 const cases: { scenario: string; profile: OptimizeProfileName; source: string }[] = [
   { scenario: "direct_loop", profile: "release_balanced", source: directLoopSource() },
@@ -48,6 +74,50 @@ const cases: { scenario: string; profile: OptimizeProfileName; source: string }[
 
 const rows: Row[] = [];
 for (const item of cases) {
+  for (let index = 0; index < warmupIterations; index++) {
+    await compileSample(item);
+  }
+  const samples: Sample[] = [];
+  for (let index = 0; index < measuredIterations; index++) {
+    samples.push(await compileSample(item));
+  }
+  const representative = samples[Math.floor(samples.length / 2)]!;
+  rows.push({
+    scenario: item.scenario,
+    profile: item.profile,
+    iterations: measuredIterations,
+    parse_median_ms: formatStat(samples, (sample) => sample.parseMs, median),
+    import_median_ms: formatStat(samples, (sample) => sample.importMs, median),
+    check_median_ms: formatStat(samples, (sample) => sample.checkMs, median),
+    optimize_median_ms: formatStat(samples, (sample) => sample.optimizeMs, median),
+    optimize_p90_ms: formatStat(samples, (sample) => sample.optimizeMs, p90),
+    layout_median_ms: formatStat(samples, (sample) => sample.layoutMs, median),
+    lower_median_ms: formatStat(samples, (sample) => sample.lowerMs, median),
+    cleanup_median_ms: formatStat(samples, (sample) => sample.cleanupMs, median),
+    wat_render_median_ms: formatStat(samples, (sample) => sample.watRenderMs, median),
+    wasm_encode_median_ms: formatStat(samples, (sample) => sample.wasmEncodeMs, median),
+    total_with_wat_median_ms: formatStat(samples, (sample) => sample.totalWithWatMs, median),
+    total_with_wat_p90_ms: formatStat(samples, (sample) => sample.totalWithWatMs, p90),
+    total_wasm_only_median_ms: formatStat(samples, (sample) => sample.totalWasmOnlyMs, median),
+    total_wasm_only_p90_ms: formatStat(samples, (sample) => sample.totalWasmOnlyMs, p90),
+    wat_bytes: representative.watBytes,
+    wasm_bytes: representative.wasmBytes,
+    loops: representative.loops,
+    recursive_calls: representative.recursiveCalls,
+    function_calls: representative.functionCalls,
+    slowest_optimizer_phase: slowestOptimizerPhase(representative.trace),
+    optimizer_passes: optimizerPasses(representative.trace),
+    optimizer_touched_functions: optimizerTouchedFunctions(representative.trace),
+  });
+}
+
+console.table(rows);
+
+async function compileSample(item: {
+  scenario: string;
+  profile: OptimizeProfileName;
+  source: string;
+}): Promise<Sample> {
   const trace: CompileTraceEvent[] = [];
   const artifact = await compileArtifactsFromSource(item.source, {
     resolveModule: resolveProjectModule,
@@ -60,38 +130,30 @@ for (const item of cases) {
   });
   const wat = artifact.wat ?? "";
   const timings = artifact.timings;
-  rows.push({
-    scenario: item.scenario,
-    profile: item.profile,
-    parse_ms: timings.parseMs.toFixed(3),
-    import_ms: timings.importMs.toFixed(3),
-    check_ms: timings.checkMs.toFixed(3),
-    optimize_ms: timings.optimizeMs.toFixed(3),
-    layout_ms: timings.backendLayoutMs.toFixed(3),
-    lower_ms: timings.backendLowerMs.toFixed(3),
-    cleanup_ms: timings.backendCleanupMs.toFixed(3),
-    wat_render_ms: timings.watRenderMs.toFixed(3),
-    wasm_encode_ms: timings.wasmEncodeMs.toFixed(3),
-    total_with_wat_ms: (
-      timings.parseMs + timings.importMs + timings.checkMs + timings.backendMs +
-      timings.watRenderMs + timings.wasmEncodeMs
-    ).toFixed(3),
-    total_wasm_only_ms: (
-      timings.parseMs + timings.importMs + timings.checkMs + timings.backendMs +
-      timings.wasmEncodeMs
-    ).toFixed(3),
-    wat_bytes: wat.length,
-    wasm_bytes: artifact.wasm.byteLength,
+  const totalWithWatMs = timings.parseMs + timings.importMs + timings.checkMs + timings.backendMs +
+    timings.watRenderMs + timings.wasmEncodeMs;
+  const totalWasmOnlyMs = timings.parseMs + timings.importMs + timings.checkMs + timings.backendMs +
+    timings.wasmEncodeMs;
+  return {
+    trace,
+    parseMs: timings.parseMs,
+    importMs: timings.importMs,
+    checkMs: timings.checkMs,
+    optimizeMs: timings.optimizeMs,
+    layoutMs: timings.backendLayoutMs,
+    lowerMs: timings.backendLowerMs,
+    cleanupMs: timings.backendCleanupMs,
+    watRenderMs: timings.watRenderMs,
+    wasmEncodeMs: timings.wasmEncodeMs,
+    totalWithWatMs,
+    totalWasmOnlyMs,
+    watBytes: wat.length,
+    wasmBytes: artifact.wasm.byteLength,
     loops: count(wat, /\bloop\b/g),
-    recursive_calls: recursiveCallCount(wat),
-    function_calls: count(wat, /\bcall \$/g),
-    slowest_optimizer_phase: slowestOptimizerPhase(trace),
-    optimizer_passes: optimizerPasses(trace),
-    optimizer_touched_functions: optimizerTouchedFunctions(trace),
-  });
+    recursiveCalls: recursiveCallCount(wat),
+    functionCalls: count(wat, /\bcall \$/g),
+  };
 }
-
-console.table(rows);
 
 function directLoopSource(): string {
   return `
@@ -170,7 +232,7 @@ function optimizerTouchedFunctions(trace: CompileTraceEvent[]): number {
   return trace
     .filter((event) => event.name.endsWith(".optimizeDecls"))
     .reduce((max, event) => {
-      const count = event.counters?.changedFunctions;
+      const count = event.counters?.optimizedFunctions ?? event.counters?.changedFunctions;
       return typeof count === "number" ? Math.max(max, count) : max;
     }, 0);
 }
@@ -189,6 +251,24 @@ function recursiveCallCount(wat: string): number {
 
 function count(source: string, pattern: RegExp): number {
   return source.match(pattern)?.length ?? 0;
+}
+
+function formatStat(
+  samples: Sample[],
+  select: (sample: Sample) => number,
+  summarize: (values: number[]) => number,
+): string {
+  return summarize(samples.map(select)).toFixed(3);
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].toSorted((left, right) => left - right);
+  return sorted[Math.floor(sorted.length / 2)] ?? 0;
+}
+
+function p90(values: number[]): number {
+  const sorted = [...values].toSorted((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.9) - 1)] ?? 0;
 }
 
 function escapeRegExp(value: string): string {

@@ -1,7 +1,7 @@
 import type { Declaration, FnDecl } from "./core_ast.ts";
 import {
-  defaultCompilerPluginRegistry,
   type CompilerPluginRegistry,
+  defaultCompilerPluginRegistry,
   isKnownIntrinsicId as registryHasIntrinsicId,
 } from "./plugins.ts";
 

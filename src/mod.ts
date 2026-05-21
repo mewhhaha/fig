@@ -1,20 +1,19 @@
 import { parse } from "./parser.ts";
-import { checkProgram, checkProgramForAnalysis, type CheckTrace } from "./check.ts";
+import {
+  type AnalysisCheckResult,
+  checkProgram,
+  checkProgramForAnalysis,
+  type CheckResult,
+  type CheckTrace,
+} from "./check.ts";
 import {
   type BackendOptions,
   emitWasm,
   emitWat,
   lowerProgramToBackendArtifact,
-  lowerProgramToBackendModule,
-  summarizeBackendLayoutDecisions,
   wasmFromBackendModule,
   watFromBackendModule,
 } from "./backend.ts";
-import {
-  type OptimizationPlan,
-  type OptimizeOptions,
-  summarizeOptimizationPlan,
-} from "./optimize.ts";
 import type {
   ConstDecl,
   Declaration,
@@ -125,7 +124,10 @@ export interface ImportPhaseTrace {
   referenceCount?: number;
 }
 
-export async function checkSource(source: string, options: CheckSourceOptions = {}) {
+export async function checkSource(
+  source: string,
+  options: CheckSourceOptions = {},
+): Promise<CheckResult> {
   const trace = compileTraceSink(options);
   const program = await parse(source, {
     sourceId: options.sourceId,
@@ -143,7 +145,10 @@ export async function checkSource(source: string, options: CheckSourceOptions = 
   );
 }
 
-export async function checkSourceForAnalysis(source: string, options: CheckSourceOptions = {}) {
+export async function checkSourceForAnalysis(
+  source: string,
+  options: CheckSourceOptions = {},
+): Promise<AnalysisCheckResult> {
   const trace = compileTraceSink(options);
   const program = await parse(source, {
     sourceId: options.sourceId,
@@ -155,7 +160,7 @@ export async function checkSourceForAnalysis(source: string, options: CheckSourc
 export async function checkParsedSourceForAnalysis(
   program: Program,
   options: CheckSourceOptions = {},
-) {
+): Promise<AnalysisCheckResult> {
   if (!options.resolveModule) return checkProgramForAnalysis(program, checkOptions(options));
   const trace = compileTraceSink(options);
   return checkProgramForAnalysis(
@@ -291,77 +296,11 @@ function checkOptions(options: CheckSourceOptions): CheckSourceOptions & { trace
   return { ...options, trace: options.trace === true };
 }
 
-export async function explainOptimization(
-  source: string,
-  options: CompileSourceOptions & OptimizeOptions = {},
-): Promise<OptimizationPlan> {
-  const checked = await checkSource(source, options);
-  const plan = summarizeOptimizationPlan(checked.program, options);
-  for (const decision of summarizeBackendLayoutDecisions(checked.program, options)) {
-    plan.decisions.push(decision);
-    const fnName = typeof decision.evidence?.function === "string"
-      ? decision.evidence.function
-      : undefined;
-    const target = typeof decision.evidence?.target === "string"
-      ? decision.evidence.target
-      : decision.target;
-    const layout = decision.evidence?.layout;
-    if (
-      fnName &&
-      (layout === "packed" || layout === "scratch" || layout === "local_slots")
-    ) {
-      plan.functions.get(fnName)?.actions.push({
-        kind: "choose_layout",
-        target,
-        layout,
-        reason: decision.reason,
-      });
-    }
-  }
-  return plan;
-}
-
 export { parse } from "./parser.ts";
 export { formatSource, isFormatted } from "./format.ts";
 export { tokenize } from "./tokenize.ts";
-export {
-  type BackendModule,
-  backendModuleToWasm,
-  backendModuleToWat,
-  type BackendOptions,
-  type BackendPhaseTimings,
-  compileBackendModule,
-  type LoweredBackendArtifact,
-  lowerProgramToBackendArtifact,
-  lowerProgramToBackendModule,
-  wasmFromBackendModule,
-  watFromBackendModule,
-} from "./backend.ts";
-export {
-  type AbstractFunctionFacts,
-  type AbstractValue,
-  type FunctionFacts,
-  type FunctionPlan,
-  type LayoutCandidate,
-  OPTIMIZATION_RULES,
-  type OptimizationDecision,
-  type OptimizationPlan,
-  type OptimizationRule,
-  type OptimizationRuleId,
-  OPTIMIZE_PROFILES,
-  type OptimizeProfile,
-  type OptimizeProfileName,
-  optimizeProgram,
-  type OptMode,
-  type PlannedAction,
-  type Recurrence,
-  type RewriteRule,
-  type RewriteRuleId,
-  summarizeAbstractValues,
-  summarizeOptimizationPlan,
-  summarizeProgram,
-  summarizeRecurrences,
-} from "./optimize.ts";
+export { type BackendOptions } from "./backend.ts";
+export { type OptimizeProfile, type OptimizeProfileName, type OptMode } from "./optimize.ts";
 export { CompileError, formatDiagnostic } from "./diagnostics.ts";
 export { type CheckPhaseTrace, type CheckProgramOptions, type CheckTrace } from "./check.ts";
 export { type CompileTraceEvent, type CompileTraceSink, formatCompileTraceEvent } from "./trace.ts";
@@ -380,6 +319,7 @@ export {
   type TypeBuiltinContext,
   type TypePluginValue,
 } from "./plugins.ts";
+export { FIG_VERSION } from "./version.ts";
 
 async function resolveSourceImports(
   root: Program,
@@ -572,7 +512,11 @@ function mergePrograms(
           )
           : importedProgram;
         return [
-          ...qualifyEffectImportsAsDeclarations(prunedProgram.imports, alias),
+          ...qualifyEffectImportsAsDeclarations(
+            prunedProgram.imports,
+            alias,
+            new Set(prunedProgram.declarations.flatMap(collectDeclarationNames)),
+          ),
           ...qualifyImportedDeclarations(prunedProgram.declarations, alias),
         ];
       }),
@@ -637,8 +581,20 @@ function mergePrograms(
     moduleName: program.moduleName,
     imports: [
       ...imports.flatMap((item) => item.imports),
-      ...aliasedImports.flatMap((item) => item.program.imports),
-      ...destructuredImports.flatMap((item) => item.program.imports),
+      ...aliasedImports.flatMap((item) =>
+        qualifyEffectImportTypes(
+          item.program.imports,
+          item.alias,
+          new Set(item.program.declarations.flatMap(collectDeclarationNames)),
+        )
+      ),
+      ...destructuredImports.flatMap((item) =>
+        qualifyEffectImportTypes(
+          item.program.imports,
+          item.alias,
+          new Set(item.program.declarations.flatMap(collectDeclarationNames)),
+        )
+      ),
       ...program.imports,
     ],
     sourceImports: [],
@@ -1311,7 +1267,11 @@ function qualifyImportedDeclarations(declarations: Declaration[], alias: string)
   return declarations.map((decl) => qualifyDeclaration(decl, alias, names));
 }
 
-function qualifyEffectImportsAsDeclarations(imports: Program["imports"], alias: string): FnDecl[] {
+function qualifyEffectImportsAsDeclarations(
+  imports: Program["imports"],
+  alias: string,
+  names: Set<string>,
+): FnDecl[] {
   return imports.map((item) => {
     const signature = parseFunctionType(item.type);
     return {
@@ -1320,8 +1280,11 @@ function qualifyEffectImportsAsDeclarations(imports: Program["imports"], alias: 
       imported: true,
       rootPublic: false,
       name: qualifyName(item.name, alias),
-      params: signature.params,
-      returnType: signature.returnType,
+      params: signature.params.map((param) => ({
+        ...param,
+        type: qualifyTypeSource(param.type, alias, names),
+      })),
+      returnType: qualifyTypeSource(signature.returnType, alias, names),
       effects: [...item.effects],
       body: {
         kind: "block",
@@ -1336,10 +1299,30 @@ function qualifyEffectImportsAsDeclarations(imports: Program["imports"], alias: 
   });
 }
 
+function qualifyEffectImportTypes(
+  imports: Program["imports"],
+  alias: string,
+  names: Set<string>,
+): Program["imports"] {
+  return imports.map((item) => ({
+    ...item,
+    type: qualifyFunctionTypeSource(item.type, alias, names),
+  }));
+}
+
+function qualifyFunctionTypeSource(source: string, alias: string, names: Set<string>): string {
+  const signature = parseFunctionType(source);
+  const params = signature.params.map((param) =>
+    `${param.name}: ${qualifyTypeSource(param.type, alias, names)}`
+  ).join(", ");
+  const returnType = qualifyTypeSource(signature.returnType, alias, names);
+  return `fn(${params}) -> ${returnType}`;
+}
+
 function parseFunctionType(
   type: string,
 ): { params: { name: string; type: string }[]; returnType: string } {
-  const match = type.match(/^fn\s*\(([\s\S]*?)\)\s*->\s*([^!]+)(?:![\s\S]*)?$/);
+  const match = type.match(/^fn\s*\(([\s\S]*?)\)\s*->\s*([\s\S]+)$/);
   const params = splitTopLevelComma(match?.[1] ?? "").map((part, index) => {
     const pieces = part.split(":");
     return {

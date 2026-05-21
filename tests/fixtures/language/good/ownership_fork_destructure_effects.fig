@@ -1,4 +1,4 @@
-const clock: fn() -> i32 !{time} = @effect("clock");
+const clock = @external("clock", fn(host: io) -> io(i32));
 
 type fn Pair() -> struct {
   let Pair = {first: i32, second: i32};
@@ -13,8 +13,8 @@ fn sink(x: i32) -> i32 {
   x
 }
 
-pub fn main() -> i32 !{time} {
-  let x = clock();
+pub fn main(host: io) -> i32 {
+  let x = clock(host);
   let moved = sink(x);
   let first, second = make_pair();
   x + moved + first + second

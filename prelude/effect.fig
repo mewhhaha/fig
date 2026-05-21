@@ -1,0 +1,60 @@
+type fn Member(effect: const, effects: const) -> type {
+  @require(
+    @type_list_contains(effects, effect),
+    "capability list is missing required member"
+  );
+  i32
+}
+
+type fn Members(required: const, effects: const) -> type {
+  @require(
+    @type_list_contains_all(required, effects),
+    "capability list is missing one or more required members"
+  );
+  i32
+}
+
+type fn UniqueEffects(effects: const) -> type {
+  @require(
+    @type_list_is_unique(effects),
+    "capability list contains duplicate members"
+  );
+  i32
+}
+
+type fn Eff(effects: const, value: type) -> type {
+  value
+}
+
+type fn With(effect: const, effects: const, value: type) -> type {
+  Member(effect, effects);
+  Eff(effects, value)
+}
+
+type fn WithAll(required: const, effects: const, value: type) -> type {
+  Members(required, effects);
+  Eff(effects, value)
+}
+
+type fn Reader(effects: const, value: type) -> type {
+  With(#reader, effects, value)
+}
+
+type fn State(effects: const, value: type) -> type {
+  With(#state, effects, value)
+}
+
+type fn Debug(effects: const, value: type) -> type {
+  With(#debug, effects, value)
+}
+
+fn Eff::pure(value: a) -> Eff(effects, a) {
+  value
+}
+
+fn Eff::bind(
+  value: Eff(effects, a),
+  const f: fn(x: a) -> Eff(effects, b)
+) -> Eff(effects, b) {
+  f(value)
+}

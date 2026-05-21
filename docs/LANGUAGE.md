@@ -1,13 +1,13 @@
 # Fig Language Reference
 
 This file is the entry point for the Fig language documentation. The compiler remains the source of
-truth: use `grammar.ebnf`, `src/check.ts`, `src/primitives.ts`, and the tested fixtures under
-`tests/fixtures/language` when behavior and prose disagree.
+truth. In a source checkout, use `grammar.ebnf`, `src/check.ts`, `src/primitives.ts`, and the tested
+fixtures under `tests/fixtures/language` when behavior and prose disagree.
 
 ## Reading Order
 
-1. [Syntax](reference/syntax.md) covers source files, declarations, imports, host effects,
-   parameters, blocks, patterns, and literals.
+1. [Syntax](reference/syntax.md) covers source files, declarations, imports, host IO, parameters,
+   blocks, patterns, and literals.
 2. [Types](reference/types.md) covers primitive types, function types, shapes, products, unions,
    repeats, and constructors.
 3. [Expressions](reference/expressions.md) covers calls, constructors, match, operators, pipe-bind,

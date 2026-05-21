@@ -6,6 +6,18 @@ The Fig language server runs over stdio and is editor-neutral:
 deno task lsp
 ```
 
+From JSR, run the exported LSP entry point:
+
+```sh
+deno run --allow-read jsr:@mewhhaha/fig/lsp
+```
+
+From a GitHub Release binary, run:
+
+```sh
+fig lsp
+```
+
 ## Status
 
 The language server is usable for Helix-first IntelliSense today. It supports diagnostics, hover,
@@ -16,19 +28,51 @@ LSP-owned semantic Index.
 
 ## Helix
 
-Add a language server entry to your Helix `languages.toml`:
+From a Fig source checkout, add a language server entry to your Helix `languages.toml`:
 
 ```toml
 [language-server.fig-lsp]
 command = "deno"
-args = ["task", "--cwd", "/home/mewhhaha/src/shovel", "lsp"]
+args = ["task", "lsp"]
 
 [[language]]
 name = "fig"
 scope = "source.fig"
 file-types = ["fig"]
 language-servers = ["fig-lsp"]
-formatter = { command = "deno", args = ["run", "--allow-read", "/home/mewhhaha/src/shovel/src/cli.ts", "fmt", "-"] }
+formatter = { command = "deno", args = ["run", "--allow-read", "src/cli.ts", "fmt", "-"] }
+auto-format = true
+```
+
+For a JSR-installed configuration, use the exported package entry points:
+
+```toml
+[language-server.fig-lsp]
+command = "deno"
+args = ["run", "--allow-read", "jsr:@mewhhaha/fig/lsp"]
+
+[[language]]
+name = "fig"
+scope = "source.fig"
+file-types = ["fig"]
+language-servers = ["fig-lsp"]
+formatter = { command = "deno", args = ["run", "--allow-read", "jsr:@mewhhaha/fig/cli", "fmt", "-"] }
+auto-format = true
+```
+
+For a GitHub Release binary on `PATH`, use:
+
+```toml
+[language-server.fig-lsp]
+command = "fig"
+args = ["lsp"]
+
+[[language]]
+name = "fig"
+scope = "source.fig"
+file-types = ["fig"]
+language-servers = ["fig-lsp"]
+formatter = { command = "fig", args = ["fmt", "-"] }
 auto-format = true
 ```
 

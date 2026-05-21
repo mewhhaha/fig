@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@mewhhaha/baba@0.3.7": "0.3.7",
     "jsr:@std/assert@1": "1.0.18",
     "jsr:@std/internal@^1.0.12": "1.0.12",
     "npm:@microsoft/tsdoc@0.15.1": "0.15.1",
@@ -8,6 +9,9 @@
     "npm:web-tree-sitter@0.26.6": "0.26.6"
   },
   "jsr": {
+    "@mewhhaha/baba@0.3.7": {
+      "integrity": "4378ae8ecfc13475c5690ff05bf0f94b0ba8fc31265774b5f8f2054967210d70"
+    },
     "@std/assert@1.0.18": {
       "integrity": "270245e9c2c13b446286de475131dc688ca9abcd94fc5db41d43a219b34d1c78",
       "dependencies": [
@@ -28,6 +32,7 @@
   },
   "workspace": {
     "dependencies": [
+      "jsr:@mewhhaha/baba@0.3.7",
       "npm:@microsoft/tsdoc@0.15.1",
       "npm:web-tree-sitter@0.26.6"
     ]

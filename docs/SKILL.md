@@ -95,7 +95,7 @@ Generated grammar/parser updates require `deno task codegen`.
 Write Fig files with `.fig` extension. a program is a sequence of declarations:
 
 - `type fn` declarations for compile-time type functions.
-- `const` declarations for compile-time constants, dictionaries, host effects, and imports.
+- `const` declarations for compile-time constants, dictionaries, host IO imports, and imports.
 - `fn` or `pub fn` declarations for value functions.
 - Top-level `let` declarations for simple Values.
 
@@ -147,7 +147,7 @@ widths `u1` through `u64`. Narrow unsigned fields may be storage-packed in produ
 
 ## Functions
 
-Declare functions with `fn name(params) -> Type !{effects} { ... }`:
+Declare functions with `fn name(params) -> Type { ... }`:
 
 ```fig
 fn add(a: i32, b: i32) -> i32 { a + b }
@@ -170,7 +170,7 @@ generated runtime parameters.
 Function types use `fn(...) -> Type`; const function parameters enable compile-time specialization:
 
 ```fig
-fn Map4(const f: fn(x: i32) -> i32, xs: {4*i32}) -> {4*i32} {
+fn Map4(const f: fn(i32) -> i32, xs: {4*i32}) -> {4*i32} {
   [f(xs[0]), f(xs[1]), f(xs[2]), f(xs[3])]
 }
 ```
@@ -224,12 +224,11 @@ fn score(true: bool, true: bool) -> i32 { 3 }
 fn score(_: bool, _: bool) -> i32 { 0 }
 ```
 
-Value function clauses must keep the same arity, visibility, return type, effect row, and compatible
-runtime parameter representation. Refined `i32(...)` parameter domains may vary across clauses
-because they all lower to runtime `i32`. Current value-clause dispatch is best for literal,
-wildcard, binding, and refined scalar-domain cases; use `match` arms for sum-variant payload
-deconstruction. Type functions also support ordered clauses and `match` over static values and
-types.
+Value function clauses must keep the same arity, visibility, return type, and compatible runtime
+parameter representation. Refined `i32(...)` parameter domains may vary across clauses because they
+all lower to runtime `i32`. Current value-clause dispatch is best for literal, wildcard, binding,
+and refined scalar-domain cases; use `match` arms for sum-variant payload deconstruction. Type
+functions also support ordered clauses and `match` over static values and types.
 
 ## Products, Sums, Shapes, and Arrays
 
@@ -292,7 +291,7 @@ Inside type functions:
 - Return a final type expression.
 - Use `match` for static branching.
 - Use `@compile_error("message")` or `@require(condition, "message")` for diagnostics.
-- Do not call effectful host effects from type-level evaluation.
+- Do not call host IO imports from type-level evaluation.
 
 When choosing a type-function pattern:
 
@@ -557,16 +556,22 @@ The arity must match the flattened product Result.
 
 ## Effects and Capabilities
 
-Declare host imports as const effects:
+Declare host imports as external IO actions:
 
 ```fig
-const clock: fn() -> i32 !{time} = @effect("clock");
-pub fn main() -> i32 !{time} { clock() }
+const clock = @external("clock", fn(host: io) -> io(i32));
+
+pub fn main(host: io) -> io(i32) {
+  do @io(_) {
+    now <- clock(host);
+    return(now)
+  }
+}
 ```
 
-Calling an effectful host function from a pure function is rejected. Effect rows use `!{name}` or
-`!{}` and must cover the host effects used by the function. Host effects lower to Wasm imports
-from module `env`.
+Host imports take the `io` executor value explicitly and lower to Wasm imports from module `env`.
+Use `prelude.effect` capability lists such as `effect.Eff({#debug}, A)` for ordinary library-level
+effect modeling.
 
 ## Heap Runtime Intrinsics
 
@@ -578,7 +583,7 @@ the language surface.
 Compiler-recognized branch intrinsics such as `@branch_handle`, `@branch_mark`, and
 `@branch_ensure_editable` may appear behind narrow internal wrappers while the runtime scaffold is
 being built. Temporal intrinsics remain compatibility-only in temporal memory mode. Ordinary Fig
-modules should prefer prelude APIs and host effects.
+modules should prefer prelude APIs and host IO imports.
 
 ## Const Function and Pipe Sugar
 
@@ -613,18 +618,18 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
 - `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, and `prelude.schedule`.
 - `prelude.geometry2d`: Fixed 2D vector, color, vertex, quad, and geometry helpers.
 
-Prelude modules are pure and do not declare host effects. Heap-backed lists, growable vectors,
+Prelude modules are pure and do not declare host IO imports. Heap-backed lists, growable vectors,
 allocation-backed append, `push`, `pop`, and `reserve` are intentionally absent.
 
 ## Web Canvas Module
 
-Use `const canvas = @import("web.canvas");` for browser-facing host effects and WGSL metadata.
-It provides canvas/GPU/event effects, event record helpers, `shader_id`, and `shader_layout`.
-WGSL shader layout reflection uses fenced source strings and extracts bindings/locations into the
+Use `const canvas = @import("web.canvas");` for browser-facing host IO imports and WGSL metadata. It
+provides canvas/GPU/event effects, event record helpers, `shader_id`, and `shader_layout`. WGSL
+shader layout reflection uses fenced source strings and extracts bindings/locations into the
 compiler shader manifest.
 
 ## Current Syntax Checklist
 
 Use `type fn` for type-level computation, `match` for branching, attached members for namespaced
-operations, `@import` for modules, and `@effect` for host imports. Model dictionaries and
+operations, `@import` for modules, and `@external` for host imports. Model dictionaries and
 typeclass-like evidence as ordinary `type fn` product builders plus `const` Values.

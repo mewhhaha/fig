@@ -7,7 +7,7 @@ import { lex, type Token } from "../generated/baba-workbench/tokenizer.ts";
 import { fail } from "./diagnostics.ts";
 
 type item = TokenItem | CommentItem;
-type BraceMode = "block" | "effectRow";
+type BraceMode = "block";
 type Delimiter = "(" | "[" | "{" | "<";
 type TopLevelDeclKind = "ConstDecl" | "TopLetDecl" | "FnDecl" | "TypeFnDecl";
 
@@ -55,7 +55,7 @@ const binaryOperators = new Set([
 const compactBefore = new Set([")", "]", ",", ";", ".", ":", "::"]);
 const compactAfter = new Set(["(", "[", ".", "::", "@", "\\"]);
 const spacedSymbols = new Set(["=", "->", "=>"]);
-const declarationKeywords = new Set(["pub", "fn", "type", "const", "let", "effect", "import"]);
+const declarationKeywords = new Set(["pub", "fn", "type", "const", "let", "external", "import"]);
 
 export function formatSource(source: string): string {
   const normalized = source.replace(/\r\n?/g, "\n");
@@ -142,7 +142,6 @@ export function formatSource(source: string): string {
       previousTopLevelDecl = topLevelDecl;
       continue;
     }
-    const closingEffectRowBrace = token.text === "}" && braceModes.at(-1) === "effectRow";
     const closingDelimiter = delimiterContexts.at(-1);
     if (
       closingDelimiter && (token.text === ")" || token.text === "]" || token.text === ">") &&
@@ -154,7 +153,7 @@ export function formatSource(source: string): string {
       writer.lineStart();
     }
     if (
-      token.text === "}" && !closingEffectRowBrace &&
+      token.text === "}" &&
       !(closingDelimiter?.delimiter === "{" && !closingDelimiter.broken)
     ) {
       if (!writer.atLineStart()) writer.newline();
@@ -214,7 +213,7 @@ export function formatSource(source: string): string {
     writer.raw(token.text);
 
     if (token.text === "{") {
-      const mode: BraceMode = previousToken?.text === "!" ? "effectRow" : "block";
+      const mode: BraceMode = "block";
       braceModes.push(mode);
       if (mode === "block") {
         const canStayFlat = flatBraceCandidateStarts.has(token.token.span.start);
@@ -285,7 +284,7 @@ export function formatSource(source: string): string {
       previousToken = undefined;
       continue;
     }
-    if (token.text === "}" && !closingEffectRowBrace) {
+    if (token.text === "}") {
       braceModes.pop();
       delimiterContexts.pop();
       if (braceModes.length === 0 && delimiterContexts.length === 0) {
@@ -295,8 +294,6 @@ export function formatSource(source: string): string {
           else if (nextDecl) writer.newline();
         }
       } else if (nextStartsDeclaration(items, item)) writer.blankLine();
-    } else if (token.text === "}") {
-      braceModes.pop();
     }
 
     if (topLevelDecl) previousTopLevelDecl = topLevelDecl;
@@ -444,10 +441,6 @@ function separate(
     rightIndex,
   } = context;
   if (right.text === "}") return;
-  if (startsEffectRow(left, right)) return;
-  if (braceMode === "effectRow" && left.text === "{") {
-    return;
-  }
   if (isRepeatPrefix(left.token)) return;
   if (topLevel && nextTopLevelDecl) {
     if (shouldBlankBeforeNextTopLevelDecl(previousTopLevelDecl, nextTopLevelDecl)) {
@@ -558,10 +551,6 @@ function matchingOpen(close: string): Delimiter | undefined {
   if (close === "]") return "[";
   if (close === "}") return "{";
   if (close === ">") return "<";
-}
-
-function startsEffectRow(left: TokenItem, right: TokenItem): boolean {
-  return left.text === "!" && (right.text === "{" || right.text === "{}");
 }
 
 function opensBracketWithoutSpace(left: TokenItem): boolean {

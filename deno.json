@@ -1,11 +1,38 @@
 {
   "name": "@mewhhaha/fig",
-  "version": "0.1.0",
+  "version": "0.0.1",
+  "license": "MIT",
   "exports": {
-    ".": "./src/mod.ts"
+    ".": "./src/mod.ts",
+    "./cli": "./src/cli.ts",
+    "./lsp": "./src/lsp/main.ts",
+    "./unstable": "./src/unstable.ts"
+  },
+  "publish": {
+    "include": [
+      "deno.json",
+      "LICENSE",
+      "README.md",
+      "CHANGELOG.md",
+      "docs/LANGUAGE.md",
+      "docs/EXAMPLES.md",
+      "docs/lsp.md",
+      "docs/design-refinement-recursion.md",
+      "docs/reference/**/*.md",
+      "src/**/*.ts",
+      "generated/baba-workbench/parser.ts",
+      "generated/baba-workbench/tokenizer.ts",
+      "generated/baba-workbench/ast/types.ts",
+      "generated/baba-workbench/ast/visitor.ts",
+      "prelude/**/*.fig",
+      "web/**/*.fig",
+      "engine/**/*.fig",
+      "examples/**/*.fig",
+      "examples/engine_canvas.html"
+    ]
   },
   "imports": {
-    "@mewhhaha/baba": "../baba/src/mod.ts",
+    "@mewhhaha/baba": "jsr:@mewhhaha/baba@0.3.7",
     "tsdoc": "npm:@microsoft/tsdoc@0.15.1",
     "web-tree-sitter": "npm:web-tree-sitter@0.26.6"
   },
@@ -17,11 +44,15 @@
     "test": "deno test --allow-read --allow-write --allow-run",
     "lsp": "deno run --allow-read src/lsp/main.ts",
     "bench:const": "deno run --allow-read scripts/bench_const_params.ts",
+    "bench:eff-rows": "deno run --allow-read scripts/bench_eff_rows.ts",
     "bench:range-fold": "deno run --allow-read scripts/bench_range_fold_compile.ts",
     "bench:monad-stack": "deno run --allow-read scripts/bench_monad_stack.ts",
     "bench:memory-model": "deno run --allow-read scripts/bench_memory_model.ts",
     "bench:ecs-compare": "deno run --allow-read --allow-write --allow-run scripts/bench_ecs_compare.ts",
-    "brackeys:dev": "deno run --allow-read --allow-net scripts/brackeys_dev_server.ts",
+    "publish:dry-run": "deno publish --dry-run --allow-dirty",
+    "publish:check": "deno publish --dry-run --allow-dirty && deno check src/mod.ts src/cli.ts src/lsp/main.ts && deno run --allow-read --allow-write src/cli.ts run examples/hello.fig",
+    "release:binaries": "deno run --allow-read --allow-write --allow-run --allow-env=RELEASE_TAG scripts/build_release_binaries.ts",
+    "release:binary:check": "deno run --allow-read --allow-write --allow-run scripts/check_release_binary.ts",
     "snapshots": "deno test --allow-read --allow-write tests/wat_snapshot_test.ts",
     "smoke": "deno run --allow-read --allow-write src/cli.ts run examples/hello.fig",
     "helix": "deno run --allow-read --allow-write --allow-run scripts/build_helix_parser.ts && env FIG_HELIX_CONFIG=$PWD/helix/config/helix FIG_HELIX_RUNTIME=$PWD/helix/runtime deno run --allow-read --allow-write --allow-env scripts/install_helix.ts && env XDG_CONFIG_HOME=$PWD/helix/config HELIX_RUNTIME=$PWD/helix/runtime hx --health fig"

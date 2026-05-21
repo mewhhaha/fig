@@ -1,0 +1,20 @@
+const effect = @import("prelude.effect");
+
+type fn Env() -> type {
+  i32
+}
+
+fn ask(env: Env) -> effect.Reader(effects, Env) {
+  env
+}
+
+fn add_env(env: Env) -> effect.Eff({#reader}, i32) {
+  do @monad(effect.Eff({#reader}, _)) {
+    current <- ask(env);
+    current + 2
+  }
+}
+
+pub fn main() -> i32 {
+  add_env(40)
+}

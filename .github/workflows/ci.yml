@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Format
+        run: deno fmt --check
+
+      - name: Generated grammar is fresh
+        run: |
+          deno task grammar
+          deno fmt --config deno.json generated/baba-workbench/grammar.js generated/baba-workbench/tokenizer.ts generated/tokenizer.ts
+          git diff --exit-code generated/baba-workbench generated/tokenizer.ts helix/runtime/queries/fig
+
+      - name: Typecheck
+        run: deno task check
+
+      - name: Test
+        run: deno task test
+
+      - name: Smoke
+        run: deno task smoke
+
+      - name: Package entrypoints
+        run: deno task publish:check
+
+      - name: Publish dry run
+        run: deno publish --dry-run

@@ -628,18 +628,19 @@ Deno.test("LSP hover renders TSDoc and inferred types", async () => {
   assertStringIncludes(callHover?.contents.value ?? "", "```fig\nfn add_one(x: i32) -> i32\n```");
 });
 
-Deno.test("LSP hover renders host effect signatures and inferred let results first", async () => {
+Deno.test("LSP hover renders host IO signatures and inferred let results first", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   cache.open(
     uri,
     1,
     [
-      'const clock: fn() -> i32 !{time} = @effect("clock");',
-      "pub fn main() -> i32 !{time} {",
-      "  let now = clock();",
-      "  let later = now;",
-      "  later",
+      'const clock = @external("clock", fn(host: io) -> io(i32));',
+      "pub fn main(host: io) -> io(i32) {",
+      "  do @io(_) {",
+      "    now <- clock(host);",
+      "    return(now)",
+      "  }",
       "}",
     ].join("\n"),
   );
@@ -649,41 +650,39 @@ Deno.test("LSP hover renders host effect signatures and inferred let results fir
   const effectHover = hoverAt(result, { line: 0, character: 7 });
   assert(
     effectHover?.contents.value.startsWith(
-      "```fig\nconst clock: fn() -> i32 !{time}\n```",
+      "```fig\nconst clock: fn(host: io) -> io(i32)\n```",
     ),
   );
 
-  const nowHover = hoverAt(result, { line: 2, character: 7 });
+  const nowHover = hoverAt(result, { line: 3, character: 5 });
   assert(nowHover?.contents.value.startsWith("```fig\nnow: i32\n```"));
-
-  const laterHover = hoverAt(result, { line: 3, character: 7 });
-  assert(laterHover?.contents.value.startsWith("```fig\nlater: i32\n```"));
 });
 
-Deno.test("LSP hover renders top-level values inferred from host effects", async () => {
+Deno.test("LSP hover renders top-level values inferred from host IO calls", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
   cache.open(
     uri,
     1,
     [
-      'const clock: fn() -> i32 !{time} = @effect("clock");',
-      "const top_const = clock();",
-      "let top_let = clock();",
+      'const clock = @external("clock", fn(host: io) -> io(i32));',
+      "const host = 0;",
+      "const top_const = clock(host);",
+      "let top_let = clock(host);",
       "let copied = top_const;",
     ].join("\n"),
   );
   const result = await cache.reanalyze(uri);
   assert(result);
 
-  const topConstHover = hoverAt(result, { line: 1, character: 7 });
-  assert(topConstHover?.contents.value.startsWith("```fig\nconst top_const: i32\n```"));
+  const topConstHover = hoverAt(result, { line: 2, character: 7 });
+  assert(topConstHover?.contents.value.startsWith("```fig\nconst top_const: io(i32)\n```"));
 
-  const topLetHover = hoverAt(result, { line: 2, character: 5 });
-  assert(topLetHover?.contents.value.startsWith("```fig\nlet top_let: i32\n```"));
+  const topLetHover = hoverAt(result, { line: 3, character: 5 });
+  assert(topLetHover?.contents.value.startsWith("```fig\nlet top_let: io(i32)\n```"));
 
-  const copiedHover = hoverAt(result, { line: 3, character: 5 });
-  assert(copiedHover?.contents.value.startsWith("```fig\nlet copied: i32\n```"));
+  const copiedHover = hoverAt(result, { line: 4, character: 5 });
+  assert(copiedHover?.contents.value.startsWith("```fig\nlet copied: io(i32)\n```"));
 });
 
 Deno.test("LSP hover renders structural types for inferred const records", async () => {
@@ -957,7 +956,7 @@ Deno.test("LSP hover covers checked AST syntax nodes without symbol hovers", asy
   const cache = new AnalysisCache();
   const source = [
     'const std = @import("prelude.std");',
-    'const clock: fn() -> i32 !{time} = @effect("clock");',
+    'const clock = @external("clock", fn(host: io) -> io(i32));',
     "type fn Pair() -> struct {",
     "  let Pair = {first: i32, second: i32};",
     "  struct(Pair)",
@@ -967,10 +966,10 @@ Deno.test("LSP hover covers checked AST syntax nodes without symbol hovers", asy
     "  t",
     "}",
     "fn make_pair() -> Pair { Pair {first: 2, second: 3} }",
-    "fn read(flag: bool) -> i32 !{time} {",
+    "fn read(host: io, flag: bool) -> i32 {",
     "  let left, right = make_pair();",
     "  let piped = left \\value -> value + right;",
-    "  let made = Pair {first: piped, second: clock()};",
+    "  let made = Pair {first: piped, second: clock(host)};",
     "  match flag {",
     "    true => made.first,",
     "    _ => made.second",
@@ -1297,7 +1296,8 @@ Deno.test("LSP inlay hints infer product constructors and hide import aliases", 
     end: { line: 20, character: 0 },
   }).map((hint) => hint.label);
   assert(labels.includes(": Velocity2d"));
-  assertEquals(labels.filter((label) => label === ": Geometry2dBatchI32(3)").length, 2);
+  assertEquals(labels.filter((label) => label === ": Geometry2dBatchI32(3)").length, 1);
+  assert(labels.includes(": Geometry2dBatchI32(capacity)"));
   assertEquals(labels.some((label) => label.includes("__import")), false);
 
   const hover = hoverAt(result, positionIn(source, "acc0 =", 1));

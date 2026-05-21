@@ -12,6 +12,6 @@ type fn Layout() -> type {
 ```)
 }
 
-pub fn main() -> i32 !{gpu} {
-  canvas.gpu_create_shader(shader_id)
+pub fn main(host: io) -> i32 {
+  canvas.gpu_create_shader(host, shader_id)
 }

@@ -1,8 +1,10 @@
-const clock: fn() -> i32 !{time} = @effect("clock");
-const random: fn() -> i32 !{entropy} = @effect("random");
+const clock = @external("clock", fn(host: io) -> io(i32));
+const random = @external("random", fn(host: io) -> io(i32));
 
-pub fn main() -> i32 !{time, entropy} {
-  let now = clock();
-  let entropy = random();
-  now + entropy
+pub fn main(host: io) -> io(i32) {
+  do @io(_) {
+    now <- clock(host);
+    entropy <- random(host);
+    return(now + entropy)
+  }
 }

@@ -1,30 +1,33 @@
 const asset = @import("web.asset");
 
-const canvas_init: fn(
+const canvas_init = @external("canvas_init", fn(
+  host: io,
   target: i32,
   width: i32,
   height: i32
-) -> i32 !{canvas} = @effect("canvas_init");
-const gpu_create_shader: fn(shader_id: i32) -> i32 !{gpu} = @effect("gpu_create_shader");
-const gpu_create_pipeline: fn(shader: i32, layout: i32) -> i32 !{gpu} = @effect(
-  "gpu_create_pipeline"
-);
-const gpu_upload_vertices: fn(
+) -> io(i32));
+const gpu_create_shader = @external("gpu_create_shader", fn(host: io, shader_id: i32) -> io(i32));
+const gpu_create_pipeline = @external("gpu_create_pipeline", fn(host: io, shader: i32, layout: i32) -> io(i32));
+const gpu_upload_vertices = @external("gpu_upload_vertices", fn(
+  host: io,
   buffer: i32,
   ptr: i32,
   byte_len: i32
-) -> i32 !{gpu} = @effect("gpu_upload_vertices");
-const gpu_draw_quads: fn(
+) -> io(i32));
+const gpu_draw_quads = @external("gpu_draw_quads", fn(
+  host: io,
   pipeline: i32,
   vertices: i32,
   quad_count: i32
-) -> i32 !{gpu} = @effect("gpu_draw_quads");
-const gpu_begin_frame: fn(
+) -> io(i32));
+const gpu_begin_frame = @external("gpu_begin_frame", fn(
+  host: io,
   target: i32,
   width: i32,
   height: i32
-) -> i32 !{canvas, gpu} = @effect("gpu_begin_frame");
-const gpu_draw_rect: fn(
+) -> io(i32));
+const gpu_draw_rect = @external("gpu_draw_rect", fn(
+  host: io,
   canvas: i32,
   x: i32,
   y: i32,
@@ -32,8 +35,9 @@ const gpu_draw_rect: fn(
   h: i32,
   z: i32,
   color: i32
-) -> i32 !{gpu} = @effect("gpu_draw_rect");
-const gpu_draw_sprite: fn(
+) -> io(i32));
+const gpu_draw_sprite = @external("gpu_draw_sprite", fn(
+  host: io,
   canvas: i32,
   atlas: i32,
   sx: i32,
@@ -46,9 +50,9 @@ const gpu_draw_sprite: fn(
   dh: i32,
   flip_x: i32,
   z: i32
-) -> i32 !{gpu} = @effect("gpu_draw_sprite");
-const gpu_present: fn(canvas: i32) -> i32 !{canvas, gpu} = @effect("gpu_present");
-const event_poll: fn(ptr: i32, capacity: i32) -> i32 !{event} = @effect("event_poll");
+) -> io(i32));
+const gpu_present = @external("gpu_present", fn(host: io, canvas: i32) -> io(i32));
+const event_poll = @external("event_poll", fn(host: io, ptr: i32, capacity: i32) -> io(i32));
 
 type fn Rect2d() -> type {
   let Rect2d = {
@@ -62,8 +66,9 @@ type fn Rect2d() -> type {
   struct(Rect2d)
 }
 
-fn draw_rect(canvas: i32, rect: Rect2d) -> i32 !{gpu} {
+fn draw_rect(host: io, canvas: i32, rect: Rect2d) -> i32 {
   gpu_draw_rect(
+    host,
     canvas,
     rect.x,
     rect.y,
@@ -91,8 +96,9 @@ type fn SpriteDraw2d() -> type {
   struct(SpriteDraw2d)
 }
 
-fn draw_sprite(canvas: i32, sprite: SpriteDraw2d) -> i32 !{gpu} {
+fn draw_sprite(host: io, canvas: i32, sprite: SpriteDraw2d) -> i32 {
   gpu_draw_sprite(
+    host,
     canvas,
     asset.id(sprite.atlas),
     sprite.sx,

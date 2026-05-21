@@ -9,6 +9,7 @@ import type {
   Program,
   Statement,
   StaticForSource,
+  TypeDecl,
   TypeExpr,
 } from "./core_ast.ts";
 import { patternBindingNames, patternBindsName } from "./patterns.ts";
@@ -20,6 +21,7 @@ import {
   renderRefinedI32Domain,
   scalarFactsFromI32Range,
 } from "./refined_scalar.ts";
+import { runtimeTypeInfo, splitRuntimeTypeArgs } from "./runtime_types.ts";
 import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
 
 export type OptMode = "debug" | "release";
@@ -70,6 +72,7 @@ interface OptimizerConfig {
   productInlineBudget: number;
   passes: number;
   rewriteUnusedPrivateParams: boolean;
+  typeDecls: TypeDecl[];
 }
 
 export interface OptimizationScope {
@@ -419,6 +422,29 @@ export interface OptimizationDecision {
   afterCost?: number;
 }
 
+interface OptimizerAnalysis {
+  functions: Map<string, FnDecl>;
+  forwarding: Map<string, string>;
+  recurrences: Map<string, Recurrence>;
+  summaries: Map<string, FunctionSummary>;
+  plan: OptimizationPlan;
+  inlineable: Map<string, FnDecl>;
+}
+
+interface OptimizationChangeSet {
+  functions: Set<string>;
+  declarations: Set<string>;
+  visitedFunctions: number;
+  visitedDeclarations: number;
+}
+
+interface OptimizerPassState {
+  declarationIndexes: Map<string, number>;
+  callers: Map<string, Set<string>>;
+  dirtyFunctions: Set<string>;
+  dirtyDeclarations: Set<string>;
+}
+
 export type AbstractValue =
   | { kind: "unreachable" }
   | { kind: "unknown" }
@@ -448,31 +474,39 @@ export function optimizeProgram(program: Program, options: OptimizeOptions = {})
       result,
     ) => optimizerTraceCounters(result),
   );
-  const scope = traceSync(
+  config.typeDecls = programTypeDecls(optimized);
+  let scope = traceSync(
     options.trace,
     "opt.scope",
     () => buildOptimizationScope(optimized),
     (result) => optimizerTraceCounters(optimized, result),
   );
   if (config.rewriteUnusedPrivateParams) {
-    traceSync(
+    const forwardingChanged = traceSync(
       options.trace,
       "opt.inlinePureForwardingWrappers",
       () => inlinePureForwardingWrappers(optimized, scope),
       (changed) => optimizerTraceCounters(optimized, scope, { changedFunctions: changed ? 1 : 0 }),
     );
-    traceSync(
-      options.trace,
-      "opt.expandFiniteStaticRecurrences.initial",
-      () => expandFiniteStaticRecurrences(optimized, config, scope),
-      (changed) => optimizerTraceCounters(optimized, scope, { changedFunctions: changed ? 1 : 0 }),
-    );
-    traceSync(
+    if (forwardingChanged) scope = buildOptimizationScope(optimized);
+    const structuralAnalysis = buildOptimizerAnalysis(optimized, config, scope);
+    const loweredTailGroups = traceSync(
       options.trace,
       "opt.lowerTailRecurrenceClauseGroups",
-      () => lowerTailRecurrenceClauseGroups(optimized, config, scope),
+      () => lowerTailRecurrenceClauseGroups(optimized, config, scope, structuralAnalysis),
       (changed) => optimizerTraceCounters(optimized, scope, { changedFunctions: changed ? 1 : 0 }),
     );
+    if (loweredTailGroups) scope = buildOptimizationScope(optimized);
+    const expandAnalysis = loweredTailGroups
+      ? buildOptimizerAnalysis(optimized, config, scope)
+      : structuralAnalysis;
+    const expandedInitial = traceSync(
+      options.trace,
+      "opt.expandFiniteStaticRecurrences.initial",
+      () => expandFiniteStaticRecurrences(optimized, config, scope, expandAnalysis),
+      (changed) => optimizerTraceCounters(optimized, scope, { changedFunctions: changed ? 1 : 0 }),
+    );
+    if (expandedInitial) scope = buildOptimizationScope(optimized);
     traceSync(
       options.trace,
       "opt.expandFiniteStaticRecurrences.second",
@@ -601,71 +635,339 @@ function runOptimizePasses(
 ): void {
   const maxPasses = Math.min(config.passes, 2);
   let previousInlineableNames: Set<string> | undefined;
+  let previousHadGeneratedRecurrence = false;
+  let analysis: OptimizerAnalysis | undefined;
+  let state = initialOptimizerPassState(program, scope);
   for (let pass = 0; pass < maxPasses; pass++) {
+    if (!state.dirtyFunctions.size && !state.dirtyDeclarations.size) break;
     if (
       pass > 0 && previousInlineableNames?.size &&
-      hasReachableGeneratedRecurrence(program, scope)
+      previousHadGeneratedRecurrence
     ) break;
+    const passState = cloneOptimizerPassState(state);
+    analysis ??= traceSync(
+      trace,
+      `opt.pass.${pass}.analysis`,
+      () => buildOptimizerAnalysis(program, config, scope),
+      (result) =>
+        optimizerTraceCounters(program, scope, {
+          functions: result.functions.size,
+          plannedActions: result.plan.decisions.length,
+          inlineableFunctions: result.inlineable.size,
+          dirtyFunctions: passState.dirtyFunctions.size,
+          dirtyDeclarations: passState.dirtyDeclarations.size,
+          hasGeneratedRecurrence: optimizerAnalysisHasGeneratedRecurrence(result),
+          pass,
+        }),
+    );
+    previousHadGeneratedRecurrence = optimizerAnalysisHasGeneratedRecurrence(analysis);
     const functions = traceSync(
       trace,
       `opt.pass.${pass}.functionMap`,
-      () => functionMap(program, scope),
-      (result) => optimizerTraceCounters(program, scope, { functions: result.size, pass }),
+      () => analysis!.functions,
+      (result) =>
+        optimizerTraceCounters(program, scope, {
+          functions: result.size,
+          dirtyFunctions: passState.dirtyFunctions.size,
+          dirtyDeclarations: passState.dirtyDeclarations.size,
+          cached: true,
+          pass,
+        }),
     );
     const forwarding = traceSync(
       trace,
       `opt.pass.${pass}.forwardingWrappers`,
-      () => forwardingWrappers(functions),
-      (result) => optimizerTraceCounters(program, scope, { changedFunctions: result.size, pass }),
+      () => analysis!.forwarding,
+      (result) =>
+        optimizerTraceCounters(program, scope, {
+          changedFunctions: result.size,
+          dirtyFunctions: passState.dirtyFunctions.size,
+          dirtyDeclarations: passState.dirtyDeclarations.size,
+          cached: true,
+          pass,
+        }),
     );
-    const recurrences = summarizeRecurrences(program, scope);
     const summaries = traceSync(
       trace,
       `opt.pass.${pass}.summaries`,
-      () => functionSummaries(program, functions, recurrences, scope),
-      (result) => optimizerTraceCounters(program, scope, { functions: result.size, pass }),
+      () => analysis!.summaries,
+      (result) =>
+        optimizerTraceCounters(program, scope, {
+          functions: result.size,
+          dirtyFunctions: passState.dirtyFunctions.size,
+          dirtyDeclarations: passState.dirtyDeclarations.size,
+          cached: true,
+          pass,
+        }),
     );
     const plan = traceSync(
       trace,
       `opt.pass.${pass}.plan`,
-      () =>
-        buildOptimizationPlan(
-          program,
-          config.profile,
-          { functions, summaries, recurrences },
-          scope,
-        ),
+      () => analysis!.plan,
       (result) =>
         optimizerTraceCounters(program, scope, {
-          changedFunctions: result.decisions.length,
+          plannedActions: result.decisions.length,
+          dirtyFunctions: passState.dirtyFunctions.size,
+          dirtyDeclarations: passState.dirtyDeclarations.size,
+          cached: true,
           pass,
         }),
     );
     const inlineable = traceSync(
       trace,
       `opt.pass.${pass}.inlineable`,
-      () => inlineableFunctions(functions, plan),
-      (result) => optimizerTraceCounters(program, scope, { functions: result.size, pass }),
+      () => analysis!.inlineable,
+      (result) =>
+        optimizerTraceCounters(program, scope, {
+          functions: result.size,
+          dirtyFunctions: passState.dirtyFunctions.size,
+          dirtyDeclarations: passState.dirtyDeclarations.size,
+          cached: true,
+          pass,
+        }),
     );
     const inlineableNames = new Set(inlineable.keys());
     previousInlineableNames = inlineableNames;
-    traceSync(
+    const optimizedFunctions = traceSync(
       trace,
       `opt.pass.${pass}.optimizeDecls`,
-      () => {
-        program.declarations = program.declarations.map((decl) =>
-          optimizeDecl(decl, forwarding, inlineable, functions, config, scope)
-        );
-      },
-      () => optimizerTraceCounters(program, scope, { pass }),
+      () =>
+        optimizeDeclarations(
+          program,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+          scope,
+          passState,
+        ),
+      (changes) =>
+        optimizerTraceCounters(program, scope, {
+          optimizedFunctions: changes.visitedFunctions,
+          visitedDeclarations: changes.visitedDeclarations,
+          dirtyFunctions: passState.dirtyFunctions.size,
+          dirtyDeclarations: passState.dirtyDeclarations.size,
+          changedFunctions: changes.functions.size,
+          changedDeclarations: changes.declarations.size,
+          pass,
+        }),
     );
-    traceSync(
+    const foldedFunctions = traceSync(
       trace,
       `opt.pass.${pass}.foldAbstractFacts`,
-      () => foldAbstractFactsInProgram(program, scope),
-      () => optimizerTraceCounters(program, scope, { pass }),
+      () => foldAbstractFactsInProgram(program, scope, passState),
+      (changes) =>
+        optimizerTraceCounters(program, scope, {
+          optimizedFunctions: changes.visitedFunctions,
+          visitedDeclarations: changes.visitedDeclarations,
+          dirtyFunctions: passState.dirtyFunctions.size,
+          dirtyDeclarations: passState.dirtyDeclarations.size,
+          changedFunctions: changes.functions.size,
+          changedDeclarations: changes.declarations.size,
+          pass,
+        }),
     );
+    const changed = mergeOptimizationChangeSets(optimizedFunctions, foldedFunctions);
+    if (!changed.functions.size && !changed.declarations.size) break;
+    state = nextOptimizerPassState(passState, scope, changed);
+    traceInstant(
+      trace,
+      `opt.pass.${pass}.dirtyNext`,
+      optimizerTraceCounters(program, scope, {
+        dirtyFunctions: passState.dirtyFunctions.size,
+        dirtyDeclarations: passState.dirtyDeclarations.size,
+        changedFunctions: changed.functions.size,
+        changedDeclarations: changed.declarations.size,
+        nextDirtyFunctions: state.dirtyFunctions.size,
+        nextDirtyDeclarations: state.dirtyDeclarations.size,
+        pass,
+      }),
+    );
+    analysis = undefined;
   }
+}
+
+function emptyOptimizationChangeSet(): OptimizationChangeSet {
+  return {
+    functions: new Set(),
+    declarations: new Set(),
+    visitedFunctions: 0,
+    visitedDeclarations: 0,
+  };
+}
+
+function mergeOptimizationChangeSets(
+  ...sets: OptimizationChangeSet[]
+): OptimizationChangeSet {
+  const merged = emptyOptimizationChangeSet();
+  for (const set of sets) {
+    for (const name of set.functions) merged.functions.add(name);
+    for (const name of set.declarations) merged.declarations.add(name);
+    merged.visitedFunctions += set.visitedFunctions;
+    merged.visitedDeclarations += set.visitedDeclarations;
+  }
+  return merged;
+}
+
+function initialOptimizerPassState(
+  program: Program,
+  scope: OptimizationScope,
+): OptimizerPassState {
+  const declarationIndexes = optimizerDeclarationIndexes(program);
+  return {
+    declarationIndexes,
+    callers: scopedFunctionCallerGraph(program, scope),
+    dirtyFunctions: dirtyDeclaredFunctions(scope.reachableFunctions, declarationIndexes),
+    dirtyDeclarations: reachableRuntimeTopLevelDeclarations(program, scope),
+  };
+}
+
+function cloneOptimizerPassState(state: OptimizerPassState): OptimizerPassState {
+  return {
+    declarationIndexes: state.declarationIndexes,
+    callers: state.callers,
+    dirtyFunctions: new Set(state.dirtyFunctions),
+    dirtyDeclarations: new Set(state.dirtyDeclarations),
+  };
+}
+
+function nextOptimizerPassState(
+  previous: OptimizerPassState,
+  scope: OptimizationScope,
+  changed: OptimizationChangeSet,
+): OptimizerPassState {
+  const dirtyFunctions = new Set<string>();
+  for (const name of changed.functions) {
+    if (scope.reachableFunctions.has(name) && previous.declarationIndexes.has(name)) {
+      dirtyFunctions.add(name);
+    }
+    for (const caller of previous.callers.get(name) ?? []) dirtyFunctions.add(caller);
+  }
+  const dirtyDeclarations = new Set<string>();
+  if (changed.declarations.size) {
+    for (const name of changed.declarations) {
+      if (scope.reachableDeclarations.has(name) && previous.declarationIndexes.has(name)) {
+        dirtyDeclarations.add(name);
+      }
+    }
+    for (const root of scope.runtimeRoots) {
+      if (previous.declarationIndexes.has(root)) dirtyFunctions.add(root);
+    }
+  }
+  return {
+    declarationIndexes: previous.declarationIndexes,
+    callers: previous.callers,
+    dirtyFunctions,
+    dirtyDeclarations,
+  };
+}
+
+function optimizerDeclarationIndexes(program: Program): Map<string, number> {
+  const indexes = new Map<string, number>();
+  program.declarations.forEach((decl, index) => indexes.set(decl.name, index));
+  return indexes;
+}
+
+function dirtyDeclaredFunctions(
+  names: Set<string>,
+  declarationIndexes: Map<string, number>,
+): Set<string> {
+  return new Set([...names].filter((name) => declarationIndexes.has(name)));
+}
+
+function reachableRuntimeTopLevelDeclarations(
+  program: Program,
+  scope: OptimizationScope,
+): Set<string> {
+  const names = new Set<string>();
+  for (const decl of program.declarations) {
+    if (
+      (decl.kind === "let" || decl.kind === "const") &&
+      scope.reachableDeclarations.has(decl.name)
+    ) {
+      names.add(decl.name);
+    }
+  }
+  return names;
+}
+
+function optimizerVisitIndexes(
+  program: Program,
+  scope?: OptimizationScope,
+  state?: OptimizerPassState,
+): number[] {
+  if (!state) {
+    return program.declarations.flatMap((decl, index) => {
+      if (decl.kind === "fn" && (!scope || scope.reachableFunctions.has(decl.name))) {
+        return [index];
+      }
+      if (
+        (decl.kind === "let" || decl.kind === "const") &&
+        (!scope || scope.reachableDeclarations.has(decl.name))
+      ) {
+        return [index];
+      }
+      return [];
+    });
+  }
+  const indexes = new Set<number>();
+  for (const name of state.dirtyFunctions) {
+    const index = state.declarationIndexes.get(name);
+    if (index !== undefined) indexes.add(index);
+  }
+  for (const name of state.dirtyDeclarations) {
+    const index = state.declarationIndexes.get(name);
+    if (index !== undefined) indexes.add(index);
+  }
+  return [...indexes].sort((left, right) => left - right);
+}
+
+function scopedFunctionCallerGraph(
+  program: Program,
+  scope: OptimizationScope,
+): Map<string, Set<string>> {
+  const callers = new Map<string, Set<string>>();
+  const add = (callee: string, caller: string) => {
+    if (!scope.reachableFunctions.has(callee) || !scope.reachableFunctions.has(caller)) return;
+    const existing = callers.get(callee);
+    if (existing) existing.add(caller);
+    else callers.set(callee, new Set([caller]));
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind !== "fn" || !scope.reachableFunctions.has(decl.name)) continue;
+    for (const called of calledFunctionList(decl.body)) add(called, decl.name);
+  }
+  return callers;
+}
+
+function buildOptimizerAnalysis(
+  program: Program,
+  config: OptimizerConfig,
+  scope: OptimizationScope,
+): OptimizerAnalysis {
+  const functions = functionMap(program, scope);
+  const forwarding = forwardingWrappers(functions);
+  const recurrences = summarizeRecurrences(program, scope);
+  const summaries = functionSummaries(program, functions, recurrences, scope);
+  const plan = buildOptimizationPlan(
+    program,
+    config.profile,
+    { functions, summaries, recurrences },
+    scope,
+  );
+  const inlineable = inlineableFunctions(functions, plan);
+  return { functions, forwarding, recurrences, summaries, plan, inlineable };
+}
+
+function optimizerAnalysisHasGeneratedRecurrence(analysis: OptimizerAnalysis): boolean {
+  for (const recurrence of analysis.recurrences.values()) {
+    const dispatcher = analysis.functions.get(recurrence.fn);
+    if (dispatcher?.generated) return true;
+    if (recurrence.clauses.some((clause) => analysis.functions.get(clause.fn)?.generated)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function optimizerConfig(options: OptimizeOptions): OptimizerConfig {
@@ -676,17 +978,8 @@ function optimizerConfig(options: OptimizeOptions): OptimizerConfig {
     productInlineBudget: profile.inline.productBudget,
     passes: profile.abstract.maxPasses,
     rewriteUnusedPrivateParams: profile.name !== "debug",
+    typeDecls: [],
   };
-}
-
-function hasReachableGeneratedRecurrence(program: Program, scope: OptimizationScope): boolean {
-  const functions = functionMap(program, scope);
-  for (const recurrence of summarizeRecurrences(program, scope).values()) {
-    const dispatcher = functions.get(recurrence.fn);
-    if (dispatcher?.generated) return true;
-    if (recurrence.clauses.some((clause) => functions.get(clause.fn)?.generated)) return true;
-  }
-  return false;
 }
 
 function resolveOptimizeProfile(options: OptimizeOptions = {}): OptimizeProfile {
@@ -726,14 +1019,16 @@ export function buildOptimizationScope(program: Program): OptimizationScope {
       .map((decl) => [decl.name, decl]),
   );
   for (const item of program.imports) {
+    const signature = parseOptimizerFnSignature(item.type);
     functions.set(item.name, {
       kind: "fn",
       public: false,
       imported: true,
       rootPublic: false,
       name: item.name,
-      params: [],
-      returnType: item.type,
+      externalName: item.externalName,
+      params: signature.params,
+      returnType: signature.returnType,
       effects: item.effects,
       body: { kind: "block", statements: [] },
       primitiveId: "host_effect",
@@ -1466,20 +1761,44 @@ function functionMap(program: Program, scope?: OptimizationScope): Map<string, F
   );
   for (const item of program.imports) {
     if (scope && !scope.reachableFunctions.has(item.name)) continue;
+    const signature = parseOptimizerFnSignature(item.type);
     functions.set(item.name, {
       kind: "fn",
       public: false,
       imported: true,
       rootPublic: false,
       name: item.name,
-      params: [],
-      returnType: item.type,
+      externalName: item.externalName,
+      params: signature.params,
+      returnType: signature.returnType,
       effects: item.effects,
       body: { kind: "block", statements: [] },
       primitiveId: "host_effect",
     });
   }
   return functions;
+}
+
+function parseOptimizerFnSignature(type: string): {
+  params: Param[];
+  returnType: string;
+} {
+  const match = type.trim().match(/^fn\s*\(([\s\S]*?)\)\s*->\s*([^!]+)(?:![\s\S]*)?$/);
+  if (!match) return { params: [], returnType: type };
+  const params = match[1].trim()
+    ? splitRuntimeTypeArgs(match[1]).map((part, index) => {
+      const colon = part.indexOf(":");
+      return {
+        name: colon >= 0 ? part.slice(0, colon).trim() : `arg${index}`,
+        type: (colon >= 0 ? part.slice(colon + 1) : part).trim(),
+      };
+    })
+    : [];
+  return { params, returnType: match[2].trim() };
+}
+
+function programTypeDecls(program: Program): TypeDecl[] {
+  return program.declarations.filter((decl): decl is TypeDecl => decl.kind === "type");
 }
 
 export function summarizeProgram(
@@ -1611,7 +1930,27 @@ function buildOptimizationPlan(
   for (const [name, summary] of summaries) {
     const fn = functions.get(name);
     if (!fn) continue;
-    const inline = chooseInlineAction(fn, summary, profile);
+    const recurrence = recurrenceIndex.get(name);
+    if (recurrence) {
+      decisions.push({
+        pass: "plan.inline",
+        target: name,
+        action: "call.inline.skip_recursive",
+        reason: recurrence.fn === name
+          ? `recurrence dispatcher ${recurrence.fn} is handled by recurrence planning`
+          : `recurrence clause for ${recurrence.fn} is handled by recurrence planning`,
+        evidence: {
+          recurrence: recurrence.fn,
+          kind: recurrence.kind,
+          astCost: summary.astCost,
+          returnClass: summary.returnClass,
+          effectClass: summary.effectClass,
+        },
+        beforeCost: summary.astCost,
+      });
+      continue;
+    }
+    const inline = chooseInlineAction(fn, summary, profile, functions);
     if (inline.action.kind === "inline") {
       addAction(name, inline.action, {
         pass: "plan.inline",
@@ -1758,6 +2097,7 @@ function chooseInlineAction(
   fn: FnDecl,
   summary: FunctionSummary,
   profile: OptimizeProfile,
+  functions: Map<string, FnDecl>,
 ): {
   action: PlannedAction | { kind: "skip"; reason: string };
   rule: RewriteRuleId;
@@ -1794,6 +2134,14 @@ function chooseInlineAction(
       action: { kind: "skip", reason: `effect class is ${summary.effectClass}` },
       rule: "call.inline.skip_effectful",
       reason: `effect class is ${summary.effectClass}`,
+      evidence,
+    };
+  }
+  if (hasRuntimeEffect(fn.body, functions)) {
+    return {
+      action: { kind: "skip", reason: "function body has runtime effects" },
+      rule: "call.inline.skip_effectful",
+      reason: "function body has runtime effects",
       evidence,
     };
   }
@@ -1864,8 +2212,7 @@ function tailExposureInlineCandidates(
         helper,
         caller,
         summary,
-        reason:
-          `single-use private pure scalar helper exposes tail call back to ${caller.name}`,
+        reason: `single-use private pure scalar helper exposes tail call back to ${caller.name}`,
       });
     }
   }
@@ -1882,22 +2229,11 @@ function tailExposureHelperEligible(
     !summary.isPrimitive &&
     summary.isPure &&
     summary.effectClass === "pure" &&
-    isScalarLikeRuntimeReturn(fn, summary) &&
+    summary.returnClass === "scalar" &&
     summary.recursiveKind === "none" &&
     summary.callCount === 1 &&
     !valueUses.has(fn.name) &&
     !hasRuntimeEffect(fn.body, functions);
-}
-
-function isScalarLikeRuntimeReturn(fn: FnDecl, summary: FunctionSummary): boolean {
-  if (summary.returnClass === "scalar") return true;
-  if (summary.returnClass !== "flat_product" || summary.slotCountEstimate !== 1) return false;
-  const type = fn.returnType;
-  if (!type) return false;
-  if (!/^[A-Za-z_][A-Za-z0-9_.]*\([^,{}]*\)$/.test(type.trim())) return false;
-  return !/\bstruct\s*\(|[,{}]|\bInlineArray(?:List|Builder)?\b|\bBuffer\b|\bString\b|\bBytes\b|fn\s*\(/.test(
-    type,
-  );
 }
 
 function tailCallsFunction(block: BlockExpr, target: string): boolean {
@@ -2111,14 +2447,17 @@ function expandFiniteStaticRecurrences(
   program: Program,
   config: OptimizerConfig,
   scope?: OptimizationScope,
+  analysis?: OptimizerAnalysis,
 ): boolean {
-  const functions = functionMap(program, scope);
-  const recurrenceSummaries = summarizeRecurrences(program, scope);
-  const summaries = functionSummaries(program, functions, recurrenceSummaries, scope);
-  const plan = buildOptimizationPlan(
+  const functions = analysis?.functions ?? functionMap(program, scope);
+  const plan = analysis?.plan ?? buildOptimizationPlan(
     program,
     config.profile,
-    { functions, summaries, recurrences: recurrenceSummaries },
+    {
+      functions,
+      summaries: analysis?.summaries,
+      recurrences: analysis?.recurrences,
+    },
     scope,
   );
   const recurrences = [...plan.functions.values()]
@@ -2256,14 +2595,17 @@ function lowerTailRecurrenceClauseGroups(
   program: Program,
   config: OptimizerConfig,
   scope?: OptimizationScope,
+  analysis?: OptimizerAnalysis,
 ): boolean {
-  const functions = functionMap(program, scope);
-  const recurrences = summarizeRecurrences(program, scope);
-  const summaries = functionSummaries(program, functions, recurrences, scope);
-  const plan = buildOptimizationPlan(
+  const functions = analysis?.functions ?? functionMap(program, scope);
+  const plan = analysis?.plan ?? buildOptimizationPlan(
     program,
     config.profile,
-    { functions, summaries, recurrences },
+    {
+      functions,
+      summaries: analysis?.summaries,
+      recurrences: analysis?.recurrences,
+    },
     scope,
   );
   const replacements = new Map<string, FnDecl>();
@@ -2834,21 +3176,33 @@ function abstractNumberConstant(value: AbstractValue): number | undefined {
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
-function foldAbstractFactsInProgram(program: Program, scope?: OptimizationScope): void {
-  program.declarations = program.declarations.map((decl): Declaration => {
+function foldAbstractFactsInProgram(
+  program: Program,
+  scope?: OptimizationScope,
+  state?: OptimizerPassState,
+): OptimizationChangeSet {
+  const changes = emptyOptimizationChangeSet();
+  for (const index of optimizerVisitIndexes(program, scope, state)) {
+    const decl = program.declarations[index];
+    if (!decl) continue;
+    changes.visitedDeclarations++;
     if (decl.kind === "fn") {
-      if (scope && !scope.reachableFunctions.has(decl.name)) return decl;
+      changes.visitedFunctions++;
       const env = new Map(
         decl.params.map((param) => [param.name, abstractValueFromType(param.type)]),
       );
-      return { ...decl, body: foldAbstractFactsInBlock(decl.body, env) };
+      const body = foldAbstractFactsInBlock(decl.body, env);
+      if (stableExprKey(body) !== stableExprKey(decl.body)) changes.functions.add(decl.name);
+      program.declarations[index] = { ...decl, body };
+      continue;
     }
     if (decl.kind === "let" || decl.kind === "const") {
-      if (scope && !scope.reachableDeclarations.has(decl.name)) return decl;
-      return { ...decl, value: foldAbstractFactsInExpr(decl.value, new Map()) };
+      const value = foldAbstractFactsInExpr(decl.value, new Map());
+      if (stableExprKey(value) !== stableExprKey(decl.value)) changes.declarations.add(decl.name);
+      program.declarations[index] = { ...decl, value };
     }
-    return decl;
-  });
+  }
+  return changes;
 }
 
 function foldAbstractFactsInBlock(
@@ -3000,6 +3354,7 @@ function functionSummaries(
   scope?: OptimizationScope,
 ): Map<string, FunctionSummary> {
   const callCounts = programCallCounts(program, scope);
+  const typeDecls = programTypeDecls(program);
   const recurrenceIndex = recurrences ? recurrenceSummariesByFunction(recurrences) : new Map();
   const summaries = new Map<string, FunctionSummary>();
   for (const fn of functions.values()) {
@@ -3007,15 +3362,17 @@ function functionSummaries(
       !program.declarations.includes(fn);
     const astCost = functionCost(fn);
     const recursiveKind = directSelfRecursiveKind(fn);
-    const returnKind = returnClass(fn.returnType);
+    const returnInfo = runtimeTypeInfo(fn.returnType, typeDecls);
+    const returnKind = returnInfo.class;
     const hostCall = exprHasHostCall(fn.body, functions);
+    const hostLike = imported || fn.primitiveId === "host_effect" || hostCall;
     const recurrence = recurrenceIndex.get(fn.name);
     summaries.set(fn.name, {
       name: fn.name,
       isPublic: isCurrentModulePublic(fn),
       isPrimitive: Boolean(fn.primitiveId),
       isImported: imported,
-      isPure: fn.effects.length === 0,
+      isPure: fn.effects.length === 0 && !hostLike,
       effects: [...fn.effects],
       recursiveKind,
       astCost,
@@ -3035,7 +3392,7 @@ function functionSummaries(
       hasBranchIntrinsic: exprHasBranchIntrinsic(fn.body),
       hasHostCall: hostCall,
       hasConstFunctionParam: fn.params.some((param) => param.const && param.type.startsWith("fn")),
-      slotCountEstimate: slotCountEstimate(fn.returnType),
+      slotCountEstimate: Math.max(1, returnInfo.slots.length),
       heapWriteCountEstimate: 0,
     });
   }
@@ -3058,8 +3415,8 @@ function effectClass(
   imported: boolean,
   hostCall: boolean,
 ): FunctionSummary["effectClass"] {
-  if (fn.effects.length === 0) return "pure";
   if (imported || fn.primitiveId === "host_effect" || hostCall) return "host";
+  if (fn.effects.length === 0) return "pure";
   if (fn.effects.every((effect) => READ_ONLY_EFFECTS.has(effect))) return "read_only";
   if (fn.effects.some((effect) => VOLATILE_EFFECTS.has(effect))) return "volatile";
   return "state";
@@ -3114,23 +3471,6 @@ function programCallCounts(program: Program, scope?: OptimizationScope): Map<str
     }
   }
   return counts;
-}
-
-function returnClass(type: string | undefined): FunctionSummary["returnClass"] {
-  if (!type) return "multi";
-  if (isScalarRuntimeReturn(type)) return "scalar";
-  if (/InlineArray|InlineArrayList|InlineArrayBuilder/.test(type)) return "inline_array";
-  if (/Buffer|String|Bytes/.test(type)) return "buffer_handle";
-  if (/fn\s*\(/.test(type)) return "closure";
-  if (/[,{}]|\bstruct\(/.test(type)) return "flat_product";
-  return "flat_product";
-}
-
-function slotCountEstimate(type: string | undefined): number {
-  if (!type || isScalarRuntimeReturn(type)) return 1;
-  const inline = type.match(/InlineArray\((\d+)/);
-  if (inline) return Number.parseInt(inline[1] ?? "1", 10);
-  return Math.max(1, splitTopLevel(type.replace(/^struct\((.*)\)$/, "$1")).length);
 }
 
 function inferParamEffects(
@@ -3202,6 +3542,47 @@ function resolveForwardingTarget(
   return undefined;
 }
 
+function optimizeDeclarations(
+  program: Program,
+  forwarding: Map<string, string>,
+  inlineable: Map<string, FnDecl>,
+  functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
+  scope?: OptimizationScope,
+  state?: OptimizerPassState,
+): OptimizationChangeSet {
+  const changes = emptyOptimizationChangeSet();
+  for (const index of optimizerVisitIndexes(program, scope, state)) {
+    const decl = program.declarations[index];
+    if (!decl) continue;
+    changes.visitedDeclarations++;
+    if (decl.kind === "fn") changes.visitedFunctions++;
+    const optimized = optimizeDecl(
+      decl,
+      forwarding,
+      inlineable,
+      functions,
+      config,
+      scope,
+    );
+    if (
+      decl.kind === "fn" && optimized.kind === "fn" &&
+      stableExprKey(decl.body) !== stableExprKey(optimized.body)
+    ) {
+      changes.functions.add(decl.name);
+    }
+    if (
+      (decl.kind === "let" || decl.kind === "const") &&
+      (optimized.kind === "let" || optimized.kind === "const") &&
+      stableExprKey(decl.value) !== stableExprKey(optimized.value)
+    ) {
+      changes.declarations.add(decl.name);
+    }
+    program.declarations[index] = optimized;
+  }
+  return changes;
+}
+
 function optimizeDecl(
   decl: Declaration,
   forwarding: Map<string, string>,
@@ -3246,7 +3627,7 @@ function optimizeBlock(
       optimizeStatement(stmt, forwarding, inlineable, functions, config)
     ),
     expr: options.allowMultiValueResult && expr
-      ? inlineCallExpr(expr, inlineable, { allowMultiValue: true }) ?? expr
+      ? inlineCallExpr(expr, inlineable, { allowMultiValue: true }, config.typeDecls) ?? expr
       : expr,
   };
   const singleUseInlined = inlineSingleUsePureLets(optimized, functions);
@@ -3812,8 +4193,8 @@ function optimizeStatement(
     const value = optimizeExpr(stmt.value, forwarding, inlineable, functions, config);
     const inlined = stmt.kind === "destructure_let" ||
         isFixedUpdateInlineCall(value, inlineable) ||
-        isMultiValueInlineLetCall(value, inlineable, functions)
-      ? inlineCallExpr(value, inlineable, { allowMultiValue: true })
+        isMultiValueInlineLetCall(value, inlineable, functions, config.typeDecls)
+      ? inlineCallExpr(value, inlineable, { allowMultiValue: true }, config.typeDecls)
       : undefined;
     return {
       ...stmt,
@@ -3827,12 +4208,13 @@ function isMultiValueInlineLetCall(
   expr: Expr,
   inlineable: Map<string, FnDecl>,
   functions: Map<string, FnDecl>,
+  typeDecls: TypeDecl[],
 ): boolean {
   if (expr.kind !== "call" || expr.callee.kind !== "var") return false;
   const fn = inlineable.get(expr.callee.name);
   return Boolean(
     fn &&
-      !isScalarRuntimeReturn(fn.returnType) &&
+      runtimeTypeInfo(fn.returnType, typeDecls).class !== "scalar" &&
       fn.body.statements.length === 0 &&
       fn.body.expr &&
       isSpeculablePureInlineValue(fn.body.expr, functions),
@@ -3877,7 +4259,7 @@ function optimizeExpr(
         const fixedUpdateShape = isFixedUpdateInlineCall({ ...expr, callee, args }, inlineable);
         const inlined = inlineCall(callee.name, args, inlineable, {
           allowMultiValue: (options.allowMultiValueResult ?? false) && !fixedUpdateShape,
-        });
+        }, config.typeDecls);
         if (inlined) {
           return optimizeExpr(inlined, forwarding, inlineable, functions, config, options);
         }
@@ -4626,7 +5008,7 @@ function samePureExpr(left: Expr, right: Expr, functions: Map<string, FnDecl>): 
     stableExprKey(left) === stableExprKey(right);
 }
 
-function stableExprKey(expr: Expr): string {
+function stableExprKey(expr: Expr | BlockExpr): string {
   switch (expr.kind) {
     case "do":
       return `do:${expr.strategy.name}`;
@@ -4717,12 +5099,6 @@ function inlineableFunctions(
     if (fn) result.set(fn.name, fn);
   }
   return result;
-}
-
-function isScalarRuntimeReturn(type: string | undefined): boolean {
-  return type === "i32" || type === "bool" || type === "char" || type === "count" ||
-    type === "i64" || type === "f32" || type === "f64" ||
-    unsignedBitWidth(type) !== undefined;
 }
 
 function unsignedBitWidth(type: string | undefined): number | undefined {
@@ -5233,7 +5609,7 @@ function directSelfCalls(
 
 function calledFunctionList(expr: Expr | BlockExpr | undefined): string[] {
   const names: string[] = [];
-  const visit = (item: Expr | BlockExpr | Statement | undefined) => {
+  const visit = (item: Expr | BlockExpr | Statement | DoStatement | undefined) => {
     if (!item) return;
     switch (item.kind) {
       case "call":
@@ -5280,8 +5656,16 @@ function calledFunctionList(expr: Expr | BlockExpr | undefined): string[] {
         item.statements.forEach(visit);
         visit(item.expr);
         return;
+      case "const_fn":
+        visit(item.body);
+        return;
+      case "do":
+        item.statements.forEach(visit);
+        visit(item.expr);
+        return;
       case "let":
       case "destructure_let":
+      case "do_bind":
         visit(item.value);
         return;
       case "proof_const":
@@ -5324,6 +5708,22 @@ function exprHasHostCall(
   );
 }
 
+function exprHasTransitiveHostCall(
+  expr: Expr | BlockExpr | undefined,
+  functions: Map<string, FnDecl>,
+  seen: Set<string> = new Set(),
+): boolean {
+  for (const name of calledFunctionList(expr)) {
+    const fn = functions.get(name);
+    if (!fn) continue;
+    if (fn.primitiveId === "host_effect") return true;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (exprHasTransitiveHostCall(fn.body, functions, seen)) return true;
+  }
+  return false;
+}
+
 function exprReturnsAlias(expr: Expr, name: string): boolean {
   return expr.kind === "var" && (expr.name === name || expr.name.startsWith(`${name}.`) ||
     expr.name.startsWith(`${name}[`));
@@ -5340,7 +5740,8 @@ function paramUsedInEffectfulCall(
     if (expr.kind === "call" && expr.callee.kind === "var") {
       const callee = functions.get(expr.callee.name);
       if (
-        (callee?.effects.length ?? 0) > 0 && expr.args.some((arg) => exprMentionsName(arg, name))
+        callee && functionHasRuntimeEffect(callee, functions) &&
+        expr.args.some((arg) => exprMentionsName(arg, name))
       ) {
         retained = true;
         return;
@@ -5423,10 +5824,13 @@ function inlineCall(
   args: Expr[],
   inlineable: Map<string, FnDecl>,
   options: { allowMultiValue: boolean },
+  typeDecls: TypeDecl[],
 ): Expr | undefined {
   const fn = inlineable.get(name);
   if (!fn || fn.params.length !== args.length) return undefined;
-  if (!options.allowMultiValue && !isScalarRuntimeReturn(fn.returnType)) return undefined;
+  if (!options.allowMultiValue && runtimeTypeInfo(fn.returnType, typeDecls).class !== "scalar") {
+    return undefined;
+  }
   const statements: Statement[] = [];
   let body = alphaRenameInlineBlock(structuredClone(fn.body) as FnDecl["body"], fn.name);
   fn.params.forEach((param, index) => {
@@ -5455,9 +5859,10 @@ function inlineCallExpr(
   expr: Expr,
   inlineable: Map<string, FnDecl>,
   options: { allowMultiValue: boolean },
+  typeDecls: TypeDecl[],
 ): Expr | undefined {
   return expr.kind === "call" && expr.callee.kind === "var"
-    ? inlineCall(expr.callee.name, expr.args, inlineable, options)
+    ? inlineCall(expr.callee.name, expr.args, inlineable, options, typeDecls)
     : undefined;
 }
 
@@ -5863,12 +6268,13 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
       return true;
     case "const_fn":
       return hasRuntimeEffect(expr.body, functions);
-    case "call":
+    case "call": {
+      const callee = expr.callee.kind === "var" ? functions.get(expr.callee.name) : undefined;
       return (expr.callee.kind === "var" &&
-        (!functions.has(expr.callee.name) ||
-          (functions.get(expr.callee.name)?.effects.length ?? 0) > 0)) ||
+        (!callee || functionHasRuntimeEffect(callee, functions))) ||
         hasRuntimeEffect(expr.callee, functions) ||
         expr.args.some((arg) => hasRuntimeEffect(arg, functions));
+    }
     case "index":
       return hasRuntimeEffect(expr.target, functions) || hasRuntimeEffect(expr.index, functions);
     case "binary":
@@ -5904,6 +6310,11 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
     case "placeholder":
       return false;
   }
+}
+
+function functionHasRuntimeEffect(fn: FnDecl, functions: Map<string, FnDecl>): boolean {
+  return fn.effects.length > 0 || fn.primitiveId === "host_effect" ||
+    exprHasTransitiveHostCall(fn.body, functions);
 }
 
 function substituteStaticForSource(

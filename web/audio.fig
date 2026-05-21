@@ -1,7 +1,7 @@
 const asset = @import("web.asset");
 
-const audio_play: fn(sound_id: i32) -> i32 !{audio} = @effect("audio_play");
-const audio_music: fn(track_id: i32, enabled: i32) -> i32 !{audio} = @effect("audio_music");
+const audio_play = @external("audio_play", fn(host: io, sound_id: i32) -> io(i32));
+const audio_music = @external("audio_music", fn(host: io, track_id: i32, enabled: i32) -> io(i32));
 
 fn sound(id: i32) -> asset.Handle(#sound) {
   asset.handle(#sound, id)
@@ -11,10 +11,10 @@ fn music_track(id: i32) -> asset.Handle(#music) {
   asset.handle(#music, id)
 }
 
-fn play(sound_handle: asset.Handle(#sound)) -> i32 !{audio} {
-  audio_play(asset.id(sound_handle))
+fn play(host: io, sound_handle: asset.Handle(#sound)) -> i32 {
+  audio_play(host, asset.id(sound_handle))
 }
 
-fn music(track: asset.Handle(#music), enabled: i32) -> i32 !{audio} {
-  audio_music(asset.id(track), enabled)
+fn music(host: io, track: asset.Handle(#music), enabled: i32) -> i32 {
+  audio_music(host, asset.id(track), enabled)
 }

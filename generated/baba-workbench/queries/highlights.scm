@@ -24,7 +24,6 @@
 (Call "." (LowerIdent) @variable.other.member)
 (Primary (PascalIdent) @constructor)
 "import" @keyword.control.import
-"capability" @keyword
 "type" @keyword.type
 "const" @keyword
 "contract" @keyword
@@ -46,7 +45,6 @@
 "else" @keyword
 "if" @keyword
 "zip" @keyword
-"!" @operator
 "%" @operator
 "&&" @operator
 "(" @punctuation.bracket
@@ -73,6 +71,7 @@
 ">=" @operator
 ">>=" @operator
 "@" @operator
+"@external" @operator
 "[" @punctuation.bracket
 "\\" @operator
 "]" @punctuation.bracket

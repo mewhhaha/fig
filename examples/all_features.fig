@@ -1,5 +1,5 @@
-const clock: fn() -> i64 !{time} = @effect("clock");
-const random: fn() -> i32 !{entropy} = @effect("random");
+const clock = @external("clock", fn(host: io) -> io(i64));
+const random = @external("random", fn(host: io) -> io(i32));
 
 type fn Id() {
   i32
@@ -169,7 +169,7 @@ fn classify(x: i32) -> i32 {
   }
 }
 
-pub fn main() -> i32 !{time, entropy} {
+pub fn main(host: io) -> i32 {
   let n: Id = 40;
   let point: Point = Point {x: 1, y: 2};
   let xs: Buffer(i32) = <1, 2, 3, 4>;
@@ -183,8 +183,8 @@ line```;
   let ok = true;
   let span = 1 .. 4;
   let zipped = 1 zip 2;
-  let now = clock();
-  let entropy = random();
+  let now = clock(host);
+  let entropy = random(host);
   let owned = 7;
   let sunk = sink(owned);
   let matched = same(Point {x: 1, y: 2}, Point {x: 1, y: 2});

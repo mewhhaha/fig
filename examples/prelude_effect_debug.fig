@@ -1,0 +1,24 @@
+const effect = @import("prelude.effect");
+
+fn debug_value(value: i32) -> effect.Debug(effects, i32) {
+  value
+}
+
+fn checked_add(
+  state: i32,
+  amount: i32
+) -> effect.WithAll({#debug, #state}, {#debug, #state}, i32) {
+  let before: effect.Debug({#debug, #state}, i32) = debug_value(state);
+  debug_value(before + amount)
+}
+
+fn program(seed: i32) -> effect.Eff({#debug, #state}, i32) {
+  do @monad(effect.Eff({#debug, #state}, _)) {
+    first <- checked_add(seed, 4);
+    checked_add(first, 5)
+  }
+}
+
+pub fn main() -> i32 {
+  program(33)
+}

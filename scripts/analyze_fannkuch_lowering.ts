@@ -1,10 +1,5 @@
-import {
-  checkSource,
-  optimizeProgram,
-  summarizeProgram,
-  wasmFromSource,
-  watFromSource,
-} from "../src/mod.ts";
+import { checkSource, wasmFromSource, watFromSource } from "../src/mod.ts";
+import { optimizeProgram, summarizeProgram } from "../src/unstable.ts";
 
 type SectionRow = {
   id: number;

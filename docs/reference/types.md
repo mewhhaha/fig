@@ -15,17 +15,18 @@ fn(x: i32) -> i32
 type
 ```
 
-The `_` token is not a general inferred type annotation. It is reserved for direct arguments in
-`do` strategy type calls, such as `Option(_)` or `State(World, _)`.
+The `_` token is not a general inferred type annotation. It is reserved for direct arguments in `do`
+strategy type calls, such as `Option(_)` or `State(World, _)`.
 
 Primitive scalar types currently include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`,
-and unsigned widths `u1` through `u64`.
+the compiler-owned IO executor type `io`, and unsigned widths `u1` through `u64`.
 
 Use `@type_is_number(t)` in compile-time contracts to test whether `t` is one of the numeric scalar
 types, including arbitrary unsigned widths such as `u3` or `u17`.
 
-Function types are `fn(params) -> Type`. Effect rows are part of function declarations and typed
-host effects, written as `!{effect, other}` or `!{}`.
+Function types are `fn(params) -> Type`. Host imports use an explicit first `io` executor parameter
+and return `io(T)` actions. Library-level effect capabilities are ordinary value/type contracts,
+usually modeled with `prelude.effect.Eff(tags, A)`.
 
 ## Shapes, Products, and Unions
 

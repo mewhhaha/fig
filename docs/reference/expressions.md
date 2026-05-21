@@ -89,7 +89,8 @@ update-heavy code, use fresh block-local names for pure values or an explicit
 
 ## Do Strategies
 
-`do` blocks name their sequencing strategy with a static builtin and an explicit effect type call:
+`do` blocks name their sequencing strategy with a static builtin and, for ordinary strategies, an
+explicit effect type call:
 
 ```fig
 do @monad(Option(_)) {
@@ -103,8 +104,23 @@ do @monad(State(World, _)) {
 }
 ```
 
-The strategy must be a type call whose argument count matches the declared type function arity.
-Use `_` only for the value type positions the `do` block should infer. For example, unary monads use
+Host IO uses the built-in `do @io(_)` strategy. It sequences `io(T)` actions, binds `<-` names as
+`T`, and requires a final `io(T)` action. Use the compiler builtin `return(value)` to lift a pure
+value into `io(T)`, and use `do @io(T)` when the carried value type should be written explicitly:
+
+```fig
+const clock = @external("clock", fn(host: io) -> io(i32));
+
+pub fn main(host: io) -> io(i32) {
+  do @io(_) {
+    now <- clock(host);
+    return(now + 1)
+  }
+}
+```
+
+The strategy must be a type call whose argument count matches the declared type function arity. Use
+`_` only for the value type positions the `do` block should infer. For example, unary monads use
 `Option(_)` or `Box(_)`; binary monads use `State(World, _)` or `Reader(Env, _)`.
 
 Bare or partially applied strategy constructors are rejected:
@@ -130,8 +146,8 @@ let start = 1;
 next // 2
 ```
 
-Use fresh names for pure intermediate values. Use `do @monad(State(T, _))` when the source order is the
-meaning of the computation.
+Use fresh names for pure intermediate values. Use `do @monad(State(T, _))` when the source order is
+the meaning of the computation.
 
 Tuple and product results can be destructured with multi-bind:
 

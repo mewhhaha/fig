@@ -21,29 +21,30 @@ aliases, dotted names, type annotations, and non-`@import` right-hand sides are 
 Namespace imports preserve nested imported namespaces, so a module that imports `prelude.layout` can
 expose it as `array.layout` through its own namespace import.
 
-| Import                 | Role                                                                                                      |
-| ---------------------- | --------------------------------------------------------------------------------------------------------- |
+| Import                 | Role                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `prelude.std`          | Common merged pure surface for functions, monads, operators, options/results, tuples, arrays, and schedules. |
-| `prelude.core`         | Core static contracts, option/result roots, tuples, and index proofs.                                     |
-| `prelude.fixed`        | Canonical fixed-size value arrays and direct spread/update/edit helpers.                                  |
-| `prelude.fixed_build`  | Builder fallback for constructing fixed values when direct slots are not convenient.                      |
-| `prelude.range`        | Canonical runtime `i32` range iterators and self-tail-recursive fold helpers.                             |
-| `prelude.scalar`       | Tiny pure bool helpers and generic numeric scalar helpers guarded by `@type_is_number`.                   |
-| `prelude.layout`       | Scalar, lane, tile, matrix, fixed inline-array layouts, and collector members.                            |
-| `prelude.array_static` | Fixed inline array, lane, range iterator, map/zip/fold/reduce, checked get, and compact array helpers.    |
-| `prelude.function`     | Function composition and typeclass-like `functor`, `applicative`, and `monad` helpers.                    |
-| `prelude.monad`        | Binary `State(S, A)` and explicit `Reader(R, A)` helpers for ordered flows.                               |
-| `prelude.operators`    | Operator descriptors for arithmetic, comparison, boolean, append, functor, applicative, and monad syntax. |
-| `prelude.option`       | Pure option constructors and helpers.                                                                     |
-| `prelude.result`       | Pure result constructors and helpers.                                                                     |
-| `prelude.tuple`        | Tuple and pair helpers.                                                                                   |
-| `prelude.bool`         | Compatibility namespace that imports `prelude.scalar`.                                                    |
-| `prelude.num`          | Compatibility namespace that imports `prelude.scalar`.                                                    |
-| `prelude.order`        | Compatibility namespace that imports `prelude.scalar`.                                                    |
-| `prelude.schedule`     | Static schedule metadata vocabulary.                                                                      |
-| `prelude.geometry2d`   | Pure fixed 2D geometry layout helpers.                                                                    |
-| `web.canvas`           | Browser canvas/GPU/event effects plus WGSL shader metadata helpers.                                        |
-| `engine.ecs`           | Experimental ECS sketch retained for parser coverage while shape-recursive value builders are redesigned. |
+| `prelude.core`         | Core static contracts, option/result roots, tuples, and index proofs.                                        |
+| `prelude.fixed`        | Canonical fixed-size value arrays and direct spread/update/edit helpers.                                     |
+| `prelude.fixed_build`  | Builder fallback for constructing fixed values when direct slots are not convenient.                         |
+| `prelude.range`        | Canonical runtime `i32` range iterators and self-tail-recursive fold helpers.                                |
+| `prelude.scalar`       | Tiny pure bool helpers and generic numeric scalar helpers guarded by `@type_is_number`.                      |
+| `prelude.layout`       | Scalar, lane, tile, matrix, fixed inline-array layouts, and collector members.                               |
+| `prelude.array_static` | Fixed inline array, lane, range iterator, map/zip/fold/reduce, checked get, and compact array helpers.       |
+| `prelude.function`     | Function composition and typeclass-like `functor`, `applicative`, and `monad` helpers.                       |
+| `prelude.monad`        | Binary `State(S, A)` and explicit `Reader(R, A)` helpers for ordered flows.                                  |
+| `prelude.effect`       | Transparent capability-tag helpers such as `Eff`, `Reader`, `State`, `Debug`, `With`, and `WithAll`.         |
+| `prelude.operators`    | Operator descriptors for arithmetic, comparison, boolean, append, functor, applicative, and monad syntax.    |
+| `prelude.option`       | Pure option constructors and helpers.                                                                        |
+| `prelude.result`       | Pure result constructors and helpers.                                                                        |
+| `prelude.tuple`        | Tuple and pair helpers.                                                                                      |
+| `prelude.bool`         | Compatibility namespace that imports `prelude.scalar`.                                                       |
+| `prelude.num`          | Compatibility namespace that imports `prelude.scalar`.                                                       |
+| `prelude.order`        | Compatibility namespace that imports `prelude.scalar`.                                                       |
+| `prelude.schedule`     | Static schedule metadata vocabulary.                                                                         |
+| `prelude.geometry2d`   | Pure fixed 2D geometry layout helpers.                                                                       |
+| `web.canvas`           | Browser canvas/GPU/event effects plus WGSL shader metadata helpers.                                          |
+| `engine.ecs`           | Experimental ECS sketch retained for parser coverage while shape-recursive value builders are redesigned.    |
 
 Prelude modules are intended to remain pure and portable across the browser and Deno WebAssembly
-target. Browser-specific host effects live under `web.*`.
+target. Browser-specific host IO imports live under `web.*`.

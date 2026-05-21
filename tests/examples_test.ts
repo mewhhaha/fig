@@ -124,89 +124,50 @@ Deno.test("engine playground frame builds, ticks, and renders visible sprites", 
     },
   });
   assertEquals((instance.exports.playground_world_len as () => number)(), 2);
-  assertEquals((instance.exports.playground_probe as () => number)(), 8);
-  const frame = (instance.exports.main as () => number[])();
+  assertEquals((instance.exports.playground_probe as (host: number) => number)(0), 8);
+  const frame = (instance.exports.main as (host: number) => number[])(0);
   assertEquals(frame[0], 20);
   assertEquals(frame[5], 2);
   assertEquals(frame[48], 8);
   const rendered = (instance.exports.render_frame as (
+    host: number,
     target: number,
     width: number,
     height: number,
-  ) => number)(1, 960, 540);
+  ) => number)(0, 1, 960, 540);
   assertEquals(rendered, 4);
   assertEquals(began, 1);
   assertEquals(presented, 1);
   assertEquals(drawCalls.length, 2);
-  assertEquals(drawCalls[0]?.slice(1), [20, 8, 16, 16, 1, 2]);
+  assertEquals(drawCalls[0]?.slice(2), [20, 8, 16, 16, 1, 2]);
 });
 
-Deno.test("brackeys player keeps last facing direction while idle", async () => {
-  const source = await Deno.readTextFile("examples/brackeys_platformer.fig");
-  const module = new WebAssembly.Module(
-    await wasmFromSource(source, { resolveModule, optMode: "release" }),
-  );
-
-  const playerFlipAfter = (axis0: number, axis1: number) => {
-    const drawCalls: number[][] = [];
-    const instance = new WebAssembly.Instance(module, {
-      env: {
-        clock: () => 1n,
-        random: () => 2,
-        tick_millis: () => 16,
-        input_axis_x: () => 0,
-        input_pressed: () => 0,
-        canvas_init: () => 1,
-        gpu_create_shader: () => 1,
-        gpu_create_pipeline: () => 1,
-        gpu_upload_vertices: () => 1,
-        gpu_draw_quads: () => 1,
-        gpu_begin_frame: () => 1,
-        gpu_draw_rect: () => 1,
-        gpu_draw_sprite: (...args: number[]) => {
-          drawCalls.push(args);
-          return 1;
-        },
-        gpu_present: () => 1,
-        event_poll: () => 0,
-        audio_play: () => 1,
-        audio_music: () => 1,
-      },
-    });
-    const initWorld = instance.exports.init_world as () => number[];
-    const stepWorld = instance.exports.step_world as (
-      ...args: number[]
-    ) => number[];
-    const inputKey = instance.exports.input_key as (
-      ...args: number[]
-    ) => number[];
-    const renderWorld = instance.exports.render_world as (
-      ...args: number[]
-    ) => number;
-    let world = initWorld();
-    if (axis0 !== 0) world = inputKey(...world, axis0 < 0 ? 1 : 2, 1);
-    world = stepWorld(...world, 16);
-    if (axis0 !== 0) world = inputKey(...world, axis0 < 0 ? 1 : 2, 0);
-    if (axis1 !== 0) world = inputKey(...world, axis1 < 0 ? 1 : 2, 1);
-    world = stepWorld(...world, 16);
-    renderWorld(1, 288, 162, ...world);
-    return drawCalls.find((args) => args[1] === 2)?.[10];
-  };
-
-  assertEquals(playerFlipAfter(-1, 0), 1);
-  assertEquals(playerFlipAfter(1, 0), 0);
-});
-
-Deno.test("host effect imports are emitted in WAT and wasm", async () => {
+Deno.test("host IO imports are emitted in WAT and wasm", async () => {
   const source = await Deno.readTextFile("examples/effects.fig");
   const wat = await watFromSource(source, { resolveModule });
-  assertStringIncludes(wat, `(func $clock (import "env" "clock") (result i32))`);
-  assertStringIncludes(wat, `(func $random (import "env" "random") (result i32))`);
+  assertStringIncludes(wat, `(func $clock (import "env" "clock") (param i32) (result i32))`);
+  assertStringIncludes(wat, `(func $random (import "env" "random") (param i32) (result i32))`);
   const module = new WebAssembly.Module(await wasmFromSource(source, { resolveModule }));
   assertEquals(
     WebAssembly.Module.imports(module).map((item) => `${item.module}.${item.name}`),
     ["env.clock", "env.random"],
   );
+});
+
+Deno.test("prelude effect examples run", async () => {
+  const expected = new Map([
+    ["examples/prelude_effect_reader.fig", 42],
+    ["examples/prelude_effect_state.fig", 12],
+    ["examples/prelude_effect_debug.fig", 42],
+    ["examples/prelude_effect_ecs_do.fig", 7],
+  ]);
+  for (const [file, value] of expected) {
+    const source = await Deno.readTextFile(file);
+    const instance = new WebAssembly.Instance(
+      new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+    );
+    assertEquals((instance.exports.main as CallableFunction)(), value);
+  }
 });
 
 Deno.test("CLI run reports required host imports", async () => {

@@ -5,8 +5,8 @@ Fig source files use the `.fig` extension. a program is a sequence of `type fn`,
 
 ## Names
 
-Lowercase identifiers match `[a-z_][a-z0-9_]*` and are used for functions, locals, fields,
-host effects, imports, primitive type names, and type functions. PascalCase identifiers match
+Lowercase identifiers match `[a-z_][a-z0-9_]*` and are used for functions, locals, fields, host
+effects, imports, primitive type names, and type functions. PascalCase identifiers match
 `[a-Z][a-Za-z0-9]*` and are used for product constructors, union variants, and type-level local
 shape bindings.
 
@@ -107,15 +107,24 @@ Destructured import entries are plain declaration names. Aliases, dotted names, 
 non-`@import` right-hand sides are rejected. Namespace imports can qualify nested imports, so a
 module imported as `std` can expose names such as `std.array.Layout.lane4_i32`.
 
-Host imports are top-level consts whose value is `@effect("name")` and whose type is a function
-type:
+Host imports are top-level consts whose value is `@external("name", fn(...))`. The function type
+takes the compiler primitive `io` executor as its first parameter and returns an `io(T)` action:
 
 ```fig
-const clock: fn() -> i32 !{time} = @effect("clock");
+const clock = @external("clock", fn(host: io) -> io(i32));
 ```
 
-Host effects lower to WebAssembly imports from module `env`. Calling a host effect requires the
-enclosing function effect row to contain the imported function's effects.
+Host IO imports lower to WebAssembly imports from module `env`. Pass the `io` executor explicitly
+and sequence actions with `do @io(_)`:
+
+```fig
+pub fn main(host: io) -> io(i32) {
+  do @io(_) {
+    now <- clock(host);
+    return(now)
+  }
+}
+```
 
 ## Constants and Lets
 
@@ -135,8 +144,8 @@ let value: i32 = 1;
 
 ## Functions and Parameters
 
-Functions use `fn name(params) -> Type !{effects} { ... }`. `pub fn` exports through the WebAssembly
-backend and must include an explicit return type.
+Functions use `fn name(params) -> Type { ... }`. `pub fn` exports through the WebAssembly backend
+and must include an explicit return type.
 
 ```fig
 fn add(a: i32, b: i32) -> i32 { a + b }
@@ -150,8 +159,8 @@ fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
 ```
 
 Repeated functions with the same name are ordered clauses. Clauses must keep compatible visibility,
-arity, return type, effect row, and runtime parameter representation. Refined `i32(...)` domains may
-vary by clause because they all lower to runtime `i32`. The first matching clause wins.
+arity, return type, and runtime parameter representation. Refined `i32(...)` domains may vary by
+clause because they all lower to runtime `i32`. The first matching clause wins.
 
 ```fig
 fn score(true: bool, true: bool) -> i32 { 3 }

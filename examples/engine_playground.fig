@@ -1,15 +1,16 @@
 const ecs = @import("engine.ecs");
 const canvas = @import("web.canvas");
 const core = @import("prelude.core");
+const effect = @import("prelude.effect");
 const {
   Geometry2dBatchI32,
   append_geometry2d_batch,
   emit_rect2d_batch,
   empty_geometry2d_batch
 } = @import("prelude.geometry2d");
-const tick_millis: fn() -> i32 !{time} = @effect("tick_millis");
-const input_axis_x: fn() -> i32 !{event} = @effect("input_axis_x");
-const input_pressed: fn() -> i32 !{event} = @effect("input_pressed");
+const tick_millis = @external("tick_millis", fn(host: io) -> io(i32));
+const input_axis_x = @external("input_axis_x", fn(host: io) -> io(i32));
+const input_pressed = @external("input_pressed", fn(host: io) -> io(i32));
 const entity_capacity: count = 4;
 
 type fn Transform2d() -> type {
@@ -128,11 +129,11 @@ fn entity_index(raw: i32) -> EntityId {
   }
 }
 
-fn read_frame_input() -> FrameInput !{time, event} {
+fn read_frame_input(host: io) -> FrameInput {
   FrameInput {
-    dt_ms: tick_millis(),
-    axis_x: input_axis_x(),
-    pressed: input_pressed()
+    dt_ms: tick_millis(host),
+    axis_x: input_axis_x(host),
+    pressed: input_pressed(host)
   }
 }
 
@@ -189,6 +190,14 @@ fn run_frame(world: World, input: FrameInput) -> World {
   ecs.run(world, input, frame_systems)
 }
 
+fn run_frame_effect(
+  world: World,
+  input: FrameInput
+) -> effect.Eff({#ecs, #render}, World) {
+  const proof = effect.Member(#ecs, {#ecs, #render});
+  ecs.run(world, input, frame_systems)
+}
+
 fn render_system(world: World, input: FrameInput) -> RenderBatch {
   empty_render_batch()
     \batch -> append_visible_render_item(
@@ -239,6 +248,14 @@ fn append_visible_render_item(
   }
 }
 
+fn render_effect(
+  world: World,
+  input: FrameInput
+) -> effect.Eff({#ecs, #render}, RenderBatch) {
+  const proof = effect.Member(#render, {#ecs, #render});
+  render_system(world, input)
+}
+
 fn render_item_at(
   world: World,
   index: i32
@@ -250,10 +267,12 @@ fn render_item_at(
 }
 
 fn draw_render_item(
+  host: io,
   canvas_handle: i32,
   item: RenderItem2d
-) -> i32 !{gpu} {
+) -> i32 {
   canvas.draw_rect(
+    host,
     canvas_handle,
     {
       x: item.transform.x,
@@ -267,18 +286,21 @@ fn draw_render_item(
 }
 
 fn draw_render_items_loop(
+  host: io,
   canvas_handle: i32,
   world: World,
   cursor: core.IndexCursor(entity_capacity),
   drawn: i32
-) -> i32 !{gpu} {
+) -> i32 {
   match core.IndexCursor::next(entity_capacity, cursor) {
     Yield(index, next) => match index < world.len {
       true => draw_render_items_loop(
+        host,
         canvas_handle,
         world,
         next,
         drawn + draw_render_item(
+          host,
           canvas_handle,
           render_item_at(world, index)
         )
@@ -289,8 +311,9 @@ fn draw_render_items_loop(
   }
 }
 
-fn draw_render_items(canvas_handle: i32, world: World) -> i32 !{gpu} {
+fn draw_render_items(host: io, canvas_handle: i32, world: World) -> i32 {
   draw_render_items_loop(
+    host,
     canvas_handle,
     world,
     core.IndexCursor::start(entity_capacity),
@@ -339,37 +362,43 @@ fn build_demo_world() -> World {
   }
 }
 
-fn run_demo_frame() -> RenderBatch !{time, event} {
-  let input = read_frame_input();
-  let world = build_demo_world();
-  let updated = run_frame(world, input);
-  render_system(updated, input)
+fn run_demo_frame(host: io) -> RenderBatch {
+  run_demo_frame_effect(host)
 }
 
-pub fn main() -> RenderBatch !{time, event} {
-  run_demo_frame()
+fn run_demo_frame_effect(host: io) -> effect.Eff({#ecs, #render}, RenderBatch) {
+  let input = read_frame_input(host);
+  let world = build_demo_world();
+  let updated: effect.Eff({#ecs, #render}, World) = run_frame_effect(world, input);
+  render_effect(updated, input)
+}
+
+pub fn main(host: io) -> RenderBatch {
+  run_demo_frame(host)
 }
 
 pub fn render_frame(
+  host: io,
   target: i32,
   width: i32,
   height: i32
-) -> i32 !{time, event, canvas, gpu} {
-  let input = read_frame_input();
+) -> i32 {
+  let input = read_frame_input(host);
   let world = build_demo_world();
   let updated = run_frame(world, input);
   let canvas_handle = canvas.gpu_begin_frame(
+    host,
     target,
     width,
     height
   );
-  let drawn = draw_render_items(canvas_handle, updated);
-  let presented = canvas.gpu_present(canvas_handle);
+  let drawn = draw_render_items(host, canvas_handle, updated);
+  let presented = canvas.gpu_present(host, canvas_handle);
   canvas_handle + drawn + presented
 }
 
-pub fn playground_probe() -> i32 !{time, event} {
-  let output = run_demo_frame();
+pub fn playground_probe(host: io) -> i32 {
+  let output = run_demo_frame(host);
   output.len
 }
 

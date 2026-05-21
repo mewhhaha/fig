@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, for example v0.0.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Format
+        run: deno fmt --check
+
+      - name: Generated grammar is fresh
+        run: |
+          deno task grammar
+          deno fmt --config deno.json generated/baba-workbench/grammar.js generated/baba-workbench/tokenizer.ts generated/tokenizer.ts
+          git diff --exit-code generated/baba-workbench generated/tokenizer.ts helix/runtime/queries/fig
+
+      - name: Typecheck
+        run: deno task check
+
+      - name: Test
+        run: deno task test
+
+      - name: Smoke
+        run: deno task smoke
+
+      - name: Package entrypoints
+        run: deno task publish:check
+
+      - name: Native binary
+        run: deno task release:binary:check
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Build release binaries
+        run: deno run --allow-read --allow-write --allow-run scripts/build_release_binaries.ts --tag "$RELEASE_TAG" --out dist
+
+      - name: Upload release assets
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS \
+              --title "$RELEASE_TAG" \
+              --notes "Fig $RELEASE_TAG" \
+              --verify-tag
+          fi

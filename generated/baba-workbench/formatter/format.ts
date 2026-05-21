@@ -13,7 +13,7 @@ const blockNodes = new Set([
   "Block",
 ]);
 const listNodes = new Set([]);
-const spacing = new Map([["(","tight"],["[","tight"]]);
+const spacing = new Map([["(", "tight"], ["[", "tight"]]);
 
 export function formatNode(node: FormatNode, options: FormatOptions = {}): string {
   const indent = options.indent ?? "  ";

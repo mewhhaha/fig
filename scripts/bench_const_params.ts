@@ -1,10 +1,6 @@
 import type { Expr, Program } from "../src/core_ast.ts";
-import {
-  checkSource,
-  type CheckTrace,
-  type CompileTraceEvent,
-  optimizeProgram,
-} from "../src/mod.ts";
+import { checkSource, type CheckTrace, type CompileTraceEvent } from "../src/mod.ts";
+import { optimizeProgram } from "../src/unstable.ts";
 
 const sizes = stringArg("--sizes")
   ?.split(",")

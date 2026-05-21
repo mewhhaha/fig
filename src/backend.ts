@@ -86,6 +86,7 @@ interface BackendData {
 
 interface BackendImport {
   name: string;
+  importName?: string;
   params: ValueType[];
   results: ValueType[];
 }
@@ -544,6 +545,7 @@ export function lowerProgramToBackendArtifact(
   const module = {
     imports: imports.map((fn) => ({
       name: fn.name,
+      importName: fn.externalName,
       params: fn.params.flatMap((param) =>
         flattenType(param.type, layouts).map((slot) => slot.wat)
       ),
@@ -601,7 +603,9 @@ function backendMemories(
     if (needsHeapMemory) return [heapObjects];
     return needsScratchMemory ? [TEMPORAL_MEMORIES[2]!] : [];
   }
-  if (needsBranchMemory) return needsHeapMemory ? withHeapCapacity(BRANCH_MEMORIES) : BRANCH_MEMORIES;
+  if (needsBranchMemory) {
+    return needsHeapMemory ? withHeapCapacity(BRANCH_MEMORIES) : BRANCH_MEMORIES;
+  }
   if (needsHeapMemory && needsScratchMemory) return [heapObjects, BRANCH_MEMORIES[1]!];
   if (needsHeapMemory) return [heapObjects];
   return needsScratchMemory ? [BRANCH_MEMORIES[1]!] : [];
@@ -4480,6 +4484,31 @@ function tailLoopArgIsIdentity(expr: Expr, param: Param, ctx: LowerContext): boo
     exprSlots.every((slot, index) => slot.wat === paramSlots[index]?.wat);
 }
 
+function dropLoopVaryingParamFacts(
+  facts: Map<string, ScalarFacts>,
+  sourceFn: FnDecl,
+  renamedFn: FnDecl,
+  selfCalls: Extract<Expr, { kind: "call" }>[],
+  ctx: LowerContext,
+): void {
+  if (!selfCalls.length) return;
+  for (const [index, sourceParam] of sourceFn.params.entries()) {
+    if (
+      selfCalls.every((call) =>
+        tailLoopArgIsIdentity(runtimeCallArgs(call, sourceFn)[index], sourceParam, ctx)
+      )
+    ) {
+      continue;
+    }
+    const renamedParam = renamedFn.params[index];
+    if (!renamedParam) continue;
+    facts.delete(renamedParam.name);
+    for (const binding of flattenBinding(renamedParam.name, renamedParam.type, ctx.layouts)) {
+      facts.delete(binding.name);
+    }
+  }
+}
+
 function lowerTailLoopParamUpdateWithFieldReuse(
   update: TailLoopParamUpdate,
   fn: FnDecl,
@@ -5821,6 +5850,9 @@ function lowerExpr(
           value: 0,
         }));
       }
+      if (expr.callee.name === "return" && expr.args.length === 1) {
+        return lowerExpr(expr.args[0]!, ctx, locals, ioActionItemType(expectedType));
+      }
       if (expr.callee.name === "@replace_field") {
         const replaced = lowerReplaceFieldCall(expr, ctx, locals, expectedType);
         if (replaced) return replaced;
@@ -6649,6 +6681,7 @@ function lowerPrivateProductCallInline(
   if (!callee || isCurrentModulePublic(callee) || callee.name === ctx.currentFn?.name) {
     return undefined;
   }
+  if (callee.primitiveId) return undefined;
   if (isFixedArrayProtocolHelper(callee, ctx)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.name.startsWith("__state"))) return undefined;
@@ -6999,6 +7032,7 @@ function lowerPrivateScalarTailLoopCallInline(
   if (!callee || isCurrentModulePublic(callee) || callee.name === ctx.currentFn.name) {
     return undefined;
   }
+  if (callee.primitiveId) return undefined;
   if (callee.effects.length || (callee.generated && !callee.generatedInlineable)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
@@ -7019,6 +7053,9 @@ function lowerPrivateScalarTailLoopCallInline(
   if (runtimeArgs.some((arg) => hasRuntimeEffect(arg, ctx.functions))) return undefined;
 
   const prefix = `__inl_${callee.name.replaceAll(/[^A-Za-z0-9_]/g, "_")}_${ctx.tempIndex++}`;
+  const selfCalls = directCallExprs(callee.body).filter((call) =>
+    call.callee.kind === "var" && call.callee.name === callee.name
+  );
   const scalarArgSubstitutions = new Map<string, Expr>();
   const productFieldSubstitutions = new Map<string, Expr>();
   for (const [index, param] of callee.params.entries()) {
@@ -7026,6 +7063,14 @@ function lowerPrivateScalarTailLoopCallInline(
     if (!arg) continue;
     if (flattenType(param.type, ctx.layouts).length === 1) {
       if (arg.kind === "var") continue;
+      if (
+        selfCalls.length &&
+        !selfCalls.every((call) =>
+          tailLoopArgIsIdentity(runtimeCallArgs(call, callee)[index], param, ctx)
+        )
+      ) {
+        continue;
+      }
       if (countNameUses(callee.body, param.name) > 1) continue;
       scalarArgSubstitutions.set(param.name, arg);
       continue;
@@ -7054,9 +7099,6 @@ function lowerPrivateScalarTailLoopCallInline(
 
   const renames = new Map<string, string>();
   const aliasedScalarParams = new Set<string>();
-  const selfCalls = directCallExprs(callee.body).filter((call) =>
-    call.callee.kind === "var" && call.callee.name === callee.name
-  );
   for (const [index, param] of inlineCallee.params.entries()) {
     const originalParam = callee.params[index];
     const arg = runtimeArgs[index];
@@ -7091,6 +7133,7 @@ function lowerPrivateScalarTailLoopCallInline(
     renames,
   );
   const localScalarFacts = scalarFactsForFunctionParams(renamed, ctx, callee.name, renames);
+  dropLoopVaryingParamFacts(localScalarFacts, callee, renamed, selfCalls, ctx);
   callee.params.forEach((param, index) => {
     if (
       param.type === "i32" &&
@@ -7229,6 +7272,7 @@ function lowerPrivateScalarCallInline(
   if (!callee || isCurrentModulePublic(callee) || callee.name === ctx.currentFn.name) {
     return undefined;
   }
+  if (callee.primitiveId) return undefined;
   if (callee.effects.length || (callee.generated && !callee.generatedInlineable)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
@@ -7792,7 +7836,10 @@ function foldBinary(op: string, a: number, b: number): number | boolean | undefi
   }
 }
 
-function patternMatchesLiteral(pattern: MatchArm["pattern"], literal: Extract<Expr, { kind: "literal" }>): boolean {
+function patternMatchesLiteral(
+  pattern: MatchArm["pattern"],
+  literal: Extract<Expr, { kind: "literal" }>,
+): boolean {
   if (pattern.kind === "wildcard") return true;
   if (pattern.kind !== "literal") return false;
   return pattern.literalKind === literal.literalKind && pattern.value === literal.value;
@@ -11935,7 +11982,7 @@ function emitDataWat(item: BackendData): string {
 
 function emitImportWat(item: BackendImport): string {
   const signature = [
-    `(func $${watName(item.name)} (import "env" "${watName(item.name)}")`,
+    `(func $${watName(item.name)} (import "env" "${watName(item.importName ?? item.name)}")`,
     ...item.params.map((param) => `(param ${param})`),
     ...item.results.map((result) => `(result ${result})`),
   ].join(" ");
@@ -12139,7 +12186,7 @@ export function backendModuleToWasm(
       2,
       vecItems(module.imports.map((fn, index) => [
         ...nameBytes("env"),
-        ...nameBytes(fn.name),
+        ...nameBytes(fn.importName ?? fn.name),
         0x00,
         ...uleb(typeIndex[index]),
       ])),
@@ -13042,9 +13089,13 @@ function heapArrayItemTypeFromCall(
   expectedType?: string,
 ): string | undefined {
   const directIntrinsic = expr.callee.kind === "var" && expr.callee.name.startsWith("@");
-  const explicit = directIntrinsic && expr.args[0] ? renderBackendTypeProofArg(expr.args[0]) : undefined;
+  const explicit = directIntrinsic && expr.args[0]
+    ? renderBackendTypeProofArg(expr.args[0])
+    : undefined;
   if (explicit) return explicit;
-  const callee = expr.callee.kind === "var" ? backendFunctionByName(expr.callee.name, ctx) : undefined;
+  const callee = expr.callee.kind === "var"
+    ? backendFunctionByName(expr.callee.name, ctx)
+    : undefined;
   const returnType = callee?.returnType
     ? specializeCallReturnType(expr, callee.returnType, ctx) ?? callee.returnType
     : undefined;
@@ -13096,11 +13147,15 @@ function lowerHeapArrayNew(
   return [
     ...lowerExpr(capExpr, ctx, locals, "i32"),
     { op: "local.set", name: cap },
-    ...lowerHeapAlloc([
-      { op: "local.get", name: cap },
-      { op: "const", type: "i32", value: layout.stride },
-      { op: "binary", wasm: "i32.mul" },
-    ], ctx, locals),
+    ...lowerHeapAlloc(
+      [
+        { op: "local.get", name: cap },
+        { op: "const", type: "i32", value: layout.stride },
+        { op: "binary", wasm: "i32.mul" },
+      ],
+      ctx,
+      locals,
+    ),
     { op: "const", type: "i32", value: 0 },
     { op: "local.get", name: cap },
   ];
@@ -13134,11 +13189,15 @@ function lowerHeapArrayEnsureCapacity(
       ],
       elseBody: [
         ...lowerHeapArrayGrowthCapacity(arr.cap, needed, newCap),
-        ...lowerHeapAlloc([
-          { op: "local.get", name: newCap },
-          { op: "const", type: "i32", value: layout.stride },
-          { op: "binary", wasm: "i32.mul" },
-        ], ctx, locals),
+        ...lowerHeapAlloc(
+          [
+            { op: "local.get", name: newCap },
+            { op: "const", type: "i32", value: layout.stride },
+            { op: "binary", wasm: "i32.mul" },
+          ],
+          ctx,
+          locals,
+        ),
         { op: "local.set", name: newPtr },
         ...lowerHeapArrayCopy(newPtr, arr.ptr, arr.len, layout),
         { op: "local.get", name: newPtr },
@@ -13162,10 +13221,12 @@ function lowerHeapArrayGet(
     ...arr.prefix,
     ...lowerExpr(index ?? staticIndexExpr(0), ctx, locals, "i32"),
     { op: "local.set", name: item },
-    ...layout.slots.flatMap(({ slot, offset, align }) => [
-      ...lowerHeapItemAddress(arr.ptr, item, layout.stride, offset),
-      { op: "load", type: slot.wat, align, offset: 0 },
-    ] as Instr[]),
+    ...layout.slots.flatMap(({ slot, offset, align }) =>
+      [
+        ...lowerHeapItemAddress(arr.ptr, item, layout.stride, offset),
+        { op: "load", type: slot.wat, align, offset: 0 },
+      ] as Instr[]
+    ),
   ];
 }
 
@@ -13222,11 +13283,15 @@ function lowerHeapArrayPush(
       ],
       elseBody: [
         ...lowerHeapArrayGrowthCapacity(arr.cap, undefined, newCap),
-        ...lowerHeapAlloc([
-          { op: "local.get", name: newCap },
-          { op: "const", type: "i32", value: layout.stride },
-          { op: "binary", wasm: "i32.mul" },
-        ], ctx, locals),
+        ...lowerHeapAlloc(
+          [
+            { op: "local.get", name: newCap },
+            { op: "const", type: "i32", value: layout.stride },
+            { op: "binary", wasm: "i32.mul" },
+          ],
+          ctx,
+          locals,
+        ),
         { op: "local.set", name: newPtr },
         ...lowerHeapArrayCopy(newPtr, arr.ptr, arr.len, layout),
         ...lowerHeapArrayStores(newPtr, arr.len, values.names, layout),
@@ -13250,7 +13315,12 @@ function cacheHeapArray(
   const names = ["ptr", "len", "cap"].map((field) => heapTemp(ctx, locals, `${label}_${field}`));
   return {
     prefix: [
-      ...lowerExpr(array ?? { kind: "literal", literalKind: "number", value: "0" }, ctx, locals, `HeapArray(${itemType})`),
+      ...lowerExpr(
+        array ?? { kind: "literal", literalKind: "number", value: "0" },
+        ctx,
+        locals,
+        `HeapArray(${itemType})`,
+      ),
       ...names.toReversed().map((name): Instr => ({ op: "local.set", name })),
     ],
     ptr: names[0]!,
@@ -13286,11 +13356,13 @@ function lowerHeapArrayStores(
   valueNames: string[],
   layout: HeapItemLayout,
 ): Instr[] {
-  return layout.slots.flatMap(({ slot, offset, align }, slotIndex) => [
-    ...lowerHeapItemAddress(ptr, index, layout.stride, offset),
-    { op: "local.get", name: valueNames[slotIndex] ?? valueNames[0] ?? "__heap_missing" },
-    { op: "store", type: slot.wat, align, offset: 0 },
-  ] as Instr[]);
+  return layout.slots.flatMap(({ slot, offset, align }, slotIndex) =>
+    [
+      ...lowerHeapItemAddress(ptr, index, layout.stride, offset),
+      { op: "local.get", name: valueNames[slotIndex] ?? valueNames[0] ?? "__heap_missing" },
+      { op: "store", type: slot.wat, align, offset: 0 },
+    ] as Instr[]
+  );
 }
 
 function lowerHeapArrayCopy(
@@ -13951,6 +14023,8 @@ function statementLocalBindings(stmt: Statement, ctx: LowerContext): BackendLoca
 
 function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[] {
   type = stripBorrowType(type);
+  const ioItemType = ioActionItemType(type);
+  if (ioItemType) return flattenType(ioItemType, layouts);
   const staticShape = flattenStaticShapeType(type, layouts);
   if (staticShape) return staticShape;
   const resolved = resolveAlias(type, layouts);
@@ -14000,6 +14074,12 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
     return flattenShape(slots, layouts);
   }
   return [{ suffix: "", type: resolved, wat: watType(resolved) }];
+}
+
+function ioActionItemType(type: string | undefined): string | undefined {
+  const args = typeCallArgs(type?.trim() ?? "", "io");
+  if (args === undefined) return undefined;
+  return splitTypeArgs(args)[0]?.trim() || "i32";
 }
 
 function flattenStaticShapeType(
@@ -14506,7 +14586,7 @@ function topLevelEffectIndex(source: string): number {
 
 function isPrimitiveType(type: string): boolean {
   if (parseRefinedI32Type(type)) return true;
-  return ["i32", "u32", "i64", "u64", "f32", "f64", "bool"].includes(type) ||
+  return ["i32", "u32", "i64", "u64", "f32", "f64", "bool", "io"].includes(type) ||
     unsignedBitWidth(type) !== undefined;
 }
 
@@ -14610,11 +14690,14 @@ function importAsFn(item: Program["imports"][number]): FnDecl {
   return {
     kind: "fn",
     public: false,
+    imported: true,
     name: item.name,
+    externalName: item.externalName,
     params,
     returnType: match?.[2].trim() ?? "i32",
     effects: item.effects,
     body: { kind: "block", statements: [] },
+    primitiveId: "host_effect",
   };
 }
 
@@ -14819,42 +14902,72 @@ function exprMentionsName(expr: Expr, name: string): boolean {
   return found;
 }
 
-function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
+function hasRuntimeEffect(
+  expr: Expr,
+  functions: Map<string, FnDecl>,
+  seen: Set<string> = new Set(),
+): boolean {
   switch (expr.kind) {
-    case "call":
+    case "call": {
+      const callee = expr.callee.kind === "var" ? functions.get(expr.callee.name) : undefined;
       return (expr.callee.kind === "var" &&
-        (functions.get(expr.callee.name)?.effects.length ?? 0) > 0) ||
-        hasRuntimeEffect(expr.callee, functions) ||
-        expr.args.some((arg) => hasRuntimeEffect(arg, functions));
+        Boolean(callee && functionHasRuntimeEffect(callee, functions, seen))) ||
+        hasRuntimeEffect(expr.callee, functions, seen) ||
+        expr.args.some((arg) => hasRuntimeEffect(arg, functions, seen));
+    }
     case "index":
-      return hasRuntimeEffect(expr.target, functions) || hasRuntimeEffect(expr.index, functions);
+      return hasRuntimeEffect(expr.target, functions, seen) ||
+        hasRuntimeEffect(expr.index, functions, seen);
     case "binary":
-      return hasRuntimeEffect(expr.left, functions) || hasRuntimeEffect(expr.right, functions);
+      return hasRuntimeEffect(expr.left, functions, seen) ||
+        hasRuntimeEffect(expr.right, functions, seen);
     case "pipe_bind":
-      return hasRuntimeEffect(expr.value, functions) || hasRuntimeEffect(expr.body, functions);
+      return hasRuntimeEffect(expr.value, functions, seen) ||
+        hasRuntimeEffect(expr.body, functions, seen);
     case "match":
-      return hasRuntimeEffect(expr.value, functions) ||
-        expr.arms.some((arm) => hasRuntimeEffect(arm.value, functions));
+      return hasRuntimeEffect(expr.value, functions, seen) ||
+        expr.arms.some((arm) => hasRuntimeEffect(arm.value, functions, seen));
     case "shape":
     case "product_constructor":
-      return expr.slots.some((slot) => hasRuntimeEffect(slot.value, functions));
+      return expr.slots.some((slot) => hasRuntimeEffect(slot.value, functions, seen));
     case "range":
-      return hasRuntimeEffect(expr.start, functions) || hasRuntimeEffect(expr.end, functions);
+      return hasRuntimeEffect(expr.start, functions, seen) ||
+        hasRuntimeEffect(expr.end, functions, seen);
     case "static_for_slots":
-      return hasRuntimeEffect(expr.value, functions);
+      return hasRuntimeEffect(expr.value, functions, seen) ||
+        (expr.source.kind === "range"
+          ? hasRuntimeEffect(expr.source.start, functions, seen) ||
+            hasRuntimeEffect(expr.source.end, functions, seen)
+          : hasRuntimeEffect(expr.source.shape, functions, seen));
     case "field":
-      return hasRuntimeEffect(expr.value, functions) || hasRuntimeEffect(expr.key, functions);
+      return hasRuntimeEffect(expr.value, functions, seen) ||
+        hasRuntimeEffect(expr.key, functions, seen);
     case "block":
       return expr.statements.some((stmt) =>
         (stmt.kind === "let" || stmt.kind === "destructure_let") &&
-        hasRuntimeEffect(stmt.value, functions)
+        hasRuntimeEffect(stmt.value, functions, seen)
       ) ||
-        (expr.expr ? hasRuntimeEffect(expr.expr, functions) : false);
+        (expr.expr ? hasRuntimeEffect(expr.expr, functions, seen) : false);
+    case "do":
+      return true;
+    case "const_fn":
+      return hasRuntimeEffect(expr.body, functions, seen);
     case "placeholder":
       return false;
     default:
       return false;
   }
+}
+
+function functionHasRuntimeEffect(
+  fn: FnDecl,
+  functions: Map<string, FnDecl>,
+  seen: Set<string>,
+): boolean {
+  if (fn.effects.length > 0 || fn.primitiveId === "host_effect") return true;
+  if (seen.has(fn.name)) return false;
+  seen.add(fn.name);
+  return hasRuntimeEffect(fn.body, functions, seen);
 }
 
 function usesTemporalIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {

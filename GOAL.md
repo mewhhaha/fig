@@ -1,6 +1,11 @@
-The diagnosis is right: **`range_fold_1k` is paying a broad release optimizer cost to erase one small imported abstraction chain**. The final Wasm is tiny, but the compiler is still doing `structuredClone(program)`, recurrence expansion, multiple `runOptimizePasses`, possible second expansion, tail-recurrence lowering, and another round of passes. `runOptimizePasses` also rebuilds function maps, summaries, optimization plans, and walks declarations each pass.
+The diagnosis is right: **`range_fold_1k` is paying a broad release optimizer cost to erase one
+small imported abstraction chain**. The final Wasm is tiny, but the compiler is still doing
+`structuredClone(program)`, recurrence expansion, multiple `runOptimizePasses`, possible second
+expansion, tail-recurrence lowering, and another round of passes. `runOptimizePasses` also rebuilds
+function maps, summaries, optimization plans, and walks declarations each pass.
 
-The plan below is agent-ready and focused on making this path simpler, more direct, and more structural.
+The plan below is agent-ready and focused on making this path simpler, more direct, and more
+structural.
 
 # Goal
 
@@ -43,7 +48,8 @@ fold_loop recurrence
 release optimizer passes over the checked program
 ```
 
-The expensive part is not final lowering or Wasm encoding. In the latest local split, the backend bucket is dominated by optimization:
+The expensive part is not final lowering or Wasm encoding. In the latest local split, the backend
+bucket is dominated by optimization:
 
 ```txt
 backend bucket:
@@ -53,7 +59,8 @@ backend bucket:
   cleanup:         0.018 ms
 ```
 
-This matches the current optimizer structure: `optimizeProgram` broadly clones the program and may run the whole optimize pass pipeline multiple times. 
+This matches the current optimizer structure: `optimizeProgram` broadly clones the program and may
+run the whole optimize pass pipeline multiple times.
 
 ---
 
@@ -63,7 +70,8 @@ This matches the current optimizer structure: `optimizeProgram` broadly clones t
 
 Before changing behavior, expose where the 4.35 ms is going inside `optimizeProgram`.
 
-`src/trace.ts` already has `CompileTraceSink`, `traceSync`, `traceAsync`, and `traceInstant`. Use that instead of adding another trace system. 
+`src/trace.ts` already has `CompileTraceSink`, `traceSync`, `traceAsync`, and `traceInstant`. Use
+that instead of adding another trace system.
 
 ## Files
 
@@ -111,7 +119,7 @@ Each trace event should include counters:
 Add `trace` plumbing where missing:
 
 ```ts
-optimizeProgram(program, { optMode, profile, assumeRewrites, trace })
+optimizeProgram(program, { optMode, profile, assumeRewrites, trace });
 ```
 
 ## Acceptance criteria
@@ -133,7 +141,9 @@ No behavior changes yet.
 
 ## Problem
 
-The optimizer currently treats the program broadly. For an imported abstraction like range fold, this is too much. The backend already removes unreachable private functions later, but optimization has already paid the cost.
+The optimizer currently treats the program broadly. For an imported abstraction like range fold,
+this is too much. The backend already removes unreachable private functions later, but optimization
+has already paid the cost.
 
 ## Goal
 
@@ -177,7 +187,8 @@ unreachable imported helper functions
 unreachable type-only helpers
 ```
 
-Important: keep all declarations in the returned `Program` for now to avoid behavior changes, but **only run expensive optimizer work on scoped functions**.
+Important: keep all declarations in the returned `Program` for now to avoid behavior changes, but
+**only run expensive optimizer work on scoped functions**.
 
 Modify these helpers to accept scope:
 
@@ -219,9 +230,12 @@ optimization trace reports only reachable helper chain touched
 
 ## Problem
 
-Imported declarations may retain `public: true`. But public in the imported module does not mean exported from the current Wasm module. If optimizer treats imported public functions as non-inlineable, wrapper erasure becomes more expensive.
+Imported declarations may retain `public: true`. But public in the imported module does not mean
+exported from the current Wasm module. If optimizer treats imported public functions as
+non-inlineable, wrapper erasure becomes more expensive.
 
-The docs now emphasize namespace imports and associated names, while imported declarations remain qualified through aliases. 
+The docs now emphasize namespace imports and associated names, while imported declarations remain
+qualified through aliases.
 
 ## Goal
 
@@ -244,8 +258,8 @@ Simplest first version:
 
 ```ts
 interface FnDecl {
-  public: boolean;          // source declaration visibility
-  rootPublic?: boolean;     // true only for root module pub functions
+  public: boolean; // source declaration visibility
+  rootPublic?: boolean; // true only for root module pub functions
   imported?: boolean;
 }
 ```
@@ -356,7 +370,8 @@ WAT does not contain fold wrapper call
 
 ## Problem
 
-`release_balanced` allows 4 abstract passes, and the current optimizer may run those passes multiple times. Each pass rebuilds summaries/plans and maps.
+`release_balanced` allows 4 abstract passes, and the current optimizer may run those passes multiple
+times. Each pass rebuilds summaries/plans and maps.
 
 ## Goal
 
@@ -444,7 +459,8 @@ RangeIter::fold_loop(...)
 add
 ```
 
-The compiler should erase small pure forwarding/wrapper functions before running general abstract optimization.
+The compiler should erase small pure forwarding/wrapper functions before running general abstract
+optimization.
 
 ## Files
 
@@ -458,7 +474,7 @@ tests/compiler_test.ts
 Add a prepass:
 
 ```ts
-inlinePureForwardingWrappers(program, scope, config)
+inlinePureForwardingWrappers(program, scope, config);
 ```
 
 It should inline functions that are:
@@ -509,7 +525,8 @@ loop survives
 wrappers do not survive as calls
 ```
 
-This aligns with the existing policy that optimization eligibility should be structural, not tied to prelude names. 
+This aligns with the existing policy that optimization eligibility should be structural, not tied to
+prelude names.
 
 ---
 
@@ -587,7 +604,8 @@ release_fast_compile:          optimize 2.409 ms
 
 So the profile helps, but it does not solve the core issue.
 
-Keep it, document it, but aim to make `release_balanced` cheaper by default through structural optimizer changes.
+Keep it, document it, but aim to make `release_balanced` cheaper by default through structural
+optimizer changes.
 
 ---
 
@@ -663,11 +681,13 @@ const function parameter specialized
 
 ## 2. Do not globally inline imported public declarations
 
-Only inline functions that are not current-module export roots. Imported public functions are not necessarily current Wasm exports.
+Only inline functions that are not current-module export roots. Imported public functions are not
+necessarily current Wasm exports.
 
 ## 3. Do not optimize contract declarations as runtime code
 
-Contracts now exist in the AST, and backend already filters them through `runtimeProgramView`.  Keep contracts out of runtime optimization/lowering paths unless collecting rewrite facts.
+Contracts now exist in the AST, and backend already filters them through `runtimeProgramView`. Keep
+contracts out of runtime optimization/lowering paths unless collecting rewrite facts.
 
 ## 4. Do not sacrifice final shape
 
@@ -702,7 +722,8 @@ Give the agent this exact sequence:
 
 # Expected result
 
-After PRs 1–6, `range_fold_1k` should stop paying the broad whole-program release optimizer cost. It should compile more like:
+After PRs 1–6, `range_fold_1k` should stop paying the broad whole-program release optimizer cost. It
+should compile more like:
 
 ```txt
 parse/import/check
@@ -714,4 +735,3 @@ emit Wasm
 ```
 
 The final compiled code should stay the same, but the path to get there should be much shorter.
-

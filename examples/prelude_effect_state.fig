@@ -1,0 +1,31 @@
+const effect = @import("prelude.effect");
+
+type fn Store() -> type {
+  i32
+}
+
+fn get(store: Store) -> effect.State(effects, Store) {
+  store
+}
+
+fn put(_old: Store, next: Store) -> effect.State(effects, Store) {
+  next
+}
+
+fn bump(store: Store) -> effect.Eff({#state}, Store) {
+  do @monad(effect.Eff({#state}, _)) {
+    current <- get(store);
+    put(current, current + 1)
+  }
+}
+
+fn program(seed: Store) -> effect.Eff({#state}, Store) {
+  do @monad(effect.Eff({#state}, _)) {
+    first <- bump(seed);
+    bump(first)
+  }
+}
+
+pub fn main() -> i32 {
+  program(10)
+}

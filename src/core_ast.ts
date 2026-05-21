@@ -18,6 +18,7 @@ export type BranchHint = string;
 export interface EffectImport extends AstNodeMeta {
   kind: "import";
   name: string;
+  externalName?: string;
   type: string;
   effects: string[];
 }
@@ -38,6 +39,7 @@ export interface FnDecl extends AstNodeMeta {
   doc?: string;
   public: boolean;
   name: string;
+  externalName?: string;
   memberOf?: {
     owner: string;
     member: string;
@@ -305,7 +307,7 @@ export type Expr =
   | (
     & {
       kind: "do";
-      strategy: { name: string; effect: TypeExpr } & AstNodeMeta;
+      strategy: { name: string; effect: TypeExpr; hasEffect: boolean } & AstNodeMeta;
       statements: DoStatement[];
       expr?: Expr;
     }

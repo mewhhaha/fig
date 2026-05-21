@@ -163,12 +163,12 @@ Unfolding must be bounded by:
 
 ## Effects and Cost
 
-Effect rows are part of optimization soundness:
+Effects are part of optimization soundness:
 
 - Pure code may be folded, duplicated, reordered, and inlined.
 - Read-only effects may be inlined but not duplicated freely.
-- State, host, random, time, and I/O effects cannot be folded unless the host effect is explicitly
-  proven safe for that transformation.
+- State, host, random, time, and I/O effects cannot be folded unless the host IO action is
+  explicitly proven safe for that transformation.
 
 Each function summary tracks estimated Wasm bytes, runtime instructions, maximum unfolding
 cardinality, effect class, allocation behavior, and tail-call/stack behavior. Those summaries feed

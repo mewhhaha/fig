@@ -139,7 +139,7 @@ function coreStaticParamKind(name: string, index: number): TypeParamKind | undef
       name === "type_flat_slots" || name === "type_size_bits" || name === "type_align_bits" ||
       name === "type_is_inline_array" || name === "type_inline_array_len" ||
       name === "type_inline_array_item" || name === "type_is_fn" || name === "type_fn_params" ||
-      name === "type_fn_return" || name === "type_fn_effects" || name === "type_fn_param_count" ||
+      name === "type_fn_return" || name === "type_fn_param_count" ||
       name === "type_is_scalar" || name === "type_scalar_carrier" ||
       name === "type_scalar_min" || name === "type_scalar_max" ||
       name === "type_scalar_bit_width" || name === "type_scalar_signed" ||
@@ -170,7 +170,6 @@ const coreStaticBuiltinNames = [
   "type_is_fn",
   "type_fn_params",
   "type_fn_return",
-  "type_fn_effects",
   "type_fn_param_count",
   "type_is_scalar",
   "type_scalar_carrier",
@@ -223,7 +222,7 @@ const coreStaticBuiltinNames = [
 export const coreImportsPlugin: CompilerPlugin = {
   apiVersion: COMPILER_PLUGIN_API_VERSION,
   id: "core-imports",
-  declarationBuiltins: [{ name: "import" }, { name: "effect" }],
+  declarationBuiltins: [{ name: "import" }, { name: "external" }],
 };
 
 export const coreStaticPlugin: CompilerPlugin = {

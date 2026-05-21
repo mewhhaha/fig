@@ -1,7 +1,7 @@
 const std = @import("prelude.std");
-const clock: fn() -> i32 !{time} = @effect("clock");
+const clock = @external("clock", fn(host: io) -> io(i32));
 let seed: i32 = 42;
 
-pub fn main() -> i32 !{time} {
-  clock() + seed
+pub fn main(host: io) -> i32 {
+  clock(host) + seed
 }
