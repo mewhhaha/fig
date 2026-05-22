@@ -6,14 +6,32 @@ type Grammar = {
 };
 
 const root = new URL("../", import.meta.url);
-const grammarUrl = new URL("generated/baba-workbench/src/grammar.json", root);
+const grammarUrl = new URL("generated/baba-workbench/grammar.js", root);
 const parserUrl = new URL("generated/baba-workbench/tree-sitter-fig.wasm", root);
 const queriesUrl = new URL("generated/baba-workbench/queries/", root);
 const helixQueriesUrl = new URL("helix/runtime/queries/fig/", root);
 const queryBuiltins = new Set(["ERROR", "MISSING"]);
 
+async function loadGeneratedGrammar(): Promise<Grammar> {
+  const globals = globalThis as typeof globalThis & {
+    grammar?: (definition: Grammar) => Grammar;
+  };
+  const previousGrammar = globals.grammar;
+  globals.grammar = (definition) => definition;
+  try {
+    const module = await import(grammarUrl.href) as { default: Grammar };
+    return module.default;
+  } finally {
+    if (previousGrammar === undefined) {
+      delete globals.grammar;
+    } else {
+      globals.grammar = previousGrammar;
+    }
+  }
+}
+
 Deno.test("generated tree-sitter queries only reference generated nodes", async () => {
-  const grammar = JSON.parse(await Deno.readTextFile(grammarUrl)) as Grammar;
+  const grammar = await loadGeneratedGrammar();
   const generatedNodes = new Set(Object.keys(grammar.rules));
 
   const unknownReferences: string[] = [];
