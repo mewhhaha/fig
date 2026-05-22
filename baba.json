@@ -25,7 +25,6 @@
     "highlights": {
       "entries": [
         { "literal": "import", "capture": "keyword.control.import" },
-        { "literal": "capability", "capture": "keyword" },
         { "literal": "type", "capture": "keyword.type" },
         { "literal": "const", "capture": "keyword" },
         { "literal": "contract", "capture": "keyword" },

@@ -16,8 +16,8 @@ let updated = update_player(stepped);
 updated
 ```
 
-Ordinary local `let` statements are dependency-ordered pure bindings, not temporal update steps.
-When a sequence is intentionally ordered, make that ordering explicit with a monad:
+Ordinary local `let` statements are source-ordered pure bindings, not assignment or temporal update
+steps. When a sequence is intentionally ordered, make that ordering explicit with a monad:
 
 ```fig
 let world = do @monad(State(World, _)) {
@@ -66,9 +66,9 @@ fn program(env: Env, store: Store) -> effect.Eff({#reader, #state}, i32) {
 }
 ```
 
-Avoid APIs that make callers write both a row argument and a proof argument, such as
+Avoid APIs that make callers write both a capability-list argument and a proof argument, such as
 `ask([#reader, #state], effect.Member(#reader, [#reader, #state]), env)`, unless the function truly
-has no value or expected result type from which the row can be inferred.
+has no value or expected result type from which the capability list can be inferred.
 
 ECS code can use the same layering: use `do @applicative(ecs.Query(...))` to build a query,
 `do @monad(ecs.System(...))` to sequence systems, and an outer `do @monad(effect.Eff(...))` to

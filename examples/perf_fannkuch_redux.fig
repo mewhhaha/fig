@@ -179,8 +179,8 @@ fn search(state: State) -> State {
 
 pub fn main(seed: i32) -> i32 {
   let initial = State {
-    perm: <seed - seed, 1, 2, 3, 4, 5, 6>,
-    count: <0, 0, 0, 0, 0, 0, 0>,
+    perm: #[seed - seed, 1, 2, 3, 4, 5, 6],
+    count: #[0, 0, 0, 0, 0, 0, 0],
     r: 7,
     index: 0,
     checksum: 0,

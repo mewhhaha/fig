@@ -52,7 +52,7 @@ fn first_lane(tile: Tile2x4I32) -> i32 {
 }
 
 pub fn main() -> i32 {
-  let view: StridedViewI328x2 = {base: <1, 2, 3, 4, 5, 6, 7, 8>, len: 8, stride: 2};
-  let tile: Tile2x4I32 = <<1, 2, 3, 4>, <5, 6, 7, 8>>;
+  let view: StridedViewI328x2 = {base: #[1, 2, 3, 4, 5, 6, 7, 8], len: 8, stride: 2};
+  let tile: Tile2x4I32 = #[#[1, 2, 3, 4], #[5, 6, 7, 8]];
   apply_tile(scalar_map4, {value: view_base(view) + first_lane(tile)}).value
 }

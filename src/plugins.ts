@@ -120,7 +120,18 @@ const shapeFirstArg = new Set([
   "shape_filter",
 ]);
 
+const typeListBuiltinNames = new Set([
+  "type_list_contains",
+  "type_list_contains_all",
+  "type_list_index",
+  "type_list_append",
+  "type_list_remove",
+  "type_list_unique",
+  "type_list_is_unique",
+]);
+
 function coreStaticParamKind(name: string, index: number): TypeParamKind | undefined {
+  if (typeListBuiltinNames.has(name)) return "const";
   if (shapeFirstArg.has(name) && index === 0) return "const";
   if (name === "shape_map" && index === 1) return "type fn(_: const) -> type";
   if ((name === "shape_map_with_key" || name === "shape_filter") && index === 1) {
@@ -195,6 +206,13 @@ const coreStaticBuiltinNames = [
   "type_variant_payload_type",
   "type_has_niche",
   "type_niche_value",
+  "type_list_contains",
+  "type_list_contains_all",
+  "type_list_index",
+  "type_list_append",
+  "type_list_remove",
+  "type_list_unique",
+  "type_list_is_unique",
   "type_slots",
   "type_slot_count",
   "type_variant_slots",

@@ -8,7 +8,7 @@ import { fail } from "./diagnostics.ts";
 
 type item = TokenItem | CommentItem;
 type BraceMode = "block";
-type Delimiter = "(" | "[" | "{" | "<";
+type Delimiter = "(" | "[" | "{" | "#[";
 type TopLevelDeclKind = "ConstDecl" | "TopLetDecl" | "FnDecl" | "TypeFnDecl";
 
 const MAX_LINE_WIDTH = 100;
@@ -145,7 +145,7 @@ export function formatSource(source: string): string {
     const closingDelimiter = delimiterContexts.at(-1);
     if (
       closingDelimiter && (token.text === ")" || token.text === "]" || token.text === ">") &&
-      closingDelimiter.delimiter === matchingOpen(token.text) &&
+      tokenClosesDelimiter(token.text, closingDelimiter.delimiter) &&
       closingDelimiter.broken
     ) {
       if (!writer.atLineStart()) writer.newline();
@@ -246,7 +246,7 @@ export function formatSource(source: string): string {
     }
     if (
       token.text === "(" || token.text === "[" ||
-      (token.text === "<" && collectionDelimiterStarts.has(token.token.span.start))
+      (token.text === "#[" && collectionDelimiterStarts.has(token.token.span.start))
     ) {
       const shouldBreak = groupWouldOverflow(writer, items, index);
       delimiterContexts.push({
@@ -259,7 +259,7 @@ export function formatSource(source: string): string {
     }
     if (
       closingDelimiter && (token.text === ")" || token.text === "]" || token.text === ">") &&
-      closingDelimiter.delimiter === matchingOpen(token.text)
+      tokenClosesDelimiter(token.text, closingDelimiter.delimiter)
     ) {
       delimiterContexts.pop();
     }
@@ -472,13 +472,15 @@ function separate(
     }
     return;
   }
-  if ((left.text === "(" || left.text === "[") && writer.wouldOverflow(right.text)) {
+  if (
+    (left.text === "(" || left.text === "[" || left.text === "#[") &&
+    writer.wouldOverflow(right.text)
+  ) {
     writer.breakAfterOpenDelimiter();
     if (delimiterContext) delimiterContext.broken = true;
     if (delimiterContext) delimiterContext.indented = true;
     return;
   }
-  if (delimiterContext?.delimiter === "<" && (left.text === "<" || right.text === ">")) return;
   if (right.text === "[" && opensBracketWithoutSpace(left)) return;
   if (left.text === "{" && delimiterContext?.delimiter === "{" && !delimiterContext.broken) return;
   if (left.text === "{" || left.text === ";") {
@@ -550,7 +552,10 @@ function matchingOpen(close: string): Delimiter | undefined {
   if (close === ")") return "(";
   if (close === "]") return "[";
   if (close === "}") return "{";
-  if (close === ">") return "<";
+}
+
+function tokenClosesDelimiter(close: string, open: Delimiter): boolean {
+  return matchingOpen(close) === open || (open === "#[" && close === "]");
 }
 
 function opensBracketWithoutSpace(left: TokenItem): boolean {
@@ -1018,18 +1023,17 @@ function nestedGroupWouldBreak(
 
 function isOpeningGroupToken(item: TokenItem, collectionDelimiterStarts: Set<number>): boolean {
   return item.text === "(" || item.text === "[" || item.text === "{" ||
-    (item.text === "<" && collectionDelimiterStarts.has(item.token.span.start));
+    (item.text === "#[" && collectionDelimiterStarts.has(item.token.span.start));
 }
 
 function isClosingGroupToken(item: TokenItem, collectionDelimiterStarts: Set<number>): boolean {
-  return item.text === ")" || item.text === "]" || item.text === "}" ||
-    (item.text === ">" && collectionDelimiterStarts.size > 0);
+  return item.text === ")" || item.text === "]" || item.text === "}";
 }
 
 function matchingClose(open: string): string {
   if (open === "(") return ")";
   if (open === "[") return "]";
-  if (open === "<") return ">";
+  if (open === "#[") return "]";
   return "}";
 }
 
@@ -1041,7 +1045,8 @@ function flatSeparatorLength(left: TokenItem, right: TokenItem): number {
     return 0;
   }
   if (
-    left.text === "(" || left.text === "[" || left.text === "." || left.text === "@" ||
+    left.text === "(" || left.text === "[" || left.text === "#[" || left.text === "." ||
+    left.text === "@" ||
     left.text === "\\"
   ) {
     return 0;

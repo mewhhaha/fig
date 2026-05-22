@@ -44,41 +44,26 @@
 "do" @keyword
 "else" @keyword
 "if" @keyword
-"zip" @keyword
-"%" @operator
-"&&" @operator
 "(" @punctuation.bracket
 ")" @punctuation.bracket
-"*" @operator
-"+" @operator
 "," @punctuation.delimiter
-"-" @operator
 "->" @operator
 "." @punctuation.delimiter
 ".." @operator
 "..." @operator
-"/" @operator
 ":" @punctuation.delimiter
 "::" @operator
 ";" @punctuation.delimiter
-"<$>" @operator
-"<*>" @operator
 "<-" @operator
-"<=" @operator
-"<>" @operator
 "=" @operator
 "=>" @operator
-">=" @operator
-">>=" @operator
 "@" @operator
 "@external" @operator
 "[" @punctuation.bracket
 "\\" @operator
 "]" @punctuation.bracket
-"^^" @operator
 "{" @punctuation.bracket
 "{}" @operator
-"||" @operator
 "}" @punctuation.bracket
 (fenced_text) @string.special
 (Char) @constant
@@ -87,8 +72,4 @@
 (BranchHint) @keyword.directive
 (DoBindStmt (LowerIdent) @variable)
 (CollectionValue (CollectionOpen) @punctuation.bracket)
-(CollectionValueItems (CollectionClose) @punctuation.bracket)
-(CollectionValueTail (CollectionClose) @punctuation.bracket)
-(Op (CollectionOpen) @operator)
-(Op (CollectionClose) @operator)
-(OpNoCollectionClose (CollectionOpen) @operator)
+(Op) @operator

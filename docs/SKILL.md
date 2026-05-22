@@ -17,7 +17,7 @@ summarizes the current supported surface.
 - Use `docs/reference/types.md` for primitive, function, tuple, shape/product/union, repeat, and
   constructor types.
 - Use `docs/reference/expressions.md` for calls, constructors, tuples, collections, match,
-  operators, pipe-bind, `$`, local bindings, and destructuring.
+  operators, named pipe-bind, local bindings, and destructuring.
 - Use `docs/reference/type-functions.md` for type blocks, result kinds, parameters, `struct`,
   `union`, `operator`, and type matches.
 - Use `docs/reference/builtins.md` for every `@...` compiler builtin and backend intrinsic.
@@ -139,7 +139,7 @@ Use these literal forms:
 - Fenced text: Triple backticks, useful for WGSL shader source.
 - Literal type tags: `#Tag`, `#field`, `#infixl`.
 - Tuple and repeat values: `[1, true]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
-- Target-typed collection literals: `<1, 2, 3>`, including spread such as `<0, ...rest>`.
+- Target-typed collection literals: `#[1, 2, 3]`, including spread such as `#[0, ...rest]`.
 
 Unsuffixed integer literals default from context, commonly to `i32`. Current primitive scalar types
 include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`, and arbitrary unsigned integer
@@ -195,11 +195,11 @@ Supported expressions include:
 - Product construction: `Point {x: 1, y: 2}` with labeled, positioned, punned, or spread slots.
 - Shape values: `{x: 1, y: 2}`, `{x, y}`, and `{...base, z: 3}`.
 - Tuple and repeat values: `[1, 2]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
-- Target-typed collection literals: `<1, 2, 3>`, `<0, ...rest>`.
+- Target-typed collection literals: `#[1, 2, 3]`, `#[0, ...rest]`.
 - `match value { pattern => expr, _ => fallback }` and boolean `if cond { a } else { b }`.
 - Binary operators listed in `grammar.ebnf`.
 - Ranges: `start .. end`.
-- Pipe-bind: `expr \name -> next` and placeholder form `expr \$ -> use($)`.
+- Pipe-bind: `expr \name -> next`.
 
 Boolean `if` is expression sugar for `match` on `bool`. There is no assignment statement; bind new
 locals with `let`. Let statements require semicolons.
@@ -598,7 +598,7 @@ Const-function literals are templates for expected `const fn` parameters. They a
 closure values and cannot capture runtime locals. Use pipe-bind for scoped value flow:
 
 ```fig
-1 \$ -> inc($) \y -> add(1, y)
+1 \x -> inc(x) \y -> add(1, y)
 ```
 
 Fig does not support `|>` pipeline syntax or lambda literals like `\x -> x + 1` as ordinary runtime

@@ -155,7 +155,6 @@ export type AstNode =
   | LiteralAstNode
   | BoolAstNode
   | OpAstNode
-  | OpNoCollectionCloseAstNode
   | TypeOpAstNode;
 
 export interface ProgramAstNode {
@@ -1190,13 +1189,6 @@ export interface BoolAstNode {
 export interface OpAstNode {
   kind: "Op";
   type: "Op";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface OpNoCollectionCloseAstNode {
-  kind: "OpNoCollectionClose";
-  type: "OpNoCollectionClose";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }

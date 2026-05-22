@@ -283,6 +283,136 @@ function checkReservedCompilerNames(program: Program, diagnostics: Diagnostic[])
   }
 }
 
+function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
+  const checkTypeExpr = (expr: TypeExpr | undefined) => {
+    if (!expr) return;
+    if (expr.kind === "type_static_ref" && isDeclarationOnlyBuiltin(expr.name)) {
+      diagnostics.push(diagnosticAt(
+        "syntax.declaration_builtin",
+        `@${expr.name} is only valid as a top-level const declaration value`,
+        expr,
+      ));
+    }
+    for (const child of typeExprChildren(expr)) checkTypeExpr(child);
+  };
+  const checkStatement = (stmt: Statement) => {
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") checkExpr(stmt.value);
+    if (stmt.kind === "proof_const") checkTypeExpr(stmt.value);
+  };
+  const checkDoStatement = (stmt: DoStatement) => {
+    if (stmt.kind === "proof_const") checkTypeExpr(stmt.value);
+    else if ("value" in stmt) checkExpr(stmt.value);
+  };
+  const checkBlock = (block: BlockExpr) => {
+    for (const stmt of block.statements) checkStatement(stmt);
+    if (block.expr) checkExpr(block.expr);
+  };
+  const checkExpr = (expr: Expr | undefined) => {
+    if (!expr) return;
+    switch (expr.kind) {
+      case "placeholder":
+        diagnostics.push(diagnosticAt(
+          "syntax.placeholder_removed",
+          "$ placeholder syntax has been removed; use a named binding",
+          expr,
+        ));
+        return;
+      case "var":
+        if (expr.name.startsWith("@") && isDeclarationOnlyBuiltin(expr.name.slice(1))) {
+          diagnostics.push(diagnosticAt(
+            "syntax.declaration_builtin",
+            `${expr.name} is only valid as a top-level const declaration value`,
+            expr,
+          ));
+        }
+        return;
+      case "pipe_bind":
+        if (expr.name === "$") {
+          diagnostics.push(diagnosticAt(
+            "syntax.placeholder_removed",
+            "$ placeholder pipe-bind has been removed; use a named pipe-bind variable",
+            expr,
+          ));
+        }
+        checkExpr(expr.value);
+        checkExpr(expr.body);
+        return;
+      case "const_fn":
+        checkExpr(expr.body);
+        return;
+      case "match":
+        checkExpr(expr.value);
+        for (const arm of expr.arms) checkExpr(arm.value);
+        return;
+      case "shape":
+      case "product_constructor":
+        for (const slot of expr.slots) {
+          if (slot.index) checkExpr(slot.index);
+          checkExpr(slot.value);
+        }
+        return;
+      case "static_for_slots":
+        if (expr.source.kind === "range") {
+          checkExpr(expr.source.start);
+          checkExpr(expr.source.end);
+        } else {
+          checkExpr(expr.source.shape);
+        }
+        checkExpr(expr.value);
+        return;
+      case "block":
+        checkBlock(expr);
+        return;
+      case "do":
+        checkTypeExpr(expr.strategy.effect);
+        for (const stmt of expr.statements) checkDoStatement(stmt);
+        checkExpr(expr.expr);
+        return;
+      default:
+        for (const child of exprChildren(expr)) checkExpr(child);
+        return;
+    }
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn" || decl.kind === "contract") {
+      checkBlock(decl.body);
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      checkExpr(decl.value);
+    } else if (decl.kind === "type") {
+      for (const stmt of decl.body.statements) checkTypeExpr(stmt.value);
+      checkTypeExpr(decl.body.expr);
+    }
+  }
+}
+
+function isDeclarationOnlyBuiltin(name: string): boolean {
+  return name === "import" || name === "external";
+}
+
+function typeExprChildren(expr: TypeExpr): TypeExpr[] {
+  switch (expr.kind) {
+    case "type_call":
+      return [expr.callee, ...expr.args];
+    case "type_shape":
+      return expr.shape.slots.map((slot) => slot.type);
+    case "type_match":
+      return [expr.value, ...expr.arms.map((arm) => arm.value)];
+    case "type_binary":
+      return [expr.left, expr.right];
+    case "type_ref":
+    case "type_hole":
+    case "type_static_ref":
+    case "type_fn":
+    case "type_operator":
+    case "type_bool":
+    case "type_number":
+    case "type_char":
+    case "type_string":
+    case "type_literal":
+      return [];
+  }
+}
+
 export function checkProgramForAnalysis(
   program: Program,
   options: CheckProgramOptions = {},
@@ -326,9 +456,10 @@ function checkProgramInternal(
     shaderManifest.set(entry.id, entry);
     return entry;
   };
-  const hostEffects = new Map(program.imports.map((item) => [item.name, item.effects]));
+  const hostIoImports = new Map(program.imports.map((item) => [item.name, item.effects]));
   checkExternalImportsUseExplicitIo(program, diagnostics);
   recordPhase("checkReservedCompilerNames", () => checkReservedCompilerNames(program, diagnostics));
+  recordPhase("checkRemovedSyntax", () => checkRemovedSyntax(program, diagnostics));
   recordPhase("lowerDoExpressions", () => lowerDoExpressions(program, diagnostics));
   recordPhase(
     "checkBorrowTypeRestrictions",
@@ -369,7 +500,7 @@ function checkProgramInternal(
       program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
       typeDecls,
       fnDecls,
-      hostEffects,
+      hostIoImports,
       addShader,
       [],
       pluginRegistry,
@@ -465,7 +596,7 @@ function checkProgramInternal(
       program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
       typeDecls,
       fnDecls,
-      hostEffects,
+      hostIoImports,
       addShader,
       diagnostics,
       pluginRegistry,
@@ -476,7 +607,7 @@ function checkProgramInternal(
       program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
       typeDecls,
       fnDecls,
-      hostEffects,
+      hostIoImports,
       functions,
       diagnostics,
     ));
@@ -485,7 +616,7 @@ function checkProgramInternal(
       program,
       typeDecls,
       fnDecls,
-      hostEffects,
+      hostIoImports,
       constValues,
       diagnostics,
       pluginRegistry,
@@ -517,7 +648,7 @@ function checkProgramInternal(
           });
         }
         if (!decl.generated && !decl.primitiveId) {
-          checkFn(decl, hostEffects, diagnostics, typeDecls, [...fnDecls, ...importFnDecls], {
+          checkFn(decl, hostIoImports, diagnostics, typeDecls, [...fnDecls, ...importFnDecls], {
             ...options,
             memo,
           });
@@ -1163,6 +1294,7 @@ function lowerIoDoExpression(
   types: TypeDecl[],
   functions: FnDecl[],
 ): Expr {
+  validateDoStatementLocals(expr.statements, diagnostics);
   if (!expr.strategy.hasEffect) {
     diagnostics.push({
       code: "do.io_strategy_arity",
@@ -3760,7 +3892,7 @@ function checkConstDictionaries(
   consts: ConstDecl[],
   types: TypeDecl[],
   functionDecls: FnDecl[],
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   functions: Set<string>,
   diagnostics: Diagnostic[],
 ) {
@@ -3776,7 +3908,7 @@ function checkConstDictionaries(
         decl.type ?? decl.value.inferredType,
         typesByName,
         functionsByName,
-        hostEffects,
+        hostIoImports,
         diagnostics,
       )
     ) {
@@ -3791,7 +3923,7 @@ function checkConstDictionaries(
           decl,
           typesByName,
           functionsByName,
-          hostEffects,
+          hostIoImports,
           diagnostics,
         )
       ) {
@@ -3820,7 +3952,7 @@ function checkConstDictionaries(
       });
     }
     if (decl.type) {
-      checkConstDictionaryShape(decl, typesByName, functionsByName, hostEffects, diagnostics);
+      checkConstDictionaryShape(decl, typesByName, functionsByName, hostIoImports, diagnostics);
     }
     const labels = new Set<string>();
     for (const slot of decl.value.slots) {
@@ -3932,18 +4064,18 @@ function isRuntimeProductConstInitializer(
   decl: ConstDecl,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   diagnostics: Diagnostic[],
 ): boolean {
   if (!decl.type || decl.value.kind !== "product_constructor") return false;
-  return isRuntimeProductConstType(decl.type, typesByName, functions, hostEffects, diagnostics);
+  return isRuntimeProductConstType(decl.type, typesByName, functions, hostIoImports, diagnostics);
 }
 
 function isRuntimeProductConstType(
   type: string | undefined,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   diagnostics: Diagnostic[],
 ): boolean {
   if (!type) return false;
@@ -3951,7 +4083,7 @@ function isRuntimeProductConstType(
     type,
     typesByName,
     functions,
-    hostEffects,
+    hostIoImports,
     new Map(),
     diagnostics,
   );
@@ -3962,7 +4094,7 @@ function checkConstDictionaryShape(
   decl: ConstDecl,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   diagnostics: Diagnostic[],
 ) {
   const normalized = decl.type
@@ -3970,7 +4102,7 @@ function checkConstDictionaryShape(
       decl.type,
       typesByName,
       functions,
-      hostEffects,
+      hostIoImports,
       new Map(),
       diagnostics,
       decl.span,
@@ -4042,7 +4174,7 @@ function evaluateConstDecls(
   consts: ConstDecl[],
   types: TypeDecl[],
   functions: FnDecl[],
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   addShader: (source: string) => ShaderManifestEntry,
   diagnostics: Diagnostic[],
   pluginRegistry: CompilerPluginRegistry,
@@ -4074,7 +4206,7 @@ function evaluateConstDecls(
     typeValues,
     new Map(types.map((decl) => [decl.name, decl])),
     byFn,
-    hostEffects,
+    hostIoImports,
     addShader,
     diagnostics,
     (name) => evaluateConst(name),
@@ -4116,7 +4248,7 @@ class ConstEvaluator {
     private types: Map<string, ConstValue>,
     private typesByName: Map<string, TypeDecl>,
     private functions: Map<string, FnDecl>,
-    private hostEffects: Map<string, string[]>,
+    private hostIoImports: Map<string, string[]>,
     private addShader: (source: string) => ShaderManifestEntry,
     private diagnostics: Diagnostic[],
     private constLookup: (name: string) => ConstValue | undefined,
@@ -4325,7 +4457,7 @@ class ConstEvaluator {
         span: expr.span,
       };
     }
-    if (this.hostEffects.has(name)) {
+    if (this.hostIoImports.has(name)) {
       return this.unsupported(
         "const.runtime_call",
         `cannot call imported host IO function ${name} during const evaluation`,
@@ -4371,7 +4503,7 @@ class ConstEvaluator {
         returnType,
         this.typesByName,
         this.functions,
-        this.hostEffects,
+        this.hostIoImports,
         this.diagnostics,
       );
     return { ...value, type: returnType, ...(runtimeShape ? { runtime: true } : {}) };
@@ -4837,7 +4969,7 @@ class ConstEvaluator {
     const evaluator = new TypeEvaluator(
       this.typesByName,
       this.functions,
-      this.hostEffects,
+      this.hostIoImports,
       this.types,
       this.diagnostics,
       this.addShader,
@@ -10102,7 +10234,7 @@ function checkTypeContracts(
   program: Program,
   types: TypeDecl[],
   functions: FnDecl[],
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   pluginRegistry: CompilerPluginRegistry,
@@ -10116,7 +10248,7 @@ function checkTypeContracts(
           decl.type,
           byName,
           byFn,
-          hostEffects,
+          hostIoImports,
           consts,
           diagnostics,
           decl.span,
@@ -10134,7 +10266,7 @@ function checkTypeContracts(
             param.type,
             byName,
             byFn,
-            hostEffects,
+            hostIoImports,
             consts,
             diagnostics,
             param.span ?? decl.span,
@@ -10153,7 +10285,7 @@ function checkTypeContracts(
           decl.returnType,
           byName,
           byFn,
-          hostEffects,
+          hostIoImports,
           consts,
           diagnostics,
           decl.span,
@@ -10164,7 +10296,7 @@ function checkTypeContracts(
         decl.body,
         byName,
         byFn,
-        hostEffects,
+        hostIoImports,
         consts,
         diagnostics,
         constTypeParams,
@@ -10178,7 +10310,7 @@ function checkBlockTypeContracts(
   block: Extract<Expr, { kind: "block" }>,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   deferredTypeParams = new Set<string>(),
@@ -10193,7 +10325,7 @@ function checkBlockTypeContracts(
         stmt.type,
         typesByName,
         functions,
-        hostEffects,
+        hostIoImports,
         consts,
         diagnostics,
         stmt.span,
@@ -10205,7 +10337,7 @@ function checkBlockTypeContracts(
         stmt.value,
         typesByName,
         functions,
-        hostEffects,
+        hostIoImports,
         consts,
         diagnostics,
         pluginRegistry,
@@ -10217,7 +10349,7 @@ function checkBlockTypeContracts(
       block.expr,
       typesByName,
       functions,
-      hostEffects,
+      hostIoImports,
       consts,
       diagnostics,
       pluginRegistry,
@@ -10229,7 +10361,7 @@ function checkExprTypeContracts(
   expr: Expr,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   pluginRegistry: CompilerPluginRegistry = defaultCompilerPluginRegistry,
@@ -10239,7 +10371,7 @@ function checkExprTypeContracts(
       expr,
       typesByName,
       functions,
-      hostEffects,
+      hostIoImports,
       consts,
       diagnostics,
       new Set(),
@@ -10250,7 +10382,7 @@ function checkExprTypeContracts(
       expr.value,
       typesByName,
       functions,
-      hostEffects,
+      hostIoImports,
       consts,
       diagnostics,
       pluginRegistry,
@@ -10260,7 +10392,7 @@ function checkExprTypeContracts(
         arm.value,
         typesByName,
         functions,
-        hostEffects,
+        hostIoImports,
         consts,
         diagnostics,
         pluginRegistry,
@@ -10272,7 +10404,7 @@ function checkExprTypeContracts(
         slot.value,
         typesByName,
         functions,
-        hostEffects,
+        hostIoImports,
         consts,
         diagnostics,
         pluginRegistry,
@@ -10474,7 +10606,7 @@ function instantiateNestedAnnotations(
   annotation: string,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   diagnosticSpan?: Span,
@@ -10485,7 +10617,7 @@ function instantiateNestedAnnotations(
       typeExpr,
       typesByName,
       functions,
-      hostEffects,
+      hostIoImports,
       consts,
       diagnostics,
       new Map(),
@@ -10499,7 +10631,7 @@ function instantiateAnnotation(
   annotation: string,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   diagnosticSpan?: Span,
@@ -10511,7 +10643,7 @@ function instantiateAnnotation(
     expr,
     typesByName,
     functions,
-    hostEffects,
+    hostIoImports,
     consts,
     diagnostics,
     new Map(),
@@ -10525,7 +10657,7 @@ function instantiateTypeExpr(
   expr: TypeExpr,
   typesByName: Map<string, TypeDecl>,
   functions: Map<string, FnDecl>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   locals = new Map<string, TypeEvalValue>(),
@@ -10535,7 +10667,7 @@ function instantiateTypeExpr(
   const evaluator = new TypeEvaluator(
     typesByName,
     functions,
-    hostEffects,
+    hostIoImports,
     consts,
     diagnostics,
     shaderManifestEntry,
@@ -10549,7 +10681,7 @@ class TypeEvaluator {
   constructor(
     private typesByName: Map<string, TypeDecl>,
     private functions: Map<string, FnDecl>,
-    private hostEffects: Map<string, string[]>,
+    private hostIoImports: Map<string, string[]>,
     private consts: Map<string, ConstValue>,
     private diagnostics: Diagnostic[],
     private addShader: (source: string) => ShaderManifestEntry,
@@ -10705,7 +10837,7 @@ class TypeEvaluator {
     }
     const builtin = this.evalBuiltin(callee, args);
     if (builtin) return builtin;
-    if (this.hostEffects.has(callee)) {
+    if (this.hostIoImports.has(callee)) {
       return this.unsupported(
         "type.runtime_effect_call",
         `cannot call imported host IO function ${callee} during type evaluation`,
@@ -11210,7 +11342,7 @@ class TypeEvaluator {
         }
         const builtin = this.evalBuiltin(name, args);
         if (builtin) return builtin;
-        if (this.hostEffects.has(name)) {
+        if (this.hostIoImports.has(name)) {
           return this.unsupported(
             "type.runtime_effect_call",
             `cannot call imported host IO function ${name} during type evaluation`,
@@ -12162,7 +12294,8 @@ function checkExternalImportsUseExplicitIo(program: Program, diagnostics: Diagno
     if (item.effects.length > 0) {
       diagnostics.push({
         code: "external.io_effects_removed",
-        message: "external imports use the primitive io parameter instead of source effects",
+        message:
+          "external imports use the primitive io parameter instead of function effect syntax",
         span: item.span,
       });
     }
@@ -13151,7 +13284,7 @@ interface SynthResult {
 
 interface CheckContext {
   env: Map<string, OwnershipBinding>;
-  hostEffects: Map<string, string[]>;
+  hostIoImports: Map<string, string[]>;
   effects: string[];
   types: TypeDecl[];
   functions: FnDecl[];
@@ -13162,7 +13295,7 @@ interface CheckContext {
 
 function checkFn(
   fn: FnDecl,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   diagnostics: Diagnostic[],
   types: TypeDecl[],
   functions: FnDecl[],
@@ -13179,7 +13312,7 @@ function checkFn(
   };
   const ctx = checkContext(
     env,
-    hostEffects,
+    hostIoImports,
     fn.effects,
     diagnostics,
     types,
@@ -13204,7 +13337,7 @@ function checkFn(
   checkBlock(
     fn.body,
     env,
-    hostEffects,
+    hostIoImports,
     fn.effects,
     diagnostics,
     returnType?.runtimeType ?? fn.returnType,
@@ -13324,7 +13457,7 @@ function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
 function checkStatement(
   stmt: Statement,
   env: Map<string, OwnershipBinding>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   types: TypeDecl[],
@@ -13334,7 +13467,7 @@ function checkStatement(
   if (stmt.kind === "let") {
     const ctx = checkContext(
       env,
-      hostEffects,
+      hostIoImports,
       effects,
       diagnostics,
       types,
@@ -13345,7 +13478,7 @@ function checkStatement(
     checkExpr(
       stmt.value,
       env,
-      hostEffects,
+      hostIoImports,
       effects,
       diagnostics,
       annotated?.runtimeType ?? stmt.type,
@@ -13364,7 +13497,7 @@ function checkStatement(
     checkExpr(
       stmt.value,
       env,
-      hostEffects,
+      hostIoImports,
       effects,
       diagnostics,
       undefined,
@@ -13485,7 +13618,7 @@ function typeNameOf(type: string): string {
 function checkExpr(
   expr: Expr,
   env: Map<string, OwnershipBinding>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType?: string,
@@ -13495,7 +13628,7 @@ function checkExpr(
 ): SynthResult {
   const ctx = checkContext(
     env,
-    hostEffects,
+    hostIoImports,
     effects,
     diagnostics,
     types,
@@ -13513,7 +13646,7 @@ function checkExprAgainst(
   checkExprImpl(
     expr,
     ctx.env,
-    ctx.hostEffects,
+    ctx.hostIoImports,
     ctx.effects,
     ctx.diagnostics,
     expected?.runtimeType,
@@ -13889,7 +14022,7 @@ function checkAmbiguousNullaryInferredCalls(
 
 function checkContext(
   env: Map<string, OwnershipBinding>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   types: TypeDecl[],
@@ -13897,7 +14030,7 @@ function checkContext(
   options: RuntimeCheckOptions,
   proofFacts: ProofFact[] = [],
 ): CheckContext {
-  return { env, hostEffects, effects, diagnostics, types, functions, options, proofFacts };
+  return { env, hostIoImports, effects, diagnostics, types, functions, options, proofFacts };
 }
 
 function typeFactsForRuntimeType(type: string | undefined): TypeFacts | undefined {
@@ -13907,7 +14040,7 @@ function typeFactsForRuntimeType(type: string | undefined): TypeFacts | undefine
 function checkExprImpl(
   expr: Expr,
   env: Map<string, OwnershipBinding>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType?: string,
@@ -13929,7 +14062,7 @@ function checkExprImpl(
         checkExpr(
           expr.body,
           nextEnv,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           signature.returnType,
@@ -13998,7 +14131,7 @@ function checkExprImpl(
         checkExpr(
           expr.args[0]!,
           env,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           itemType,
@@ -14022,7 +14155,7 @@ function checkExprImpl(
             fn.name === calleeName || fn.name.endsWith(`.${calleeName}`) ||
             fn.name.endsWith(`::${calleeName}`)
           ) &&
-          !hostEffects.has(calleeName)
+          !hostIoImports.has(calleeName)
         ) {
           diagnostics.push(diagnosticAt(
             "function.unknown",
@@ -14042,7 +14175,7 @@ function checkExprImpl(
           rawExpected,
           checkContext(
             env,
-            hostEffects,
+            hostIoImports,
             effects,
             diagnostics,
             types,
@@ -14053,7 +14186,7 @@ function checkExprImpl(
         checkExpr(
           arg,
           env,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           expected,
@@ -14090,7 +14223,7 @@ function checkExprImpl(
       checkExpr(
         expr.target,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14101,7 +14234,7 @@ function checkExprImpl(
       checkExpr(
         expr.index,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14116,7 +14249,7 @@ function checkExprImpl(
         checkExpr(
           expr.left,
           env,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           undefined,
@@ -14128,7 +14261,7 @@ function checkExprImpl(
         checkExpr(
           expr.right,
           env,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           leftType,
@@ -14140,7 +14273,7 @@ function checkExprImpl(
         checkExpr(
           expr.left,
           env,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           numericExpectedType(expectedType),
@@ -14151,7 +14284,7 @@ function checkExprImpl(
         checkExpr(
           expr.right,
           env,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           numericExpectedType(expectedType),
@@ -14175,7 +14308,7 @@ function checkExprImpl(
       checkExpr(
         expr.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14195,7 +14328,7 @@ function checkExprImpl(
       checkExpr(
         expr.body,
         scoped,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         expectedType,
@@ -14209,7 +14342,7 @@ function checkExprImpl(
       checkExpr(
         expr.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14231,7 +14364,7 @@ function checkExprImpl(
         checkExpr(
           arm.value,
           armEnv,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           expectedType,
@@ -14247,7 +14380,7 @@ function checkExprImpl(
           checkFixedCollectionUpdateLiteral(
             expr,
             env,
-            hostEffects,
+            hostIoImports,
             effects,
             diagnostics,
             inlineArrayLikeTypeArgs(expectedType, types),
@@ -14259,7 +14392,7 @@ function checkExprImpl(
           checkProductSpreadLiteral(
             expr,
             env,
-            hostEffects,
+            hostIoImports,
             effects,
             diagnostics,
             expectedType ?? expr.inferredType,
@@ -14271,7 +14404,7 @@ function checkExprImpl(
           checkInlineArraySpreadLiteral(
             expr,
             env,
-            hostEffects,
+            hostIoImports,
             effects,
             diagnostics,
             expectedType,
@@ -14286,7 +14419,7 @@ function checkExprImpl(
         checkExpr(
           slot.value,
           env,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           options.recoverTypes ? expectedShapeSlotType(expectedType, slot.label, types) : undefined,
@@ -14301,7 +14434,7 @@ function checkExprImpl(
         checkExpr(
           slot.value,
           env,
-          hostEffects,
+          hostIoImports,
           effects,
           diagnostics,
           options.recoverTypes
@@ -14317,7 +14450,7 @@ function checkExprImpl(
       checkExpr(
         expr.start,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14328,7 +14461,7 @@ function checkExprImpl(
       checkExpr(
         expr.end,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14341,7 +14474,7 @@ function checkExprImpl(
       checkExpr(
         expr.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14354,7 +14487,7 @@ function checkExprImpl(
       checkExpr(
         expr.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14365,7 +14498,7 @@ function checkExprImpl(
       checkExpr(
         expr.key,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14378,7 +14511,7 @@ function checkExprImpl(
       checkBlock(
         expr,
         new Map(env),
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         expectedType,
@@ -14687,7 +14820,7 @@ function expectedShapeSlotType(
 function checkProductSpreadLiteral(
   expr: Extract<Expr, { kind: "shape" }>,
   env: Map<string, OwnershipBinding>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType: string | undefined,
@@ -14715,7 +14848,7 @@ function checkProductSpreadLiteral(
       checkExpr(
         slot.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14750,7 +14883,7 @@ function checkProductSpreadLiteral(
       checkExpr(
         slot.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14771,7 +14904,7 @@ function checkProductSpreadLiteral(
     checkExpr(
       slot.value,
       env,
-      hostEffects,
+      hostIoImports,
       effects,
       diagnostics,
       expectedSlotType,
@@ -14812,7 +14945,7 @@ function checkProductSpreadLiteral(
 function checkInlineArraySpreadLiteral(
   expr: Extract<Expr, { kind: "shape" }>,
   env: Map<string, OwnershipBinding>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType: string | undefined,
@@ -14862,7 +14995,7 @@ function checkInlineArraySpreadLiteral(
       checkExpr(
         slot.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -14894,7 +15027,7 @@ function checkInlineArraySpreadLiteral(
       checkExpr(
         slot.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         itemType,
@@ -14916,7 +15049,7 @@ function checkInlineArraySpreadLiteral(
 function checkFixedCollectionUpdateLiteral(
   expr: Extract<Expr, { kind: "shape" }>,
   env: Map<string, OwnershipBinding>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expected:
@@ -14964,7 +15097,7 @@ function checkFixedCollectionUpdateLiteral(
       checkExpr(
         slot.value,
         env,
-        hostEffects,
+        hostIoImports,
         effects,
         diagnostics,
         undefined,
@@ -15007,7 +15140,7 @@ function checkFixedCollectionUpdateLiteral(
     checkExpr(
       slot.index,
       env,
-      hostEffects,
+      hostIoImports,
       effects,
       diagnostics,
       undefined,
@@ -15018,7 +15151,7 @@ function checkFixedCollectionUpdateLiteral(
     checkExpr(
       slot.value,
       env,
-      hostEffects,
+      hostIoImports,
       effects,
       diagnostics,
       itemType,
@@ -15193,7 +15326,7 @@ function isInlineArrayExprBuiltinWrapper(fn: FnDecl): boolean {
 function checkBlock(
   block: Extract<Expr, { kind: "block" }>,
   env: Map<string, OwnershipBinding>,
-  hostEffects: Map<string, string[]>,
+  hostIoImports: Map<string, string[]>,
   effects: string[],
   diagnostics: Diagnostic[],
   expectedType?: string,
@@ -15203,13 +15336,13 @@ function checkBlock(
 ) {
   const ordered = orderBlockStatements(block.statements, diagnostics);
   for (const stmt of ordered) {
-    checkStatement(stmt, env, hostEffects, effects, diagnostics, types, functions, options);
+    checkStatement(stmt, env, hostIoImports, effects, diagnostics, types, functions, options);
   }
   if (block.expr) {
     checkExpr(
       block.expr,
       env,
-      hostEffects,
+      hostIoImports,
       effects,
       diagnostics,
       expectedType,
@@ -15737,43 +15870,27 @@ function orderBlockStatements(statements: Statement[], diagnostics: Diagnostic[]
   });
   if (hasDuplicate) return statements;
 
-  const dependencies = statements.map((stmt) => {
+  statements.forEach((stmt, index) => {
     const refs = new Set<string>();
     collectStatementRefs(stmt, refs);
-    return [...refs]
-      .map((name) => owners.get(name))
-      .filter((index): index is number => index !== undefined);
-  });
-  const state = new Array<"visiting" | "done" | undefined>(statements.length);
-  const ordered: Statement[] = [];
-  let hasCycle = false;
-
-  const visit = (index: number, stack: number[]) => {
-    if (state[index] === "done") return;
-    if (state[index] === "visiting") {
-      const cycle = [...stack.slice(stack.indexOf(index)), index]
-        .map((item) => boundNames(statements[item]).join(", "))
-        .join(" -> ");
-      diagnostics.push({
-        code: "type.local_cycle",
-        message: `local binding cycle${cycle ? `: ${cycle}` : ""}`,
-      });
-      hasCycle = true;
-      return;
+    for (const name of refs) {
+      const owner = owners.get(name);
+      if (owner === undefined || owner < index) continue;
+      diagnostics.push(diagnosticAt(
+        "type.local_order",
+        owner === index
+          ? `local binding ${name} cannot reference itself`
+          : `local binding ${name} must be declared before it is used`,
+        stmt,
+      ));
     }
-    state[index] = "visiting";
-    for (const dependency of dependencies[index]) visit(dependency, [...stack, index]);
-    state[index] = "done";
-    ordered.push(statements[index]);
-  };
-
-  for (let index = 0; index < statements.length; index++) visit(index, []);
-  return hasCycle ? statements : ordered;
+  });
+  return statements;
 }
 
 function validateDoStatementLocals(statements: DoStatement[], diagnostics: Diagnostic[]) {
-  const owners = new Set<string>();
-  for (const stmt of statements) {
+  const owners = new Map<string, number>();
+  statements.forEach((stmt, index) => {
     const names = doBoundNames(stmt);
     const localNames = new Set<string>();
     for (const name of names) {
@@ -15786,8 +15903,33 @@ function validateDoStatementLocals(statements: DoStatement[], diagnostics: Diagn
         continue;
       }
       localNames.add(name);
-      owners.add(name);
+      owners.set(name, index);
     }
+  });
+  statements.forEach((stmt, index) => {
+    const refs = new Set<string>();
+    collectDoStatementRefs(stmt, refs);
+    for (const name of refs) {
+      const owner = owners.get(name);
+      if (owner === undefined || owner < index) continue;
+      diagnostics.push(diagnosticAt(
+        "type.local_order",
+        owner === index
+          ? `local binding ${name} cannot reference itself`
+          : `local binding ${name} must be declared before it is used`,
+        stmt,
+      ));
+    }
+  });
+}
+
+function collectDoStatementRefs(stmt: DoStatement, refs: Set<string>) {
+  if (stmt.kind === "let" || stmt.kind === "destructure_let" || stmt.kind === "do_bind") {
+    collectExprRefs(stmt.value, refs, new Set());
+  } else if (stmt.kind === "do_expr") {
+    collectExprRefs(stmt.value, refs, new Set());
+  } else if (stmt.kind === "proof_const") {
+    collectTypeExprRefs(stmt.value, refs);
   }
 }
 
@@ -15820,6 +15962,40 @@ function spanForDoBoundName(stmt: DoStatement, name: string): { span?: Span; nam
 function collectStatementRefs(stmt: Statement, refs: Set<string>) {
   if (stmt.kind === "let") collectExprRefs(stmt.value, refs, new Set());
   else if (stmt.kind === "destructure_let") collectExprRefs(stmt.value, refs, new Set());
+  else if (stmt.kind === "proof_const") collectTypeExprRefs(stmt.value, refs);
+}
+
+function collectTypeExprRefs(expr: TypeExpr, refs: Set<string>) {
+  switch (expr.kind) {
+    case "type_ref":
+      refs.add(expr.name);
+      return;
+    case "type_call":
+      collectTypeExprRefs(expr.callee, refs);
+      for (const arg of expr.args) collectTypeExprRefs(arg, refs);
+      return;
+    case "type_shape":
+      for (const slot of expr.shape.slots) collectTypeExprRefs(slot.type, refs);
+      return;
+    case "type_match":
+      collectTypeExprRefs(expr.value, refs);
+      for (const arm of expr.arms) collectTypeExprRefs(arm.value, refs);
+      return;
+    case "type_binary":
+      collectTypeExprRefs(expr.left, refs);
+      collectTypeExprRefs(expr.right, refs);
+      return;
+    case "type_hole":
+    case "type_static_ref":
+    case "type_fn":
+    case "type_operator":
+    case "type_bool":
+    case "type_number":
+    case "type_char":
+    case "type_string":
+    case "type_literal":
+      return;
+  }
 }
 
 function collectExprRefs(expr: Expr, refs: Set<string>, shadowed: Set<string>) {

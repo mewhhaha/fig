@@ -5,10 +5,10 @@ Fig source files use the `.fig` extension. a program is a sequence of `type fn`,
 
 ## Names
 
-Lowercase identifiers match `[a-z_][a-z0-9_]*` and are used for functions, locals, fields, host
-effects, imports, primitive type names, and type functions. PascalCase identifiers match
-`[a-Z][a-Za-z0-9]*` and are used for product constructors, union variants, and type-level local
-shape bindings.
+Lowercase identifiers match `[a-z_][a-z0-9_]*` and are used for functions, locals, fields, host IO
+import aliases, primitive type names, and ordinary value bindings. PascalCase identifiers match
+`[A-Z][A-Za-z0-9]*` and are used for product constructors, union variants, type functions, and
+type-level local shape bindings.
 
 Qualified names use `.` for namespace/module qualification and `::` for attached members or
 associated contracts, for example `prelude.option.Option`, `Point::eql`, or
@@ -85,7 +85,7 @@ type fn Point(
 Multiple contiguous `///` lines join with newlines after stripping the marker and at most one
 following space. Ordinary `//` comments remain non-doc comments.
 
-## Imports and Capabilities
+## Imports and Host IO
 
 Import a module with a top-level const:
 
@@ -213,8 +213,8 @@ Blocks contain `let` statements, local proof consts, and an optional final expre
 }
 ```
 
-Local lets require semicolons. Multi-bind destructuring requires a value with multiple runtime
-result slots:
+Local lets require semicolons and are source-ordered; a local can only reference earlier locals in
+the same block. Multi-bind destructuring requires a value with multiple runtime result slots:
 
 ```fig
 let first, second = make_pair();

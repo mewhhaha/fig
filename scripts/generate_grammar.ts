@@ -70,18 +70,13 @@ for (const file of bundle.files) {
         "(ImportBindingItems (PascalIdent) @type)",
       )
       .replace("(CollectionOpen) @constant\n", "")
-      .replace("(CollectionClose) @constant\n", "")
       .replace("(DoBindName) @constant\n", "");
     content += [
       "(DoStrategy (StaticBuiltin) @keyword.directive)",
       "(BranchHint) @keyword.directive",
       "(DoBindStmt (LowerIdent) @variable)",
       "(CollectionValue (CollectionOpen) @punctuation.bracket)",
-      "(CollectionValueItems (CollectionClose) @punctuation.bracket)",
-      "(CollectionValueTail (CollectionClose) @punctuation.bracket)",
-      "(Op (CollectionOpen) @operator)",
-      "(Op (CollectionClose) @operator)",
-      "(OpNoCollectionClose (CollectionOpen) @operator)",
+      "(Op) @operator",
     ].join("\n") + "\n";
   }
   await Deno.writeTextFile(path, content);

@@ -129,9 +129,9 @@ value through a contract, local proof constants when a proof is needed only insi
 explicit `const` proof parameters when the caller must select or provide the proof.
 
 For effect-style APIs, prefer the same transparent-contract pattern. Do not require callers to pass
-a separate row const plus a separate proof when the row can be inferred from the expected result or
-from a value in the call. Define a proof type that returns the value type itself, then put that
-proof on the value:
+a separate capability-list const plus a separate proof when the capability list can be inferred from
+the expected result or from a value in the call. Define a proof type that returns the value type
+itself, then put that proof on the value:
 
 ```fig
 const effect = @import("prelude.effect");

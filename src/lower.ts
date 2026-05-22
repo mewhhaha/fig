@@ -519,8 +519,8 @@ function lowerTypeExpr(node: Node): TypeExpr {
     case "StaticBuiltin":
       return {
         kind: "type_static_ref",
-        ...meta(expr, firstIdentifier(expr)),
-        name: text(firstIdentifier(expr), "static builtin"),
+        ...meta(expr, firstStaticBuiltinName(expr)),
+        name: lowerStaticBuiltinName(expr),
       };
     case "TypeShape":
       return { kind: "type_shape", ...spanOnly(expr), shape: lowerTypeShape(expr) };
@@ -1509,8 +1509,8 @@ function lowerPrimary(node: Node): Expr {
     case "StaticBuiltin":
       return {
         kind: "var",
-        ...meta(child, firstIdentifier(child)),
-        name: `@${text(firstIdentifier(child), "static builtin")}`,
+        ...meta(child, firstStaticBuiltinName(child)),
+        name: `@${lowerStaticBuiltinName(child)}`,
       };
     case "TypeBuilderName":
       return { kind: "var", ...spanOnly(child), name: child.text };
@@ -1918,6 +1918,18 @@ function firstIdentifier(node: Node): Node {
   const found = named(node).find(isIdentifier);
   if (!found) return unreachable(node, "identifier");
   return found;
+}
+
+function firstStaticBuiltinName(node: Node): Node {
+  const found = named(node).find(isIdentifier);
+  if (found) return found;
+  if (node.type === "StaticBuiltin" && node.text === "@import") return node;
+  return unreachable(node, "static builtin");
+}
+
+function lowerStaticBuiltinName(node: Node): string {
+  const found = named(node).find(isIdentifier);
+  return found ? text(found, "static builtin") : node.text.replace(/^@/, "");
 }
 
 function firstFieldName(node: Node): Node {

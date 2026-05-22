@@ -1,8 +1,8 @@
 # Fig Expressions
 
 Expressions include literals, variables, calls, field access, indexing, constructors, shape values,
-tuple values, collection literals, matches, `if` sugar, binary operators, ranges, blocks, pipe-bind,
-and `$`.
+tuple values, collection literals, matches, `if` sugar, binary operators, ranges, blocks, and
+pipe-bind.
 
 ```fig
 add(1, 2)
@@ -11,7 +11,7 @@ xs[0]
 Point {x: 1, y: 2}
 {x: 1, y: 2}
 [1, [0; 3]]
-<1, 2, 3>
+#[1, 2, 3]
 match value { Some(x) => x, None => 0 }
 if ready { 1 } else { 0 }
 1 .. 4
@@ -79,13 +79,12 @@ Pipe-bind evaluates the left side, binds it, and evaluates the next atom:
 
 ```fig
 1 \x -> add(x, 2)
-1 \$ -> add($, 2)
 ```
 
-The placeholder pipe-bind form is retained for compatibility, but named pipe-bind variables are the
-preferred form. Pipe-bind is intended for short one-step value flow. For state machines or
-update-heavy code, use fresh block-local names for pure values or an explicit
-`do @monad(State(T, _))` sequence for ordered state transitions.
+Pipe-bind requires a named binding. The old `$` placeholder form has been removed. Pipe-bind is
+intended for short one-step value flow. For state machines or update-heavy code, use fresh
+block-local names for pure values or an explicit `do @monad(State(T, _))` sequence for ordered state
+transitions.
 
 ## Do Strategies
 
@@ -137,13 +136,13 @@ type call, and state-threaded `do` blocks require the state argument to be concr
 
 ## Local Bindings and Destructuring
 
-Local `let` bindings must use unique names within the same block. Initializers are
-dependency-ordered, so a later binding can feed an earlier statement when there is no cycle:
+Local `let` bindings must use unique names within the same block. Initializers are source-ordered: a
+local can reference parameters, top-level declarations, and earlier locals, but not later locals.
 
 ```fig
-let next = start + 1;
 let start = 1;
-next // 2
+let next = start + 1;
+next
 ```
 
 Use fresh names for pure intermediate values. Use `do @monad(State(T, _))` when the source order is
@@ -216,8 +215,8 @@ Angle-bracket collection literals are target-typed and lower through collector m
 expected type. a spread can append a tail collection when the expected collector supports it:
 
 ```fig
-let tail: Layout.InlineArrayList(3, i32) = <1, 2, 3>;
-let ys: Layout.InlineArrayList(4, i32) = <0, ...tail>;
+let tail: Layout.InlineArrayList(3, i32) = #[1, 2, 3];
+let ys: Layout.InlineArrayList(4, i32) = #[0, ...tail];
 ```
 
 ## Operators

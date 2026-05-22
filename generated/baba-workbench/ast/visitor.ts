@@ -55,7 +55,6 @@ import type {
   MatchValuesAstNode,
   MatchValuesParenAstNode,
   OpAstNode,
-  OpNoCollectionCloseAstNode,
   ParamAstNode,
   ParamsAstNode,
   ParamTailAstNode,
@@ -303,7 +302,6 @@ export interface AstVisitor<R = void> {
   Literal?: (node: LiteralAstNode) => R;
   Bool?: (node: BoolAstNode) => R;
   Op?: (node: OpAstNode) => R;
-  OpNoCollectionClose?: (node: OpNoCollectionCloseAstNode) => R;
   TypeOp?: (node: TypeOpAstNode) => R;
   unknown?: (node: SyntaxNodeLike) => R;
 }
@@ -1343,13 +1341,6 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
       return {
         kind: "Op",
         type: "Op",
-        node,
-        fields: {},
-      };
-    case "OpNoCollectionClose":
-      return {
-        kind: "OpNoCollectionClose",
-        type: "OpNoCollectionClose",
         node,
         fields: {},
       };

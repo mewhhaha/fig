@@ -107,8 +107,8 @@ const simdDot1Source = `
   }
 
   pub fn main(seed: i32) -> i32 {
-    let row: Lane4I32 = <1 + seed, 2, 3, 4>;
-    let col: Lane4I32 = <1, 5, 9, 13>;
+    let row: Lane4I32 = #[1 + seed, 2, 3, 4];
+    let col: Lane4I32 = #[1, 5, 9, 13];
     row[0] * col[0] + row[1] * col[1] + row[2] * col[2] + row[3] * col[3]
   }
 `;
@@ -259,7 +259,7 @@ const scenarios: Scenario[] = [
       fn inc(x: i32) -> i32 { x + 1 }
       fn keep(x: i32) -> bool { x > 2 }
       pub fn main(seed: i32) -> i32 {
-        let xs: array.layout.Lane4I32 = <1, 2, 3, 4>;
+        let xs: array.layout.Lane4I32 = #[1, 2, 3, 4];
         let out: array.CompactArray(4, i32) = array.Iter::collect(
           array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(xs), keep), inc)
         );
@@ -359,7 +359,7 @@ const scenarios: Scenario[] = [
     source: `
       const layout = @import("prelude.layout");
       pub fn main(seed: i32) -> i32 {
-        let xs: layout.InlineArray(16, i32) = <1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>;
+        let xs: layout.InlineArray(16, i32) = #[1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let ys: layout.InlineArray(16, i32) = [...xs, [7]: xs[7] + 3];
         xs[7] + ys[7] + ys[15]
       }

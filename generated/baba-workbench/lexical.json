@@ -57,7 +57,9 @@
     "\\",
     "%",
     "+",
+    "<",
     "=",
+    ">",
     "|",
     "$"
   ],
@@ -68,11 +70,7 @@
     },
     {
       "name": "CollectionOpen",
-      "pattern": "<"
-    },
-    {
-      "name": "CollectionClose",
-      "pattern": ">"
+      "pattern": "#\\["
     },
     {
       "name": "Number",

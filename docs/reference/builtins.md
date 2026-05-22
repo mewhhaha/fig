@@ -1,7 +1,8 @@
 # Fig Builtins
 
-Builtins are called with `@name(...)` in Fig source. Static type evaluation strips the `@` before
-dispatching internally; source code should keep it.
+Most compiler builtins are called with `@name(...)` in Fig source. Static type evaluation strips the
+`@` before dispatching internally; source code should keep it. The exception is `return(value)`,
+which is a reserved IO expression builtin used to lift a pure value into `io(T)`.
 
 ## Compiler Plugin API
 
@@ -31,6 +32,12 @@ rather than raw Wasm byte emission.
 | `@import`   | string module specifier           | namespace alias value   | top-level const lowering/checking |
 | `@external` | string import name, function type | host IO action function | top-level const checking/backend  |
 
+`@import` and `@external` are declaration-only forms. They are valid as top-level `const` values,
+not as ordinary expressions.
+
+`return(value)` is available in expression position when an `io(T)` result is expected. It is not a
+normal function and cannot be redefined.
+
 ## Diagnostics and Contracts
 
 | Builtin          | Arguments             | Returns | Phase                     |
@@ -49,22 +56,65 @@ matching const-function templates.
 These builtins take a type value as their first argument and run during type evaluation. Most also
 work during const evaluation when their arguments are compile-time Values.
 
-| Builtin                  | Arguments                                                      | Returns                                     |
-| ------------------------ | -------------------------------------------------------------- | ------------------------------------------- |
-| `@type_is_product`       | `t: type`                                                      | `bool`                                      |
-| `@type_is_sum`           | `t: type`                                                      | `bool`                                      |
-| `@type_is_alias`         | `t: type`                                                      | `bool`                                      |
-| `@type_is_number`        | `t: type`                                                      | `bool`                                      |
-| `@type_has_slot`         | `t: type`, `slot: #literal/string`                             | `bool`                                      |
-| `@type_slot_type`        | `t: type`, `slot: #literal/string`                             | slot `type`, or diagnostic                  |
-| `@type_has_member`       | `t: type`, `member: #literal/string`                           | `bool`                                      |
-| `@type_member_type`      | `t: type`, `member: #literal/string`                           | member function `type`, or diagnostic       |
-| `@type_has_variant`      | `t: type`, `variant: #literal/string`                          | `bool`                                      |
-| `@type_variant_has_slot` | `t: type`, `variant: #literal/string`, `slot: #literal/string` | `bool`                                      |
-| `@type_slots`            | `t: type`                                                      | shape of product slots                      |
-| `@type_slot_count`       | `t: type`                                                      | numeric slot count; non-products return `0` |
-| `@type_variant_slots`    | `t: type`, `variant: #literal/string`                          | shape of variant slots                      |
-| `@type_variants`         | `t: type`                                                      | shape describing variants                   |
+| Builtin                      | Arguments                                                      | Returns                                     |
+| ---------------------------- | -------------------------------------------------------------- | ------------------------------------------- |
+| `@type_is_product`           | `t: type`                                                      | `bool`                                      |
+| `@type_is_sum`               | `t: type`                                                      | `bool`                                      |
+| `@type_is_alias`             | `t: type`                                                      | `bool`                                      |
+| `@type_is_number`            | `t: type`                                                      | `bool`                                      |
+| `@type_has_slot`             | `t: type`, `slot: #literal/string`                             | `bool`                                      |
+| `@type_slot_type`            | `t: type`, `slot: #literal/string`                             | slot `type`, or diagnostic                  |
+| `@type_has_member`           | `t: type`, `member: #literal/string`                           | `bool`                                      |
+| `@type_member_type`          | `t: type`, `member: #literal/string`                           | member function `type`, or diagnostic       |
+| `@type_members`              | `t: type`                                                      | shape of attached members                   |
+| `@type_member_target`        | `t: type`, `member: #literal/string`                           | target member function name                 |
+| `@type_is_fn`                | `t: type`                                                      | `bool`                                      |
+| `@type_fn_params`            | `t: type`                                                      | shape of function parameter types           |
+| `@type_fn_return`            | `t: type`                                                      | function return `type`                      |
+| `@type_fn_param_count`       | `t: type`                                                      | numeric parameter count                     |
+| `@type_is_scalar`            | `t: type`                                                      | `bool`                                      |
+| `@type_scalar_carrier`       | `t: type`                                                      | scalar carrier tag                          |
+| `@type_scalar_min`           | `t: type`                                                      | numeric minimum                             |
+| `@type_scalar_max`           | `t: type`                                                      | numeric maximum                             |
+| `@type_scalar_bit_width`     | `t: type`                                                      | numeric bit width                           |
+| `@type_scalar_signed`        | `t: type`                                                      | `bool`                                      |
+| `@type_scalar_domain`        | `t: type`                                                      | scalar domain metadata                      |
+| `@type_is_refined_scalar`    | `t: type`                                                      | `bool`                                      |
+| `@type_layout`               | `t: type`                                                      | layout metadata shape                       |
+| `@type_storage_kind`         | `t: type`                                                      | storage kind tag                            |
+| `@type_flat_slot_count`      | `t: type`                                                      | flattened slot count                        |
+| `@type_flat_slots`           | `t: type`                                                      | shape of flattened slot types               |
+| `@type_size_bits`            | `t: type`                                                      | numeric size in bits                        |
+| `@type_align_bits`           | `t: type`                                                      | numeric alignment in bits                   |
+| `@type_is_inline_array`      | `t: type`                                                      | `bool`                                      |
+| `@type_inline_array_len`     | `t: type`                                                      | inline array length                         |
+| `@type_inline_array_item`    | `t: type`                                                      | inline array item `type`                    |
+| `@type_has_variant`          | `t: type`, `variant: #literal/string`                          | `bool`                                      |
+| `@type_variant_has_slot`     | `t: type`, `variant: #literal/string`, `slot: #literal/string` | `bool`                                      |
+| `@type_variant_count`        | `t: type`                                                      | numeric variant count                       |
+| `@type_variant_tag_type`     | `t: type`                                                      | variant tag `type`                          |
+| `@type_variant_payload_type` | `t: type`, `variant: #literal/string`                          | payload `type`, or empty type               |
+| `@type_has_niche`            | `t: type`                                                      | `bool`                                      |
+| `@type_niche_value`          | `t: type`                                                      | niche value metadata                        |
+| `@type_slots`                | `t: type`                                                      | shape of product slots                      |
+| `@type_slot_count`           | `t: type`                                                      | numeric slot count; non-products return `0` |
+| `@type_variant_slots`        | `t: type`, `variant: #literal/string`                          | shape of variant slots                      |
+| `@type_variants`             | `t: type`                                                      | shape describing variants                   |
+
+## Type-List Builtins
+
+Type-list builtins operate on compile-time list shapes such as `[#reader, #state]`. They are used by
+`prelude.effect` capability-list proofs and can also hold type values.
+
+| Builtin                   | Arguments        | Returns                    |
+| ------------------------- | ---------------- | -------------------------- |
+| `@type_list_contains`     | list, item       | `bool`                     |
+| `@type_list_contains_all` | required, actual | `bool`                     |
+| `@type_list_index`        | list, item       | numeric index or error     |
+| `@type_list_append`       | left, right      | combined type list         |
+| `@type_list_remove`       | list, item       | list without matching item |
+| `@type_list_unique`       | list             | deduplicated list          |
+| `@type_list_is_unique`    | list             | `bool`                     |
 
 ## Shape Builtins
 

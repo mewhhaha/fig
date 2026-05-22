@@ -185,7 +185,6 @@ export type AstNode =
   | LiteralAstNode
   | BoolAstNode
   | OpAstNode
-  | OpNoCollectionCloseAstNode
   | TypeOpAstNode;
 
 export interface ProgramAstNode {
@@ -1224,13 +1223,6 @@ export interface OpAstNode {
   children: AstNode[];
 }
 
-export interface OpNoCollectionCloseAstNode {
-  kind: "OpNoCollectionClose";
-  type: "OpNoCollectionClose";
-  node: RuleParseNode;
-  children: AstNode[];
-}
-
 export interface TypeOpAstNode {
   kind: "TypeOp";
   type: "TypeOp";
@@ -2061,7 +2053,7 @@ const rules: Record<string, Expression> = {
   },
   "CollectionValueItems": {
     kind: "choice",
-    options: [{ kind: "ref", name: "CollectionClose" }, {
+    options: [{ kind: "literal", value: "]" }, {
       kind: "sequence",
       items: [{ kind: "ref", name: "CollectionSpreadSlot" }, {
         kind: "ref",
@@ -2083,7 +2075,7 @@ const rules: Record<string, Expression> = {
   },
   "CollectionValueTail": {
     kind: "choice",
-    options: [{ kind: "ref", name: "CollectionClose" }, {
+    options: [{ kind: "literal", value: "]" }, {
       kind: "sequence",
       items: [{ kind: "literal", value: "," }, { kind: "ref", name: "CollectionValueItems" }],
     }],
@@ -2129,7 +2121,7 @@ const rules: Record<string, Expression> = {
       kind: "repeat",
       expression: {
         kind: "sequence",
-        items: [{ kind: "ref", name: "OpNoCollectionClose" }, { kind: "ref", name: "Call" }],
+        items: [{ kind: "ref", name: "Op" }, { kind: "ref", name: "Call" }],
       },
     }],
   },
@@ -2709,33 +2701,9 @@ const rules: Record<string, Expression> = {
       { kind: "literal", value: "%" },
       { kind: "literal", value: "==" },
       { kind: "literal", value: "!=" },
-      { kind: "ref", name: "CollectionOpen" },
+      { kind: "literal", value: "<" },
       { kind: "literal", value: "<=" },
-      { kind: "ref", name: "CollectionClose" },
-      { kind: "literal", value: ">=" },
-      { kind: "literal", value: "&&" },
-      { kind: "literal", value: "||" },
-      { kind: "literal", value: "^^" },
-      { kind: "literal", value: "<>" },
-      { kind: "literal", value: "<$>" },
-      { kind: "literal", value: "<*>" },
-      { kind: "literal", value: ">>=" },
-      { kind: "literal", value: "zip" },
-      { kind: "literal", value: ".." },
-    ],
-  },
-  "OpNoCollectionClose": {
-    kind: "choice",
-    options: [
-      { kind: "literal", value: "+" },
-      { kind: "literal", value: "-" },
-      { kind: "literal", value: "*" },
-      { kind: "literal", value: "/" },
-      { kind: "literal", value: "%" },
-      { kind: "literal", value: "==" },
-      { kind: "literal", value: "!=" },
-      { kind: "ref", name: "CollectionOpen" },
-      { kind: "literal", value: "<=" },
+      { kind: "literal", value: ">" },
       { kind: "literal", value: ">=" },
       { kind: "literal", value: "&&" },
       { kind: "literal", value: "||" },
@@ -4115,15 +4083,6 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "Op",
         type: "Op",
-        node,
-        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
-          child !== null
-        ),
-      };
-    case "OpNoCollectionClose":
-      return {
-        kind: "OpNoCollectionClose",
-        type: "OpNoCollectionClose",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode =>
           child !== null

@@ -9,9 +9,9 @@ fn ok(value: i32) -> Result(i32, i32) {
 }
 
 pub fn main() -> i32 {
-  let xs: merge.array.layout.Lane4I32 = <1, 2, 3, 4>;
-  let ones_a: merge.array.layout.Lane4I32 = <1, 1, 1, 1>;
-  let ones_b: merge.array.layout.Lane4I32 = <1, 1, 1, 1>;
+  let xs: merge.array.layout.Lane4I32 = #[1, 2, 3, 4];
+  let ones_a: merge.array.layout.Lane4I32 = #[1, 1, 1, 1];
+  let ones_b: merge.array.layout.Lane4I32 = #[1, 1, 1, 1];
   let result_value: Result(i32, i32) = ok(
     lane4_dot_i32(lane4_add_i32(map4_i32(inc, xs), ones_a), ones_b)
   );

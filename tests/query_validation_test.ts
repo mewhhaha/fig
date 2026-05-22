@@ -193,7 +193,13 @@ Deno.test("highlight query distinguishes collection delimiters from comparison o
   const language = await Language.load(parserUrl.pathname);
   const parser = new Parser();
   parser.setLanguage(language);
-  const source = `fn list() -> [i32, i32] { <1, 2> }`;
+  const source = `
+type fn Bag(a: type) {
+  let Bag = {sum: i32};
+  struct(Bag)
+}
+fn list() -> Bag(i32) { #[1, 2] }
+`;
   const tree = parser.parse(source);
   if (!tree) throw new Error("failed to parse collection highlight smoke source");
   const query = new Query(language, await Deno.readTextFile(new URL("highlights.scm", queriesUrl)));
@@ -204,15 +210,15 @@ Deno.test("highlight query distinguishes collection delimiters from comparison o
   }));
 
   assertEquals(
-    captures.filter(({ name, text }) => name === "punctuation.bracket" && text === "<").length,
+    captures.filter(({ name, text }) => name === "punctuation.bracket" && text === "#[").length,
     1,
   );
   assertEquals(
-    captures.filter(({ name, text }) => name === "punctuation.bracket" && text === ">").length,
+    captures.filter(({ name, text }) => name === "punctuation.bracket" && text === "]").length,
     1,
   );
-  assertEquals(captures.some(({ name, text }) => name === "constant" && text === "<"), false);
-  assertEquals(captures.some(({ name, text }) => name === "constant" && text === ">"), false);
+  assertEquals(captures.some(({ name, text }) => name === "constant" && text === "#["), false);
+  assertEquals(captures.some(({ name, text }) => name === "constant" && text === "]"), false);
 });
 
 function extractNamedNodeReferences(query: string): string[] {

@@ -486,12 +486,12 @@ Deno.test("inline array list spread literals lower as flattened slots", async ()
       const layout = @import("prelude.layout");
 
       fn tail() -> layout.InlineArrayList(2, i32) {
-        <2, 3>
+        #[2, 3]
       }
 
       fn build_list() -> layout.InlineArrayList(4, i32) {
         let rest = tail();
-        <0, 1, ...rest>
+        #[0, 1, ...rest]
       }
 
       pub fn main() -> layout.InlineArray(4, i32) {
@@ -514,7 +514,7 @@ Deno.test("indexed spread update tuple literals check fixed inline arrays", asyn
       struct(InlineArray)
     }
     pub fn main() -> InlineArray(4, i32) {
-      let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+      let xs: InlineArray(4, i32) = #[1, 2, 3, 4];
       let ys: InlineArray(4, i32) = [...xs, [1]: 32];
       ys
     }
@@ -537,7 +537,7 @@ Deno.test("indexed spread update rejects invalid fixed tuple overrides", async (
         struct(InlineArray)
       }
       pub fn Bad() -> InlineArray(4, i32) {
-        let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+        let xs: InlineArray(4, i32) = #[1, 2, 3, 4];
         [...xs, [4]: 32]
       }
     `,
@@ -550,7 +550,7 @@ Deno.test("indexed spread update rejects invalid fixed tuple overrides", async (
         struct(InlineArray)
       }
       pub fn Bad() -> InlineArray(4, i32) {
-        let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
+        let xs: InlineArray(4, i32) = #[1, 2, 3, 4];
         [...xs, [1]: true]
       }
     `,
@@ -563,8 +563,8 @@ Deno.test("indexed spread update rejects invalid fixed tuple overrides", async (
         struct(InlineArray)
       }
       pub fn Bad() -> InlineArray(4, i32) {
-        let xs: InlineArray(4, i32) = <1, 2, 3, 4>;
-        <...xs, [1]: 32>
+        let xs: InlineArray(4, i32) = #[1, 2, 3, 4];
+        #[...xs, [1]: 32]
       }
     `,
     "collection.fixed_update_square_syntax",
@@ -576,7 +576,7 @@ Deno.test("spread entries stay out of product and require inline array list tail
     `
       const layout = @import("prelude.layout");
       type fn Pair() { let Pair = {first: i32, second: i32}; struct(Pair) }
-      fn tail() -> layout.InlineArrayList(1, i32) { <2> }
+      fn tail() -> layout.InlineArrayList(1, i32) { #[2] }
       pub fn Bad() -> Pair { Pair [first: 1, ...tail()] }
     `,
     "parse.syntax",
@@ -587,7 +587,7 @@ Deno.test("spread entries stay out of product and require inline array list tail
     `
       const layout = @import("prelude.layout");
       pub fn Bad(xs: layout.InlineArray(1, i32)) -> layout.InlineArrayList(2, i32) {
-        <1, ...xs>
+        #[1, ...xs]
       }
     `,
     "collection.spread_tail_type",
@@ -689,8 +689,8 @@ Deno.test("target-typed collection literals lower through collector members", as
     fn Bag::collect_finish(const a: type, builder: Bag(a)) -> Bag(a) { builder }
     fn take(xs: Bag(i32)) -> Bag(i32) { xs }
     pub fn main() -> i32 {
-      let xs: Bag(i32) = <1, 2, 3>;
-      let ys = take(<4, 5>);
+      let xs: Bag(i32) = #[1, 2, 3];
+      let ys = take(#[4, 5]);
       xs.sum + ys.sum
     }
   `);
@@ -714,9 +714,13 @@ Deno.test("target-typed collection literals lower through collector members", as
 
 Deno.test("collection literals require target collector context", async () => {
   await assertThrowsCompile(
+    "pub fn Bad() -> i32 { <1, 2> }",
+    "syntax.collection_angle_removed",
+  );
+  await assertThrowsCompile(
     `
       pub fn Bad() -> i32 {
-        let xs = <1, 2, 3>;
+        let xs = #[1, 2, 3];
         0
       }
     `,
@@ -725,7 +729,7 @@ Deno.test("collection literals require target collector context", async () => {
   await assertThrowsCompile(
     `
       type fn Scalar() { i32 }
-      pub fn Bad() -> Scalar { <1, 2> }
+      pub fn Bad() -> Scalar { #[1, 2] }
     `,
     "collection.collector_missing",
   );
@@ -1364,7 +1368,7 @@ Deno.test("static type reflection exposes members functions scalars layouts and 
   `);
 });
 
-Deno.test("static type-list builtins support membership and row operations", async () => {
+Deno.test("static type-list builtins support membership and type-list operations", async () => {
   await checkSource(`
     type fn Reader() -> type { i32 }
     type fn State() -> type { i32 }
@@ -1404,7 +1408,7 @@ Deno.test("removed function effect reflection builtin is rejected", async () => 
   assert(!registry.staticBuiltins.has("type_fn_effects"));
 });
 
-Deno.test("static type-list builtins report missing and malformed rows", async () => {
+Deno.test("static type-list builtins report missing and malformed type lists", async () => {
   await assertThrowsCompile(
     `
       type fn Bad(a: type) -> type {
@@ -3051,6 +3055,13 @@ Deno.test("rejects external imports without IO action return", async () => {
   );
 });
 
+Deno.test("rejects declaration-only compiler builtins in expressions", async () => {
+  await assertThrowsCompile(
+    'pub fn main() -> i32 { @import("prelude.core") }',
+    "syntax.declaration_builtin",
+  );
+});
+
 Deno.test("do @io unwraps IO actions and requires final IO action", async () => {
   await checkSource(`
     const clock = @external("clock", fn(host: io) -> io(i32));
@@ -3366,7 +3377,6 @@ Deno.test("rejects removed ownership and explicit memory forms", async () => {
   await assertThrowsCompile("fn bad(x: &(i32)) -> i32 { 0 }", "parse.syntax");
   await assertThrowsCompile("pub fn main() -> i32 { let x = 1; &x }", "parse.syntax");
   await assertThrowsCompile("fn bad(x: #(i32)) -> i32 { 0 }", "parse.syntax");
-  await assertThrowsCompile("pub fn main() -> i32 { let xs = #[1, 2, 3]; 0 }", "parse.syntax");
   await assertThrowsCompile("pub fn main(mem: memory) -> i32 { 0 }", "type.unknown_type");
   await assertThrowsCompile(
     "fn bad(x: i32) -> i32 { @memory_load_i32(x, x) }",
@@ -3376,7 +3386,7 @@ Deno.test("rejects removed ownership and explicit memory forms", async () => {
   await assertThrowsCompile("fn bad(x: i32) -> i32 { @freeze(x) }", "primitive.unknown");
 });
 
-Deno.test("rejects local shadowing and preserves dependency ordering", async () => {
+Deno.test("rejects local shadowing and requires source-ordered locals", async () => {
   await checkSource(`
     fn sink(x: i32) -> i32 { x }
     pub fn main() -> i32 {
@@ -3385,13 +3395,16 @@ Deno.test("rejects local shadowing and preserves dependency ordering", async () 
       x + moved
     }
   `);
-  await checkSource(`
+  await assertThrowsCompile(
+    `
     pub fn main() -> i32 {
       let b = a + 1;
       let a = 1;
       b
     }
-  `);
+  `,
+    "type.local_order",
+  );
   await assertThrowsCompile(
     `
     pub fn main() -> i32 {
@@ -3472,7 +3485,22 @@ Deno.test("rejects local shadowing and preserves dependency ordering", async () 
       a
     }
   `,
-    "type.local_cycle",
+    "type.local_order",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Id(a: type) -> type { a }
+    fn Id::pure(value: a) -> Id(a) { value }
+    fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }
+    pub fn main() -> Id(i32) {
+      do @monad(Id(_)) {
+        let y = x + 1;
+        x <- Id::pure(1);
+        pure(y)
+      }
+    }
+  `,
+    "type.local_order",
   );
   await assertThrowsCompile(
     `
@@ -3541,7 +3569,7 @@ Deno.test("pipe bind syntax lowers through scoped bind bodies", async () => {
     fn add(a: i32, b: i32) -> i32 { a + b }
     fn mul(a: i32, b: i32) -> i32 { a * b }
     pub fn main() -> i32 {
-      1 \\$ -> inc($) \\y -> add(1, y) \\z -> mul(z, 2)
+      1 \\x -> inc(x) \\y -> add(1, y) \\z -> mul(z, 2)
     }
   `,
     { optMode: "release" },
@@ -3557,7 +3585,7 @@ Deno.test("pipe bind syntax lowers through scoped bind bodies", async () => {
     fn add(a: i32, b: i32) -> i32 { a + b }
     fn mul(a: i32, b: i32) -> i32 { a * b }
     pub fn main() -> i32 {
-      1 \\$ -> inc($) \\y -> add(1, y) \\z -> mul(z, 2)
+      1 \\x -> inc(x) \\y -> add(1, y) \\z -> mul(z, 2)
     }
   `,
         { optMode: "release" },
@@ -3565,6 +3593,13 @@ Deno.test("pipe bind syntax lowers through scoped bind bodies", async () => {
     ),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 6);
+  await assertThrowsCompile(
+    `
+    fn inc(x: i32) -> i32 { x + 1 }
+    pub fn main() -> i32 { 1 \\$ -> inc($) }
+  `,
+    "syntax.placeholder_removed",
+  );
   await assertThrowsCompile(
     "pub fn main() -> i32 { \\x -> x + 1 }",
     "const.const_fn_context",
@@ -3692,8 +3727,8 @@ Deno.test("const function literals specialize const fn parameters", async () => 
     }
     pub fn main() -> Lane4I32 { map4_i32($ + 1, [1, 2, 3, 4]) }
   `,
-    "const.placeholder_deprecated",
-    "$ + 1",
+    "syntax.placeholder_removed",
+    "$",
   );
 });
 
@@ -5899,7 +5934,7 @@ Deno.test("explainOptimization reports backend structural fixed-array layout dec
       read(layout.InlineArray::set(4, u3, xs, index, 7), index)
     }
     pub fn main(index: i32) -> i32 {
-      bump_read(<1, 2, 3, 4>, index)
+      bump_read(#[1, 2, 3, 4], index)
     }
   `;
 
@@ -5921,7 +5956,7 @@ Deno.test("explainOptimization reports packed local-slot and scratch fixed-array
       read(layout.InlineArray::set(4, u3, xs, index, 7), index)
     }
     pub fn main(index: i32) -> i32 {
-      bump_read(<1, 2, 3, 4>, index)
+      bump_read(#[1, 2, 3, 4], index)
     }
   `;
   const localSlotSource = `
@@ -5936,7 +5971,7 @@ Deno.test("explainOptimization reports packed local-slot and scratch fixed-array
       }
     }
     pub fn main() -> i32 {
-      let out = loop(0, <0, 0, 0, 0>);
+      let out = loop(0, #[0, 0, 0, 0]);
       out[0]
     }
   `;
@@ -5952,7 +5987,7 @@ Deno.test("explainOptimization reports packed local-slot and scratch fixed-array
       }
     }
     pub fn main(i: i32) -> i32 {
-      let out = loop(0, <0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>);
+      let out = loop(0, #[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
       out[i]
     }
   `;

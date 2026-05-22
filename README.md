@@ -53,7 +53,7 @@ Type functions currently cover several compile-time concepts:
   `#debug` as erased value contracts. Prefer APIs like
   `fn ask(env: Env) ->
   effect.Reader(effects, Env)` so callers rely on inference instead of
-  passing separate row and proof const arguments.
+  passing separate capability-list and proof const arguments.
 - Value-layout modeling: examples encode products, sums, fixed inline buffers, compact arrays, and
   static constraints as compile-time type-function contracts.
 

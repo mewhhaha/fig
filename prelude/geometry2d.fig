@@ -103,7 +103,7 @@ fn quad2d_rect(
   let color1 = color01;
   let color2 = color23;
   let color3 = color23;
-  <vertex2d(vec3(x00, y00, z0), vec2(0, 0), color0), vertex2d(
+  #[vertex2d(vec3(x00, y00, z0), vec2(0, 0), color0), vertex2d(
     vec3(x11, y01, z1),
     vec2(1, 0),
     color1
@@ -111,7 +111,7 @@ fn quad2d_rect(
     vec3(x03, y13, z3),
     vec2(0, 1),
     color3
-  )>
+  )]
 }
 
 fn quad2d_translate(
@@ -120,7 +120,7 @@ fn quad2d_translate(
   dy: i32,
   dz: i32
 ) -> Quad2dI32 {
-  <Vertex2dI32 {
+  #[Vertex2dI32 {
     x: q[0].x + dx,
     y: q[0].y + dy,
     z: q[0].z + dz,
@@ -148,7 +148,7 @@ fn quad2d_translate(
     u: q[3].u,
     v: q[3].v,
     rgba: q[3].rgba
-  }>
+  }]
 }
 
 fn emit_quad2d(q: Quad2dI32) -> Geometry2dI32 {
@@ -188,11 +188,11 @@ fn emit_quad2d_batch(
 
 fn empty_geometry2d() -> Geometry2dI32 {
   Geometry2dI32 {
-    vertices: <Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0},
+    vertices: #[Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0},
       Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0},
       Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0},
       Vertex2dI32 {x: 0, y: 0, z: 0, u: 0, v: 0, rgba: 0}
-    >,
+    ],
     vertex_count: 0
   }
 }

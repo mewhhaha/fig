@@ -16,18 +16,18 @@ fn dot4(a: Lane4I32, b: Lane4I32) -> i32 {
 }
 
 pub fn main(a: Mat4I32, b: Mat4I32) -> Mat4I32 {
-  let r0: Lane4I32 = <a[0], a[1], a[2], a[3]>;
-  let r1: Lane4I32 = <a[4], a[5], a[6], a[7]>;
-  let r2: Lane4I32 = <a[8], a[9], a[10], a[11]>;
-  let r3: Lane4I32 = <a[12], a[13], a[14], a[15]>;
-  let c0: Lane4I32 = <b[0], b[4], b[8], b[12]>;
-  let c1: Lane4I32 = <b[1], b[5], b[9], b[13]>;
-  let c2: Lane4I32 = <b[2], b[6], b[10], b[14]>;
-  let c3: Lane4I32 = <b[3], b[7], b[11], b[15]>;
-  <
+  let r0: Lane4I32 = #[a[0], a[1], a[2], a[3]];
+  let r1: Lane4I32 = #[a[4], a[5], a[6], a[7]];
+  let r2: Lane4I32 = #[a[8], a[9], a[10], a[11]];
+  let r3: Lane4I32 = #[a[12], a[13], a[14], a[15]];
+  let c0: Lane4I32 = #[b[0], b[4], b[8], b[12]];
+  let c1: Lane4I32 = #[b[1], b[5], b[9], b[13]];
+  let c2: Lane4I32 = #[b[2], b[6], b[10], b[14]];
+  let c3: Lane4I32 = #[b[3], b[7], b[11], b[15]];
+  #[
     dot4(r0, c0), dot4(r0, c1), dot4(r0, c2), dot4(r0, c3),
     dot4(r1, c0), dot4(r1, c1), dot4(r1, c2), dot4(r1, c3),
     dot4(r2, c0), dot4(r2, c1), dot4(r2, c2), dot4(r2, c3),
     dot4(r3, c0), dot4(r3, c1), dot4(r3, c2), dot4(r3, c3)
-  >
+  ]
 }

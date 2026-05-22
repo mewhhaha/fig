@@ -20,7 +20,7 @@ Deno.test("prelude fragments compose by concatenation", async () => {
     ${await fragment("array_static")}
 
     fn inc(x: i32) -> i32 { x + 1 }
-    pub fn main() -> Lane4I32 { map4_i32(inc, <1, 2, 3, 4>) }
+    pub fn main() -> Lane4I32 { map4_i32(inc, #[1, 2, 3, 4]) }
   `);
 });
 
@@ -191,9 +191,9 @@ Deno.test("prelude std imports common data layout function and schedule fragment
     pub fn main() -> i32 {
       let dims: Pair(i32, i32) = Pair {first: 2, second: 4};
       let triple: Tuple3(i32, i32, i32) = Tuple3 {first: 1, second: 2, third: 3};
-      let lanes: Lane4I32 = map4_i32(inc, <1, 2, 3, 4>);
+      let lanes: Lane4I32 = map4_i32(inc, #[1, 2, 3, 4]);
       let schedule_tile: Tile2x4 = {rows: 2, cols: 4};
-      let matrix: Mat4I32 = mat4_rows_i32(lanes, <1, 2, 3, 4>, <5, 6, 7, 8>, <9, 10, 11, 12>);
+      let matrix: Mat4I32 = mat4_rows_i32(lanes, #[1, 2, 3, 4], #[5, 6, 7, 8], #[9, 10, 11, 12]);
       dims.first + dims.second + Triple.third + matrix[0][0] + schedule_tile.rows
     }
     `,
@@ -213,7 +213,7 @@ Deno.test("prelude std exposes pure fixed collection helpers", async () => {
     fn keep(x: i32) -> bool { x > 2 }
 
     pub fn main() -> i32 {
-      let xs: array.layout.Lane4I32 = <1, 2, 3, 4>;
+      let xs: array.layout.Lane4I32 = #[1, 2, 3, 4];
       let mapped = array.map4_i32(inc, xs);
       let zipped = array.zip_with4_i32(add, mapped, xs);
       let folded = array.fold4_i32(sum, 0, xs);
@@ -1183,7 +1183,7 @@ Deno.test("Lane4I32 lowers to four scalar Wasm results", async () => {
     `
     const array = @import("prelude.array_static");
     fn inc(x: i32) -> i32 { x + 1 }
-    pub fn main() -> array.layout.Lane4I32 { array.map4_i32(inc, <1, 2, 3, 4>) }
+    pub fn main() -> array.layout.Lane4I32 { array.map4_i32(inc, #[1, 2, 3, 4]) }
   `,
     { resolveModule, optMode: "release" },
   );
@@ -1215,7 +1215,7 @@ Deno.test("fold4 and reduce4 specialize reducers", async () => {
     const array = @import("prelude.array_static");
     fn add(a: i32, b: i32) -> i32 { a + b }
     pub fn main() -> i32 {
-      array.fold4_i32(add, 0, <1, 2, 3, 4>) + array.reduce4_i32(add, <1, 2, 3, 4>)
+      array.fold4_i32(add, 0, #[1, 2, 3, 4]) + array.reduce4_i32(add, #[1, 2, 3, 4])
     }
   `,
     { resolveModule, optMode: "release" },
@@ -1232,8 +1232,8 @@ Deno.test("lane arithmetic patterns emit scalar arithmetic without helper calls"
     `
     const merge = @import("prelude.std");
     pub fn main(seed: i32) -> i32 {
-      let xs: merge.array.layout.Lane4I32 = <seed, 2, 3, 4>;
-      let ys: merge.array.layout.Lane4I32 = <5, 6, 7, 8>;
+      let xs: merge.array.layout.Lane4I32 = #[seed, 2, 3, 4];
+      let ys: merge.array.layout.Lane4I32 = #[5, 6, 7, 8];
       let zs: merge.array.layout.Lane4I32 = [
         (xs[0] + ys[0]) * 1,
         (xs[1] + ys[1]) * 1,
@@ -1249,8 +1249,8 @@ Deno.test("lane arithmetic patterns emit scalar arithmetic without helper calls"
     `
     const merge = @import("prelude.std");
     pub fn main(seed: i32) -> i32 {
-      let xs: merge.array.layout.Lane4I32 = <seed, 2, 3, 4>;
-      let ys: merge.array.layout.Lane4I32 = <5, 6, 7, 8>;
+      let xs: merge.array.layout.Lane4I32 = #[seed, 2, 3, 4];
+      let ys: merge.array.layout.Lane4I32 = #[5, 6, 7, 8];
       let zs: merge.array.layout.Lane4I32 = [
         (xs[0] + ys[0]) * 1,
         (xs[1] + ys[1]) * 1,
@@ -1283,7 +1283,7 @@ Deno.test("Lane4I32 helper surface checks queries reductions transforms and shap
     fn even(x: i32) -> bool { x % 2 == 0 }
     fn positive(x: i32) -> bool { x > 0 }
     pub fn main() -> i32 {
-      let xs: Lane4I32 = <1, 2, 3, 4>;
+      let xs: Lane4I32 = #[1, 2, 3, 4];
       let set = lane4_set_i32(xs, 1, 9);
       let updated = lane4_update_i32(xs, 2, inc);
       let replaced = lane4_replace_where_i32(xs, even, 0);
@@ -1296,14 +1296,14 @@ Deno.test("Lane4I32 helper surface checks queries reductions transforms and shap
       let missing = match lane4_index_of_i32(xs, 7) { Some(value) => value, None => 5 };
       let invalid = lane4_set_i32(xs, 9, 99);
       let predicates = match lane4_any_i32(xs, even) {
-        true => match lane4_all_i32(xs, positive) { true => lane4_count_i32(<1, 2, 3, 4>, even), false => 0 },
+        true => match lane4_all_i32(xs, positive) { true => lane4_count_i32(#[1, 2, 3, 4], even), false => 0 },
         false => 0,
       };
-      lane4_length_i32(<1, 2, 3, 4>) +
-        lane4_sum_i32(<1, 2, 3, 4>) +
-        lane4_product_i32(<1, 2, 3, 4>) +
-        lane4_min_i32(<7, 2, 9, 4>) +
-        lane4_max_i32(<7, 2, 9, 4>) +
+      lane4_length_i32(#[1, 2, 3, 4]) +
+        lane4_sum_i32(#[1, 2, 3, 4]) +
+        lane4_product_i32(#[1, 2, 3, 4]) +
+        lane4_min_i32(#[7, 2, 9, 4]) +
+        lane4_max_i32(#[7, 2, 9, 4]) +
         set[1] + updated[2] + replaced[1] + taken[1] + dropped[0] +
         reversed[0] + left[3] + right[0] + found + missing + invalid[1] +
         predicates
@@ -1319,9 +1319,9 @@ Deno.test("compact_array helpers check len guards and fixed capacity", async () 
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     fn even(x: i32) -> bool { x % 2 == 0 }
     pub fn main() -> i32 {
-      let empty: CompactArray(4, i32) = CompactArray {items: <9, 9, 9, 9>, len: 0};
-      let part: CompactArray(4, i32) = CompactArray {items: <2, 4, 8, 16>, len: 2};
-      let full: CompactArray(4, i32) = CompactArray {items: <1, 2, 3, 4>, len: 4};
+      let empty: CompactArray(4, i32) = CompactArray {items: #[9, 9, 9, 9], len: 0};
+      let part: CompactArray(4, i32) = CompactArray {items: #[2, 4, 8, 16], len: 2};
+      let full: CompactArray(4, i32) = CompactArray {items: #[1, 2, 3, 4], len: 4};
       let mapped = CompactArray::map(4, i32, i32, part, inc);
       let in_bounds = match CompactArray::get(4, i32, mapped, 1) { Some(value) => value, None => 0 };
       let out_bounds = match CompactArray::get(4, i32, mapped, 2) { Some(value) => value, None => 7 };
@@ -1338,9 +1338,9 @@ Deno.test("generic compact_array supports bounded literals and push overflow", a
     const array = @import("prelude.array_static");
 
     pub fn main() -> i32 {
-      let xs: array.CompactArray(5, i32) = <1, 2, 3>;
+      let xs: array.CompactArray(5, i32) = #[1, 2, 3];
       let pushed = array.CompactArray::push(5, i32, xs, 4);
-      let full: array.CompactArray(2, bool) = <true, false>;
+      let full: array.CompactArray(2, bool) = #[true, false];
       let overflowed = array.CompactArray::push(2, bool, full, true);
       let full_value = match array.CompactArray::is_full(2, bool, full) {
         true => 1,
@@ -1364,7 +1364,7 @@ Deno.test("compact_array collection literals reject items past capacity", async 
     `
     const array = @import("prelude.array_static");
     pub fn Bad() -> array.CompactArray(2, i32) {
-      <1, 2, 3>
+      #[1, 2, 3]
     }
     `,
     "collection.capacity",
@@ -1379,7 +1379,7 @@ Deno.test("iterator convenience helpers check and fuse", async () => {
     fn keep(x: i32) -> bool { x > 2 }
     fn small(x: i32) -> bool { x < 5 }
     pub fn main() -> i32 {
-      let xs = InlineArray::Iter(<1, 2, 3, 4>).filter(keep).map(inc);
+      let xs = InlineArray::Iter(#[1, 2, 3, 4]).filter(keep).map(inc);
       let any_value = match xs.any(small) { true => 1, false => 0 };
       let all_value = match xs.all(small) { true => 2, false => 0 };
       any_value + all_value + xs.count() + xs.sum()
@@ -1400,7 +1400,7 @@ Deno.test("inline array iterators support explicit attached dispatch", async () 
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main() -> i32 {
-      Iter::fold(Iter::map(InlineArray::Iter(<1, 2, 3, 4>), inc), 0, add)
+      Iter::fold(Iter::map(InlineArray::Iter(#[1, 2, 3, 4]), inc), 0, add)
     }
   `,
     { resolveModule },
@@ -1419,7 +1419,7 @@ Deno.test("fluent inline array iterator chains preserve receivers and fuse", asy
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     pub fn main() -> i32 {
-      InlineArray::Iter(<1, 2, 3, 4>).map(inc).reverse().fold(0, add)
+      InlineArray::Iter(#[1, 2, 3, 4]).map(inc).reverse().fold(0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
@@ -1438,7 +1438,7 @@ Deno.test("inline array iterator filter map fold fuses and runs", async () => {
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      array.Iter::fold(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(<1, 2, 3, 4>), keep), inc), 0, add)
+      array.Iter::fold(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(#[1, 2, 3, 4]), keep), inc), 0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
@@ -1462,7 +1462,7 @@ Deno.test("pipe-bound fluent iterator chains resolve receivers and fuse", async 
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      array.layout.InlineArray::Iter(<1, 2, 3, 4>) \\$ -> array.Iter::fold(array.Iter::map(array.Iter::filter($, keep), inc), 0, add)
+      array.layout.InlineArray::Iter(#[1, 2, 3, 4]) \\iter -> array.Iter::fold(array.Iter::map(array.Iter::filter(iter, keep), inc), 0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
@@ -1485,7 +1485,7 @@ Deno.test("inline array iterator filter collect compacts valid prefix", async ()
     fn inc(x: i32) -> i32 { x + 1 }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      let out: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(<1, 2, 3, 4>), keep), inc));
+      let out: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(#[1, 2, 3, 4]), keep), inc));
       out.len + out.items[0] + out.items[1] + out.items[2]
     }
   `;

@@ -115,8 +115,8 @@ const simdDot1Source = `
   }
 
   pub fn main(seed: i32) -> i32 {
-    let row: Lane4I32 = <1 + seed - seed, 2, 3, 4>;
-    let col: Lane4I32 = <1, 5, 9, 13>;
+    let row: Lane4I32 = #[1 + seed - seed, 2, 3, 4];
+    let col: Lane4I32 = #[1, 5, 9, 13];
     row[0] * col[0] + row[1] * col[1] + row[2] * col[2] + row[3] * col[3]
   }
 `;
@@ -295,7 +295,7 @@ const figScenarios: FigScenario[] = [
       fn inc(x: i32) -> i32 { x + 1 }
       fn keep(x: i32) -> bool { x > 2 }
       pub fn main(seed: i32) -> i32 {
-        let xs: array.layout.Lane4I32 = <1, 2, 3, 4>;
+        let xs: array.layout.Lane4I32 = #[1, 2, 3, 4];
         let out: array.CompactArray(4, i32) = array.Iter::collect(
           array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(xs), keep), inc)
         );
@@ -389,7 +389,7 @@ const figScenarios: FigScenario[] = [
     source: `
       const layout = @import("prelude.layout");
       pub fn main(seed: i32) -> i32 {
-        let xs: layout.InlineArray(16, i32) = <1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>;
+        let xs: layout.InlineArray(16, i32) = #[1 + seed - seed, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let ys: layout.InlineArray(16, i32) = [...xs, [7]: xs[7] + 3];
         xs[7] + ys[7] + ys[15]
       }
@@ -646,14 +646,14 @@ const figScenarios: FigScenario[] = [
     source: `${simdMat4Source.replace("pub fn main(", "fn mat4_main(")}
       pub fn main(seed: i32) -> i32 {
         let result = mat4_main(
-          <1 + seed - seed, 2, 3, 4>,
-          <5, 6, 7, 8>,
-          <9, 10, 11, 12>,
-          <13, 14, 15, 16>,
-          <1, 5, 9, 13>,
-          <2, 6, 10, 14>,
-          <3, 7, 11, 15>,
-          <4, 8, 12, 16>
+          #[1 + seed - seed, 2, 3, 4],
+          #[5, 6, 7, 8],
+          #[9, 10, 11, 12],
+          #[13, 14, 15, 16],
+          #[1, 5, 9, 13],
+          #[2, 6, 10, 14],
+          #[3, 7, 11, 15],
+          #[4, 8, 12, 16]
         );
         result[0][0] + result[0][1] + result[0][2] + result[0][3] +
           result[1][0] + result[1][1] + result[1][2] + result[1][3] +
@@ -1078,7 +1078,7 @@ fn tail_product_loop_1k(seed: i32) -> i32 {
 }
 
 fn inline_array_builder_map(seed: i32) -> i32 {
-    let xs = std::array::from_fn::<_, 16, _>(|i| black_box(i as i32 + 1));
+    let xs = std::array::from_fn::<_, 16, _](|i| black_box(i as i32 + 1));
     let ys = xs.map(|x| black_box(x + 1));
     ys[0] + ys[15] + seed - seed
 }
@@ -1121,7 +1121,7 @@ fn alias_snapshot_update(seed: i32) -> i32 {
 }
 
 fn fixed_collection_update(seed: i32) -> i32 {
-    let xs = std::array::from_fn::<_, 16, _>(|i| black_box(i as i32 + 1));
+    let xs = std::array::from_fn::<_, 16, _](|i| black_box(i as i32 + 1));
     let mut ys = xs;
     ys[(seed - seed + 7) as usize] = black_box(ys[(seed - seed + 7) as usize] + 3);
     xs[7] + ys[7] + ys[15]

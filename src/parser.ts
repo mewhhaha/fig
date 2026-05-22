@@ -20,9 +20,14 @@ export async function parse(source: string, options: ParseOptions = {}): Promise
   );
   if (!result.ok || !result.tree) {
     const diagnostic = result.diagnostics[0];
+    const code = looksLikeRemovedAngleCollection(source)
+      ? "syntax.collection_angle_removed"
+      : "parse.syntax";
     fail(
-      "parse.syntax",
-      diagnostic?.message ?? "syntax error",
+      code,
+      code === "syntax.collection_angle_removed"
+        ? "angle-bracket collection literals have been removed; use #[...]"
+        : diagnostic?.message ?? "syntax error",
       diagnostic?.span
         ? lines.span(diagnostic.span.start, diagnostic.span.end, options.sourceId)
         : undefined,
@@ -47,6 +52,13 @@ export async function parse(source: string, options: ParseOptions = {}): Promise
     () => lowerProgram(adapted, docs, options.sourceId),
     programTraceCounters,
   );
+}
+
+function looksLikeRemovedAngleCollection(source: string): boolean {
+  return /(^|[=(:,{\[]|\breturn\b)\s*<\s*(?:[0-9]|true\b|false\b|\.\.\.|[A-Za-z_][A-Za-z0-9_]*\s*[,+-])[\s\S]{0,200}>/
+    .test(
+      source,
+    );
 }
 
 function adaptNode(source: string, node: ParseNode, lines: SourceLineMap): SyntaxNodeLike {
