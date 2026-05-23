@@ -6,12 +6,6 @@ The Fig language server runs over stdio and is editor-neutral:
 deno task lsp
 ```
 
-From JSR, run the exported LSP entry point:
-
-```sh
-deno run --allow-read jsr:@mewhhaha/fig/lsp
-```
-
 From a GitHub Release binary, run:
 
 ```sh
@@ -44,22 +38,6 @@ formatter = { command = "deno", args = ["run", "--allow-read", "src/cli.ts", "fm
 auto-format = true
 ```
 
-For a JSR-installed configuration, use the exported package entry points:
-
-```toml
-[language-server.fig-lsp]
-command = "deno"
-args = ["run", "--allow-read", "jsr:@mewhhaha/fig/lsp"]
-
-[[language]]
-name = "fig"
-scope = "source.fig"
-file-types = ["fig"]
-language-servers = ["fig-lsp"]
-formatter = { command = "deno", args = ["run", "--allow-read", "jsr:@mewhhaha/fig/cli", "fmt", "-"] }
-auto-format = true
-```
-
 For a GitHub Release binary on `PATH`, use:
 
 ```toml
@@ -73,6 +51,22 @@ scope = "source.fig"
 file-types = ["fig"]
 language-servers = ["fig-lsp"]
 formatter = { command = "fig", args = ["fmt", "-"] }
+auto-format = true
+```
+
+For a source checkout without `deno task`, point directly at the entry points:
+
+```toml
+[language-server.fig-lsp]
+command = "deno"
+args = ["run", "--allow-read", "src/lsp/main.ts"]
+
+[[language]]
+name = "fig"
+scope = "source.fig"
+file-types = ["fig"]
+language-servers = ["fig-lsp"]
+formatter = { command = "deno", args = ["run", "--allow-read", "src/cli.ts", "fmt", "-"] }
 auto-format = true
 ```
 

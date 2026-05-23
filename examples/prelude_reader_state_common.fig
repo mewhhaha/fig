@@ -1,0 +1,39 @@
+const monad = @import("prelude.monad");
+
+type fn Config() -> type {
+  let Config = {step: i32};
+  struct(Config)
+}
+
+type fn Counter() -> type {
+  let Counter = {count: i32};
+  struct(Counter)
+}
+
+fn config_step(config: Config) -> i32 {
+  config.step
+}
+
+fn read_step() -> monad.Reader(Config, i32) {
+  do @monad(monad.Reader(Config, _)) {
+    current <- monad.Reader::ask();
+    monad.Reader::pure(config_step(current))
+  }
+}
+
+fn update(config: Config) -> monad.State(Counter, Counter) {
+  let step = read_step()
+    \program -> monad.Reader::run(program, config);
+  do @monad(monad.State(Counter, _)) {
+    counter <- monad.State::get();
+    let next = Counter {count: counter.count + step};
+    monad.State::put(next);
+    monad.State::get()
+  }
+}
+
+pub fn main() -> i32 {
+  let counter = update(Config {step: 7})
+    \program -> monad.State::eval(program, Counter {count: 35});
+  counter.count
+}

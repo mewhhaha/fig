@@ -39,13 +39,8 @@ type fn Functor(t: type fn(a: type) -> type) -> type {
   t
 }
 
-type fn LawfulFunctor(t: type fn(a: type) -> type) -> type {
-  Functor(t);
-  t
-}
-
-contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
-  const proof = LawfulFunctor(T);
+contract fn Functor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
+  const proof = Functor(T);
   @assume(\x -> T::map(identity, x), \x -> x)
 }
 
@@ -80,24 +75,18 @@ type fn Applicative(t: type fn(a: type) -> type) -> type {
   t
 }
 
-type fn LawfulApplicative(t: type fn(a: type) -> type) -> type {
-  Applicative(t);
-  LawfulFunctor(t);
-  t
-}
-
-contract fn LawfulApplicative::apply_pure_identity(
+contract fn Applicative::apply_pure_identity(
 const T: type fn(a: type) -> type) -> rewrite {
-  const proof = LawfulApplicative(T);
+  const proof = Applicative(T);
   @assume(
     \x -> T::apply(T::pure(identity), x),
     \x -> x
   )
 }
 
-contract fn LawfulApplicative::apply_pure(
+contract fn Applicative::apply_pure(
 const T: type fn(a: type) -> type) -> rewrite {
-  const proof = LawfulApplicative(T);
+  const proof = Applicative(T);
   @assume(
     \(f, x) -> T::apply(T::pure(f), x),
     \(f, x) -> T::map(f, x)
@@ -134,22 +123,16 @@ type fn Monad(t: type fn(a: type) -> type) -> type {
   t
 }
 
-type fn LawfulMonad(t: type fn(a: type) -> type) -> type {
-  Monad(t);
-  LawfulApplicative(t);
-  t
-}
-
-contract fn LawfulMonad::bind_pure_left(const T: type fn(a: type) -> type) -> rewrite {
-  const proof = LawfulMonad(T);
+contract fn Monad::bind_pure_left(const T: type fn(a: type) -> type) -> rewrite {
+  const proof = Monad(T);
   @assume(
     \(x, f) -> T::bind(T::pure(x), f),
     \(x, f) -> f(x)
   )
 }
 
-contract fn LawfulMonad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
-  const proof = LawfulMonad(T);
+contract fn Monad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
+  const proof = Monad(T);
   @assume(\m -> T::bind(m, T::pure), \m -> m)
 }
 

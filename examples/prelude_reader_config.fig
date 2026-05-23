@@ -1,0 +1,25 @@
+const monad = @import("prelude.monad");
+
+type fn Config() -> type {
+  let Config = {base: i32, multiplier: i32};
+  struct(Config)
+}
+
+fn config_base(config: Config) -> i32 {
+  config.base
+}
+
+fn config_multiplier(config: Config) -> i32 {
+  config.multiplier
+}
+
+fn score(value: i32) -> monad.Reader(Config, i32) {
+  do @monad(monad.Reader(Config, _)) {
+    current <- monad.Reader::ask();
+    monad.Reader::pure(config_base(current) + value * config_multiplier(current))
+  }
+}
+
+pub fn main() -> i32 {
+  monad.Reader::run(score(8), Config {base: 10, multiplier: 4})
+}

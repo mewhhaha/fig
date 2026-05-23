@@ -348,6 +348,10 @@ Attached members use qualified function names, are discoverable through type ref
 called statically as `t::map(...)` inside generic code. Local proof consts such as
 `const Mapper = Functor(t);` are erased after they prove the contract.
 
+Prelude contracts such as `Eq(t)`, `Functor(t)`, `Applicative(t)`, `Monad(t)`, and `Monoid(t)` carry
+their law rewrite assumptions directly. Do not introduce or use a separate `LawfulX` contract for
+those standard proofs.
+
 Const dictionaries are product-shaped constants whose fields are function references:
 
 ```fig
@@ -545,8 +549,9 @@ let world = do @monad(State(World, _)) {
 }
 ```
 
-Use explicit `Reader` helpers such as `Reader::ask(env)` and `Reader::asks(env, f)` for read-only
-context flows. Product-return destructuring uses multi-bind:
+Use explicit `Reader` helpers for read-only context flows. `Reader::ask(env)` is the broadest
+pattern; `Reader::asks(env, f)` is useful when `f` is a top-level function known at the call site.
+Product-return destructuring uses multi-bind:
 
 ```fig
 let first, second = make_pair();
@@ -570,8 +575,8 @@ pub fn main(host: io) -> io(i32) {
 ```
 
 Host imports take the `io` executor value explicitly and lower to Wasm imports from module `env`.
-Use `prelude.effect` capability lists such as `effect.Eff({#debug}, A)` for ordinary library-level
-effect modeling.
+Use typed `prelude.effect` rows such as `effect.Eff({state: Store, reader: Env}, A)` for
+library-level reader/state effect modeling, and handle them with `run_state` and `run_reader`.
 
 ## Heap Runtime Intrinsics
 

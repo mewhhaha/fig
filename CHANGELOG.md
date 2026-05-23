@@ -2,7 +2,7 @@
 
 ## 0.0.1
 
-- Initial Fig compiler package for JSR.
+- Initial Fig compiler release.
 - CLI entry point for checking, formatting, WAT output, Wasm builds, running import-free examples,
   and stdio LSP mode.
 - GitHub Release binary workflow for Linux, macOS, and Windows artifacts.

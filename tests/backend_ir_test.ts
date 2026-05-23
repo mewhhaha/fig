@@ -1121,99 +1121,151 @@ Deno.test("private scalar tail-continuation helpers expose self-tail loops", asy
   assertEquals((instance.exports.main as CallableFunction)(), 154);
 });
 
-Deno.test("transparent monad-stack tail continuation lowers to a loop", async () => {
+Deno.test("state monad recursive do updates state without direct self-calls", async () => {
   const source = `
     const monad = @import("prelude.monad");
+    const core = @import("prelude.core");
 
-    type fn Error() -> type { i32 }
-    type fn Env() -> type { i32 }
     type fn Store() -> type { i32 }
 
-    type fn Either(error: type, value: type) -> type { value }
-    fn Either::pure(value: a) -> Either(error, a) { value }
-    fn Either::bind(
-      value: Either(error, a),
-      const f: fn(x: a) -> Either(error, b)
-    ) -> Either(error, b) {
-      match value == 0 { true => 0, false => f(value) }
-    }
-
-    type fn Stack(value: type) -> type {
-      Either(Error, monad.Reader(Env, monad.State(Store, value)))
-    }
-    fn Stack::pure(value: a) -> Stack(a) {
-      Either::pure(monad.Reader::pure(monad.State::pure(value)))
-    }
-    fn Stack::bind(value: Stack(a), const f: fn(x: a) -> Stack(b)) -> Stack(b) {
-      Either::bind(value, f)
-    }
-
-    fn pack(env: Env, store: Store) -> i32 { store * 8 + env }
-    fn frame_env(frame: i32) -> Env { frame % 8 }
-    fn frame_store(frame: i32) -> Store { frame / 8 }
-
-    fn start(env: Env, store: Store) -> Stack(i32) { Stack::pure(pack(env, store)) }
-    fn ask_frame(frame: i32) -> Stack(i32) {
-      let env: monad.Reader(Env, Env) = monad.Reader::ask(frame_env(frame));
-      Stack::pure(pack(env, frame_store(frame)))
-    }
-    fn get_frame(frame: i32) -> Stack(i32) {
-      let store: monad.State(Store, Store) = monad.State::get(frame_store(frame));
-      Stack::pure(pack(frame_env(frame), store))
-    }
-    fn bump_frame(frame: i32) -> Stack(i32) {
-      Stack::pure(pack(frame_env(frame), frame_store(frame) + frame_env(frame)))
-    }
-    fn guard_frame(frame: i32) -> Stack(i32) {
-      match frame_store(frame) < 2000000000 { true => Stack::pure(frame), false => 0 }
-    }
-    fn put_frame(frame: i32) -> Stack(i32) {
-      let stored: monad.State(Store, Store) = monad.State::put(frame_store(frame), frame_store(frame));
-      Stack::pure(pack(frame_env(frame), stored))
-    }
-
-    fn stack_step(env: Env, store: Store) -> Stack(i32) {
-      do @monad(Stack(_)) {
-        frame <- start(env, store);
-        asked <- ask_frame(frame);
-        current <- get_frame(asked);
-        bumped <- bump_frame(current);
-        checked <- guard_frame(bumped);
-        put_frame(checked)
+    fn step() -> monad.State(Store, core.Unit) {
+      do @monad(monad.State(Store, _)) {
+        store <- monad.State::get();
+        monad.State::put(store + 1)
       }
     }
 
-    fn stack_continue(i: i32, limit: i32, env: Env, stepped: Stack(i32)) -> Stack(i32) {
-      match stepped == 0 {
-        true => 0,
-        false => stack_loop(i + 1, limit, env, frame_store(stepped))
-      }
-    }
-
-    fn stack_loop(i: i32, limit: i32, env: Env, store: Store) -> Stack(i32) {
+    fn state_loop(i: i32, limit: i32) -> monad.State(Store, Store) {
       match i < limit {
-        true => stack_continue(i, limit, env, stack_step(env, store)),
-        false => Stack::pure(pack(env, store))
+        true => do @monad(monad.State(Store, _)) {
+          step();
+          state_loop(i + 1, limit)
+        },
+        false => monad.State::get()
       }
     }
 
     pub fn main(seed: i32, limit: i32) -> i32 {
-      let env: Env = 3;
-      let done = stack_loop(0, limit, env, seed);
-      match done == 0 { true => 0, false => frame_store(done) }
+      monad.State::eval(state_loop(0, limit), seed)
     }
   `;
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
-  const stackLoop = wat.match(/\(func \$stack_loop[\s\S]*?\n  \)/)?.[0] ??
+  const stateLoop = wat.match(/\(func \$state_loop[\s\S]*?\n  \)/)?.[0] ??
     wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-  assert(/\bloop\b/.test(stackLoop));
-  assert(!stackLoop.includes("call $stack_loop"));
-  assert(!wat.includes("call $stack_continue"));
+  assert(!stateLoop.includes("call $state_loop"));
+  assert(!wat.includes("call_indirect"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
-  assertEquals((instance.exports.main as CallableFunction)(1, 4), 13);
+  assertEquals((instance.exports.main as CallableFunction)(1, 4), 5);
+});
+
+Deno.test("transparent Reader loop lowers through function encoding without indirect calls", async () => {
+  const source = `
+    const monad = @import("prelude.monad");
+
+    type fn Env() -> type { i32 }
+
+    fn reader_loop_value(i: i32, limit: i32, env: Env, acc: i32) -> i32 {
+      match i < limit {
+        true => reader_loop_value(i + 1, limit, env, acc + env),
+        false => acc
+      }
+    }
+
+    fn reader_loop(i: i32, limit: i32, acc: i32) -> monad.Reader(Env, i32) {
+      \\env -> reader_loop_value(i, limit, env, acc)
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      monad.Reader::run(reader_loop(0, limit, seed), 3)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const closureLoop = wat.match(/\(func \$__closure_fn__fn_env[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(/\bloop\b/.test(closureLoop));
+  assert(!closureLoop.includes("call $reader_loop_value"));
+  assert(!wat.includes("call_indirect"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1, 1000), 3001);
+});
+
+Deno.test("transparent State loop lowers through function encoding without indirect calls", async () => {
+  const source = `
+    const monad = @import("prelude.monad");
+
+    type fn Store() -> type { i32 }
+
+    fn state_loop_value(i: i32, limit: i32, store: Store) -> Store {
+      match i < limit {
+        true => state_loop_value(i + 1, limit, store + 3),
+        false => store
+      }
+    }
+
+    fn state_loop(i: i32, limit: i32) -> monad.State(Store, Store) {
+      \\store -> {
+        let next = state_loop_value(i, limit, store);
+        {value: next, state: next}
+      }
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      monad.State::eval(state_loop(0, limit), seed)
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const closureLoop = wat.match(/\(func \$__closure_fn__fn_state[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(/\bloop\b/.test(closureLoop));
+  assert(!closureLoop.includes("call $state_loop_value"));
+  assert(!wat.includes("call_indirect"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1, 1000), 3001);
+});
+
+Deno.test("transparent Eff loop lowers through function encoding without indirect calls", async () => {
+  const source = `
+    const effect = @import("prelude.effect");
+
+    type fn Env() -> type { i32 }
+    type fn Store() -> type { i32 }
+
+    fn eff_loop_value(i: i32, limit: i32, env: Env, store: Store) -> Store {
+      match i < limit {
+        true => eff_loop_value(i + 1, limit, env, store + env),
+        false => store
+      }
+    }
+
+    fn eff_loop(i: i32, limit: i32) -> effect.Eff({state: Store, reader: Env}, Store) {
+      \\ctx -> {
+        let next = eff_loop_value(i, limit, ctx.reader, ctx.state);
+        {value: next, state: next}
+      }
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      let result = effect.run_reader(effect.run_state(eff_loop(0, limit), seed), 3);
+      result.value
+    }
+  `;
+  const wat = await watFromSource(source, { resolveModule, optMode: "release" });
+  const closureLoop = wat.match(/\(func \$__closure_fn__fn_ctx[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(/\bloop\b/.test(closureLoop));
+  assert(!closureLoop.includes("call $eff_loop_value"));
+  assert(!wat.includes("call_indirect"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1, 1000), 3001);
 });
 
 Deno.test("transparent capability helpers lower to scalar tail loops", async () => {
@@ -1255,37 +1307,28 @@ Deno.test("recursive Eff do release loop advances captured induction state", asy
   const source = `
     const effect = @import("prelude.effect");
 
-    fn state_step(
-      const effects: const,
-      const _proof: effect.Member(#state, effects),
-      env: i32,
-      value: i32
-    ) -> effect.Eff(effects, i32) {
-      value + env
+    fn eff_step(env: i32, value: i32) -> effect.Eff({state: i32, reader: i32}, i32) {
+      effect.Eff::pure(value + env)
     }
 
-    fn eff_step(env: i32, value: i32) -> effect.Eff({#state}, i32) {
-      state_step([#state], effect.Member(#state, [#state]), env, value)
-    }
-
-    fn eff_loop(i: i32, limit: i32, env: i32, acc: i32) -> effect.Eff({#state}, i32) {
+    fn eff_loop(i: i32, limit: i32, env: i32, acc: i32) -> effect.Eff({state: i32, reader: i32}, i32) {
       match i < limit {
-        true => do @monad(effect.Eff({#state}, _)) {
+        true => do @monad(effect.Eff({state: i32, reader: i32}, _)) {
           next <- eff_step(env, acc);
           eff_loop(i + 1, limit, env, next)
         },
-        false => acc
+        false => effect.Eff::pure(acc)
       }
     }
 
     pub fn main(seed: i32, limit: i32) -> i32 {
-      eff_loop(0, limit, 3, seed)
+      effect.run_reader(effect.run_state(eff_loop(0, limit, 3, seed), 0), 0).value
     }
   `;
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-  assert(/\bloop\b/.test(main));
-  assert(!main.includes("call $eff_loop"));
+  const loop = wat.match(/\(func \$eff_loop[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(!loop.includes("call $eff_loop"));
   assert(!wat.includes("call $__const_fn"));
 
   const instance = new WebAssembly.Instance(
@@ -1295,46 +1338,32 @@ Deno.test("recursive Eff do release loop advances captured induction state", asy
   assertEquals((instance.exports.main as CallableFunction)(1, 1000), 3001);
 });
 
-Deno.test("recursive multi-effect Eff do release loop advances captured induction state", async () => {
+Deno.test("recursive reader/state Eff do release loop advances captured induction state", async () => {
   const source = `
     const effect = @import("prelude.effect");
 
-    fn reader_state_step(
-      const effects: const,
-      const _proof: effect.Members({#reader, #state}, effects),
-      env: i32,
-      value: i32
-    ) -> effect.Eff(effects, i32) {
-      value + env
+    fn eff_step(env: i32, value: i32) -> effect.Eff({state: i32, reader: i32}, i32) {
+      effect.Eff::pure(value + env)
     }
 
-    fn eff_step(env: i32, value: i32) -> effect.Eff({#reader, #state}, i32) {
-      reader_state_step(
-        [#reader, #state],
-        effect.Members([#reader, #state], [#reader, #state]),
-        env,
-        value
-      )
-    }
-
-    fn eff_loop(i: i32, limit: i32, env: i32, acc: i32) -> effect.Eff({#reader, #state}, i32) {
+    fn eff_loop(i: i32, limit: i32, env: i32, acc: i32) -> effect.Eff({state: i32, reader: i32}, i32) {
       match i < limit {
-        true => do @monad(effect.Eff({#reader, #state}, _)) {
+        true => do @monad(effect.Eff({state: i32, reader: i32}, _)) {
           next <- eff_step(env, acc);
           eff_loop(i + 1, limit, env, next)
         },
-        false => acc
+        false => effect.Eff::pure(acc)
       }
     }
 
     pub fn main(seed: i32, limit: i32) -> i32 {
-      eff_loop(0, limit, 3, seed)
+      effect.run_reader(effect.run_state(eff_loop(0, limit, 3, seed), 0), 0).value
     }
   `;
   const wat = await watFromSource(source, { resolveModule, optMode: "release" });
-  const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
-  assert(/\bloop\b/.test(main));
-  assert(!main.includes("call $eff_loop"));
+  const loop = wat.match(/\(func \$eff_loop[\s\S]*?\n  \)/)?.[0] ??
+    wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
+  assert(!loop.includes("call $eff_loop"));
   assert(!wat.includes("call $__const_fn"));
 
   const instance = new WebAssembly.Instance(

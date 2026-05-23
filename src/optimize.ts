@@ -1354,7 +1354,7 @@ function impliedContracts(contract: string): Set<string> {
   const base = contractBaseName(contract);
   const result = new Set([base]);
   const visit = (name: string) => {
-    for (const implied of LAWFUL_CONTRACT_IMPLICATIONS.get(name) ?? []) {
+    for (const implied of CONTRACT_IMPLICATIONS.get(name) ?? []) {
       if (result.has(implied)) continue;
       result.add(implied);
       visit(implied);
@@ -1368,10 +1368,10 @@ function contractBaseName(name: string): string {
   return name.split(".").at(-1) ?? name;
 }
 
-const LAWFUL_CONTRACT_IMPLICATIONS = new Map<string, string[]>([
-  ["LawfulMonad", ["LawfulApplicative"]],
-  ["LawfulApplicative", ["LawfulFunctor"]],
-  ["LawfulMonoid", ["LawfulSemigroup"]],
+const CONTRACT_IMPLICATIONS = new Map<string, string[]>([
+  ["Monad", ["Applicative"]],
+  ["Applicative", ["Functor"]],
+  ["Monoid", ["Semigroup"]],
 ]);
 
 function instantiateGenericRewriteFact(fact: RewriteFact, concrete: string): RewriteFact {

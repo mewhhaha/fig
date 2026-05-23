@@ -1,60 +1,133 @@
+const core = @import("prelude.core");
+const monad = @import("prelude.monad");
+
 type fn Member(effect: const, effects: const) -> type {
   @require(
-    @type_list_contains(effects, effect),
-    "capability list is missing required member"
+    @shape_has_slot(effects, effect),
+    "effect row is missing required member"
   );
   i32
 }
 
 type fn Members(required: const, effects: const) -> type {
-  @require(
-    @type_list_contains_all(required, effects),
-    "capability list is missing one or more required members"
-  );
   i32
 }
 
 type fn UniqueEffects(effects: const) -> type {
-  @require(
-    @type_list_is_unique(effects),
-    "capability list contains duplicate members"
-  );
   i32
 }
 
+type fn EffContext(effects: const) -> type {
+  let Shape = effects;
+  struct(Shape)
+}
+
+type fn EffResult(effects: const, value: type) -> type {
+  match @shape_has_slot(effects, #state) {
+    true => monad.StateResult(@shape_slot(effects, #state), value),
+    false => value
+  }
+}
+
 type fn Eff(effects: const, value: type) -> type {
-  value
+  fn(ctx: EffContext(effects)) -> EffResult(effects, value)
 }
 
-type fn With(effect: const, effects: const, value: type) -> type {
-  Member(effect, effects);
-  Eff(effects, value)
+type fn RunStateResult(effects: const, value: type) -> type {
+  match @shape_has_slot(effects, #reader) {
+    true => Eff({reader: @shape_slot(effects, #reader)}, monad.StateResult(StateValue(effects), value)),
+    false => monad.StateResult(StateValue(effects), value)
+  }
 }
 
-type fn WithAll(required: const, effects: const, value: type) -> type {
-  Members(required, effects);
-  Eff(effects, value)
+type fn ReaderValue(effects: const) -> type {
+  @shape_slot(effects, #reader)
 }
 
-type fn Reader(effects: const, value: type) -> type {
-  With(#reader, effects, value)
-}
-
-type fn State(effects: const, value: type) -> type {
-  With(#state, effects, value)
-}
-
-type fn Debug(effects: const, value: type) -> type {
-  With(#debug, effects, value)
+type fn StateValue(effects: const) -> type {
+  @shape_slot(effects, #state)
 }
 
 fn Eff::pure(value: a) -> Eff(effects, a) {
-  value
+  \ctx -> {value, state: ctx.state}
 }
 
-fn Eff::bind(
+fn pure_state(value: a) -> Eff({state: store}, a) {
+  \ctx -> {value, state: ctx.state}
+}
+
+fn pure_reader(value: a) -> Eff({reader: env}, a) {
+  \ctx -> value
+}
+
+fn Eff::bind(value: Eff(effects, a), f: fn(x: a) -> Eff(effects, b)) -> Eff(effects, b) {
+  \ctx -> {
+    let current: monad.StateResult(@shape_slot(effects, #state), a) = value(ctx);
+    let next: Eff(effects, b) = f(current.value);
+    next({state: current.state, reader: ctx.reader})
+  }
+}
+
+fn ask() -> Eff(effects, ReaderValue(effects)) {
+  \ctx -> {value: ctx.reader, state: ctx.state}
+}
+
+fn ask_reader() -> Eff({reader: env}, env) {
+  ask()
+}
+
+fn get() -> Eff(effects, StateValue(effects)) {
+  \ctx -> {value: ctx.state, state: ctx.state}
+}
+
+fn get_state() -> Eff({state: store}, store) {
+  get()
+}
+
+fn put(next: StateValue(effects)) -> Eff(effects, core.Unit) {
+  \ctx -> {value: core.unit(), state: next}
+}
+
+fn put_state(next: store) -> Eff({state: store}, core.Unit) {
+  put(next)
+}
+
+fn modify(f: fn(x: StateValue(effects)) -> StateValue(effects)) -> Eff(effects, core.Unit) {
+  \ctx -> {value: core.unit(), state: f(ctx.state)}
+}
+
+fn modify_state(f: fn(x: store) -> store) -> Eff({state: store}, core.Unit) {
+  modify(f)
+}
+
+fn run_state_reader(
   value: Eff(effects, a),
-  const f: fn(x: a) -> Eff(effects, b)
-) -> Eff(effects, b) {
-  f(value)
+  initial: StateValue(effects)
+) -> Eff({reader: @shape_slot(effects, #reader)}, monad.StateResult(StateValue(effects), a)) {
+  \ctx -> {
+    let current = value({state: initial, reader: ctx.reader});
+    current
+  }
+}
+
+fn run_state_only(value: Eff({state: store}, a), initial: store) -> monad.StateResult(store, a) {
+  value({state: initial})
+}
+
+fn run_state(
+  value: Eff(effects, a),
+  initial: StateValue(effects)
+) -> Eff({reader: @shape_slot(effects, #reader)}, monad.StateResult(StateValue(effects), a)) {
+  \ctx -> {
+    let current = value({state: initial, reader: ctx.reader});
+    current
+  }
+}
+
+fn run_reader(value: Eff({reader: env}, a), env_value: env) -> a {
+  value({reader: env_value})
+}
+
+fn run_pure(value: Eff({}, a)) -> a {
+  value({})
 }

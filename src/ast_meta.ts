@@ -1,4 +1,13 @@
-export const AST_METADATA_KEYS = ["span", "nameSpan", "nameSpans"] as const;
+export const AST_METADATA_KEYS = [
+  "span",
+  "nameSpan",
+  "nameSpans",
+  "typeSpan",
+  "typeHoles",
+  "returnTypeSpan",
+  "returnTypeHoles",
+  "resolvedTypeHoles",
+] as const;
 
 type MetadataKey = typeof AST_METADATA_KEYS[number];
 

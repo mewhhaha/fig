@@ -25,8 +25,9 @@ Use `@type_is_number(t)` in compile-time contracts to test whether `t` is one of
 types, including arbitrary unsigned widths such as `u3` or `u17`.
 
 Function types are `fn(params) -> Type`. Host imports use an explicit first `io` executor parameter
-and return `io(T)` actions. Library-level effect capabilities are ordinary value/type contracts,
-usually modeled with `prelude.effect.Eff(tags, A)`.
+and return `io(T)` actions. Library-level reader/state effects use typed rows such as
+`prelude.effect.Eff({state: Store, reader: Env}, A)` and must be handled with `run_state`,
+`run_reader`, and `run_pure`.
 
 ## Shapes, Products, and Unions
 
@@ -45,7 +46,14 @@ Tuple types use brackets and lower to positional product shapes:
 [i32; 3]
 ```
 
-Define concrete product and sum layouts with type functions:
+Define concrete product and sum layouts with direct type declarations when the layout is fixed:
+
+```fig
+type Point = struct {x: i32, y: i32}
+type Option(a) = union {None, Some(value: a)}
+```
+
+Use `type fn` when the layout is computed or needs type-level control flow:
 
 ```fig
 type fn Point() -> struct {

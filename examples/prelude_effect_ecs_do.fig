@@ -1,79 +1,17 @@
-const ecs = @import("engine.ecs");
 const effect = @import("prelude.effect");
-
-type fn Position() -> type {
-  let Position = {x: i32};
-  struct(Position)
-}
 
 type fn FrameInput() -> type {
   let FrameInput = {dt: i32};
   struct(FrameInput)
 }
 
-const components = ecs.components({positions: Position});
-
-type fn World() -> type {
-  let Expected = @type_slots(ecs.World(components));
-  let World = {
-    entities: ecs.Batch(i32),
-    len: i32,
-    positions: ecs.Batch(Position)
-  };
-  let Matches = @require(
-    World == Expected,
-    "effect ECS example World must match ecs.World"
-  );
-  struct(World)
-}
-
-const positions_q = do @applicative(ecs.Query(
-  World,
-  FrameInput,
-  _
-)) {
-  positions <- ecs.write(#positions);
-  input <- ecs.res();
-  pure({positions, input})
-};
-
-fn move_position(row: struct({positions: Position, input: FrameInput})) -> struct({positions:
-  Position}) {
-  {positions: Position {x: row.positions.x + row.input.dt}}
-}
-
-fn movement_system() -> ecs.System(World, FrameInput) {
-  do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(positions_q, move_position);
-  }
-}
-
-fn run_movement(world: World, input: FrameInput) -> effect.Eff(
-  {#ecs},
-  World
-) {
-  const proof = effect.Member(#ecs, {#ecs});
-  ecs.run(world, input, movement_system)
-}
-
-fn seed_world(seed: i32) -> World {
-  {
-    entities: ecs.batch_fill(2, 0),
-    len: 2,
-    positions: ecs.batch_fill(2, Position {x: seed})
-  }
-}
-
-fn program(seed: i32) -> effect.Eff({#ecs}, i32) {
-  do @monad(effect.Eff({#ecs}, _)) {
-    world <- run_movement(
-      seed_world(seed),
-      FrameInput {dt: 3}
-    );
-    ecs.batch_get(world.positions, 0).x
+fn program(seed: i32) -> effect.Eff({reader: FrameInput}, i32) {
+  \ctx -> {
+    seed + ctx.reader.dt
   }
 }
 
 pub fn main() -> i32 {
   program(4)
+  \program -> effect.run_reader(program, FrameInput {dt: 3})
 }

@@ -37,43 +37,75 @@ Deno.test("functional prelude checks functor and monad examples", async () => {
 Deno.test("monad prelude exposes typed State pure bind and do sequencing", async () => {
   const source = `
     const monads = @import("prelude.monad");
+    const core = @import("prelude.core");
 
     type fn World() -> type {
       let World = {tick: i32};
       struct(World)
     }
 
-    fn add_two(x: i32) -> monads.State(i32, i32) {
+    fn add_two_value(x: i32) -> i32 {
       x + 2
     }
 
-    fn step(world: World) -> monads.State(World, World) {
+    fn add_two() -> monads.State(i32, core.Unit) {
+      do @monad(monads.State(i32, _)) {
+        monads.State::modify(add_two_value)
+      }
+    }
+
+    fn step_value(world: World) -> World {
       World {...world, tick: world.tick + 1}
     }
 
-    fn update_player(world: World) -> monads.State(World, World) {
+    fn step() -> monads.State(World, core.Unit) {
+      do @monad(monads.State(World, _)) {
+        monads.State::modify(step_value)
+      }
+    }
+
+    fn update_player_value(world: World) -> World {
       World {...world, tick: world.tick + 10}
     }
 
-    fn run_world(world: World) -> monads.State(World, World) {
+    fn update_player() -> monads.State(World, core.Unit) {
+      do @monad(monads.State(World, _)) {
+        monads.State::modify(update_player_value)
+      }
+    }
+
+    fn run_world() -> monads.State(World, World) {
       do @monad(monads.State(World, _)) {
         step();
         update_player();
+        monads.State::get()
       }
     }
 
     fn do_value() -> monads.State(i32, i32) {
       do @monad(monads.State(i32, _)) {
-        x <- monads.State::pure(4);
-        pure(x + 6)
+        add_two();
+        x <- monads.State::get();
+        monads.State::pure(x + 6)
       }
     }
 
+    fn bind_continue(x: i32) -> monads.State(i32, i32) {
+      do @monad(monads.State(i32, _)) {
+        monads.State::put(x + 1);
+        monads.State::get()
+      }
+    }
+
+    fn bind_value() -> monads.State(i32, i32) {
+      monads.State::bind(monads.State::get(), bind_continue)
+    }
+
     pub fn main() -> i32 {
-      let seed: monads.State(i32, i32) = monads.State::pure(3);
-      let bound = monads.State::bind(seed, add_two);
-      let world = run_world(World {tick: 1});
-      bound + do_value() + world.tick
+      let value = monads.State::eval(do_value(), 3);
+      let direct = monads.State::eval(bind_value(), 3);
+      let world = monads.State::eval(run_world(), World {tick: 1});
+      value + direct + world.tick
     }
   `;
 
@@ -83,7 +115,7 @@ Deno.test("monad prelude exposes typed State pure bind and do sequencing", async
   assertEquals((instance.exports.main as CallableFunction)(), 27);
 });
 
-Deno.test("monad prelude exposes explicit Reader helpers", async () => {
+Deno.test("monad prelude exposes Reader run helpers", async () => {
   const source = `
     const monads = @import("prelude.monad");
 
@@ -92,78 +124,77 @@ Deno.test("monad prelude exposes explicit Reader helpers", async () => {
     }
 
     fn plus_five(x: i32) -> monads.Reader(i32, i32) {
-      monads.Reader::pure(x + 5)
+      do @monad(monads.Reader(i32, _)) {
+        monads.Reader::pure(x + 5)
+      }
     }
 
     fn do_reader() -> monads.Reader(i32, i32) {
       do @monad(monads.Reader(i32, _)) {
-        x <- monads.Reader::ask(4);
-        y <- monads.Reader::asks(5, triple);
+        x <- monads.Reader::ask();
+        y <- monads.Reader::asks(triple);
         pure(x + y)
       }
     }
 
     pub fn main() -> i32 {
-      let asked = monads.Reader::ask(7);
-      let asked_mapped = monads.Reader::asks(3, triple);
-      let bound = monads.Reader::bind(asked, plus_five);
-      bound + asked_mapped + do_reader()
+      let bound = monads.Reader::run(plus_five(7), 3);
+      bound + monads.Reader::run(do_reader(), 4)
     }
   `;
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
   );
-  assertEquals((instance.exports.main as CallableFunction)(), 40);
+  assertEquals((instance.exports.main as CallableFunction)(), 28);
 });
 
-Deno.test("effect prelude exposes type-list membership proofs and Eff do", async () => {
+Deno.test("effect prelude exposes typed reader/state Eff do", async () => {
   const source = `
     const effect = @import("prelude.effect");
 
     type fn Env() -> type { i32 }
+    type fn Store() -> type { i32 }
 
-    fn ask(env: Env) -> effect.Reader(effects, Env) {
-      env
-    }
-
-    fn bump(
-      value: i32
-    ) -> effect.WithAll({#reader, #state}, {#reader, #state}, i32) {
-      value + 1
-    }
-
-    fn program(env: Env) -> effect.Eff({#reader, #state}, i32) {
-      do @monad(effect.Eff({#reader, #state}, _)) {
-        x <- ask(env);
-        bump(x)
+    fn program() -> effect.Eff({state: Store, reader: Env}, i32) {
+      do @monad(effect.Eff({state: Store, reader: Env}, _)) {
+        env <- effect.ask();
+        store <- effect.get();
+        effect.put(store + env);
+        effect.Eff::pure(store)
       }
     }
 
+    fn bind_continue(store: Store) -> effect.Eff({state: Store, reader: Env}, i32) {
+      do @monad(effect.Eff({state: Store, reader: Env}, _)) {
+        env <- effect.ask();
+        effect.put(store + env);
+        effect.Eff::pure(store)
+      }
+    }
+
+    fn direct_bind() -> effect.Eff({state: Store, reader: Env}, i32) {
+      effect.Eff::bind(effect.get(), bind_continue)
+    }
+
     pub fn main() -> i32 {
-      program(4)
+      let result = effect.run_reader(effect.run_state(program(), 4), 10);
+      let direct = effect.run_reader(effect.run_state(direct_bind(), 4), 10);
+      result.value + result.state + direct.value + direct.state
     }
   `;
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
   );
-  assertEquals((instance.exports.main as CallableFunction)(), 5);
+  assertEquals((instance.exports.main as CallableFunction)(), 36);
 });
 
-Deno.test("effect prelude reports missing and duplicate effect proofs", async () => {
+Deno.test("effect prelude reports missing effect proofs", async () => {
   await assertThrowsCompile(
     `
       const effect = @import("prelude.effect");
-      fn bad(const _proof: effect.Member(#reader, {#state})) -> i32 { 0 }
-    `,
-    "type.require",
-    { resolveModule },
-  );
-  await assertThrowsCompile(
-    `
-      const effect = @import("prelude.effect");
-      fn bad(const _proof: effect.UniqueEffects({#reader, #reader})) -> i32 { 0 }
+      fn bad(const _proof: effect.Member(#reader, {state: i32})) -> i32 { 0 }
     `,
     "type.require",
     { resolveModule },

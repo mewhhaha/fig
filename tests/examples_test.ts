@@ -160,6 +160,9 @@ Deno.test("prelude effect examples run", async () => {
     ["examples/prelude_effect_state.fig", 12],
     ["examples/prelude_effect_debug.fig", 42],
     ["examples/prelude_effect_ecs_do.fig", 7],
+    ["examples/prelude_reader_config.fig", 42],
+    ["examples/prelude_state_counter.fig", 42],
+    ["examples/prelude_reader_state_common.fig", 42],
   ]);
   for (const [file, value] of expected) {
     const source = await Deno.readTextFile(file);

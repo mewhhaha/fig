@@ -1,53 +1,83 @@
+const core = @import("prelude.core");
+
+type fn StateResult(state: type, value: type) -> type {
+  let StateResult = {value: value, state: state};
+  struct(StateResult)
+}
+
 type fn State(state: type, value: type) -> type {
-  value
+  fn(state: state) -> StateResult(state, value)
 }
 
 fn State::pure(value: a) -> State(state, a) {
-  value
+  \state_value -> StateResult {value, state: state_value}
 }
 
 fn State::bind(
   value: State(state, a),
-  const f: fn(x: a) -> State(state, b)
+  f: fn(x: a) -> State(state, b)
 ) -> State(state, b) {
-  f(value)
+  \state_value -> {
+    let current: StateResult(state, a) = value(state_value);
+    let next: State(state, b) = f(current.value);
+    next(current.state)
+  }
 }
 
-fn State::get(state_value: state) -> State(state, state) {
-  state_value
+fn State::get() -> State(state, state) {
+  \state_value -> StateResult {value: state_value, state: state_value}
 }
 
-fn State::put(_current: state, state_value: state) -> State(state, state) {
-  state_value
+fn State::put(state_value: state) -> State(state, core.Unit) {
+  \_current -> StateResult {value: core.unit(), state: state_value}
 }
 
-fn State::modify(state_value: state, const f: fn(x: state) -> state) -> State(state, state) {
-  f(state_value)
+fn State::modify(f: fn(x: state) -> state) -> State(state, core.Unit) {
+  \state_value -> StateResult {value: core.unit(), state: f(state_value)}
 }
 
-fn State::inspect(state_value: state, const f: fn(x: state) -> a) -> State(state, a) {
-  f(state_value)
+fn State::gets(f: fn(x: state) -> a) -> State(state, a) {
+  \state_value -> StateResult {value: f(state_value), state: state_value}
+}
+
+fn State::run(value: State(state, a), initial: state) -> StateResult(state, a) {
+  value(initial)
+}
+
+fn State::eval(value: State(state, a), initial: state) -> a {
+  State::run(value, initial).value
+}
+
+fn State::exec(value: State(state, a), initial: state) -> state {
+  State::run(value, initial).state
 }
 
 type fn Reader(env: type, value: type) -> type {
-  value
+  fn(env: env) -> value
 }
 
 fn Reader::pure(value: a) -> Reader(env, a) {
-  value
+  \_env_value -> value
 }
 
 fn Reader::bind(
   value: Reader(env, a),
-  const f: fn(x: a) -> Reader(env, b)
+  f: fn(x: a) -> Reader(env, b)
 ) -> Reader(env, b) {
-  f(value)
+  \env_value -> {
+    let next: Reader(env, b) = f(value(env_value));
+    next(env_value)
+  }
 }
 
-fn Reader::ask(env_value: env) -> Reader(env, env) {
-  env_value
+fn Reader::ask() -> Reader(env, env) {
+  \env_value -> env_value
 }
 
-fn Reader::asks(env_value: env, const f: fn(x: env) -> a) -> Reader(env, a) {
-  f(env_value)
+fn Reader::asks(f: fn(x: env) -> a) -> Reader(env, a) {
+  \env_value -> f(env_value)
+}
+
+fn Reader::run(value: Reader(env, a), env_value: env) -> a {
+  value(env_value)
 }

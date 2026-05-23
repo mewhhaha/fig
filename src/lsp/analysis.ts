@@ -787,8 +787,29 @@ export function codeActions(result: AnalysisResult, range: Range): CodeAction[] 
       }
     }
   }
+  actions.push(...inferredTypeHoleCodeActions(result, range));
   actions.push(...refactorCodeActions(result, range));
   return dedupeCodeActions(actions);
+}
+
+function inferredTypeHoleCodeActions(result: AnalysisResult, range: Range): CodeAction[] {
+  const holes = (result.program?.resolvedTypeHoles ?? [])
+    .filter((hole) => !hole.span.sourceId || hole.span.sourceId === result.document.uri)
+    .map((hole) => ({
+      range: result.mapper.range(hole.span.start, hole.span.end),
+      newText: hole.replacement,
+    }))
+    .filter((edit) => rangesOverlap(range, edit.range));
+  if (!holes.length) return [];
+  return [{
+    title: "Replace inferred type holes",
+    kind: "refactor.rewrite",
+    edit: {
+      changes: {
+        [result.document.uri]: dedupeEdits(holes),
+      },
+    },
+  }];
 }
 
 function toLspDiagnostic(diagnostic: CompileDiagnostic, mapper: PositionMapper): Diagnostic {

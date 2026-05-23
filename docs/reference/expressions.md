@@ -134,6 +134,16 @@ do @monad(State(World)) { ... } // invalid: State has arity 2
 type call, and state-threaded `do` blocks require the state argument to be concrete, such as
 `State(World, _)` rather than `State(_, _)`.
 
+The `_` annotation can also be used for local value bindings when the initializer determines the
+type:
+
+```fig
+let next: _ = current + 1;
+```
+
+It remains invalid for function parameters or other positions where there is no expected type or
+initializer to infer from.
+
 ## Local Bindings and Destructuring
 
 Local `let` bindings must use unique names within the same block. Initializers are source-ordered: a

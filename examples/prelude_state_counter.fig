@@ -1,0 +1,41 @@
+const monad = @import("prelude.monad");
+const core = @import("prelude.core");
+
+type fn Counter() -> type {
+  let Counter = {count: i32};
+  struct(Counter)
+}
+
+fn add_one(counter: Counter) -> Counter {
+  Counter {...counter, count: counter.count + 1}
+}
+
+fn add_ten(counter: Counter) -> Counter {
+  Counter {...counter, count: counter.count + 10}
+}
+
+fn tick() -> monad.State(Counter, core.Unit) {
+  do @monad(monad.State(Counter, _)) {
+    monad.State::modify(add_one)
+  }
+}
+
+fn bonus() -> monad.State(Counter, core.Unit) {
+  do @monad(monad.State(Counter, _)) {
+    monad.State::modify(add_ten)
+  }
+}
+
+fn program() -> monad.State(Counter, Counter) {
+  do @monad(monad.State(Counter, _)) {
+    tick();
+    tick();
+    bonus();
+    monad.State::get()
+  }
+}
+
+pub fn main() -> i32 {
+  let counter = monad.State::eval(program(), Counter {count: 30});
+  counter.count
+}

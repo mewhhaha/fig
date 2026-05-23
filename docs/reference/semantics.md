@@ -42,37 +42,35 @@ Fig source functions are pure by default. Volatile host actions use the compiler
 `@external` functions must take the `io` executor as their first parameter and return `io(T)`. Use
 `do @io(_)` or `do @io(T)` to sequence these runtime actions.
 
-Library-level effects are modeled with transparent value proofs from `prelude.effect`. The idiomatic
-shape is to put the proof on the returned value and let the capability list be inferred from the
-surrounding expected type:
+Library-level reader/state effects are modeled with typed rows from `prelude.effect`. The row names
+the carried context types, and handlers such as `run_state` and `run_reader` supply those contexts:
 
 ```fig
 const effect = @import("prelude.effect");
 
-fn ask(env: Env) -> effect.Reader(effects, Env) {
-  env
-}
-
-fn bump(store: Store) -> effect.State(effects, Store) {
-  store + 1
-}
-
-fn program(env: Env, store: Store) -> effect.Eff({#reader, #state}, i32) {
-  do @monad(effect.Eff({#reader, #state}, _)) {
-    current <- ask(env);
-    next <- bump(store);
-    current + next
+fn program() -> effect.Eff({state: Store, reader: Env}, i32) {
+  do @monad(effect.Eff({state: Store, reader: Env}, _)) {
+    env <- effect.ask();
+    store <- effect.get();
+    effect.put(store + env);
+    effect.Eff::pure(store)
   }
+}
+
+pub fn main(env: Env, seed: Store) -> i32 {
+  let result = program()
+    \program -> effect.run_state(program, seed)
+    \program -> effect.run_reader(program, env);
+  result.value
 }
 ```
 
-Avoid APIs that make callers write both a capability-list argument and a proof argument, such as
-`ask([#reader, #state], effect.Member(#reader, [#reader, #state]), env)`, unless the function truly
-has no value or expected result type from which the capability list can be inferred.
+When a computation needs more than one context, run handlers in source order with named pipe-bind.
+This keeps the values explicit without nesting handler calls.
 
-ECS code can use the same layering: use `do @applicative(ecs.Query(...))` to build a query,
-`do @monad(ecs.System(...))` to sequence systems, and an outer `do @monad(effect.Eff(...))` to
-sequence capability-checked operations that run those systems.
+ECS code uses the same transparent layering: query-builder functions return typed
+`ecs.Query(...)` tokens, `do @monad(ecs.System(...))` sequences real system functions, and commands
+are explicitly evaluated against a world value.
 
 ## Const Evaluation and Reflection
 

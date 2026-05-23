@@ -1,24 +1,25 @@
 const effect = @import("prelude.effect");
 
-fn debug_value(value: i32) -> effect.Debug(effects, i32) {
-  value
+type fn DebugLog() -> type {
+  i32
 }
 
-fn checked_add(
-  state: i32,
-  amount: i32
-) -> effect.WithAll({#debug, #state}, {#debug, #state}, i32) {
-  let before: effect.Debug({#debug, #state}, i32) = debug_value(state);
-  debug_value(before + amount)
+fn record(value: i32) -> effect.Eff({state: DebugLog}, i32) {
+  \ctx -> {
+    let next = ctx.state + value;
+    {value: next, state: next}
+  }
 }
 
-fn program(seed: i32) -> effect.Eff({#debug, #state}, i32) {
-  do @monad(effect.Eff({#debug, #state}, _)) {
-    first <- checked_add(seed, 4);
-    checked_add(first, 5)
+fn program() -> effect.Eff({state: DebugLog}, i32) {
+  \ctx -> {
+    let next = ctx.state + 9;
+    {value: next, state: next}
   }
 }
 
 pub fn main() -> i32 {
-  program(33)
+  let result = program()
+    \program -> effect.run_state_only(program, 33);
+  result.value
 }

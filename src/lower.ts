@@ -18,6 +18,7 @@ import type {
   SourceImport,
   Statement,
   StaticForSource,
+  TypeAnnotationHole,
   TypeBlock,
   TypeCountExpr,
   TypeDecl,
@@ -195,14 +196,15 @@ function lowerContractFn(node: Node): ContractDecl {
 function lowerConst(node: Node): ConstDecl | TypeDecl {
   const nameNode = named(node).find((child) => isIdentifier(child) || isFieldName(child));
   const constValue = only(node, "ConstValue");
+  const annotation = optional(node, "TypeAnn")
+    ? annotationMetadata(only(only(node, "TypeAnn"), "Type"))
+    : annotationMetadata(optional(node, "Type"));
   return {
     kind: "const",
     ...meta(node, nameNode),
     ...doc(node),
     name: bindingName(nameNode),
-    type: optional(node, "TypeAnn")
-      ? only(only(node, "TypeAnn"), "Type").text
-      : optional(node, "Type")?.text,
+    ...(annotation ? { type: annotation.type, ...annotation.meta } : {}),
     value: lowerExpr(first(constValue, "Expr")),
   };
 }
@@ -215,6 +217,10 @@ function lowerFn(node: Node): FnDecl {
   const returnType = optional(fn, "ReturnSig")
     ? named(only(fn, "ReturnSig")).find(is("Type"))?.text
     : undefined;
+  const returnTypeNode = optional(fn, "ReturnSig")
+    ? named(only(fn, "ReturnSig")).find(is("Type"))
+    : undefined;
+  const returnTypeMeta = annotationMetadata(returnTypeNode)?.meta;
   if (returnType === "struct" || returnType === "union") {
     fail(
       "parse.lower",
@@ -233,6 +239,12 @@ function lowerFn(node: Node): FnDecl {
       ? named(only(fn, "Params")).filter(is("Param")).map(lowerParam)
       : [],
     returnType,
+    ...(returnTypeMeta
+      ? {
+        returnTypeSpan: returnTypeMeta.typeSpan,
+        returnTypeHoles: returnTypeMeta.typeHoles,
+      }
+      : {}),
     effects: [],
     body: lowerBlock(only(fn, "Block")),
     ...(lowerBranchHint(optional(fn, "BranchHint")) ?? {}),
@@ -553,6 +565,75 @@ function lowerTypeExpr(node: Node): TypeExpr {
   }
 }
 
+function annotationMetadata(
+  node: Node | undefined,
+): { type: string; meta: { typeSpan?: Span; typeHoles?: TypeAnnotationHole[] } } | undefined {
+  if (!node) return undefined;
+  const holes = collectTypeAnnotationHoleNodes(node).map((hole) => ({
+    ...(spanFor(hole) ? { span: spanFor(hole) } : {}),
+  }));
+  const typeSpan = spanFor(node);
+  return {
+    type: node.text,
+    meta: {
+      ...(typeSpan ? { typeSpan } : {}),
+      ...(holes.length ? { typeHoles: holes } : {}),
+    },
+  };
+}
+
+function collectTypeAnnotationHoleNodes(node: Node): Node[] {
+  const found: Node[] = [];
+  const visit = (current: Node) => {
+    if (current.type === "TypeHole" || current.text.trim() === "_") {
+      found.push(current);
+      return;
+    }
+    for (const child of current.children ?? current.namedChildren ?? []) visit(child as Node);
+  };
+  visit(node);
+  return found;
+}
+
+function collectTypeAnnotationHoles(expr: TypeExpr): TypeAnnotationHole[] {
+  const holes: TypeAnnotationHole[] = [];
+  const visit = (node: TypeExpr) => {
+    if (node.kind === "type_hole") {
+      holes.push({ ...(node.span ? { span: node.span } : {}) });
+      return;
+    }
+    switch (node.kind) {
+      case "type_call":
+        visit(node.callee);
+        for (const arg of node.args) visit(arg);
+        return;
+      case "type_shape":
+        for (const slot of node.shape.slots) visit(slot.type);
+        return;
+      case "type_match":
+        visit(node.value);
+        for (const arm of node.arms) visit(arm.value);
+        return;
+      case "type_binary":
+        visit(node.left);
+        visit(node.right);
+        return;
+      case "type_ref":
+      case "type_static_ref":
+      case "type_fn":
+      case "type_operator":
+      case "type_bool":
+      case "type_number":
+      case "type_char":
+      case "type_string":
+      case "type_literal":
+        return;
+    }
+  };
+  visit(expr);
+  return holes;
+}
+
 function lowerTypeMember(node: Node): TypeMemberExpr {
   const fn = optional(node, "FnDecl");
   if (fn) {
@@ -781,11 +862,13 @@ function lowerParam(node: Node): Param {
   const explicitType = constTypeFnAnnotation(node.text) ??
     optional(node, "Type")?.text ??
     optional(node, "TypeAnn")?.text.replace(/^\s*:\s*/, "");
+  const annotation = annotationMetadata(optional(node, "Type"));
   return {
     ...meta(node, nameNode),
     ...doc(node),
     name,
     type: explicitType ?? "type",
+    ...(annotation?.meta ?? {}),
     const: isConstParam ? true : undefined,
     ...(isConstParam && !explicitType ? { inferStaticType: true } : {}),
     ...(pattern.kind !== "binding" || pattern.name !== name ? { pattern } : {}),
@@ -934,12 +1017,14 @@ function lowerLet(node: Node): LetDecl | DestructureLetDecl {
       value: expr,
     };
   }
+  const typeNode = named(tail).find(is("Type"));
+  const annotation = annotationMetadata(typeNode);
   return {
     kind: "let",
     ...meta(node, ids[0]),
     ...doc(node),
     name: bindingName(ids[0]),
-    type: named(tail).find(is("Type"))?.text,
+    ...(annotation ? { type: annotation.type, ...annotation.meta } : {}),
     value: lowerExpr(only(tail, "Expr")),
   };
 }

@@ -7,13 +7,8 @@ type fn Eq(t: type) {
   @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
 }
 
-type fn LawfulEq(t: type) -> type {
-  Eq(t);
-  t
-}
-
-contract fn LawfulEq::reflexive(const T: type) -> rewrite {
-  const proof = LawfulEq(T);
+contract fn Eq::reflexive(const T: type) -> rewrite {
+  const proof = Eq(T);
   @assume(\x -> T::eql(x, x), \x -> true)
 }
 
@@ -21,11 +16,6 @@ type fn Semigroup(t: type) -> type {
   let Expected = fn(a: t, b: t) -> t;
   @require(@type_has_member(t, #append), "Semigroup requires append");
   @require(@type_member_type(t, #append) == Expected, "Semigroup.append has wrong type");
-  t
-}
-
-type fn LawfulSemigroup(t: type) -> type {
-  Semigroup(t);
   t
 }
 
@@ -43,19 +33,13 @@ type fn Monoid(t: type) -> type {
   EmptyValue(t)
 }
 
-type fn LawfulMonoid(t: type) -> type {
-  Monoid(t);
-  LawfulSemigroup(t);
-  t
-}
-
-contract fn LawfulMonoid::append_empty_left(const T: type) -> rewrite {
-  const proof = LawfulMonoid(T);
+contract fn Monoid::append_empty_left(const T: type) -> rewrite {
+  const proof = Monoid(T);
   @assume(\x -> T::append(T::empty(), x), \x -> x)
 }
 
-contract fn LawfulMonoid::append_empty_right(const T: type) -> rewrite {
-  const proof = LawfulMonoid(T);
+contract fn Monoid::append_empty_right(const T: type) -> rewrite {
+  const proof = Monoid(T);
   @assume(\x -> T::append(x, T::empty()), \x -> x)
 }
 
@@ -86,6 +70,15 @@ type fn Result(a: type, e: type) -> union {
 type fn Pair(a: type, b: type) -> type {
   let Pair = {first: a, second: b};
   struct(Pair)
+}
+
+type fn Unit() -> type {
+  let Unit = {};
+  struct(Unit)
+}
+
+fn unit() -> Unit {
+  Unit {}
 }
 
 type fn Tuple2(a: type, b: type) -> type {

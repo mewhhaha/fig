@@ -43,8 +43,8 @@ jobs:
       - name: Smoke
         run: deno task smoke
 
-      - name: Package entrypoints
-        run: deno task publish:check
+      - name: Entrypoints
+        run: deno task entrypoint:check
 
       - name: Native binary
         run: deno task release:binary:check

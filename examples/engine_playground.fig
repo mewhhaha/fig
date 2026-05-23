@@ -92,25 +92,22 @@ type fn SpriteAnimationRow() -> type {
   struct(SpriteAnimationRow)
 }
 
-const movement_q = do @applicative(ecs.Query(
+fn movement_q() -> ecs.Query(World, FrameInput, MovementRow) {
+  let transform: ecs.Query(World, FrameInput, Transform2d) = ecs.write(#transform);
+  let velocity: ecs.Query(World, FrameInput, Velocity2d) = ecs.read(#velocity);
+  let input: ecs.Query(World, FrameInput, FrameInput) = ecs.res();
+  ecs.query(MovementRow)
+}
+
+fn sprite_animation_q() -> ecs.Query(
   World,
   FrameInput,
-  _
-)) {
-  transform <- ecs.write(#transform);
-  velocity <- ecs.read(#velocity);
-  input <- ecs.res();
-  pure({transform, velocity, input})
-};
-const sprite_animation_q = do @applicative(ecs.Query(
-  World,
-  FrameInput,
-  _
-)) {
-  sprite <- ecs.write(#sprite);
-  input <- ecs.res();
-  pure({sprite, input})
-};
+  SpriteAnimationRow
+) {
+  let sprite: ecs.Query(World, FrameInput, Sprite2d) = ecs.write(#sprite);
+  let input: ecs.Query(World, FrameInput, FrameInput) = ecs.res();
+  ecs.query(SpriteAnimationRow)
+}
 
 fn empty_world() -> World {
   {
@@ -166,7 +163,7 @@ fn animated_sprite(row: SpriteAnimationRow) -> struct({sprite: Sprite2d}) {
 
 fn movement_system() -> ecs.System(World, FrameInput) {
   do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(movement_q, moved_transform);
+    ecs.map(movement_q(), moved_transform);
   }
 }
 
@@ -175,7 +172,7 @@ fn sprite_animation_system() -> ecs.System(
   FrameInput
 ) {
   do @monad(ecs.System(World, FrameInput)) {
-    ecs.map(sprite_animation_q, animated_sprite);
+    ecs.map(sprite_animation_q(), animated_sprite);
   }
 }
 
@@ -193,8 +190,7 @@ fn run_frame(world: World, input: FrameInput) -> World {
 fn run_frame_effect(
   world: World,
   input: FrameInput
-) -> effect.Eff({#ecs, #render}, World) {
-  const proof = effect.Member(#ecs, {#ecs, #render});
+) -> World {
   ecs.run(world, input, frame_systems)
 }
 
@@ -251,8 +247,7 @@ fn append_visible_render_item(
 fn render_effect(
   world: World,
   input: FrameInput
-) -> effect.Eff({#ecs, #render}, RenderBatch) {
-  const proof = effect.Member(#render, {#ecs, #render});
+) -> RenderBatch {
   render_system(world, input)
 }
 
@@ -366,10 +361,10 @@ fn run_demo_frame(host: io) -> RenderBatch {
   run_demo_frame_effect(host)
 }
 
-fn run_demo_frame_effect(host: io) -> effect.Eff({#ecs, #render}, RenderBatch) {
+fn run_demo_frame_effect(host: io) -> RenderBatch {
   let input = read_frame_input(host);
   let world = build_demo_world();
-  let updated: effect.Eff({#ecs, #render}, World) = run_frame_effect(world, input);
+  let updated: World = run_frame_effect(world, input);
   render_effect(updated, input)
 }
 

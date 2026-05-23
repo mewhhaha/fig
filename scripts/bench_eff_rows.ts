@@ -45,17 +45,18 @@ const resolveModule = async (moduleName: string) => {
 
 const scenarios: Scenario[] = [
   releaseScenario("direct", directSource()),
-  releaseScenario("eff_state", effSource(["#state"], "state_step")),
-  releaseScenario("eff_reader_state", effSource(["#reader", "#state"], "reader_state_step")),
+  releaseScenario("eff_reader", readerEffSource()),
+  releaseScenario("eff_state", stateEffSource()),
+  releaseScenario("eff_reader_state", readerStateEffSource(false)),
   {
     ...releaseScenario(
-      "eff_reader_state_log_clock",
-      effSource(["#reader", "#state", "#log", "#clock"], "wide_step"),
+      "eff_reader_state_debug_clock",
+      readerStateEffSource(true),
     ),
   },
   {
     name: "do_recursive_eff_state_debug",
-    source: doRecursiveEffSource(["#state"], "state_step"),
+    source: stateEffSource(),
     optMode: "debug",
     limit: doLimit,
     calls: doCalls,
@@ -63,7 +64,7 @@ const scenarios: Scenario[] = [
   },
   {
     name: "do_recursive_eff_state_release",
-    source: doRecursiveEffSource(["#state"], "state_step"),
+    source: stateEffSource(),
     optMode: "release",
     limit: doLimit,
     calls: doCalls,
@@ -71,7 +72,7 @@ const scenarios: Scenario[] = [
   },
   {
     name: "do_recursive_eff_reader_state_debug",
-    source: doRecursiveEffSource(["#reader", "#state"], "reader_state_step"),
+    source: readerStateEffSource(false),
     optMode: "debug",
     limit: doLimit,
     calls: doCalls,
@@ -79,23 +80,23 @@ const scenarios: Scenario[] = [
   },
   {
     name: "do_recursive_eff_reader_state_release",
-    source: doRecursiveEffSource(["#reader", "#state"], "reader_state_step"),
+    source: readerStateEffSource(false),
     optMode: "release",
     limit: doLimit,
     calls: doCalls,
     run: true,
   },
   {
-    name: "do_recursive_eff_reader_state_log_clock_debug",
-    source: doRecursiveEffSource(["#reader", "#state", "#log", "#clock"], "wide_step"),
+    name: "do_recursive_eff_reader_state_debug_clock_debug",
+    source: readerStateEffSource(true),
     optMode: "debug",
     limit: doLimit,
     calls: doCalls,
     run: true,
   },
   {
-    name: "do_recursive_eff_reader_state_log_clock_release",
-    source: doRecursiveEffSource(["#reader", "#state", "#log", "#clock"], "wide_step"),
+    name: "do_recursive_eff_reader_state_debug_clock_release",
+    source: readerStateEffSource(true),
     optMode: "release",
     limit: doLimit,
     calls: doCalls,
@@ -139,6 +140,7 @@ for (const scenario of scenarios) {
 
   const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
   const main = instance.exports.main as CallableFunction;
+  resetFigHeap(instance);
   const result = main(seed, scenario.limit) as number;
   const wanted = seed + 3 * scenario.limit;
   if (result !== wanted) {
@@ -151,6 +153,7 @@ for (const scenario of scenarios) {
     const start = performance.now();
     let local = 0;
     for (let i = 0; i < scenario.calls; i++) {
+      resetFigHeap(instance);
       local += main(seed + (i % 7), scenario.limit) as number;
     }
     const elapsed = performance.now() - start;
@@ -205,83 +208,104 @@ function directSource(): string {
   `;
 }
 
-function effSource(effects: string[], stepName: string): string {
-  const rowType = `{${effects.join(", ")}}`;
-  const rowValue = `[${effects.join(", ")}]`;
-  const proof = effects.length === 1
-    ? `effect.Member(${effects[0]}, ${rowValue})`
-    : `effect.Members(${rowValue}, ${rowValue})`;
-  const proofType = effects.length === 1
-    ? `effect.Member(${effects[0]}, effects)`
-    : `effect.Members(${rowType}, effects)`;
-
+function readerEffSource(): string {
   return `
     const effect = @import("prelude.effect");
 
-    fn ${stepName}(
-      const effects: const,
-      const _proof: ${proofType},
-      env: i32,
-      value: i32
-    ) -> effect.Eff(effects, i32) {
-      value + env
-    }
+    type fn Env() -> type { i32 }
 
-    fn eff_step(env: i32, value: i32) -> effect.Eff(${rowType}, i32) {
-      ${stepName}(${rowValue}, ${proof}, env, value)
-    }
-
-    fn eff_loop(i: i32, limit: i32, env: i32, acc: i32) -> effect.Eff(${rowType}, i32) {
+    fn eff_loop_value(i: i32, limit: i32, env: Env, acc: i32) -> i32 {
       match i < limit {
-        true => eff_loop(i + 1, limit, env, eff_step(env, acc)),
+        true => eff_loop_value(i + 1, limit, env, acc + env),
         false => acc
       }
     }
 
+    fn eff_loop(i: i32, limit: i32, acc: i32) -> effect.Eff({reader: Env}, i32) {
+      \\ctx -> {
+        eff_loop_value(i, limit, ctx.reader, acc)
+      }
+    }
+
     pub fn main(seed: i32, limit: i32) -> i32 {
-      eff_loop(0, limit, 3, seed)
+      effect.run_reader(eff_loop(0, limit, seed), 3)
     }
   `;
 }
 
-function doRecursiveEffSource(effects: string[], stepName: string): string {
-  const rowType = `{${effects.join(", ")}}`;
-  const rowValue = `[${effects.join(", ")}]`;
-  const proof = effects.length === 1
-    ? `effect.Member(${effects[0]}, ${rowValue})`
-    : `effect.Members(${rowValue}, ${rowValue})`;
-  const proofType = effects.length === 1
-    ? `effect.Member(${effects[0]}, effects)`
-    : `effect.Members(${rowType}, effects)`;
-
+function stateEffSource(): string {
   return `
     const effect = @import("prelude.effect");
 
-    fn ${stepName}(
-      const effects: const,
-      const _proof: ${proofType},
-      env: i32,
-      value: i32
-    ) -> effect.Eff(effects, i32) {
-      value + env
-    }
+    type fn Store() -> type { i32 }
 
-    fn eff_step(env: i32, value: i32) -> effect.Eff(${rowType}, i32) {
-      ${stepName}(${rowValue}, ${proof}, env, value)
-    }
-
-    fn eff_loop(i: i32, limit: i32, env: i32, acc: i32) -> effect.Eff(${rowType}, i32) {
+    fn eff_loop_value(i: i32, limit: i32, store: Store) -> Store {
       match i < limit {
-        true => do @monad(effect.Eff(${rowType}, _)) {
-          next <- eff_step(env, acc);
-          eff_loop(i + 1, limit, env, next)
-        },
-        false => acc
+        true => eff_loop_value(i + 1, limit, store + 3),
+        false => store
+      }
+    }
+
+    fn eff_loop(i: i32, limit: i32) -> effect.Eff({state: Store}, Store) {
+      \\ctx -> {
+        let next = eff_loop_value(i, limit, ctx.state);
+        {value: next, state: next}
       }
     }
 
     pub fn main(seed: i32, limit: i32) -> i32 {
-      eff_loop(0, limit, 3, seed)
+      let result = effect.run_state_only(eff_loop(0, limit), seed);
+      result.value
+    }
+  `;
+}
+
+function readerStateEffSource(includeTracingCarriers: boolean): string {
+  const rowType = includeTracingCarriers
+    ? "{state: Store, reader: Env, debug: Debug, clock: Clock}"
+    : "{state: Store, reader: Env}";
+  const runnerParams = includeTracingCarriers
+    ? "_initial: Store, _env: Env, _debug: Debug, _clock: Clock"
+    : "_initial: Store, _env: Env";
+  const runnerArgs = includeTracingCarriers ? "seed, 3, 0, 0" : "seed, 3";
+  return `
+    const effect = @import("prelude.effect");
+    const core = @import("prelude.core");
+    const monad = @import("prelude.monad");
+
+    type fn Store() -> type { i32 }
+    type fn Env() -> type { i32 }
+    type fn Debug() -> type { i32 }
+    type fn Clock() -> type { i32 }
+
+    fn eff_loop_value(i: i32, limit: i32, env: Env, store: Store) -> Store {
+      match i < limit {
+        true => eff_loop_value(i + 1, limit, env, store + env),
+        false => store
+      }
+    }
+
+    fn eff_loop(i: i32, limit: i32) -> effect.Eff(${rowType}, Store) {
+      \\ctx -> {
+        let next = eff_loop_value(i, limit, ctx.reader, ctx.state);
+        {value: next, state: next}
+      }
+    }
+
+    fn run_effect(
+      value: effect.Eff(${rowType}, Store),
+      ${runnerParams}
+    ) -> monad.StateResult(Store, Store) {
+      ${
+    includeTracingCarriers
+      ? "value({state: _initial, reader: _env, debug: _debug, clock: _clock})"
+      : "value({state: _initial, reader: _env})"
+  }
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      let result = run_effect(eff_loop(0, limit), ${runnerArgs});
+      result.value
     }
   `;
 }
@@ -293,6 +317,12 @@ function median(values: number[]): number {
 
 function count(text: string, pattern: RegExp): number {
   return text.match(pattern)?.length ?? 0;
+}
+
+function resetFigHeap(instance: WebAssembly.Instance) {
+  const memory = instance.exports.fig_objects;
+  if (!(memory instanceof WebAssembly.Memory)) return;
+  new DataView(memory.buffer).setUint32(0, 0, true);
 }
 
 function stringArg(name: string): string | undefined {

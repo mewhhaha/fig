@@ -5,25 +5,25 @@ WebAssembly output.
 
 See `docs/LANGUAGE.md` for the full core-language syntax, semantics, and compiler builtin reference.
 
-## Using The Package
+## Using Fig
 
-Use the compiler library from JSR:
+Use the compiler library from a source checkout:
 
 ```ts
-import { checkSource, wasmFromSource } from "jsr:@mewhhaha/fig";
+import { checkSource, wasmFromSource } from "./src/mod.ts";
 ```
 
-Run the CLI through the exported package entry point:
+Run the CLI from a source checkout:
 
 ```bash
-deno run --allow-read jsr:@mewhhaha/fig/cli check examples/hello.fig
-deno run --allow-read --allow-write jsr:@mewhhaha/fig/cli build examples/hello.fig
+deno run --allow-read src/cli.ts check examples/hello.fig
+deno run --allow-read --allow-write src/cli.ts build examples/hello.fig
 ```
 
-Run the language server over stdio through the LSP entry point:
+Run the language server over stdio from a source checkout:
 
 ```bash
-deno run --allow-read jsr:@mewhhaha/fig/lsp
+deno run --allow-read src/lsp/main.ts
 ```
 
 Download native `fig` binaries from GitHub Releases:
@@ -43,17 +43,20 @@ Type functions currently cover several compile-time concepts:
 
 - Layout constructors: products, sums, aliases, function types, shape types, and counted inline
   arrays.
+- Direct data declarations for fixed layouts, such as `type Point = struct {x: i32, y: i32}` and
+  `type Option(a) = union {None, Some(value: a)}`.
 - Static reflection: product/sum/alias checks, slot lookup, variant lookup, and attached member
   lookup.
 - Static contracts: `@require`-checked proofs such as `Eq(t)`, `Functor(t)`, `Droppable(t)`, and
   layout predicates.
 - Constructor-polymorphic helpers: generic functions can infer type constructors at call sites and
   use local proof consts such as `const Mapper = Functor(t);`.
-- Transparent effect capabilities: `prelude.effect` models tags such as `#reader`, `#state`, and
-  `#debug` as erased value contracts. Prefer APIs like
-  `fn ask(env: Env) ->
-  effect.Reader(effects, Env)` so callers rely on inference instead of
-  passing separate capability-list and proof const arguments.
+- Reader, state, and effect carriers: `prelude.monad` exposes compiler-lowered `Reader` and `State`
+  computations with `run`, `eval`, and `exec`; `prelude.effect` supports typed reader/state rows
+  such as `effect.Eff({state: Store, reader: Env}, A)` with explicit handlers.
+- Reader and state examples: `examples/prelude_reader_config.fig`,
+  `examples/prelude_state_counter.fig`, and `examples/prelude_reader_state_common.fig` show the
+  current explicit helper and named pipe-bind handler style.
 - Value-layout modeling: examples encode products, sums, fixed inline buffers, compact arrays, and
   static constraints as compile-time type-function contracts.
 

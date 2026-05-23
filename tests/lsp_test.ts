@@ -319,6 +319,81 @@ Deno.test("LSP code actions combine nested matches into tuple match", async () =
   );
 });
 
+Deno.test("LSP code actions replace inferred type holes", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "type fn Box(a: type) -> struct { let Box = {value: a}; struct(Box) }",
+    "fn one() -> _ { 1 }",
+    "fn nested() -> Box(_) { Box {value: 2} }",
+    "pub fn main() -> i32 { one() + nested().value }",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const actions = codeActions(
+    result,
+    new PositionMapper(source).range(source.indexOf("-> _") + 3, source.indexOf("-> _") + 3),
+  );
+  const action = actions.find((item) => item.title === "Replace inferred type holes");
+  assert(action);
+  assertEquals(action.edit?.changes[uri]?.[0].newText, "i32");
+
+  const nestedActions = codeActions(
+    result,
+    new PositionMapper(source).range(source.indexOf("Box(_)") + 4, source.indexOf("Box(_)") + 4),
+  );
+  const nestedAction = nestedActions.find((item) => item.title === "Replace inferred type holes");
+  assert(nestedAction);
+  assertEquals(nestedAction.edit?.changes[uri]?.[0].newText, "i32");
+});
+
+Deno.test("LSP code action replaces multiple inferred type holes", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "type fn Pair(a: type, b: type) -> struct { let Pair = {left: a, right: b}; struct(Pair) }",
+    "fn pair() -> Pair(_, _) { Pair {left: 1, right: true} }",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const actions = codeActions(
+    result,
+    new PositionMapper(source).range(
+      source.indexOf("Pair(_, _)"),
+      source.indexOf("Pair(_, _)") + "Pair(_, _)".length,
+    ),
+  );
+  const action = actions.find((item) => item.title === "Replace inferred type holes");
+  assert(action);
+  assertEquals(action.edit?.changes[uri]?.map((edit) => edit.newText), ["i32", "bool"]);
+});
+
+Deno.test("LSP code action replaces do-strategy inferred type holes", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "type fn Id(a: type) -> type { a }",
+    "fn Id::pure(value: a) -> Id(a) { value }",
+    "fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) { f(value) }",
+    "fn run() -> Id(i32) { do @monad(Id(_)) { pure(1) } }",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const actions = codeActions(
+    result,
+    new PositionMapper(source).range(source.indexOf("Id(_)") + 3, source.indexOf("Id(_)") + 3),
+  );
+  const action = actions.find((item) => item.title === "Replace inferred type holes");
+  assert(action);
+  assertEquals(action.edit?.changes[uri]?.[0].newText, "i32");
+});
+
 Deno.test("LSP analysis routes open imported diagnostics to imported URI", async () => {
   const rootUri = pathToUri("/tmp/project/main.fig");
   const importedUri = pathToUri("/tmp/project/broken.fig");

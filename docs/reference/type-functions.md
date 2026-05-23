@@ -1,6 +1,15 @@
 # Fig Type Functions
 
-Type functions run at compile time:
+Direct type declarations cover fixed product, sum, and alias layouts:
+
+```fig
+type Point = struct {x: i32, y: i32}
+type Option(a) = union {None, Some(value: a)}
+type Count = i32
+```
+
+They lower to ordinary type functions. Use explicit `type fn` declarations when the type is computed
+at compile time:
 
 ```fig
 type fn Pair(a: type, b: type) -> struct {
@@ -101,7 +110,7 @@ Use these patterns when choosing how to express static intent:
 | Define a runtime data layout                   | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
 | Require behavior on a concrete type            | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`. |
 | Call required behavior carried by a value      | Annotate a value as `contract(t)` and call the attached member as `t::member(...)`.             |
-| Call required behavior without a carrier value | Pass `const _proof: contract(t)` as an explicit erased proof fallback.                          |
+| Call required behavior without a runtime value | Pass `const _proof: contract(t)` as an explicit erased proof fallback.                          |
 | Abstract over a unary type constructor         | Accept `t: type fn(a: type) -> type`, use values as `t(a)`, and reflect members on `t`.         |
 | Choose dispatch from a type value              | Pass the type as `const t` or `const t: type`; do not model types as runtime Values.            |
 | Specialize layout or counts                    | Pass static shape data as `const n: count`, `const a: type`, or another `const` parameter.      |
@@ -128,32 +137,35 @@ Use contracted parameters when a value carries the type, contracted returns when
 value through a contract, local proof constants when a proof is needed only inside one body, and
 explicit `const` proof parameters when the caller must select or provide the proof.
 
-For effect-style APIs, prefer the same transparent-contract pattern. Do not require callers to pass
-a separate capability-list const plus a separate proof when the capability list can be inferred from
-the expected result or from a value in the call. Define a proof type that returns the value type
-itself, then put that proof on the value:
+Prelude contracts such as `Eq(t)`, `Functor(t)`, `Applicative(t)`, `Monad(t)`, and `Monoid(t)` are
+law-bearing proofs. Their associated `contract fn ... -> rewrite` declarations attach optimizer
+rewrite facts directly to the base contract; there is no separate `LawfulX` proof layer.
+
+For effect-style APIs, prefer typed rows and handlers. Do not require callers to pass a separate
+capability-list const plus a separate proof when the required context can be inferred from a typed
+row such as `{state: Store, reader: Env}`:
 
 ```fig
 const effect = @import("prelude.effect");
 
-fn ask(env: Env) -> effect.Reader(effects, Env) {
-  env
-}
-
-fn get(store: Store) -> effect.State(effects, Store) {
-  store
-}
-
-fn program(env: Env, store: Store) -> effect.Eff({#reader, #state}, i32) {
-  do @monad(effect.Eff({#reader, #state}, _)) {
-    current_env <- ask(env);
-    current_store <- get(store);
-    current_env + current_store
+fn program() -> effect.Eff({state: Store, reader: Env}, i32) {
+  do @monad(effect.Eff({state: Store, reader: Env}, _)) {
+    env <- effect.ask();
+    store <- effect.get();
+    effect.put(store + env);
+    effect.Eff::pure(store)
   }
+}
+
+pub fn main(env: Env, seed: Store) -> i32 {
+  let result = program()
+    \program -> effect.run_state(program, seed)
+    \program -> effect.run_reader(program, env);
+  result.value
 }
 ```
 
-The noisier fallback is still valid when there is no carrier value or expected type to infer from:
+Static proof parameters are still valid when a function is only checking a typed row label:
 
 ```fig
 fn low_level(
@@ -163,8 +175,8 @@ fn low_level(
 ) -> effect.Eff(effects, i32) {
   value
 }
-```
 
-Use that form sparingly. Most user-facing APIs should expose contracted values such as
-`effect.Reader(effects, Env)`, `effect.State(effects, Store)`, `effect.Debug(effects, i32)`, or
-`effect.WithAll({#debug, #state}, effects, i32)`.
+fn example(value: i32) -> effect.Eff({debug: i32}, i32) {
+  low_level({debug: i32}, effect.Member(#debug, {debug: i32}), value)
+}
+```

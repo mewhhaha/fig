@@ -28,6 +28,17 @@ fn core.Result::map_err(const f: fn(x: e) -> f, value: core.Result(a, e)) -> cor
   match value { Ok(inner) => ok(inner), Err(error) => err(f(error)) }
 }
 
+fn core.Result::pure(value: a) -> core.Result(a, e) {
+  ok(value)
+}
+
+fn core.Result::apply(value: core.Result(fn(x: a) -> b, e), arg: core.Result(a, e)) -> core.Result(b, e) {
+  match value {
+    Ok(f) => match arg { Ok(inner) => ok(f(inner)), Err(error) => err(error) },
+    Err(error) => err(error),
+  }
+}
+
 fn core.Result::bind(value: core.Result(a, e), const f: fn(x: a) -> core.Result(b, e)) -> core.Result(b, e) {
   match value { Ok(inner) => f(inner), Err(error) => err(error) }
 }

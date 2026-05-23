@@ -11,9 +11,11 @@ import type {
   Param,
   ParamPattern,
   Program,
+  ResolvedTypeHole,
   ShapeType,
   Statement,
   StaticForSource,
+  TypeAnnotationHole,
   TypeBody,
   TypeCountExpr,
   TypeDecl,
@@ -427,6 +429,7 @@ function checkProgramInternal(
   const diagnostics: Diagnostic[] = [];
   const trace: CheckTrace | undefined = options.trace ? { phases: [] } : undefined;
   const memo = createCheckMemo();
+  program.resolvedTypeHoles = [];
   const recordPhase = <T>(
     name: string,
     run: () => T,
@@ -460,7 +463,14 @@ function checkProgramInternal(
   checkExternalImportsUseExplicitIo(program, diagnostics);
   recordPhase("checkReservedCompilerNames", () => checkReservedCompilerNames(program, diagnostics));
   recordPhase("checkRemovedSyntax", () => checkRemovedSyntax(program, diagnostics));
-  recordPhase("lowerDoExpressions", () => lowerDoExpressions(program, diagnostics));
+  recordPhase(
+    "prepareInferredTypeAnnotations",
+    () => prepareInferredTypeAnnotations(program, diagnostics),
+  );
+  recordPhase(
+    "lowerDoExpressions",
+    () => lowerDoExpressions(program, diagnostics, true, program.resolvedTypeHoles),
+  );
   recordPhase(
     "checkBorrowTypeRestrictions",
     () => checkBorrowTypeRestrictions(program, diagnostics),
@@ -591,6 +601,27 @@ function checkProgramInternal(
     "resolveAttachedMemberCalls #5",
     () => resolveAttachedMemberCalls(program, typeDecls),
   );
+  recordPhase(
+    "lowerDoExpressions #2",
+    () => lowerDoExpressions(program, diagnostics, false, program.resolvedTypeHoles),
+  );
+  fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+  const inferredStats3 = createSpecializationTrace();
+  recordPhase(
+    "specializeInferredTypeCalls #3",
+    () =>
+      specializeInferredTypeCalls(
+        program,
+        new Map(fnDecls.map((decl) => [decl.name, decl])),
+        constValues,
+        typeDecls,
+        diagnostics,
+        true,
+        inferredStats3,
+      ),
+    inferredStats3,
+  );
+  fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
   constValues = recordPhase("evaluateConstDecls #2", () =>
     evaluateConstDecls(
       program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
@@ -647,6 +678,20 @@ function checkProgramInternal(
             message: `public function ${decl.name} requires an explicit return type`,
           });
         }
+        const boundaryPublic = decl.rootPublic ?? (decl.public && !decl.imported);
+        if (
+          boundaryPublic &&
+          (typeIsRuntimeFunctionValue(decl.returnType, typeDecls) ||
+            decl.params.some((param) =>
+              !param.const && typeIsRuntimeFunctionValue(param.type, typeDecls)
+            ))
+        ) {
+          diagnostics.push({
+            code: "function.closure_boundary",
+            message: `public function ${decl.name} cannot import or export runtime function values`,
+            span: decl.span,
+          });
+        }
         if (!decl.generated && !decl.primitiveId) {
           checkFn(decl, hostIoImports, diagnostics, typeDecls, [...fnDecls, ...importFnDecls], {
             ...options,
@@ -656,6 +701,18 @@ function checkProgramInternal(
       }
     }
   });
+  recordPhase(
+    "resolveInferredTypeAnnotations",
+    () =>
+      resolveInferredTypeAnnotations(
+        program,
+        typeDecls,
+        [...fnDecls, ...importFnDecls],
+        constValues,
+        diagnostics,
+        memo,
+      ),
+  );
   for (let index = diagnostics.length - 1; index >= 0; index--) {
     const diagnostic = diagnostics[index];
     if (
@@ -920,7 +977,12 @@ function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]
   }
 }
 
-function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
+function lowerDoExpressions(
+  program: Program,
+  diagnostics: Diagnostic[],
+  deferUntyped = false,
+  resolvedTypeHoles: ResolvedTypeHole[] = [],
+) {
   const fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
   const importFnDecls = program.imports.map(importAsCheckFn);
   const allFnDecls = [...fnDecls, ...importFnDecls];
@@ -929,9 +991,14 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
     allFnDecls.map((decl) => decl.name),
   );
   const functions = new Map(allFnDecls.map((decl) => [decl.name, decl]));
-  const lowerExpr = (expr: Expr, env: Map<string, string> = new Map()): Expr => {
+  const lowerExpr = (
+    expr: Expr,
+    env: Map<string, string> = new Map(),
+    expectedType?: string,
+  ): Expr => {
     switch (expr.kind) {
       case "do":
+        recordTypeExprHoleMatches(expr.strategy.effect, expectedType, resolvedTypeHoles);
         return lowerDoExpression(
           expr,
           diagnostics,
@@ -940,6 +1007,8 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
           env,
           typeDecls,
           allFnDecls,
+          deferUntyped,
+          resolvedTypeHoles,
         );
       case "const_fn":
         return { ...expr, body: lowerExpr(expr.body, env) };
@@ -953,8 +1022,9 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
         return { ...expr, target: lowerExpr(expr.target, env), index: lowerExpr(expr.index, env) };
       case "binary":
         return { ...expr, left: lowerExpr(expr.left, env), right: lowerExpr(expr.right, env) };
-      case "pipe_bind":
+      case "pipe_bind": {
         return { ...expr, value: lowerExpr(expr.value, env), body: lowerExpr(expr.body, env) };
+      }
       case "match":
         return {
           ...expr,
@@ -991,8 +1061,9 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
         const scoped = new Map(env);
         const statements = expr.statements.map((stmt) => {
           if (stmt.kind === "let") {
-            const value = lowerExpr(stmt.value, scoped);
-            const type = stmt.type ??
+            const explicit = explicitTypeAnnotation(stmt.type);
+            const value = lowerExpr(stmt.value, scoped, explicit);
+            const type = explicit ??
               exprBindingType(value, ownershipEnvFromTypes(scoped), typeDecls, allFnDecls);
             if (type) scoped.set(stmt.name, type);
             return { ...stmt, value } as Statement;
@@ -1005,7 +1076,7 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
         return {
           ...expr,
           statements,
-          expr: expr.expr ? lowerExpr(expr.expr, scoped) : undefined,
+          expr: expr.expr ? lowerExpr(expr.expr, scoped, expectedType) : undefined,
         };
       }
       case "literal":
@@ -1016,12 +1087,12 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
   };
   for (const decl of program.declarations) {
     if (decl.kind === "fn") {
-      ensureImplicitStateParam(decl, functionNames, functions, typeDecls);
       decl.body = lowerExpr(
         decl.body,
         new Map(
           decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
         ),
+        decl.returnType,
       ) as BlockExpr;
     } else if (decl.kind === "contract") {
       decl.body = lowerExpr(
@@ -1031,113 +1102,9 @@ function lowerDoExpressions(program: Program, diagnostics: Diagnostic[]) {
         ),
       ) as BlockExpr;
     } else if (decl.kind === "let" || decl.kind === "const") {
-      decl.value = lowerExpr(decl.value);
+      decl.value = lowerExpr(decl.value, new Map(), explicitTypeAnnotation(decl.type));
     }
   }
-}
-
-function ensureImplicitStateParam(
-  decl: FnDecl,
-  functionNames: Set<string>,
-  functions: Map<string, FnDecl>,
-  types: TypeDecl[],
-) {
-  if (
-    decl.public || decl.generated || !decl.returnType || decl.params.some((param) => param.const)
-  ) {
-    return;
-  }
-  const env = new Map(decl.params.map((param) => [param.name, param.type]));
-  const effect = implicitStateEffectForFunction(
-    decl.body,
-    decl.returnType,
-    functionNames,
-    functions,
-    types,
-  );
-  if (!effect) return;
-  if (envHasDoStateType(env, effect, types)) return;
-  const name = uniqueParamName(decl.params, "__state");
-  decl.params.unshift({ name, type: renderTypeExpr(effect) });
-}
-
-function implicitStateEffectForFunction(
-  expr: Expr,
-  returnType: string,
-  functionNames: Set<string>,
-  functions: Map<string, FnDecl>,
-  types: TypeDecl[],
-): TypeExpr | undefined {
-  if (expr.kind === "do" && expr.strategy.name === "monad") {
-    const effect = expr.strategy.effect;
-    if (
-      effect.kind === "type_call" &&
-      doStateTypeKeyForType(renderTypeExpr(effect), types) ===
-        doStateTypeKeyForType(returnType, types) &&
-      doBlockHasImplicitStateCall(expr, functions) &&
-      hasDoEffectMember(functionNames, renderTypeExpr(effect.callee), "bind")
-    ) return effect;
-  }
-  if (expr.kind === "block") {
-    for (const stmt of expr.statements) {
-      if (stmt.kind === "let" || stmt.kind === "destructure_let") {
-        const found = implicitStateEffectForFunction(
-          stmt.value,
-          returnType,
-          functionNames,
-          functions,
-          types,
-        );
-        if (found) return found;
-      }
-    }
-    return expr.expr
-      ? implicitStateEffectForFunction(expr.expr, returnType, functionNames, functions, types)
-      : undefined;
-  }
-  for (const child of exprChildValues(expr)) {
-    const found = implicitStateEffectForFunction(
-      child,
-      returnType,
-      functionNames,
-      functions,
-      types,
-    );
-    if (found) return found;
-  }
-  return undefined;
-}
-
-function doBlockHasImplicitStateCall(
-  expr: Extract<Expr, { kind: "do" }>,
-  functions: Map<string, FnDecl>,
-): boolean {
-  return expr.statements.some((stmt) =>
-    stmt.kind === "do_expr" &&
-    (callOmitsLeadingRuntimeParam(stmt.value, functions) || stmt.value.kind === "call")
-  );
-}
-
-function callOmitsLeadingRuntimeParam(expr: Expr, functions: Map<string, FnDecl>): boolean {
-  if (expr.kind !== "call" || expr.callee.kind !== "var") return false;
-  const localName = expr.callee.name.split(/[.:]+/).at(-1);
-  const fn = functions.get(expr.callee.name) ?? (localName ? functions.get(localName) : undefined);
-  if (!fn) return false;
-  const runtimeParams = fn.params.filter((param) => !param.const);
-  return runtimeParams.length > 0 && expr.args.length === runtimeParams.length - 1;
-}
-
-function envHasDoStateType(env: Map<string, string>, effect: TypeExpr, types: TypeDecl[]): boolean {
-  const stateTypes = doStateTypeKeysForEffect(effect, types);
-  return [...env.values()].some((value) => stateTypes.has(doStateTypeKeyForType(value, types)));
-}
-
-function uniqueParamName(params: Param[], base: string): string {
-  const names = new Set(params.map((param) => param.name));
-  let name = base;
-  let suffix = 0;
-  while (names.has(name)) name = `${base}${suffix++}`;
-  return name;
 }
 
 function lowerDoExpression(
@@ -1148,11 +1115,16 @@ function lowerDoExpression(
   env: Map<string, string> = new Map(),
   types: TypeDecl[] = [],
   functions: FnDecl[] = [],
+  deferUntyped = false,
+  resolvedTypeHoles: ResolvedTypeHole[] = [],
 ): Expr {
   const proofEffect = renderTypeExpr(expr.strategy.effect);
   const effect = doRuntimeEffectName(expr.strategy.effect, expr.strategy.name, functionNames) ??
     proofEffect;
   const strategy = expr.strategy.name;
+  if (!functionNames && types.length === 0 && functions.length === 0) {
+    return mapDoExpressionChildren(expr, lowerExpr);
+  }
   if (strategy === "io") {
     return lowerIoDoExpression(expr, diagnostics, lowerExpr, env, types, functions);
   }
@@ -1286,6 +1258,25 @@ function lowerDoExpression(
   );
 }
 
+function mapDoExpressionChildren(
+  expr: Extract<Expr, { kind: "do" }>,
+  lowerExpr: (expr: Expr) => Expr,
+): Expr {
+  return {
+    ...expr,
+    statements: expr.statements.map((stmt): DoStatement => {
+      if (
+        stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+        stmt.kind === "destructure_let"
+      ) {
+        return { ...stmt, value: lowerExpr(stmt.value) };
+      }
+      return stmt;
+    }),
+    expr: expr.expr ? lowerExpr(expr.expr) : undefined,
+  };
+}
+
 function lowerIoDoExpression(
   expr: Extract<Expr, { kind: "do" }>,
   diagnostics: Diagnostic[],
@@ -1355,10 +1346,14 @@ function lowerIoDoExpression(
     }
     if (stmt.kind === "let") {
       const value = lowerExpr(stmt.value);
-      const type = stmt.type ??
+      const type = explicitTypeAnnotation(stmt.type) ??
         exprBindingType(value, ownershipEnvFromTypes(scoped), types, functions);
       if (type) scoped.set(stmt.name, type);
-      statements.push({ ...stmt, value, ...(type && !stmt.type ? { type } : {}) });
+      statements.push({
+        ...stmt,
+        value,
+        ...(type && !explicitTypeAnnotation(stmt.type) ? { type } : {}),
+      });
       continue;
     }
     if (stmt.kind === "destructure_let") {
@@ -1568,96 +1563,117 @@ function typeExprContainsHole(expr: TypeExpr): boolean {
   }
 }
 
-function stateDoContext(
-  effect: TypeExpr,
-  strategy: string,
-  functionNames: Set<string> | undefined,
+function recordTypeExprHoleMatches(
+  pattern: TypeExpr,
+  actualSource: string | undefined,
+  resolved: ResolvedTypeHole[],
+) {
+  if (!actualSource || !typeExprContainsHole(pattern)) return;
+  const actual = parseAnnotationType(actualSource);
+  if (!actual) return;
+  const visit = (left: TypeExpr, right: TypeExpr): boolean => {
+    if (left.kind === "type_hole") {
+      const replacement = renderTypeExpr(right);
+      if (left.span && !typeHasFreeInferredVars(replacement)) {
+        resolved.push({ span: left.span, replacement });
+      }
+      return true;
+    }
+    if (left.kind === "type_call" && right.kind === "type_call") {
+      if (renderTypeExpr(left.callee) !== renderTypeExpr(right.callee)) return false;
+      if (left.args.length !== right.args.length) return false;
+      return left.args.every((arg, index) => visit(arg, right.args[index]!));
+    }
+    return renderTypeExpr(left) === renderTypeExpr(right);
+  };
+  visit(pattern, actual);
+}
+
+function recordStrategyTypeHoleResolutions(
+  pattern: TypeExpr,
+  actual: string | undefined,
+  resolved: ResolvedTypeHole[],
+) {
+  if (!actual || !typeExprContainsHole(pattern)) return;
+  const patternText = renderTypeExpr(pattern);
+  const holeSpans = new Map<string, Span>();
+  const rewritten = replaceTypeExprHolesWithVariables(pattern, holeSpans);
+  const reverse = new Map([...holeSpans].map(([variable, span]) => [variable, span]));
+  const inferred = new Map<string, string>();
+  bindTypePattern(rewritten, actual, inferred);
+  for (const [variable, replacement] of inferred) {
+    const span = reverse.get(variable);
+    if (!span || typeHasFreeInferredVars(replacement)) continue;
+    resolved.push({ span, replacement });
+  }
+  if (pattern.kind === "type_hole" && pattern.span && !typeHasFreeInferredVars(actual)) {
+    resolved.push({ span: pattern.span, replacement: actual });
+  }
+  if (patternText === "_") return;
+}
+
+function replaceTypeExprHolesWithVariables(
+  expr: TypeExpr,
+  bindings: Map<string, Span>,
+): string {
+  if (expr.kind === "type_hole") {
+    const span = expr.span;
+    const variable = span
+      ? `inferred_type_hole_${span.start}_${span.end}`
+      : `inferred_type_hole_${bindings.size}`;
+    if (span) bindings.set(variable, span);
+    return variable;
+  }
+  if (expr.kind === "type_call") {
+    return `${replaceTypeExprHolesWithVariables(expr.callee, bindings)}(${
+      expr.args.map((arg) => replaceTypeExprHolesWithVariables(arg, bindings)).join(", ")
+    })`;
+  }
+  if (expr.kind === "type_shape") {
+    return renderShape({
+      ...expr.shape,
+      slots: expr.shape.slots.map((slot) => ({
+        ...slot,
+        type: parseAnnotationType(replaceTypeExprHolesWithVariables(slot.type, bindings)) ??
+          slot.type,
+      })),
+    });
+  }
+  return renderTypeExpr(expr);
+}
+
+function strategyValuePatternType(
+  pattern: TypeExpr,
+  valueType: string | undefined,
+): string | undefined {
+  if (!valueType || pattern.kind !== "type_call") return valueType;
+  return `${renderTypeExpr(pattern.callee)}(${
+    pattern.args.map((arg) => arg.kind === "type_hole" ? valueType : renderTypeExpr(arg)).join(", ")
+  })`;
+}
+
+function doPureValueType(
+  expr: Expr,
   env: Map<string, string>,
-  types: TypeDecl[] = [],
+  types: TypeDecl[],
+  functions: FnDecl[],
+): string | undefined {
+  if (expr.kind !== "call" || expr.args.length !== 1) return undefined;
+  const callee = expr.callee.kind === "var" ? expr.callee.name : undefined;
+  if (!callee || (callee !== "pure" && !callee.endsWith("::pure") && !callee.endsWith(".pure"))) {
+    return undefined;
+  }
+  return exprBindingType(expr.args[0]!, ownershipEnvFromTypes(env), types, functions);
+}
+
+function stateDoContext(
+  _effect: TypeExpr,
+  _strategy: string,
+  _functionNames: Set<string> | undefined,
+  _env: Map<string, string>,
+  _types: TypeDecl[] = [],
 ): { name: string; type: string } | undefined {
-  if (strategy !== "monad" || effect.kind !== "type_call") {
-    return undefined;
-  }
-  const effectName = renderTypeExpr(effect.callee);
-  if (!hasDoEffectMember(functionNames, effectName, "bind")) return undefined;
-  const stateTypes = doStateTypeKeysForEffect(effect, types);
-  const matches = [...env.entries()].filter(([, type]) =>
-    stateTypes.has(doStateTypeKeyForType(type, types))
-  );
-  const namedWorld = matches.find(([name]) => name === "world");
-  const namedSystems = matches.find(([name]) => name === "systems");
-  const selected = namedSystems ?? namedWorld ?? (matches.length === 1 ? matches[0] : undefined);
-  return selected ? { name: selected[0], type: selected[1] } : undefined;
-}
-
-function doStateTypeKey(type: string): string {
-  return type.replace(/\s+/g, "");
-}
-
-function doStateTypeKeyForType(type: string, types: TypeDecl[]): string {
-  return doStateTypeKey(resolveDoAliasType(type, types) ?? type);
-}
-
-function doStateTypeKeysForEffect(effect: TypeExpr, types: TypeDecl[]): Set<string> {
-  const stateTypes = new Set<string>();
-  const effectText = renderTypeExpr(effect);
-  stateTypes.add(doStateTypeKeyForType(effectText, types));
-  if (effect.kind === "type_call" && effect.args[0] && effect.args[0].kind !== "type_hole") {
-    stateTypes.add(doStateTypeKeyForType(renderTypeExpr(effect.args[0]), types));
-  }
-  const resolved = resolveAliasType(effectText, types) ?? effectText;
-  const resolvedArgs = typeCallArgsForBase(resolved, typeNameOf(resolved));
-  if (resolvedArgs !== undefined) {
-    const args = splitTypeArgs(resolvedArgs);
-    if (args.length === 1) stateTypes.add(doStateTypeKeyForType(args[0], types));
-  }
-  return stateTypes;
-}
-
-function resolveDoAliasType(type: string | undefined, types: TypeDecl[]): string | undefined {
-  let current = type?.trim();
-  const byName = new Map(types.map((decl) => [decl.name, decl]));
-  const byTerminal = new Map(types.map((decl) => [terminalName(decl.name), decl]));
-  const seen = new Set<string>();
-  while (current && !seen.has(current)) {
-    seen.add(current);
-    const resolved = resolveAliasType(current, types);
-    if (resolved && resolved !== current) {
-      current = resolved;
-      continue;
-    }
-    const exactDecl = byName.get(current) ?? byTerminal.get(terminalName(current));
-    if (exactDecl) {
-      const alias = earlyAliasTypeText(exactDecl, []);
-      if (!alias) return current;
-      current = alias;
-      continue;
-    }
-    const callName = typeNameOf(current);
-    const callDecl = byName.get(callName) ?? byTerminal.get(terminalName(callName));
-    const callArgs = typeCallArgsForBase(current, callName);
-    if (callDecl && callArgs !== undefined) {
-      const alias = earlyAliasTypeText(callDecl, splitTypeArgs(callArgs));
-      if (!alias) return current;
-      current = alias;
-      continue;
-    }
-    return current;
-  }
-  return current;
-}
-
-function earlyAliasTypeText(decl: TypeDecl, args: string[]): string | undefined {
-  if (decl.normalized?.kind === "alias") {
-    return substituteAliasTypeParams(decl.normalized.type, decl, args);
-  }
-  if (
-    decl.normalized || decl.resultKind !== "type" || decl.body.statements.length > 0 ||
-    !decl.body.expr
-  ) {
-    return undefined;
-  }
-  return substituteAliasTypeParams(renderTypeExpr(decl.body.expr), decl, args);
+  return undefined;
 }
 
 const DO_EFFECT_OPERATION_NAMES = new Set(["pure", "bind", "map", "apply"]);
@@ -2201,8 +2217,10 @@ function lowerResolvedOperators(
         const statements = expr.statements.map((stmt) => {
           if (stmt.kind !== "let" && stmt.kind !== "destructure_let") return stmt;
           const value = lowerExpr(stmt.value, scoped);
-          if (stmt.kind === "let" && stmt.type) scoped.set(stmt.name, stmt.type);
-          else if (stmt.kind === "let") {
+          const explicit = stmt.kind === "let" ? explicitTypeAnnotation(stmt.type) : undefined;
+          if (stmt.kind === "let" && explicit) {
+            scoped.set(stmt.name, explicit);
+          } else if (stmt.kind === "let") {
             const inferred = inferRuntimeType(value, scoped, functions, undefined, memo);
             if (inferred) scoped.set(stmt.name, inferred);
           }
@@ -2431,14 +2449,15 @@ function lowerCollectorLiterals(
           ...expr,
           statements: expr.statements.map((stmt) => {
             if (stmt.kind === "let") {
-              if (!stmt.type && stmt.value.kind === "shape" && stmt.value.syntax === "collection") {
+              const expected = explicitTypeAnnotation(stmt.type);
+              if (!expected && stmt.value.kind === "shape" && stmt.value.syntax === "collection") {
                 diagnostics.push(diagnosticAt(
                   "collection.expected_type",
                   "collection literal requires an expected target type",
                   stmt.value,
                 ));
               }
-              return { ...stmt, value: lowerExpr(stmt.value, stmt.type) };
+              return { ...stmt, value: lowerExpr(stmt.value, expected) };
             }
             if (stmt.kind === "destructure_let") {
               return { ...stmt, value: lowerExpr(stmt.value, undefined) };
@@ -2458,7 +2477,7 @@ function lowerCollectorLiterals(
     if (decl.kind === "fn") {
       decl.body = lowerExpr(decl.body, decl.returnType) as Extract<Expr, { kind: "block" }>;
     } else if (decl.kind === "let" || decl.kind === "const") {
-      decl.value = lowerExpr(decl.value, decl.type);
+      decl.value = lowerExpr(decl.value, explicitTypeAnnotation(decl.type));
     } else if (decl.kind === "contract") {
       decl.body = lowerExpr(decl.body, undefined) as Extract<Expr, { kind: "block" }>;
     }
@@ -2809,13 +2828,19 @@ function runtimeTypePatternMatches(
 
 function splitTypeArgs(source: string): string[] {
   const args: string[] = [];
-  let depth = 0;
+  let parenDepth = 0;
+  let braceDepth = 0;
+  let bracketDepth = 0;
   let start = 0;
   for (let index = 0; index < source.length; index++) {
     const char = source[index];
-    if (char === "(") depth++;
-    else if (char === ")") depth--;
-    else if (char === "," && depth === 0) {
+    if (char === "(") parenDepth++;
+    else if (char === ")") parenDepth--;
+    else if (char === "{") braceDepth++;
+    else if (char === "}") braceDepth--;
+    else if (char === "[") bracketDepth++;
+    else if (char === "]") bracketDepth--;
+    else if (char === "," && parenDepth === 0 && braceDepth === 0 && bracketDepth === 0) {
       args.push(source.slice(start, index).trim());
       start = index + 1;
     }
@@ -5475,10 +5500,10 @@ function specializeInferredBlock(
           stmt.value,
           context,
           scoped,
-          stmt.type,
+          explicitTypeAnnotation(stmt.type),
           reportAmbiguous,
         );
-        const type = stmt.type ?? inferExprType(value, context, scoped);
+        const type = explicitTypeAnnotation(stmt.type) ?? inferExprType(value, context, scoped);
         if (type) scoped.set(stmt.name, type);
         return { ...stmt, value };
       }
@@ -5747,6 +5772,9 @@ function specializeInferredCall(
       context.types,
       context.consts,
     );
+    fn.params.forEach((param, index) => {
+      inferFromValuePattern(param.type, argsByParam[index], types, context, env);
+    });
     const missingTypeVars = [...collectTypeVars(fn, context.consts)].filter((name) =>
       !types.has(name)
     );
@@ -5983,6 +6011,8 @@ function inferExprType(
       if (resolved?.kind === "type") return resolved.name;
       if (proof) return proof;
     }
+    const localFn = parseExpectedFnType(env.get(expr.callee.name) ?? "");
+    if (localFn) return localFn.returnType;
     const fn = context.functions.get(expr.callee.name);
     if (!fn) return undefined;
     return inferCallReturnType(expr, fn, context, env) ?? fn.returnType;
@@ -6358,6 +6388,17 @@ function collectFreeTypeVars(
   visit(parsed);
 }
 
+function typeHasFreeInferredVars(annotation: string, consts?: Map<string, ConstValue>): boolean {
+  const vars = new Set<string>();
+  collectFreeTypeVars(annotation, vars, new Set(), consts);
+  const fn = parseExpectedFnType(annotation);
+  if (fn) {
+    for (const param of fn.params) collectFreeTypeVars(param.type, vars, new Set(), consts);
+    collectFreeTypeVars(fn.returnType, vars, new Set(), consts);
+  }
+  return vars.size > 0;
+}
+
 function literalConstValue(expr: Extract<Expr, { kind: "literal" }>): ConstValue | undefined {
   if (expr.literalKind === "bool") return { kind: "bool", value: expr.value === "true" };
   if (expr.literalKind === "number") return { kind: "number", value: expr.value };
@@ -6444,8 +6485,14 @@ function bindTypePattern(
   types: Map<string, string>,
   typeDecls: TypeDecl[] = [],
   consts?: Map<string, ConstValue>,
+  seen = new Set<string>(),
 ) {
   if (!pattern || !actual) return;
+  pattern = substituteTypeVars(pattern, types);
+  actual = substituteTypeVars(actual, types);
+  const key = `${pattern}\0${actual}`;
+  if (seen.has(key)) return;
+  seen.add(key);
   if (isInferredTypeVarName(pattern)) {
     if (isUnresolvedInferredBinding(actual) && !consts?.has(actual.trim())) return;
     types.set(pattern, actual);
@@ -6463,17 +6510,25 @@ function bindTypePattern(
       types,
       typeDecls,
       consts,
+      seen,
     );
     return;
   }
   const pCall = pattern.match(/^([A-Za-z_][A-Za-z0-9_.]*)\(([\s\S]*)\)$/);
   const aCall = actual.match(/^([A-Za-z_][A-Za-z0-9_.]*)\(([\s\S]*)\)$/);
+  if (pCall && !aCall) {
+    const resolvedPattern = resolveAliasType(pattern, typeDecls);
+    if (resolvedPattern && resolvedPattern !== pattern) {
+      bindTypePattern(resolvedPattern, actual, types, typeDecls, consts, seen);
+    }
+    return;
+  }
   if (pCall && aCall) {
     if (isInferredTypeVarName(pCall[1])) {
       if (!isUnresolvedInferredBinding(aCall[1]) || consts?.has(aCall[1].trim())) {
         types.set(pCall[1], aCall[1]);
       }
-      bindTypePattern(pCall[2].trim(), aCall[2].trim(), types, typeDecls, consts);
+      bindTypePattern(pCall[2].trim(), aCall[2].trim(), types, typeDecls, consts, seen);
       return;
     }
     if (terminalName(pCall[1]) === terminalName(aCall[1])) {
@@ -6486,18 +6541,19 @@ function bindTypePattern(
           types,
           typeDecls,
           consts,
+          seen,
         );
       }
       return;
     }
     const resolvedPattern = resolveAliasType(pattern, typeDecls);
     if (resolvedPattern && resolvedPattern !== pattern) {
-      bindTypePattern(resolvedPattern, actual, types, typeDecls, consts);
+      bindTypePattern(resolvedPattern, actual, types, typeDecls, consts, seen);
       return;
     }
     const resolvedActual = resolveAliasType(actual, typeDecls);
     if (resolvedActual && resolvedActual !== actual) {
-      bindTypePattern(pattern, resolvedActual, types, typeDecls, consts);
+      bindTypePattern(pattern, resolvedActual, types, typeDecls, consts, seen);
     }
     return;
   }
@@ -6648,6 +6704,18 @@ function substituteInferredExpr(
       ),
     };
   }
+  if (expr.kind === "const_fn") {
+    return {
+      ...expr,
+      body: substituteInferredExpr(
+        expr.body,
+        types,
+        staticNames,
+        proofTypes,
+        substituteContextWithRuntimeBindings(context, expr.params),
+      ),
+    };
+  }
   if (expr.kind === "index") {
     return {
       ...expr,
@@ -6775,9 +6843,12 @@ function substituteInferredExpr(
       if (stmt.kind === "let") {
         statements.push({
           ...stmt,
-          type: stmt.type
-            ? substituteStaticNamesInType(substituteTypeVars(stmt.type, types), staticNames)
-            : stmt.type,
+          type: explicitTypeAnnotation(stmt.type)
+            ? substituteStaticNamesInType(
+              substituteTypeVars(explicitTypeAnnotation(stmt.type)!, types),
+              staticNames,
+            )
+            : undefined,
           value: substituteInferredExpr(
             stmt.value,
             types,
@@ -6842,6 +6913,8 @@ function specializeConstParamCalls(
     cache: new Map(),
     memo: createCheckMemo(),
     constFnCaptures: new Map(),
+    runtimeClosureCache: new Map(),
+    specializedStaticValues: new Map(),
     usedNames: new Set(program.declarations.map((decl) => "name" in decl ? decl.name : "")),
     typeConstructors: new Map(
       types.flatMap((decl) =>
@@ -6873,16 +6946,34 @@ function specializeConstParamCalls(
     processedGenerated = context.cache.size;
     for (const decl of generated) {
       if (!decl.params.some((param) => param.const)) {
-        specializeBlock(
-          decl.body,
-          context,
-          new Map(decl.params.map((param) => [param.name, param.type])),
-          decl.returnType,
-        );
+        const active = context.specializedStaticValues.get(decl.name);
+        const previousActive = context.activeStaticValues;
+        context.activeStaticValues = active;
+        try {
+          specializeBlock(
+            decl.body,
+            context,
+            new Map(decl.params.map((param) => [param.name, param.type])),
+            decl.returnType,
+          );
+        } finally {
+          context.activeStaticValues = previousActive;
+        }
       }
     }
   }
+  for (const decl of context.runtimeClosureCache.values()) {
+    specializeBlock(
+      decl.body,
+      context,
+      new Map(decl.params.map((param) => [param.name, param.type])),
+      decl.returnType,
+    );
+  }
   if (context.cache.size > 0) program.declarations.push(...context.cache.values());
+  if (context.runtimeClosureCache.size > 0) {
+    program.declarations.push(...context.runtimeClosureCache.values());
+  }
 }
 
 function specializeBlock(
@@ -6893,8 +6984,9 @@ function specializeBlock(
 ) {
   block.statements = block.statements.flatMap((stmt): Statement[] => {
     if (stmt.kind === "let") {
-      stmt.value = specializeExpr(stmt.value, context, env);
-      const type = stmt.type ?? inferExprType(stmt.value, context, env);
+      const expected = explicitTypeAnnotation(stmt.type);
+      stmt.value = specializeExpr(stmt.value, context, env, expected);
+      const type = expected ?? inferExprType(stmt.value, context, env);
       if (type) env.set(stmt.name, type);
     } else if (stmt.kind === "destructure_let") {
       stmt.value = specializeExpr(stmt.value, context, env);
@@ -6915,18 +7007,35 @@ function specializeExpr(
   try {
     switch (expr.kind) {
       case "do":
-        return lowerDoExpression(
-          expr,
-          context.diagnostics,
-          (child) => specializeExpr(child, context, env),
-        );
-      case "const_fn":
-        return expr;
+        return specializeDoExpr(expr, context, env);
+      case "const_fn": {
+        const expectedFn = expectedFunctionType(expectedType, context.types);
+        const body = context.activeStaticValues
+          ? substituteSpecializedExpr(
+            expr.body,
+            new Map(),
+            context.activeStaticValues.values,
+            context.activeStaticValues.names,
+            context,
+          )
+          : expr.body;
+        const specializedExpr = body === expr.body ? expr : { ...expr, body };
+        return expectedFn
+          ? synthesizeRuntimeClosureExpr(specializedExpr, expectedFn, context, env) ?? expr
+          : expr;
+      }
       case "call": {
         context.stats && (context.stats.visitedCalls += 1);
         const callee = specializeExpr(expr.callee, context, env);
-        const args = expr.args.map((arg) => specializeExpr(arg, context, env));
         const direct = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
+        const args = expr.args.map((arg, index) => {
+          const param = direct?.params[index];
+          const rawExpected = param && !param.const ? param.type : undefined;
+          const expected = rawExpected && !typeHasFreeInferredVars(rawExpected, context.consts)
+            ? rawExpected
+            : undefined;
+          return specializeExpr(arg, context, env, expected);
+        });
         if (!direct?.params.some((param) => param.const)) {
           if (direct && fnUsesInferredTypeVars(direct, context.consts)) {
             return specializeInferredCall(
@@ -6935,7 +7044,7 @@ function specializeExpr(
               context,
               env,
               callSiteSpan(expr),
-              undefined,
+              expectedType,
               false,
             ) ?? { ...expr, callee, args };
           }
@@ -7032,12 +7141,64 @@ function specializeExpr(
       }
       case "literal":
       case "var":
+        if (
+          expr.kind === "var" && expectedFunctionType(expectedType, context.types) &&
+          context.functions.has(expr.name) && !env.has(expr.name)
+        ) {
+          return runtimeClosureMakeExpr(expr.name, []);
+        }
+        return expr;
       case "placeholder":
         return expr;
     }
   } finally {
     context.runtimeEnv = previousRuntimeEnv;
   }
+}
+
+function expectedFunctionType(
+  expectedType: string | undefined,
+  types: TypeDecl[] = [],
+): string | undefined {
+  const direct = expectedType?.trim();
+  if (direct?.startsWith("fn(")) return direct;
+  const resolved = resolveAliasType(direct, types)?.trim();
+  return resolved?.startsWith("fn(") ? resolved : undefined;
+}
+
+function specializeDoExpr(
+  expr: Extract<Expr, { kind: "do" }>,
+  context: ConstSpecializationContext,
+  env: Map<string, string>,
+): Expr {
+  const scoped = new Map(env);
+  const statements = expr.statements.map((stmt): DoStatement => {
+    if (stmt.kind === "do_bind") {
+      const value = specializeExpr(stmt.value, context, scoped);
+      scoped.set(stmt.name, "");
+      return { ...stmt, value };
+    }
+    if (stmt.kind === "do_expr") {
+      return { ...stmt, value: specializeExpr(stmt.value, context, scoped) };
+    }
+    if (stmt.kind === "let") {
+      const value = specializeExpr(stmt.value, context, scoped);
+      const type = explicitTypeAnnotation(stmt.type) ?? inferExprType(value, context, scoped);
+      if (type) scoped.set(stmt.name, type);
+      return { ...stmt, value };
+    }
+    if (stmt.kind === "destructure_let") {
+      const value = specializeExpr(stmt.value, context, scoped);
+      for (const name of stmt.names) scoped.set(name, "");
+      return { ...stmt, value };
+    }
+    return stmt;
+  });
+  return {
+    ...expr,
+    statements,
+    expr: expr.expr ? specializeExpr(expr.expr, context, scoped) : undefined,
+  };
 }
 
 interface ConstSpecializationContext {
@@ -7051,6 +7212,12 @@ interface ConstSpecializationContext {
   cache: Map<string, FnDecl>;
   memo: CheckMemo;
   constFnCaptures: Map<string, Param[]>;
+  runtimeClosureCache: Map<string, FnDecl>;
+  specializedStaticValues: Map<
+    string,
+    { values: Map<string, ConstValue>; names: Map<string, string> }
+  >;
+  activeStaticValues?: { values: Map<string, ConstValue>; names: Map<string, string> };
   usedNames: Set<string>;
   stats?: SpecializationTrace;
   diagnosticSpan?: Span;
@@ -7136,7 +7303,9 @@ function specializeConstParamCallAttempt(
     if (args.length !== fn.params.length - leadingConstCount) return undefined;
   }
   const argsByParam = fn.params.map((param, index) => {
-    if (!omitLeadingConstArgs) return args[index];
+    if (!omitLeadingConstArgs) {
+      return args[index];
+    }
     if (index < leadingConstCount && param.const) return undefined;
     return args[index - leadingConstCount];
   });
@@ -7217,7 +7386,9 @@ function specializeConstParamCallAttempt(
         }
       }
     } else {
-      if (!arg) return undefined;
+      if (!arg) {
+        return undefined;
+      }
       runtimeArgs.push(arg);
     }
   }
@@ -7267,7 +7438,14 @@ function specializeConstParamCallAttempt(
     };
     context.cache.set(key, specialized);
     context.functions.set(specialized.name, specialized);
+    const activeStaticValues = {
+      values: new Map(staticValues),
+      names: new Map(staticArgNames),
+    };
+    context.specializedStaticValues.set(specialized.name, activeStaticValues);
     const previousRuntimeEnv = context.runtimeEnv;
+    const previousActiveStaticValues = context.activeStaticValues;
+    context.activeStaticValues = activeStaticValues;
     context.runtimeEnv = new Map(specialized.params.map((param) => [param.name, param.type]));
     try {
       specialized.body = substituteSpecializedExpr(
@@ -7277,8 +7455,15 @@ function specializeConstParamCallAttempt(
         staticArgNames,
         context,
       ) as Extract<Expr, { kind: "block" }>;
+      specializeBlock(
+        specialized.body,
+        context,
+        new Map(specialized.params.map((param) => [param.name, param.type])),
+        specialized.returnType,
+      );
     } finally {
       context.runtimeEnv = previousRuntimeEnv;
+      context.activeStaticValues = previousActiveStaticValues;
     }
     specialized.generatedInlineable = isInlineableGeneratedSpecializationSource(fn) &&
       !exprCallsFunction(specialized.body, specialized.name);
@@ -7319,8 +7504,29 @@ function inferConstStaticBindings(
       const directFn = context.functions.get(arg.name);
       if (directFn) inferFnTypeArgs(param.type, directFn, bindings, context.consts);
     }
+    if (param.const && arg.kind === "const_fn") {
+      inferConstFnLiteralTypeArgs(param.type, arg, bindings, context);
+    }
   });
   return bindings;
+}
+
+function inferConstFnLiteralTypeArgs(
+  expectedType: string,
+  arg: Extract<Expr, { kind: "const_fn" }>,
+  bindings: Map<string, string>,
+  context: ConstSpecializationContext,
+) {
+  const substitutedExpected = substituteTypeVars(expectedType, bindings);
+  const signature = parseExpectedFnType(substitutedExpected);
+  if (!signature || signature.params.length !== arg.params.length) return;
+  const fnEnv = new Map(context.runtimeEnv ?? []);
+  signature.params.forEach((param, index) => {
+    const name = arg.params[index];
+    if (name) fnEnv.set(name, param.type);
+  });
+  const bodyType = inferExprType(arg.body, context, fnEnv);
+  bindTypePattern(signature.returnType, bodyType, bindings, context.types, context.consts);
 }
 
 function collectExplicitConstArgNames(
@@ -7748,6 +7954,7 @@ function synthesizeConstFnHelper(
     });
     return undefined;
   }
+  if (typeHasFreeInferredVars(expectedType, context.consts)) return undefined;
   if (arg.params.length !== signature.params.length) {
     context.diagnostics.push({
       code: "const.const_fn_arity",
@@ -7813,6 +8020,122 @@ function synthesizeConstFnHelper(
     context.constFnCaptures.set(name, captures.filter((capture): capture is Param => !!capture));
   }
   return { name: fn.name, value: { kind: "fn", name: fn.name } };
+}
+
+function synthesizeRuntimeClosureExpr(
+  arg: Extract<Expr, { kind: "const_fn" }>,
+  expectedType: string,
+  context: ConstSpecializationContext,
+  env: Map<string, string>,
+): Expr | undefined {
+  let body = arg.body;
+  if (context.activeStaticValues) {
+    const previousRuntimeEnv = context.runtimeEnv;
+    context.runtimeEnv = env;
+    try {
+      body = substituteSpecializedExpr(
+        body,
+        new Map(),
+        context.activeStaticValues.values,
+        context.activeStaticValues.names,
+        context,
+      );
+    } finally {
+      context.runtimeEnv = previousRuntimeEnv;
+    }
+    for (const [name, value] of context.activeStaticValues.values) {
+      if (value.kind !== "fn") continue;
+      const target = context.activeStaticValues.names.get(name) ?? value.name;
+      body = replaceNamedVar(body, name, { kind: "var", name: target });
+    }
+  }
+  const signature = parseExpectedFnType(expectedType);
+  if (!signature) {
+    context.diagnostics.push({
+      code: "const.const_fn_expected_fn",
+      message: "fn literal requires an expected function type",
+      span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
+    });
+    return undefined;
+  }
+  if (arg.params.length !== signature.params.length) {
+    context.diagnostics.push({
+      code: "const.const_fn_arity",
+      message:
+        `fn literal has ${arg.params.length} parameter(s), expected ${signature.params.length}`,
+      span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
+    });
+    return undefined;
+  }
+  const paramNames = new Set(arg.params);
+  const captureNames = [...exprRuntimeCaptures(body)].filter((name) =>
+    !paramNames.has(name) && !context.functions.has(name) && !context.consts.has(name)
+  );
+  const captures = captureNames.map((name) => {
+    const type = env.get(name) ?? context.runtimeEnv?.get(name);
+    return type ? { name, type } : undefined;
+  });
+  const missing = captures.find((capture) => !capture);
+  if (missing) {
+    context.diagnostics.push({
+      code: "const.const_fn_capture",
+      message: `fn literal cannot capture runtime local ${captureNames[captures.indexOf(missing)]}`,
+      span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
+    });
+    return undefined;
+  }
+  const captureParams = captures.filter((capture): capture is Param => !!capture);
+  const key = `__closure_fn\0${expectedType}\0${JSON.stringify(body)}\0${
+    captureParams.map((capture) => `${capture.name}:${capture.type}`).join("\0")
+  }`;
+  let fn = context.runtimeClosureCache.get(key);
+  if (!fn) {
+    const name = allocateSpecializationName(
+      "__closure_fn",
+      [expectedType, JSON.stringify(body), ...captureParams.map((capture) => capture.name)],
+      context.usedNames,
+    );
+    fn = {
+      kind: "fn",
+      public: false,
+      name,
+      params: signature.params.map((param, index) => ({
+        name: arg.params[index] ?? param.name,
+        type: param.type,
+      })).concat(captureParams),
+      returnType: signature.returnType,
+      effects: [],
+      body: { kind: "block", statements: [], expr: body },
+      generated: true,
+      generatedInlineable: false,
+    };
+    context.runtimeClosureCache.set(key, fn);
+    context.functions.set(name, fn);
+    const previousRuntimeEnv = context.runtimeEnv;
+    context.runtimeEnv = new Map(fn.params.map((param) => [param.name, param.type]));
+    try {
+      specializeBlock(
+        fn.body,
+        context,
+        new Map(fn.params.map((param) => [param.name, param.type])),
+        fn.returnType,
+      );
+    } finally {
+      context.runtimeEnv = previousRuntimeEnv;
+    }
+  }
+  return runtimeClosureMakeExpr(
+    fn.name,
+    captureParams.map((param) => ({ kind: "var", name: param.name } as Expr)),
+  );
+}
+
+function runtimeClosureMakeExpr(target: string, captures: Expr[]): Expr {
+  return {
+    kind: "call",
+    callee: { kind: "var", name: `@closure_make/${target}` },
+    args: captures,
+  };
 }
 
 function parseExpectedFnType(
@@ -8704,8 +9027,9 @@ function substituteSpecializedExpr(
             context,
           );
           if (stmt.kind === "let") {
-            const type = stmt.type
-              ? substituteConstParamType(stmt.type, scopedStaticValues, scopedStaticArgNames)
+            const explicit = explicitTypeAnnotation(stmt.type);
+            const type = explicit
+              ? substituteConstParamType(explicit, scopedStaticValues, scopedStaticArgNames)
               : inferExprType(
                 value,
                 context,
@@ -8980,7 +9304,7 @@ function expandReplaceFieldsWithEnv(
       if (stmt.kind !== "let" && stmt.kind !== "destructure_let") return stmt;
       const value = expandReplaceFieldsWithEnv(stmt.value, scoped, types);
       if (stmt.kind === "let") {
-        const type = stmt.type ?? exprBindingType(
+        const type = explicitTypeAnnotation(stmt.type) ?? exprBindingType(
           value,
           new Map([...scoped].map(([name, type]) => [
             name,
@@ -9421,6 +9745,38 @@ function evaluateTypeDecls(types: TypeDecl[], diagnostics: Diagnostic[]) {
   for (const decl of types) evaluate(decl);
 }
 
+function visitTypeExpr(expr: TypeExpr, visit: (expr: TypeExpr) => void) {
+  visit(expr);
+  switch (expr.kind) {
+    case "type_call":
+      visitTypeExpr(expr.callee, visit);
+      for (const arg of expr.args) visitTypeExpr(arg, visit);
+      return;
+    case "type_shape":
+      for (const slot of expr.shape.slots) visitTypeExpr(slot.type, visit);
+      return;
+    case "type_match":
+      visitTypeExpr(expr.value, visit);
+      for (const arm of expr.arms) visitTypeExpr(arm.value, visit);
+      return;
+    case "type_binary":
+      visitTypeExpr(expr.left, visit);
+      visitTypeExpr(expr.right, visit);
+      return;
+    case "type_ref":
+    case "type_hole":
+    case "type_static_ref":
+    case "type_fn":
+    case "type_operator":
+    case "type_bool":
+    case "type_number":
+    case "type_char":
+    case "type_string":
+    case "type_literal":
+      return;
+  }
+}
+
 function validateTypeExprScalarDomains(expr: TypeExpr, diagnostics: Diagnostic[]) {
   if (expr.kind === "type_call") diagnoseScalarDomainTypeExpr(expr, diagnostics);
   if (expr.kind === "type_call") {
@@ -9497,8 +9853,9 @@ function checkTypeFunctionCasing(
         checkTypeAnnotationCasing(decl.returnType, typeNames, diagnostics, decl.span);
       }
       checkBlockTypeAnnotationCasing(decl.body, typeNames, diagnostics);
-    } else if ((decl.kind === "let" || decl.kind === "const") && decl.type) {
-      checkTypeAnnotationCasing(decl.type, typeNames, diagnostics, decl.span);
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      const explicit = explicitTypeAnnotation(decl.type);
+      if (explicit) checkTypeAnnotationCasing(explicit, typeNames, diagnostics, decl.span);
     }
   }
 }
@@ -9509,14 +9866,370 @@ function checkBlockTypeAnnotationCasing(
   diagnostics: Diagnostic[],
 ) {
   for (const stmt of block.statements) {
-    if (stmt.kind === "let" && stmt.type) {
-      checkTypeAnnotationCasing(stmt.type, typeNames, diagnostics, stmt.span);
+    const explicit = stmt.kind === "let" ? explicitTypeAnnotation(stmt.type) : undefined;
+    if (stmt.kind === "let" && explicit) {
+      checkTypeAnnotationCasing(explicit, typeNames, diagnostics, stmt.span);
     }
     if (stmt.kind === "let") {
       checkExprTypeAnnotationCasing(stmt.value, typeNames, diagnostics);
     }
   }
   if (block.expr) checkExprTypeAnnotationCasing(block.expr, typeNames, diagnostics);
+}
+
+function explicitTypeAnnotation(type: string | undefined): string | undefined {
+  return type?.trim() === "_" ? undefined : type;
+}
+
+function prepareInferredTypeAnnotations(program: Program, diagnostics: Diagnostic[]) {
+  const prepare = (
+    type: string | undefined,
+    typeSpan: Span | undefined,
+    holes:
+      | TypeAnnotationHole[]
+      | undefined,
+  ): string | undefined => {
+    if (!type || !holes?.length || !typeSpan) return type;
+    const sorted = holes
+      .filter((hole) => hole.span)
+      .toSorted((left, right) => (right.span?.start ?? 0) - (left.span?.start ?? 0));
+    let current = type;
+    for (const hole of sorted) {
+      const span = hole.span!;
+      const start = span.start - typeSpan.start;
+      const end = span.end - typeSpan.start;
+      if (start < 0 || end < start || end > current.length) continue;
+      const variable = `inferred_type_hole_${span.start}_${span.end}`;
+      hole.variable = variable;
+      current = `${current.slice(0, start)}${variable}${current.slice(end)}`;
+    }
+    return current;
+  };
+  const diagnoseUnsupported = (holes: TypeAnnotationHole[] | undefined, message: string) => {
+    for (const hole of holes ?? []) {
+      diagnostics.push({
+        code: "type.hole_context",
+        message,
+        span: hole.span,
+      });
+    }
+  };
+  const visitBlock = (block: BlockExpr) => {
+    for (const stmt of block.statements) {
+      if (stmt.kind === "let") {
+        stmt.type = prepare(stmt.type, stmt.typeSpan, stmt.typeHoles);
+        visitExpr(stmt.value);
+      } else if (stmt.kind === "destructure_let") {
+        visitExpr(stmt.value);
+      } else if (stmt.kind === "proof_const") {
+        // Proof/type expressions keep the stricter type-expression validation path.
+      }
+    }
+    if (block.expr) visitExpr(block.expr);
+  };
+  const visitExpr = (expr: Expr) => {
+    if (expr.kind === "block") {
+      visitBlock(expr);
+      return;
+    }
+    for (const child of exprChildren(expr)) visitExpr(child);
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      for (const param of decl.params) {
+        diagnoseUnsupported(
+          param.typeHoles,
+          "type holes are only allowed in expression-backed type annotations and do-strategy type arguments",
+        );
+      }
+      decl.returnType = prepare(decl.returnType, decl.returnTypeSpan, decl.returnTypeHoles);
+      visitBlock(decl.body);
+    } else if (decl.kind === "contract") {
+      for (const param of decl.params) {
+        diagnoseUnsupported(
+          param.typeHoles,
+          "type holes are only allowed in expression-backed type annotations and do-strategy type arguments",
+        );
+      }
+      visitBlock(decl.body);
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      decl.type = prepare(decl.type, decl.typeSpan, decl.typeHoles);
+      visitExpr(decl.value);
+    }
+  }
+  for (const item of program.imports) {
+    if (annotationTextContainsHole(item.type)) {
+      diagnostics.push({
+        code: "type.hole_context",
+        message: "type holes are not allowed in external import signatures",
+        span: item.span,
+      });
+    }
+  }
+}
+
+function annotationTextContainsHole(type: string | undefined): boolean {
+  return /(^|[^A-Za-z0-9_])_([^A-Za-z0-9_]|$)/.test(type ?? "");
+}
+
+function resolveInferredTypeAnnotations(
+  program: Program,
+  types: TypeDecl[],
+  functions: FnDecl[],
+  consts: Map<string, ConstValue>,
+  diagnostics: Diagnostic[],
+  memo: CheckMemo,
+) {
+  const resolved = program.resolvedTypeHoles ?? [];
+  const context = {
+    functions: new Map(functions.map((fn) => [fn.name, fn])),
+    consts,
+    typeConstructors: productConstructorMap(types),
+    types,
+  };
+  const resolveAnnotation = (
+    current: string | undefined,
+    holes: TypeAnnotationHole[] | undefined,
+    actual: string | undefined,
+    spanLike?: { span?: Span; nameSpan?: Span },
+  ): string | undefined => {
+    if (!current || !holes?.length) return current;
+    if (!actual || typeHasFreeInferredVars(actual, consts) || annotationTextContainsHole(actual)) {
+      diagnostics.push({
+        code: "type.inferred_type_ambiguous",
+        message: "cannot resolve inferred type hole without a concrete expression type",
+        span: holes.find((hole) => hole.span)?.span ?? spanLike?.span,
+      });
+      return current;
+    }
+    if (!inferredAnnotationPatternMatches(current, actual, memo)) {
+      diagnostics.push(diagnosticAt(
+        "type.literal_mismatch",
+        `expected ${renderTypeHolesAsUnderscores(current, holes)} but got ${actual}`,
+        spanLike,
+      ));
+      return current;
+    }
+    const bindings = new Map<string, string>();
+    bindTypePattern(current, actual, bindings, types, consts);
+    let next = current;
+    for (const hole of holes) {
+      if (!hole.variable) continue;
+      const replacement = bindings.get(hole.variable) ??
+        (current.trim() === hole.variable ? actual : undefined);
+      if (!replacement || typeHasFreeInferredVars(replacement, consts)) {
+        diagnostics.push({
+          code: "type.inferred_type_ambiguous",
+          message: "cannot resolve inferred type hole without a concrete expression type",
+          span: hole.span ?? spanLike?.span,
+        });
+        continue;
+      }
+      hole.replacement = replacement;
+      next = next.replace(new RegExp(`\\b${escapeRegExp(hole.variable)}\\b`, "g"), replacement);
+      if (hole.span) resolved.push({ span: hole.span, replacement });
+    }
+    return next;
+  };
+  const resolveExpr = (expr: Expr, env: Map<string, string>) => {
+    if (expr.kind === "block") {
+      inferAndResolveBlockType(expr, env, context, resolveAnnotation);
+      return;
+    }
+    for (const child of exprChildren(expr)) resolveExpr(child, env);
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      const env = new Map(
+        decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
+      );
+      const actual = inferAndResolveBlockType(
+        decl.body,
+        env,
+        context,
+        resolveAnnotation,
+        decl.returnType,
+      );
+      decl.returnType = resolveAnnotation(decl.returnType, decl.returnTypeHoles, actual, decl);
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      resolveExpr(decl.value, new Map());
+      const actual = inferExprTypeForAnnotation(decl.value, decl.type, context, new Map()) ??
+        inferExprType(decl.value, context);
+      decl.type = resolveAnnotation(decl.type, decl.typeHoles, actual, decl);
+    } else if (decl.kind === "contract") {
+      const env = new Map(
+        decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
+      );
+      inferAndResolveBlockType(decl.body, env, context, resolveAnnotation);
+    }
+  }
+  program.resolvedTypeHoles = dedupeResolvedTypeHoles(resolved);
+}
+
+function inferAndResolveBlockType(
+  block: BlockExpr,
+  env: Map<string, string>,
+  context: {
+    functions: Map<string, FnDecl>;
+    consts?: Map<string, ConstValue>;
+    typeConstructors: Map<string, TypeDecl>;
+    types?: TypeDecl[];
+  },
+  resolveAnnotation: (
+    current: string | undefined,
+    holes: TypeAnnotationHole[] | undefined,
+    actual: string | undefined,
+    spanLike?: { span?: Span; nameSpan?: Span },
+  ) => string | undefined,
+  expectedFinalType?: string,
+): string | undefined {
+  const scoped = new Map(env);
+  for (const stmt of block.statements) {
+    if (stmt.kind === "let") {
+      inferAndResolveNestedExpr(stmt.value, scoped, context, resolveAnnotation);
+      const actual = inferExprTypeForAnnotation(stmt.value, stmt.type, context, scoped) ??
+        inferExprType(stmt.value, context, scoped);
+      stmt.type = resolveAnnotation(stmt.type, stmt.typeHoles, actual, stmt);
+      const binding = stmt.type && !typeHasFreeInferredVars(stmt.type, context.consts)
+        ? stmt.type
+        : actual;
+      if (binding) scoped.set(stmt.name, binding);
+    } else if (stmt.kind === "destructure_let") {
+      inferAndResolveNestedExpr(stmt.value, scoped, context, resolveAnnotation);
+    }
+  }
+  if (block.expr) {
+    inferAndResolveNestedExpr(block.expr, scoped, context, resolveAnnotation);
+    return inferExprTypeForAnnotation(block.expr, expectedFinalType, context, scoped) ??
+      inferExprType(block.expr, context, scoped);
+  }
+  return undefined;
+}
+
+function inferExprTypeForAnnotation(
+  expr: Expr,
+  annotation: string | undefined,
+  context: {
+    functions: Map<string, FnDecl>;
+    consts?: Map<string, ConstValue>;
+    typeConstructors: Map<string, TypeDecl>;
+    types?: TypeDecl[];
+  },
+  env: Map<string, string>,
+): string | undefined {
+  if (!annotation) return undefined;
+  if (!annotation.includes("inferred_type_hole_")) return undefined;
+  const call = annotation.match(/^([A-Za-z_][A-Za-z0-9_.]*)\(([\s\S]*)\)$/);
+  if (!call) return undefined;
+  const decl = (context.types ?? []).find((item) =>
+    item.name === call[1] || terminalName(item.name) === terminalName(call[1])
+  );
+  if (decl?.normalized?.kind !== "product") return undefined;
+  if (expr.kind !== "shape" && expr.kind !== "product_constructor") return undefined;
+  const exprTypeName = expr.kind === "product_constructor" ? expr.constructor : expr.inferredType;
+  if (exprTypeName && terminalName(typeNameOf(exprTypeName)) !== terminalName(decl.name)) {
+    return undefined;
+  }
+  const slots = expr.slots.filter((slot) => slot.label);
+  if (!slots.length) return undefined;
+  const bindings = new Map<string, string>();
+  const args = splitTypeArgs(call[2]);
+  decl.params.forEach((param, index) => {
+    const arg = args[index];
+    if (arg) bindTypePattern(param.name, arg, bindings, context.types ?? [], context.consts);
+  });
+  for (const slot of slots) {
+    const expected = decl.normalized.shape.slots.find((item) => item.label === slot.label)?.type;
+    const actual = inferExprType(slot.value, context, env);
+    bindTypePattern(expected, actual, bindings, context.types ?? [], context.consts);
+  }
+  const renderedArgs = decl.params.map((param) => {
+    const arg = bindings.get(param.name);
+    return arg ? substituteTypeVars(arg, bindings) : undefined;
+  });
+  if (renderedArgs.some((arg) => !arg || typeHasFreeInferredVars(arg, context.consts))) {
+    return undefined;
+  }
+  return `${decl.name}(${renderedArgs.join(", ")})`;
+}
+
+function inferAndResolveNestedExpr(
+  expr: Expr,
+  env: Map<string, string>,
+  context: {
+    functions: Map<string, FnDecl>;
+    consts?: Map<string, ConstValue>;
+    typeConstructors: Map<string, TypeDecl>;
+    types?: TypeDecl[];
+  },
+  resolveAnnotation: (
+    current: string | undefined,
+    holes: TypeAnnotationHole[] | undefined,
+    actual: string | undefined,
+    spanLike?: { span?: Span; nameSpan?: Span },
+  ) => string | undefined,
+) {
+  if (expr.kind === "block") {
+    inferAndResolveBlockType(expr, new Map(env), context, resolveAnnotation);
+    return;
+  }
+  for (const child of exprChildren(expr)) {
+    inferAndResolveNestedExpr(child, env, context, resolveAnnotation);
+  }
+}
+
+function productConstructorMap(types: TypeDecl[]): Map<string, TypeDecl> {
+  const constructors = new Map(
+    types.flatMap((decl) =>
+      decl.normalized?.kind === "product" ? [[decl.normalized.constructor, decl] as const] : []
+    ),
+  );
+  for (const decl of types) {
+    if (decl.normalized?.kind !== "product") continue;
+    const terminal = terminalName(decl.normalized.constructor);
+    if (!constructors.has(terminal)) constructors.set(terminal, decl);
+  }
+  return constructors;
+}
+
+function inferredAnnotationPatternMatches(
+  expected: string,
+  actual: string,
+  memo: CheckMemo,
+): boolean {
+  if (typeMatches(expected, actual, memo)) return true;
+  if (isInferredTypeVarName(expected.trim())) return true;
+  const expectedCall = expected.match(/^([A-Za-z_][A-Za-z0-9_.]*)\(([\s\S]*)\)$/);
+  const actualCall = actual.match(/^([A-Za-z_][A-Za-z0-9_.]*)\(([\s\S]*)\)$/);
+  if (!expectedCall || !actualCall) return false;
+  if (terminalName(expectedCall[1]) !== terminalName(actualCall[1])) return false;
+  const expectedArgs = splitTypeArgs(expectedCall[2]);
+  const actualArgs = splitTypeArgs(actualCall[2]);
+  return expectedArgs.length === actualArgs.length &&
+    expectedArgs.every((arg, index) =>
+      inferredAnnotationPatternMatches(arg, actualArgs[index] ?? "", memo)
+    );
+}
+
+function renderTypeHolesAsUnderscores(type: string, holes: TypeAnnotationHole[]): string {
+  let rendered = type;
+  for (const hole of holes) {
+    if (!hole.variable) continue;
+    rendered = rendered.replace(new RegExp(`\\b${escapeRegExp(hole.variable)}\\b`, "g"), "_");
+  }
+  return rendered;
+}
+
+function dedupeResolvedTypeHoles(holes: ResolvedTypeHole[]): ResolvedTypeHole[] {
+  const seen = new Set<string>();
+  return holes.filter((hole) => {
+    const key = `${
+      hole.span.sourceId ?? ""
+    }:${hole.span.start}:${hole.span.end}:${hole.replacement}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function checkExprTypeAnnotationCasing(
@@ -10837,6 +11550,13 @@ class TypeEvaluator {
     }
     const builtin = this.evalBuiltin(callee, args);
     if (builtin) return builtin;
+    if (callee.startsWith("@")) {
+      this.reportDiagnostic({
+        code: "type.unknown_static_builtin",
+        message: `unknown static builtin ${callee}`,
+      });
+      return { kind: "never" };
+    }
     if (this.hostIoImports.has(callee)) {
       return this.unsupported(
         "type.runtime_effect_call",
@@ -11342,6 +12062,13 @@ class TypeEvaluator {
         }
         const builtin = this.evalBuiltin(name, args);
         if (builtin) return builtin;
+        if (name.startsWith("@")) {
+          this.reportDiagnostic({
+            code: "type.unknown_static_builtin",
+            message: `unknown static builtin ${name}`,
+          });
+          return { kind: "never" };
+        }
         if (this.hostIoImports.has(name)) {
           return this.unsupported(
             "type.runtime_effect_call",
@@ -12276,6 +13003,18 @@ function parseFnSignatureDetailed(source: string): ParsedFnSignature | undefined
 function checkExternalImportsUseExplicitIo(program: Program, diagnostics: Diagnostic[]) {
   for (const item of program.imports) {
     const signature = parseFnSignatureDetailed(item.type);
+    if (
+      signature &&
+      [signature.returnType, ...signature.params.map((param) => param.type)].some((type) =>
+        type.trim().startsWith("fn(")
+      )
+    ) {
+      diagnostics.push({
+        code: "function.closure_boundary",
+        message: `external import ${item.name} cannot import or export runtime function values`,
+        span: item.span,
+      });
+    }
     const firstParam = signature?.params[0];
     if (!signature || !firstParam || !isIoTypeName(firstParam.type)) {
       diagnostics.push({
@@ -12300,6 +13039,13 @@ function checkExternalImportsUseExplicitIo(program: Program, diagnostics: Diagno
       });
     }
   }
+}
+
+function typeIsRuntimeFunctionValue(type: string | undefined, types: TypeDecl[]): boolean {
+  const direct = type?.trim();
+  if (!direct) return false;
+  if (direct.startsWith("fn(")) return true;
+  return !!resolveAliasType(direct, types)?.trim().startsWith("fn(");
 }
 
 function isIoTypeName(type: string): boolean {
@@ -13364,7 +14110,7 @@ function checkBlockScalarDomainSymbols(
   diagnostics: Diagnostic[],
 ) {
   for (const stmt of block.statements) {
-    if (stmt.kind === "let" && stmt.type) {
+    if (stmt.kind === "let" && explicitTypeAnnotation(stmt.type)) {
       checkScalarDomainSymbols(stmt.type, staticParams, diagnostics, stmt);
     }
     if (stmt.kind === "let" || stmt.kind === "destructure_let") {
@@ -13474,19 +14220,19 @@ function checkStatement(
       functions,
       options,
     );
-    const annotated = normalizeExpectedType(stmt.type, ctx);
+    const annotated = normalizeExpectedType(explicitTypeAnnotation(stmt.type), ctx);
     checkExpr(
       stmt.value,
       env,
       hostIoImports,
       effects,
       diagnostics,
-      annotated?.runtimeType ?? stmt.type,
+      annotated?.runtimeType ?? explicitTypeAnnotation(stmt.type),
       types,
       functions,
       options,
     );
-    stmt.type = annotated?.runtimeType ?? stmt.type ??
+    stmt.type = annotated?.runtimeType ?? explicitTypeAnnotation(stmt.type) ??
       exprBindingType(stmt.value, env, types, functions, options);
     ctx.proofFacts.push(...(annotated?.proofFacts ?? []));
     env.set(stmt.name, { moved: false, type: stmt.type });
@@ -13781,7 +14527,9 @@ function checkTypeVariableMemberProofs(
         visitExpr(stmt.value, active);
       }
       if (stmt.kind === "let") {
-        active.push(...(normalizeExpectedType(stmt.type, ctx)?.proofFacts ?? []));
+        active.push(
+          ...(normalizeExpectedType(explicitTypeAnnotation(stmt.type), ctx)?.proofFacts ?? []),
+        );
       } else if (stmt.kind === "proof_const") {
         validateSatisfiesProofConst(stmt.value, ctx);
         active.push(...(normalizeExpectedType(renderTypeExpr(stmt.value), ctx)?.proofFacts ?? []));
@@ -14050,7 +14798,8 @@ function checkExprImpl(
 ) {
   switch (expr.kind) {
     case "const_fn": {
-      const signature = expectedType ? parseExpectedFnType(expectedType) : undefined;
+      const expectedFn = expectedFunctionType(expectedType, types);
+      const signature = expectedFn ? parseExpectedFnType(expectedFn) : undefined;
       if (signature) {
         const nextEnv = new Map(env);
         for (let index = 0; index < expr.params.length; index++) {
@@ -15839,6 +16588,18 @@ function typeCallArgsForBase(type: string, baseName: string): string | undefined
 }
 
 function substituteAliasTypeParams(type: string, decl: TypeDecl, args: string[]): string {
+  const signature = parseExpectedFnType(type);
+  if (signature) {
+    const bindings = new Map<string, string>();
+    decl.params.forEach((param, index) => {
+      const arg = args[index]?.trim();
+      if (arg) bindings.set(param.name, arg);
+    });
+    const params = signature.params.map((param) =>
+      `${param.name}: ${substituteTypeVars(param.type, bindings)}`
+    ).join(", ");
+    return `fn(${params}) -> ${substituteTypeVars(signature.returnType, bindings)}`;
+  }
   let result = type;
   decl.params.forEach((param, index) => {
     const arg = args[index]?.trim();

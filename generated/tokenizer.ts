@@ -20,6 +20,6 @@ export const tokenKinds = [
   "char",
   "multiline",
   "literalType",
-  "symbol",
+  "symbol"
 ] as const;
 export type GeneratedTokenKind = typeof tokenKinds[number];

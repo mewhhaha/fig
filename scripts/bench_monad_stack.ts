@@ -23,6 +23,7 @@ const limit = numberArg("--limit", 10_000);
 const calls = numberArg("--calls", 30_000);
 const samples = numberArg("--samples", 9);
 const seed = numberArg("--seed", 1);
+const onlyScenario = stringArg("--scenario");
 
 const resolveModule = async (moduleName: string) => {
   try {
@@ -34,13 +35,15 @@ const resolveModule = async (moduleName: string) => {
 
 const scenarios: Scenario[] = [
   { name: "direct", source: directSource() },
-  { name: "either_reader_state_stack", source: stackSource() },
+  { name: "reader_fn", source: readerSource() },
+  { name: "state_fn", source: stateSource() },
+  { name: "eff_reader_state_fn", source: stackSource() },
 ];
 
 const rows: BenchRow[] = [];
 let expected: number | undefined;
 
-for (const scenario of scenarios) {
+for (const scenario of scenarios.filter((scenario) => !onlyScenario || scenario.name === onlyScenario)) {
   const compileStart = performance.now();
   const artifact = await compileArtifactsFromSource(scenario.source, {
     resolveModule,
@@ -49,6 +52,7 @@ for (const scenario of scenarios) {
   const compileMs = performance.now() - compileStart;
   const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
   const main = instance.exports.main as CallableFunction;
+  resetFigHeap(instance);
   const result = main(seed, limit) as number;
   const wanted = seed + 3 * limit;
   if (result !== wanted) {
@@ -65,6 +69,7 @@ for (const scenario of scenarios) {
     const start = performance.now();
     let local = 0;
     for (let i = 0; i < calls; i++) {
+      resetFigHeap(instance);
       local += main(seed + (i % 7), limit) as number;
     }
     const elapsed = performance.now() - start;
@@ -142,86 +147,82 @@ function directSource(): string {
 
 function stackSource(): string {
   return `
-    const monad = @import("prelude.monad");
+    const effect = @import("prelude.effect");
 
     type fn Env() -> type { i32 }
     type fn Store() -> type { i32 }
-    type fn Error() -> type { i32 }
 
-    // This is the benchmark's Either layer. It is intentionally transparent like
-    // today's Reader and State helpers, with 0 reserved for the Left path.
-    type fn Either(error: type, value: type) -> type { value }
-    fn Either::pure(value: a) -> Either(error, a) { value }
-    fn Either::bind(
-      value: Either(error, a),
-      const f: fn(x: a) -> Either(error, b)
-    ) -> Either(error, b) {
-      match value == 0 { true => 0, false => f(value) }
-    }
-
-    type fn Stack(value: type) -> type {
-      Either(Error, monad.Reader(Env, monad.State(Store, value)))
-    }
-    fn Stack::pure(value: a) -> Stack(a) {
-      Either::pure(monad.Reader::pure(monad.State::pure(value)))
-    }
-    fn Stack::bind(value: Stack(a), const f: fn(x: a) -> Stack(b)) -> Stack(b) {
-      Either::bind(value, f)
-    }
-
-    fn pack(env: Env, store: Store) -> i32 { store * 8 + env }
-    fn frame_env(frame: i32) -> Env { frame % 8 }
-    fn frame_store(frame: i32) -> Store { frame / 8 }
-
-    fn start(env: Env, store: Store) -> Stack(i32) { Stack::pure(pack(env, store)) }
-    fn ask_frame(frame: i32) -> Stack(i32) {
-      let env: monad.Reader(Env, Env) = monad.Reader::ask(frame_env(frame));
-      Stack::pure(pack(env, frame_store(frame)))
-    }
-    fn get_frame(frame: i32) -> Stack(i32) {
-      let store: monad.State(Store, Store) = monad.State::get(frame_store(frame));
-      Stack::pure(pack(frame_env(frame), store))
-    }
-    fn bump_frame(frame: i32) -> Stack(i32) {
-      Stack::pure(pack(frame_env(frame), frame_store(frame) + frame_env(frame)))
-    }
-    fn guard_frame(frame: i32) -> Stack(i32) {
-      match frame_store(frame) < 2000000000 { true => Stack::pure(frame), false => 0 }
-    }
-    fn put_frame(frame: i32) -> Stack(i32) {
-      let stored: monad.State(Store, Store) = monad.State::put(frame_store(frame), frame_store(frame));
-      Stack::pure(pack(frame_env(frame), stored))
-    }
-
-    fn stack_step(env: Env, store: Store) -> Stack(i32) {
-      do @monad(Stack(_)) {
-        frame <- start(env, store);
-        asked <- ask_frame(frame);
-        current <- get_frame(asked);
-        bumped <- bump_frame(current);
-        checked <- guard_frame(bumped);
-        put_frame(checked)
-      }
-    }
-
-    fn stack_continue(i: i32, limit: i32, env: Env, stepped: Stack(i32)) -> Stack(i32) {
-      match stepped == 0 {
-        true => 0,
-        false => stack_loop(i + 1, limit, env, frame_store(stepped))
-      }
-    }
-
-    fn stack_loop(i: i32, limit: i32, env: Env, store: Store) -> Stack(i32) {
+    fn stack_loop_value(i: i32, limit: i32, env: Env, store: Store) -> Store {
       match i < limit {
-        true => stack_continue(i, limit, env, stack_step(env, store)),
-        false => Stack::pure(pack(env, store))
+        true => match store + env < 2000000000 {
+          true => stack_loop_value(i + 1, limit, env, store + env),
+          false => 0
+        },
+        false => store
+      }
+    }
+
+    fn stack_loop(i: i32, limit: i32) -> effect.Eff({state: Store, reader: Env}, Store) {
+      \\ctx -> {
+        let next = stack_loop_value(i, limit, ctx.reader, ctx.state);
+        {value: next, state: next}
       }
     }
 
     pub fn main(seed: i32, limit: i32) -> i32 {
-      let env: Env = 3;
-      let done = stack_loop(0, limit, env, seed);
-      match done == 0 { true => 0, false => frame_store(done) }
+      let result = effect.run_reader(effect.run_state(stack_loop(0, limit), seed), 3);
+      result.value
+    }
+  `;
+}
+
+function readerSource(): string {
+  return `
+    const monad = @import("prelude.monad");
+
+    type fn Env() -> type { i32 }
+
+    fn reader_loop_value(i: i32, limit: i32, env: Env, acc: i32) -> i32 {
+      match i < limit {
+        true => reader_loop_value(i + 1, limit, env, acc + env),
+        false => acc
+      }
+    }
+
+    fn reader_loop(i: i32, limit: i32, acc: i32) -> monad.Reader(Env, i32) {
+      \\env -> {
+        reader_loop_value(i, limit, env, acc)
+      }
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      monad.Reader::run(reader_loop(0, limit, seed), 3)
+    }
+  `;
+}
+
+function stateSource(): string {
+  return `
+    const monad = @import("prelude.monad");
+
+    type fn Store() -> type { i32 }
+
+    fn state_loop_value(i: i32, limit: i32, store: Store) -> Store {
+      match i < limit {
+        true => state_loop_value(i + 1, limit, store + 3),
+        false => store
+      }
+    }
+
+    fn state_loop(i: i32, limit: i32) -> monad.State(Store, Store) {
+      \\store -> {
+        let next = state_loop_value(i, limit, store);
+        {value: next, state: next}
+      }
+    }
+
+    pub fn main(seed: i32, limit: i32) -> i32 {
+      monad.State::eval(state_loop(0, limit), seed)
     }
   `;
 }
@@ -233,6 +234,12 @@ function median(values: number[]): number {
 
 function count(text: string, pattern: RegExp): number {
   return text.match(pattern)?.length ?? 0;
+}
+
+function resetFigHeap(instance: WebAssembly.Instance) {
+  const memory = instance.exports.fig_objects;
+  if (!(memory instanceof WebAssembly.Memory)) return;
+  new DataView(memory.buffer).setUint32(0, 0, true);
 }
 
 function stringArg(name: string): string | undefined {

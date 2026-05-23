@@ -184,6 +184,22 @@ interface LowerContext {
   simdDotHelperName?: string;
   scalarParamFactsByFunction?: Map<string, Map<string, ScalarFacts>>;
   localScalarFacts?: Map<string, ScalarFacts>;
+  closureDescriptors?: ClosureDescriptor[];
+  closureIds?: Map<string, number>;
+  closureDispatcherSignatures?: Map<string, ClosureSignature>;
+}
+
+interface ClosureDescriptor {
+  id: number;
+  target: string;
+  params: Param[];
+  captures: Param[];
+  returnType: string;
+}
+
+interface ClosureSignature {
+  params: { name?: string; type: string }[];
+  returnType: string;
 }
 
 interface ScratchArrayPlan {
@@ -373,6 +389,8 @@ function backendFixedArrayPlanning(
     const plan = returnProjectionPlans.get(fn.name);
     return plan ? { ...fn, returnType: plan.type } : fn;
   });
+  const closureDescriptors = collectClosureDescriptors(sourceFns, projectedRuntimeFns);
+  const closureIds = new Map(closureDescriptors.map((item) => [item.target, item.id]));
   const baseCtx: LowerContext = {
     layouts,
     functions: new Map([...imports, ...sourceFns, ...projectedRuntimeFns].map((fn) => [
@@ -406,6 +424,9 @@ function backendFixedArrayPlanning(
     functions: new Map([...imports, ...sourceFns, ...functions].map((fn) => [fn.name, fn])),
     signatures,
     scalarParamFactsByFunction: inferTailParamScalarFacts(functions),
+    closureDescriptors,
+    closureIds,
+    closureDispatcherSignatures: new Map(),
   };
   return analyzeFixedArrayPlans(functions, ctx);
 }
@@ -477,6 +498,8 @@ export function lowerProgramToBackendArtifact(
     const plan = returnProjectionPlans.get(fn.name);
     return plan ? { ...fn, returnType: plan.type } : fn;
   });
+  const closureDescriptors = collectClosureDescriptors(sourceFns, projectedRuntimeFns);
+  const closureIds = new Map(closureDescriptors.map((item) => [item.target, item.id]));
   const baseCtx: LowerContext = {
     layouts,
     functions: new Map([...imports, ...sourceFns, ...projectedRuntimeFns].map((fn) => [
@@ -495,10 +518,16 @@ export function lowerProgramToBackendArtifact(
     inlineStack: new Set(),
     fixedArrayTransformerAliases: new Map(),
     nextDataOffset: 1024,
+    closureDescriptors,
+    closureIds,
+    closureDispatcherSignatures: new Map(),
   };
   const reachableProjectedFns = removeUnreachablePrivateFunctions(
     projectedRuntimeFns,
-    new Set(layouts.constFunctionFields.values()),
+    new Set([
+      ...layouts.constFunctionFields.values(),
+      ...closureDescriptors.map((item) => item.target),
+    ]),
   );
   const functions = addOptimizedExportClones(
     reachableProjectedFns,
@@ -510,6 +539,9 @@ export function lowerProgramToBackendArtifact(
     functions: new Map([...imports, ...sourceFns, ...functions].map((fn) => [fn.name, fn])),
     signatures,
     scalarParamFactsByFunction: inferTailParamScalarFacts(functions),
+    closureDescriptors,
+    closureIds,
+    closureDispatcherSignatures: new Map(),
   };
   const fixedArrayPlans = analyzeFixedArrayPlans(functions, ctx);
   ctx.scratchPlansByFunction = fixedArrayPlans.scratch;
@@ -519,10 +551,13 @@ export function lowerProgramToBackendArtifact(
 
   const lowerStart = performance.now();
   const loweredFunctions = functions.map((fn) => lowerFunction(fn, ctx));
+  const closureDispatchers = lowerClosureDispatchers(ctx);
   let backendFunctions =
-    loweredFunctions.some((fn) => instrsCallFunction(fn.body, SIMD_DOT4_I32_HELPER))
-      ? [...loweredFunctions, simdDot4I32HelperFunction()]
-      : loweredFunctions;
+    [...loweredFunctions, ...closureDispatchers].some((fn) =>
+        instrsCallFunction(fn.body, SIMD_DOT4_I32_HELPER)
+      )
+      ? [...loweredFunctions, ...closureDispatchers, simdDot4I32HelperFunction()]
+      : [...loweredFunctions, ...closureDispatchers];
   const lowerMs = performance.now() - lowerStart;
 
   const cleanupStart = performance.now();
@@ -535,7 +570,8 @@ export function lowerProgramToBackendArtifact(
   const needsTemporalMemory = functions.some((fn) => usesTemporalIntrinsic(fn.body, ctx.functions));
   const needsBranchMemory = memoryModel !== "temporal" &&
     functions.some((fn) => usesBranchIntrinsic(fn.body, ctx.functions));
-  const needsHeapMemory = functions.some((fn) => usesHeapArrayIntrinsic(fn.body, ctx.functions));
+  const needsHeapMemory = closureDescriptors.length > 0 ||
+    functions.some((fn) => usesHeapArrayIntrinsic(fn.body, ctx.functions));
   if (memoryModel !== "temporal" && needsTemporalMemory) {
     throw new CompileError([{
       code: "backend.temporal_in_branch_mode",
@@ -833,6 +869,99 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
     locals,
     body,
   };
+}
+
+function lowerClosureDispatchers(ctx: LowerContext): BackendFunction[] {
+  const signatures = ctx.closureDispatcherSignatures ?? new Map();
+  return [...signatures.entries()].map(([key, signature]) =>
+    lowerClosureDispatcher(closureDispatcherName(key), signature, ctx)
+  );
+}
+
+function lowerClosureDispatcher(
+  name: string,
+  signature: ClosureSignature,
+  ctx: LowerContext,
+): BackendFunction {
+  const closureParam = { name: "__closure", type: "i32" as const };
+  const params = [
+    closureParam,
+    ...signature.params.flatMap((param, index) =>
+      flattenBinding(param.name ?? `arg${index}`, param.type, ctx.layouts)
+    ).map((slot) => ({ name: slot.name, type: slot.wat })),
+  ];
+  const resultSlots = flattenType(signature.returnType, ctx.layouts);
+  const matching = (ctx.closureDescriptors ?? []).filter((descriptor) =>
+    closureDescriptorMatchesSignature(descriptor, signature, ctx)
+  );
+  const fallback: Instr[] = [
+    { op: "unreachable" },
+    ...resultSlots.map((slot): Instr => ({ op: "const", type: slot.wat, value: 0 })),
+  ];
+  const body = matching.toReversed().reduce((elseBody, descriptor): Instr[] => [
+    { op: "local.get", name: "__closure" },
+    { op: "load", type: "i32", align: 4, offset: 0 },
+    { op: "const", type: "i32", value: descriptor.id },
+    { op: "binary", wasm: "i32.eq" },
+    {
+      op: "if",
+      results: resultSlots.map((slot) => slot.wat),
+      thenBody: [
+        ...signature.params.flatMap((param, index) =>
+          flattenBinding(param.name ?? `arg${index}`, param.type, ctx.layouts).map((
+            slot,
+          ) => ({ op: "local.get", name: slot.name } as Instr))
+        ),
+        ...lowerClosureCaptureLoads(descriptor, ctx),
+        { op: "call", name: descriptor.target },
+      ],
+      elseBody,
+    },
+  ], fallback);
+  return {
+    name,
+    params,
+    results: resultSlots.map((slot) => slot.wat),
+    locals: [],
+    body,
+  };
+}
+
+function closureDescriptorMatchesSignature(
+  descriptor: ClosureDescriptor,
+  signature: ClosureSignature,
+  ctx: LowerContext,
+): boolean {
+  const descriptorParams = descriptor.params.flatMap((param) =>
+    flattenType(param.type, ctx.layouts).map((slot) => slot.wat)
+  );
+  const signatureParams = signature.params.flatMap((param) =>
+    flattenType(param.type, ctx.layouts).map((slot) => slot.wat)
+  );
+  const descriptorResults = flattenType(descriptor.returnType, ctx.layouts).map((slot) => slot.wat);
+  const signatureResults = flattenType(signature.returnType, ctx.layouts).map((slot) => slot.wat);
+  return wasmSlotTypesEqual(descriptorParams, signatureParams) &&
+    wasmSlotTypesEqual(descriptorResults, signatureResults);
+}
+
+function wasmSlotTypesEqual(left: ValueType[], right: ValueType[]): boolean {
+  return left.length === right.length && left.every((type, index) => type === right[index]);
+}
+
+function lowerClosureCaptureLoads(descriptor: ClosureDescriptor, ctx: LowerContext): Instr[] {
+  let offset = 4;
+  const loads: Instr[] = [];
+  for (const capture of descriptor.captures) {
+    for (const slot of flattenType(capture.type, ctx.layouts)) {
+      const align = valueTypeByteSize(slot.wat);
+      loads.push(
+        { op: "local.get", name: "__closure" },
+        { op: "load", type: slot.wat, align, offset },
+      );
+      offset += align;
+    }
+  }
+  return loads;
 }
 
 function materializedLane4I32Params(fn: FnDecl, ctx: LowerContext): string[] {
@@ -5833,10 +5962,18 @@ function lowerExpr(
       return lowerVar(expr.name, ctx, locals, expectedType);
     }
     case "const_fn":
-      throw new Error("backend cannot lower const fn literal");
+      return flattenType(expectedType, ctx.layouts).map((slot): Instr => ({
+        op: "const",
+        type: slot.wat,
+        value: 0,
+      }));
     case "placeholder":
       throw new Error("backend cannot lower unresolved $ placeholder");
     case "call": {
+      const closureMake = lowerClosureMake(expr, ctx, locals);
+      if (closureMake) return closureMake;
+      const closureCall = lowerClosureCall(expr, ctx, locals);
+      if (closureCall) return closureCall;
       if (expr.callee.kind !== "var") {
         if (expr.args.length === 0) return lowerExpr(expr.callee, ctx, locals, expectedType);
         throw new Error("backend only supports direct calls");
@@ -7036,6 +7173,13 @@ function lowerPrivateScalarTailLoopCallInline(
   if (callee.effects.length || (callee.generated && !callee.generatedInlineable)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
+  if (
+    callee.params.some((param) =>
+      parseBackendFnSignature(resolveAlias(param.type, ctx.layouts) ?? param.type)
+    )
+  ) {
+    return undefined;
+  }
   if (flattenType(callee.returnType, ctx.layouts).length !== 1) return undefined;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
   const tailCalls = analyzeTailCalls(callee);
@@ -7276,6 +7420,13 @@ function lowerPrivateScalarCallInline(
   if (callee.effects.length || (callee.generated && !callee.generatedInlineable)) return undefined;
   if (ctx.inlineStack?.has(callee.name)) return undefined;
   if (callee.params.some((param) => param.const) || !callee.returnType) return undefined;
+  if (
+    callee.params.some((param) =>
+      parseBackendFnSignature(resolveAlias(param.type, ctx.layouts) ?? param.type)
+    )
+  ) {
+    return undefined;
+  }
   if (flattenType(callee.returnType, ctx.layouts).length !== 1) return undefined;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
   if (hasSelfCall(callee.body, callee.name)) return undefined;
@@ -11295,6 +11446,92 @@ function matchSharedScalarCandidate(expr: Expr, ctx: LowerContext): boolean {
   return flattenType(exprTypeWithLocals(expr, ctx), ctx.layouts).length === 1;
 }
 
+function lowerClosureMake(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var" || !expr.callee.name.startsWith("@closure_make/")) {
+    return undefined;
+  }
+  const target = expr.callee.name.slice("@closure_make/".length);
+  const descriptor = ctx.closureDescriptors?.find((item) => item.target === target);
+  const id = descriptor?.id ?? ctx.closureIds?.get(target);
+  if (!descriptor || id === undefined) {
+    return [{ op: "const", type: "i32", value: 0 }];
+  }
+  const ptr = heapTemp(ctx, locals, "closure_ptr");
+  let offset = 4;
+  const stores: Instr[] = [
+    { op: "local.tee", name: ptr },
+    { op: "const", type: "i32", value: id },
+    { op: "store", type: "i32", align: 4, offset: 0 },
+  ];
+  for (const [captureIndex, capture] of descriptor.captures.entries()) {
+    const value = expr.args[captureIndex] ??
+      ({ kind: "literal", literalKind: "number", value: "0" } as Expr);
+    const flat = flattenType(capture.type, ctx.layouts);
+    const names = flat.map((slot, slotIndex) => {
+      const name = `__closure_capture${ctx.tempIndex++}_${captureIndex}_${slotIndex}`;
+      ctx.tempLocals.push({ name, type: slot.wat });
+      locals.add(name);
+      return name;
+    });
+    stores.push(
+      ...lowerExpr(value, ctx, locals, capture.type),
+      ...names.toReversed().map((name): Instr => ({ op: "local.set", name })),
+    );
+    for (const [slotIndex, slot] of flat.entries()) {
+      const align = valueTypeByteSize(slot.wat);
+      stores.push(
+        { op: "local.get", name: ptr },
+        { op: "local.get", name: names[slotIndex] ?? names[0] ?? "__closure_missing" },
+        { op: "store", type: slot.wat, align, offset },
+      );
+      offset += align;
+    }
+  }
+  return [
+    ...lowerHeapAlloc([{ op: "const", type: "i32", value: Math.max(offset, 4) }], ctx, locals),
+    ...stores,
+    { op: "local.get", name: ptr },
+  ];
+}
+
+function lowerClosureCall(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  const calleeType = exprTypeWithLocals(expr.callee, ctx);
+  const resolvedCalleeType = resolveAlias(calleeType, ctx.layouts) ?? calleeType;
+  const signature = parseBackendFnSignature(resolvedCalleeType);
+  if (!signature) return undefined;
+  const localCalleeType = expr.callee.kind === "var" ? varType(expr.callee.name, ctx) : undefined;
+  if (
+    expr.callee.kind === "var" && !localCalleeType && backendFunctionByName(expr.callee.name, ctx)
+  ) {
+    return undefined;
+  }
+  const key = closureSignatureKey(signature);
+  ctx.closureDispatcherSignatures?.set(key, signature);
+  return [
+    ...lowerExpr(expr.callee, ctx, locals, calleeType),
+    ...expr.args.flatMap((arg, index) =>
+      lowerExpr(arg, ctx, locals, signature.params[index]?.type)
+    ),
+    { op: "call", name: closureDispatcherName(key) },
+  ];
+}
+
+function closureSignatureKey(signature: ClosureSignature): string {
+  return `${signature.params.map((param) => param.type).join(",")}->${signature.returnType}`;
+}
+
+function closureDispatcherName(key: string): string {
+  return `__closure_dispatch_${wgslShaderId(key)}`;
+}
+
 function binaryDivRemBySafeConstant(expr: Extract<Expr, { kind: "binary" }>): boolean {
   const divisor = staticIntegerLiteral(expr.right);
   if (divisor === undefined || divisor === 0) return false;
@@ -11571,13 +11808,45 @@ function removeUnreachablePrivateFunctions(
   return functions.filter((fn) => isCurrentModulePublic(fn) || reachable.has(fn.name));
 }
 
+function collectClosureDescriptors(sourceFns: FnDecl[], runtimeFns: FnDecl[]): ClosureDescriptor[] {
+  const byName = new Map(runtimeFns.map((fn) => [fn.name, fn]));
+  const seen = new Map<string, number>();
+  const found: ClosureDescriptor[] = [];
+  const visit = (expr: Expr | undefined) => {
+    if (!expr) return;
+    if (
+      expr.kind === "call" && expr.callee.kind === "var" &&
+      expr.callee.name.startsWith("@closure_make/")
+    ) {
+      const target = expr.callee.name.slice("@closure_make/".length);
+      if (!seen.has(target)) {
+        const fn = byName.get(target);
+        if (fn?.returnType) {
+          const captureCount = expr.args.length;
+          const params = captureCount > 0 ? fn.params.slice(0, -captureCount) : fn.params;
+          const captures = captureCount > 0 ? fn.params.slice(-captureCount) : [];
+          const id = found.length + 1;
+          seen.set(target, id);
+          found.push({ id, target, params, captures, returnType: fn.returnType });
+        }
+      }
+    }
+    for (const child of exprChildren(expr)) visit(child);
+  };
+  for (const fn of sourceFns) visit(fn.body);
+  return found;
+}
+
 function privateReturnProjectionPlans(
   functions: FnDecl[],
   layouts: LayoutEnv,
 ): Map<string, ReturnProjectionPlan> {
   const privateProductFns = new Map(
     functions.filter((fn) =>
-      !isCurrentModulePublic(fn) && fn.returnType && flattenType(fn.returnType, layouts).length > 1
+      !isCurrentModulePublic(fn) && fn.returnType &&
+      !fn.params.some((param) => isRuntimeFunctionValueType(param.type, layouts)) &&
+      !isRuntimeFunctionValueType(fn.returnType, layouts) &&
+      flattenType(fn.returnType, layouts).length > 1
     ).map((fn) => [fn.name, fn]),
   );
   const candidates = new Map<string, { suffixes: Set<string>; full: boolean }>(
@@ -11649,6 +11918,14 @@ function privateReturnProjectionPlans(
     });
   }
   return plans;
+}
+
+function isRuntimeFunctionValueType(type: string | undefined, layouts: LayoutEnv): boolean {
+  const trimmed = stripBorrowType(type)?.trim();
+  if (!trimmed) return false;
+  if (parseBackendFnSignature(trimmed)) return true;
+  const resolved = resolveAlias(trimmed, layouts);
+  return !!resolved && resolved !== trimmed && !!parseBackendFnSignature(resolved);
 }
 
 function projectionUses(
@@ -14025,10 +14302,16 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
   type = stripBorrowType(type);
   const ioItemType = ioActionItemType(type);
   if (ioItemType) return flattenType(ioItemType, layouts);
+  const effectResultSlots = effectResultFlattenSlots(type, layouts);
+  if (effectResultSlots) return effectResultSlots;
+  if (parseBackendFnSignature(type)) return [{ suffix: "", type: type ?? "i32", wat: "i32" }];
   const staticShape = flattenStaticShapeType(type, layouts);
   if (staticShape) return staticShape;
   const resolved = resolveAlias(type, layouts);
   if (!resolved) return [{ suffix: "", type: "i32", wat: "i32" }];
+  const resolvedEffectResultSlots = effectResultFlattenSlots(resolved, layouts);
+  if (resolvedEffectResultSlots) return resolvedEffectResultSlots;
+  if (parseBackendFnSignature(resolved)) return [{ suffix: "", type: resolved, wat: "i32" }];
   if (parseRefinedI32Type(resolved)) return [{ suffix: "", type: resolved, wat: "i32" }];
   if (isPrimitiveType(resolved)) return [{ suffix: "", type: resolved, wat: watType(resolved) }];
   const inlineArrayArgs = inlineArrayLikeTypeArgs(type, layouts) ??
@@ -14082,6 +14365,63 @@ function ioActionItemType(type: string | undefined): string | undefined {
   return splitTypeArgs(args)[0]?.trim() || "i32";
 }
 
+function effectCarrierSlots(
+  type: string | undefined,
+  layouts: LayoutEnv,
+): LayoutSlot[] | undefined {
+  const trimmed = stripBorrowType(type);
+  if (!trimmed) return undefined;
+  const direct = trimmed.match(/(?:^|[.])Eff\((\{.*\}),\s*([^)]+)\)$/);
+  if (direct?.[1] && direct[2] && /(?:^|[{,])\s*state\s*:/.test(direct[1])) {
+    return flattenShape([
+      { label: "value", type: direct[2].trim() },
+      { label: "state", type: effectRowStateType(direct[1]) ?? "i32" },
+    ], layouts);
+  }
+  const open = trimmed.indexOf("(");
+  if (open < 0 || !trimmed.endsWith(")")) return undefined;
+  if (terminalName(trimmed.slice(0, open).trim()) !== "Eff") return undefined;
+  const args = trimmed.slice(open + 1, -1);
+  const [row, valueType] = splitTypeArgs(args);
+  if (!row || !valueType) return undefined;
+  const shape = constShapeFromTypeArg(row, layouts);
+  const stateSlot = shape?.slots.find((slot) => slot.label === "state");
+  const stateType = stateSlot ? staticShapeSlotType(stateSlot.value) : effectRowStateType(row);
+  if (!stateType) return flattenType(valueType, layouts);
+  return flattenShape([
+    { label: "value", type: valueType },
+    { label: "state", type: stateType },
+  ], layouts);
+}
+
+function effectResultFlattenSlots(
+  type: string | undefined,
+  layouts: LayoutEnv,
+): LayoutSlot[] | undefined {
+  const trimmed = stripBorrowType(type);
+  if (!trimmed) return undefined;
+  const open = trimmed.indexOf("(");
+  if (open < 0 || !trimmed.endsWith(")")) return undefined;
+  if (terminalName(trimmed.slice(0, open).trim()) !== "EffResult") return undefined;
+  const [row, valueType] = splitTypeArgs(trimmed.slice(open + 1, -1));
+  if (!row || !valueType) return undefined;
+  const stateType = effectRowStateType(row);
+  if (!stateType) return flattenType(valueType, layouts);
+  return flattenShape([
+    { label: "value", type: valueType },
+    { label: "state", type: stateType },
+  ], layouts);
+}
+
+function effectRowStateType(row: string): string | undefined {
+  const parsed = parseInlineConstShape(row);
+  const parsedState = parsed?.slots.find((slot) => slot.label === "state");
+  if (parsedState) return staticShapeSlotType(parsedState.value);
+  if (parsed && !parsedState) return undefined;
+  const match = row.match(/(?:^|[{,])\s*state\s*:\s*([^,}]+)/);
+  return match?.[1]?.trim();
+}
+
 function flattenStaticShapeType(
   type: string | undefined,
   layouts: LayoutEnv,
@@ -14113,6 +14453,8 @@ function constShapeFromTypeArg(
 
 function parseInlineConstShape(source: string): Extract<Expr, { kind: "shape" }> | undefined {
   const trimmed = source.trim();
+  const structArgs = typeCallArgs(trimmed, "struct");
+  if (structArgs !== undefined) return parseInlineConstShape(structArgs);
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return undefined;
   const inner = trimmed.slice(1, -1).trim();
   if (!inner) return { kind: "shape", slots: [] };
@@ -14282,6 +14624,20 @@ function enclosesWholeType(source: string): boolean {
 }
 
 function substituteAliasTypeParams(type: string, decl: TypeDecl, args: string[]): string {
+  const signature = parseBackendFnSignature(type);
+  if (signature) {
+    const bindings = new Map<string, string>();
+    decl.params.forEach((param, index) => {
+      const arg = args[index]?.trim();
+      if (arg) bindings.set(param.name, arg);
+    });
+    const params = signature.params.map((param) =>
+      param.name
+        ? `${param.name}: ${substituteRuntimeTypeBindings(param.type, bindings)}`
+        : substituteRuntimeTypeBindings(param.type, bindings)
+    ).join(", ");
+    return `fn(${params}) -> ${substituteRuntimeTypeBindings(signature.returnType, bindings)}`;
+  }
   let result = type;
   decl.params.forEach((param, index) => {
     const arg = args[index]?.trim();

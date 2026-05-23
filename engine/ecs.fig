@@ -1,4 +1,5 @@
 const layout = @import("prelude.layout");
+const monad = @import("prelude.monad");
 const default_capacity = 1024;
 
 type fn Batch(component: type) -> type {
@@ -805,39 +806,54 @@ fn system_input(systems: Systems(world_t, input_t)) -> input_t {
 }
 
 type fn System(world: type, input: type) -> type {
-  Systems(world, input)
+  monad.State(Systems(world, input), Systems(world, input))
 }
 
 fn System::pure(value: Systems(world_t, input_t)) -> System(
   world_t,
   input_t
 ) {
-  value
+  monad.State::pure(value)
 }
 
 fn System::bind(
   value: System(world_t, input_t),
-  const step: fn(value: Systems(world_t, input_t)) -> System(
+  step: fn(value: Systems(world_t, input_t)) -> System(
     world_t,
     input_t
   )
 ) -> System(world_t, input_t) {
-  step(value)
+  \systems -> {
+    let current: monad.StateResult(
+      Systems(world_t, input_t),
+      Systems(world_t, input_t)
+    ) = value(systems);
+    let next: System(world_t, input_t) = step(current.value);
+    next(current.state)
+  }
 }
 
 type fn Command(value: type) -> type {
-  value
+  monad.State(value, value)
 }
 
 fn Command::pure(value: value_t) -> Command(value_t) {
-  value
+  monad.State::pure(value)
 }
 
 fn Command::bind(
   value: Command(value_t),
-  const step: fn(value: value_t) -> Command(value_t)
+  step: fn(value: value_t) -> Command(value_t)
 ) -> Command(value_t) {
-  step(value)
+  \state_value -> {
+    let current: monad.StateResult(value_t, value_t) = value(state_value);
+    let next: Command(value_t) = step(current.value);
+    next(current.state)
+  }
+}
+
+fn Command::eval(value: Command(value_t), initial: value_t) -> value_t {
+  monad.State::eval(value, initial)
 }
 
 type fn QueryRowFor(access: const) -> type {
@@ -909,19 +925,23 @@ type fn PatchForQuery(row: type, patch: type) -> type {
 }
 
 fn map(
-  systems: Systems(world_t, input_t),
   query: Query(world_t, input_t, row_t),
   const step: fn(row: row_t) -> patch_t
-) -> Systems(world_t, input_t) {
-  set(systems, query, step)
+) -> System(world_t, input_t) {
+  \systems -> {
+    let next = set(systems, query, step);
+    {value: next, state: next}
+  }
 }
 
 fn map_with_world(
-  systems: Systems(world_t, input_t),
   query: Query(world_t, input_t, row_t),
   const step: fn(row: row_t, world: world_t) -> patch_t
-) -> Systems(world_t, input_t) {
-  set_with_world(systems, query, step)
+) -> System(world_t, input_t) {
+  \systems -> {
+    let next = set_with_world(systems, query, step);
+    {value: next, state: next}
+  }
 }
 
 fn fold(
@@ -1250,12 +1270,12 @@ fn set_field_loop(
 fn run(
   world: world_t,
   input: input_t,
-  const step: fn(systems: System(world_t, input_t)) -> System(
+  const step: fn() -> System(
     world_t,
     input_t
   )
 ) -> world_t {
-  let next = step(systems_context(world, input));
+  let next = monad.State::eval(step(), systems_context(world, input));
   next.world
 }
 
@@ -1267,15 +1287,14 @@ fn WorldComponents(const world: type) -> const {
 }
 
 fn spawn(
-  world: world_t,
   entity_values: EntityRow(
     WorldComponents(world_t),
     row
   )
 ) -> Command(world_t) {
-  let entity_id = world.len;
-  let with_entity: world_t = @replace_field(
-    @replace_field(
+  \world -> {
+    let entity_id = world.len;
+    let with_entity_id: world_t = @replace_field(
       world,
       #entities,
       layout.HeapArray::push(
@@ -1283,42 +1302,49 @@ fn spawn(
         world.entities,
         entity_id
       )
-    ),
-    #len,
-    world.len + 1
-  );
-  spawn_components(
-    @type_slots(row),
-    with_entity,
-    entity_id,
-    entity_values
-  )
+    );
+    let with_entity: world_t = @replace_field(
+      with_entity_id,
+      #len,
+      world.len + 1
+    );
+    let next = spawn_components(
+      @type_slots(row),
+      with_entity,
+      entity_id,
+      entity_values
+    );
+    {value: next, state: next}
+  }
 }
 
 fn spawn_with_entities(
   entities: Batch(i32),
-  world: world_t,
   entity_values: EntityRow(
     WorldComponents(world_t),
     row
   )
 ) -> Command(world_t) {
-  let entity_id = world.len;
-  let with_entity: world_t = @replace_field(
-    @replace_field(
+  \world -> {
+    let entity_id = world.len;
+    let with_entity_id: world_t = @replace_field(
       world,
       #entities,
       layout.HeapArray::push(i32, entities, entity_id)
-    ),
-    #len,
-    world.len + 1
-  );
-  spawn_components(
-    @type_slots(row),
-    with_entity,
-    entity_id,
-    entity_values
-  )
+    );
+    let with_entity: world_t = @replace_field(
+      with_entity_id,
+      #len,
+      world.len + 1
+    );
+    let next = spawn_components(
+      @type_slots(row),
+      with_entity,
+      entity_id,
+      entity_values
+    );
+    {value: next, state: next}
+  }
 }
 
 fn spawn_default_components(
@@ -1361,7 +1387,7 @@ fn spawn_components(
   world: world_t,
   entity: i32,
   entity_values: row_t
-) -> Command(world_t) {
+) -> world_t {
   match @shape_count(fields) {
     0 => world,
     _ => spawn_components_nonempty(
@@ -1382,7 +1408,7 @@ fn spawn_components_nonempty(
   world: world_t,
   entity: i32,
   entity_values: row_t
-) -> Command(world_t) {
+) -> world_t {
   spawn_components(
     rest,
     @replace_field(

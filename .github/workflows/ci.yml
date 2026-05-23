@@ -33,8 +33,5 @@ jobs:
       - name: Smoke
         run: deno task smoke
 
-      - name: Package entrypoints
-        run: deno task publish:check
-
-      - name: Publish dry run
-        run: deno publish --dry-run
+      - name: Entrypoints
+        run: deno task entrypoint:check

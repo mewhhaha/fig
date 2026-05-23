@@ -1,31 +1,23 @@
 const effect = @import("prelude.effect");
+const core = @import("prelude.core");
 
 type fn Store() -> type {
   i32
 }
 
-fn get(store: Store) -> effect.State(effects, Store) {
-  store
+fn bump() -> effect.Eff({state: Store}, core.Unit) {
+  \ctx -> {value: core.unit(), state: ctx.state + 1}
 }
 
-fn put(_old: Store, next: Store) -> effect.State(effects, Store) {
-  next
-}
-
-fn bump(store: Store) -> effect.Eff({#state}, Store) {
-  do @monad(effect.Eff({#state}, _)) {
-    current <- get(store);
-    put(current, current + 1)
-  }
-}
-
-fn program(seed: Store) -> effect.Eff({#state}, Store) {
-  do @monad(effect.Eff({#state}, _)) {
-    first <- bump(seed);
-    bump(first)
+fn program() -> effect.Eff({state: Store}, Store) {
+  \ctx -> {
+    let next = ctx.state + 2;
+    {value: next, state: next}
   }
 }
 
 pub fn main() -> i32 {
-  program(10)
+  let result = program()
+    \program -> effect.run_state_only(program, 10);
+  result.value
 }

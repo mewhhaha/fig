@@ -10,6 +10,18 @@ export interface Program {
   imports: EffectImport[];
   sourceImports?: SourceImport[];
   declarations: Declaration[];
+  resolvedTypeHoles?: ResolvedTypeHole[];
+}
+
+export interface TypeAnnotationHole {
+  span?: Span;
+  variable?: string;
+  replacement?: string;
+}
+
+export interface ResolvedTypeHole {
+  span: Span;
+  replacement: string;
 }
 
 export type Declaration = FnDecl | ContractDecl | LetDecl | ConstDecl | TypeDecl;
@@ -49,6 +61,8 @@ export interface FnDecl extends AstNodeMeta {
   params: Param[];
   locals?: Param[];
   returnType?: string;
+  returnTypeSpan?: Span;
+  returnTypeHoles?: TypeAnnotationHole[];
   effects: string[];
   body: BlockExpr;
   generated?: boolean;
@@ -79,6 +93,8 @@ export interface LetDecl extends AstNodeMeta {
   doc?: string;
   name: string;
   type?: string;
+  typeSpan?: Span;
+  typeHoles?: TypeAnnotationHole[];
   value: Expr;
 }
 
@@ -87,6 +103,8 @@ export interface ConstDecl extends AstNodeMeta {
   doc?: string;
   name: string;
   type?: string;
+  typeSpan?: Span;
+  typeHoles?: TypeAnnotationHole[];
   value: Expr;
 }
 
@@ -259,6 +277,8 @@ export interface Param extends AstNodeMeta {
   doc?: string;
   name: string;
   type: string;
+  typeSpan?: Span;
+  typeHoles?: TypeAnnotationHole[];
   const?: boolean;
   inferStaticType?: boolean;
   pattern?: ParamPattern;

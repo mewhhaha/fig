@@ -1,11 +1,36 @@
-import { parseGrammar, parseMetadata } from "@mewhhaha/baba";
-import {
+type BabaModule = {
+  parseGrammar(source: string): unknown;
+  parseMetadata(source: string): unknown;
+};
+
+type BabaAdvancedModule = {
+  createLexicalSpec(grammar: unknown, options: { skipValidation: boolean }): unknown;
+  generateLexicalManifest(grammar: unknown, options: { spec: unknown }): string;
+  generateTokenizerSource(
+    grammar: unknown,
+    options: { spec: unknown; metadata: unknown; skipValidation: boolean },
+  ): string;
+  generateTreeSitterGrammar(
+    grammar: unknown,
+    options: { name: string; metadata: unknown; skipValidation: boolean },
+  ): string;
+  generateWorkbenchQueries(
+    grammar: unknown,
+    options: { metadata: unknown; skipValidation: boolean },
+  ): Record<string, string>;
+};
+
+const dynamicImport = new Function("specifier", "return import(specifier)") as <T>(
+  specifier: string,
+) => Promise<T>;
+const { parseGrammar, parseMetadata } = await dynamicImport<BabaModule>("@mewhhaha/baba");
+const {
   createLexicalSpec,
   generateLexicalManifest,
   generateTokenizerSource,
   generateTreeSitterGrammar,
   generateWorkbenchQueries,
-} from "@mewhhaha/baba/advanced";
+} = await dynamicImport<BabaAdvancedModule>("@mewhhaha/baba/advanced");
 
 const grammarSource = await Deno.readTextFile("grammar.ebnf");
 const metadataSource = await Deno.readTextFile("baba.json");

@@ -959,6 +959,48 @@ world\`\`\`;
   assert(program.declarations.length >= 5);
 });
 
+Deno.test("type declaration sugar lowers to ordinary type functions", async () => {
+  const checked = await checkSource(`
+    type Point = struct {x: i32, y: i32}
+    type Maybe(a) = union {None, Some(value: a)}
+    type Count = i32
+
+    pub fn main() -> i32 {
+      let point = Point {x: 1, y: 2};
+      let count: Count = 3;
+      point.x + point.y + count
+    }
+  `);
+  const point = checked.program.declarations.find((decl): decl is TypeDecl =>
+    decl.kind === "type" && decl.name === "Point"
+  );
+  const maybe = checked.program.declarations.find((decl): decl is TypeDecl =>
+    decl.kind === "type" && decl.name === "Maybe"
+  );
+  const count = checked.program.declarations.find((decl): decl is TypeDecl =>
+    decl.kind === "type" && decl.name === "Count"
+  );
+  assertEquals(point?.normalized?.kind, "product");
+  assertEquals(maybe?.normalized?.kind, "sum");
+  assertEquals(count?.normalized?.kind, "alias");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+      type Point = struct {x: i32, y: i32}
+      type Count = i32
+
+      pub fn main() -> i32 {
+        let point = Point {x: 1, y: 2};
+        let count: Count = 3;
+        point.x + point.y + count
+      }
+    `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 6);
+});
+
 Deno.test("attaches slash doc comments to Fig bindings", async () => {
   const checked = await checkSource(`
     /// builds a documented point
@@ -1661,18 +1703,18 @@ Deno.test("ecs query map derives system input from query context", async () => {
         let PositionRow = {positions: Position, input: FrameInput};
         struct(PositionRow)
       }
-      const positions_q = do @applicative(ecs.Query(GameWorld, FrameInput, _)) {
-        positions <- ecs.write(#positions);
-        input <- ecs.res();
-        pure(PositionRow {positions, input})
-      };
+      fn positions_q() -> ecs.Query(GameWorld, FrameInput, PositionRow) {
+        let positions: ecs.Query(GameWorld, FrameInput, Position) = ecs.write(#positions);
+        let input: ecs.Query(GameWorld, FrameInput, FrameInput) = ecs.res();
+        ecs.query(PositionRow)
+      }
 
       fn step(row: PositionRow) -> struct({positions: Position}) {
         {positions: Position {x: row.positions.x + row.input.dt_ms}}
       }
       fn movement() -> ecs.System(GameWorld, FrameInput) {
         do @monad(ecs.System(GameWorld, FrameInput)) {
-          ecs.map(positions_q, step);
+          ecs.map(positions_q(), step);
         }
       }
       pub fn main(world: GameWorld, input: FrameInput) -> GameWorld {
@@ -1754,6 +1796,11 @@ Deno.test("ecs query applicative map lowers to fused read input update", async (
         struct(FrameInput)
       }
 
+      type fn MovementRow() -> type {
+        let MovementRow = {positions: Position, velocities: Velocity, input: FrameInput};
+        struct(MovementRow)
+      }
+
       const components = ecs.components({
         positions: Position,
         velocities: Velocity
@@ -1771,12 +1818,12 @@ Deno.test("ecs query applicative map lowers to fused read input update", async (
         struct(World)
       }
 
-      const movement_q = do @applicative(ecs.Query(World, FrameInput, _)) {
-        positions <- ecs.write(#positions);
-        velocities <- ecs.read(#velocities);
-        input <- ecs.res();
-        pure({positions, velocities, input})
-      };
+      fn movement_q() -> ecs.Query(World, FrameInput, MovementRow) {
+        let positions: ecs.Query(World, FrameInput, Position) = ecs.write(#positions);
+        let velocities: ecs.Query(World, FrameInput, Velocity) = ecs.read(#velocities);
+        let input: ecs.Query(World, FrameInput, FrameInput) = ecs.res();
+        ecs.query(MovementRow)
+      }
 
       fn seed_world(seed: i32) -> World {
         {
@@ -1787,9 +1834,7 @@ Deno.test("ecs query applicative map lowers to fused read input update", async (
         }
       }
 
-      fn movement_step(
-        row: struct({positions: Position, velocities: Velocity, input: FrameInput})
-      ) -> struct({positions: Position}) {
+      fn movement_step(row: MovementRow) -> struct({positions: Position}) {
         {
           positions: Position {
             x: row.positions.x + row.velocities.dx + row.input.dt,
@@ -1800,7 +1845,7 @@ Deno.test("ecs query applicative map lowers to fused read input update", async (
 
       fn movement_system() -> ecs.System(World, FrameInput) {
         do @monad(ecs.System(World, FrameInput)) {
-          ecs.map(movement_q, movement_step);
+          ecs.map(movement_q(), movement_step);
         }
       }
 
@@ -1835,6 +1880,11 @@ Deno.test("ecs system monad sequences query map systems", async () => {
         struct(FrameInput)
       }
 
+      type fn PositionRow() -> type {
+        let PositionRow = {positions: Position, input: FrameInput};
+        struct(PositionRow)
+      }
+
       const components = ecs.components({positions: Position});
 
       type fn World() -> type {
@@ -1848,11 +1898,11 @@ Deno.test("ecs system monad sequences query map systems", async () => {
         struct(Shape)
       }
 
-      const positions_q = do @applicative(ecs.Query(World, FrameInput, _)) {
-        positions <- ecs.write(#positions);
-        input <- ecs.res();
-        pure({positions, input})
-      };
+      fn positions_q() -> ecs.Query(World, FrameInput, PositionRow) {
+        let positions: ecs.Query(World, FrameInput, Position) = ecs.write(#positions);
+        let input: ecs.Query(World, FrameInput, FrameInput) = ecs.res();
+        ecs.query(PositionRow)
+      }
 
       fn seed_world(seed: i32) -> World {
         {
@@ -1862,16 +1912,14 @@ Deno.test("ecs system monad sequences query map systems", async () => {
         }
       }
 
-      fn movement_step(
-        row: struct({positions: Position, input: FrameInput})
-      ) -> struct({positions: Position}) {
+      fn movement_step(row: PositionRow) -> struct({positions: Position}) {
         {positions: Position {x: row.positions.x + row.input.dt, y: row.positions.y}}
       }
 
       fn twice_system() -> ecs.System(World, FrameInput) {
         do @monad(ecs.System(World, FrameInput)) {
-          ecs.map(positions_q, movement_step);
-          ecs.map(positions_q, movement_step);
+          ecs.map(positions_q(), movement_step);
+          ecs.map(positions_q(), movement_step);
         }
       }
 
@@ -1905,6 +1953,11 @@ Deno.test("ecs spawn lowers generic component rows", async () => {
         struct(Velocity)
       }
 
+      type fn SpawnRow() -> type {
+        let SpawnRow = {positions: Position, velocities: Velocity};
+        struct(SpawnRow)
+      }
+
       const components = ecs.components({
         positions: Position,
         velocities: Velocity
@@ -1933,12 +1986,13 @@ Deno.test("ecs spawn lowers generic component rows", async () => {
 
       pub fn main(seed: i32) -> i32 {
         let world: World = seed_world();
-        let spawned: World = do @monad(ecs.Command(World)) {
-          ecs.spawn({
+        let spawn_command: ecs.Command(World) = do @monad(ecs.Command(World)) {
+          ecs.spawn(SpawnRow {
             positions: Position {x: seed},
             velocities: Velocity {dx: 2}
           });
         };
+        let spawned: World = ecs.Command::eval(spawn_command, world);
         spawned.len +
           ecs.batch_get(spawned.positions, 0).x +
           ecs.batch_get(spawned.velocities, 0).dx
@@ -1965,6 +2019,11 @@ Deno.test.ignore("ecs spawn rejects missing world fields", async () => {
         struct(Position)
       }
 
+      type fn SpawnRow() -> type {
+        let SpawnRow = {missing: Position};
+        struct(SpawnRow)
+      }
+
       const components = ecs.components({positions: Position});
 
       type fn World() -> type {
@@ -1982,9 +2041,10 @@ Deno.test.ignore("ecs spawn rejects missing world fields", async () => {
 
       pub fn main() -> World {
         let world: World = seed_world();
-        do @monad(ecs.Command(World)) {
-          ecs.spawn({missing: Position {x: 1}});
+        let command: ecs.Command(World) = do @monad(ecs.Command(World)) {
+          ecs.spawn(SpawnRow {missing: Position {x: 1}});
         }
+        ecs.Command::eval(command, world)
       }
     `,
     "ecs.spawn_unknown_field",
@@ -2015,15 +2075,20 @@ Deno.test.ignore("ecs query set rejects missing world fields", async () => {
         struct(Shape)
       }
 
-      const bad_q = do @applicative(ecs.Query(World, FrameInput, _)) {
-        missing <- ecs.write(#missing);
-        input <- ecs.res();
-        pure({missing, input})
-      };
+      type fn BadRow() -> type {
+        let BadRow = {missing: Position, input: FrameInput};
+        struct(BadRow)
+      }
+
+      fn bad_q() -> ecs.Query(World, FrameInput, BadRow) {
+        let missing: ecs.Query(World, FrameInput, Position) = ecs.write(#missing);
+        let input: ecs.Query(World, FrameInput, FrameInput) = ecs.res();
+        ecs.query(BadRow)
+      }
 
       fn bad_system() -> ecs.System(World, FrameInput) {
         do @monad(ecs.System(World, FrameInput)) {
-          ecs.map(bad_q, \\row -> {missing: row.missing});
+          ecs.map(bad_q(), \\row -> {missing: row.missing});
         }
       }
 
@@ -3732,6 +3797,45 @@ Deno.test("const function literals specialize const fn parameters", async () => 
   );
 });
 
+Deno.test("runtime function values call top-level functions and closures", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Pair() { let Pair = {left: i32, right: i32}; struct(Pair) }
+
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn apply(f: fn(x: i32) -> i32, x: i32) -> i32 { f(x) }
+
+    pub fn main() -> i32 {
+      let direct: fn(x: i32) -> i32 = inc;
+      let offset = 5;
+      let pair = Pair {left: 2, right: 3};
+      direct(4) + apply(inc, 4) + apply(\\x -> x + offset, 4) +
+        apply(\\x -> x + pair.left + pair.right, 4)
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 28);
+});
+
+Deno.test("runtime function values are rejected at wasm boundaries", async () => {
+  await assertThrowsCompile(
+    "pub fn main(f: fn(x: i32) -> i32) -> i32 { f(1) }",
+    "function.closure_boundary",
+  );
+  await assertThrowsCompile(
+    `
+    const host = @external("host", fn(io: io, cb: fn(x: i32) -> i32) -> io(i32));
+    pub fn main(io: io) -> io(i32) { host(io, \\x -> x + 1) }
+  `,
+    "function.closure_boundary",
+  );
+});
+
 Deno.test("generic const fn callbacks preserve product runtime parameters", async () => {
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -3923,24 +4027,19 @@ Deno.test("do monad parameterized state threads in-scope state implicitly", asyn
     new WebAssembly.Module(
       await wasmFromSource(
         `
-    type fn State(state: type, value: type) -> type { value }
-    fn State::pure(value: a) -> State(state, a) { value }
-    fn State::bind(
-      value: State(state, a),
-      const step: fn(value: a) -> State(state, b)
-    ) -> State(state, b) {
-      step(value)
-    }
-    fn bump(state: i32, amount: i32) -> State(i32, i32) { state + amount }
-    fn run_state(state: i32) -> State(i32, i32) {
-      do @monad(State(i32, _)) {
-        bump(2);
-        bump(3);
+    const monad = @import("prelude.monad");
+    fn add_two(x: i32) -> i32 { x + 2 }
+    fn add_three(x: i32) -> i32 { x + 3 }
+    fn run_state() -> monad.State(i32, i32) {
+      do @monad(monad.State(i32, _)) {
+        monad.State::modify(add_two);
+        monad.State::modify(add_three);
+        monad.State::get()
       }
     }
-    pub fn main() -> i32 { run_state(10) }
+    pub fn main() -> i32 { monad.State::eval(run_state(), 10) }
   `,
-        { optMode: "release" },
+        { optMode: "release", resolveModule: resolveProjectModule },
       ),
     ),
   );
@@ -3952,37 +4051,31 @@ Deno.test("do monad parameterized effect threads matching effect state", async (
     new WebAssembly.Module(
       await wasmFromSource(
         `
+    const monad = @import("prelude.monad");
     type fn Context(world: type, input: type) -> type {
       let Context = {world: world, input: input};
       struct(Context)
     }
-    type fn System(world: type, input: type) -> type {
-      Context(world, input)
+    fn add_two(systems: Context(i32, i32)) -> Context(i32, i32) {
+      Context {world: systems.world + systems.input + 2, input: systems.input}
     }
-    fn System::pure(value: Context(world, input)) -> System(world, input) {
-      value
+    fn add_three(systems: Context(i32, i32)) -> Context(i32, i32) {
+      Context {world: systems.world + systems.input + 3, input: systems.input}
     }
-    fn System::bind(
-      value: System(world, input),
-      const step: fn(value: System(world, input)) -> System(world, input)
-    ) -> System(world, input) {
-      step(value)
-    }
-    fn add_input(systems: System(i32, i32), amount: i32) -> System(i32, i32) {
-      Context {world: systems.world + systems.input + amount, input: systems.input}
-    }
-    fn run(systems: System(i32, i32)) -> System(i32, i32) {
-      do @monad(System(i32, i32)) {
-        add_input(2);
-        add_input(3);
+    fn run() -> monad.State(Context(i32, i32), Context(i32, i32)) {
+      do @monad(monad.State(Context(i32, i32), _)) {
+        monad.State::modify(add_two);
+        monad.State::modify(add_three);
+        monad.State::get()
       }
     }
     pub fn main() -> i32 {
       let systems = Context {world: 10, input: 4};
-      run(systems).world
+      let result: Context(i32, i32) = monad.State::eval(run(), systems);
+      result.world
     }
   `,
-        { optMode: "release" },
+        { optMode: "release", resolveModule: resolveProjectModule },
       ),
     ),
   );
@@ -3994,6 +4087,7 @@ Deno.test("do monad specializes multiline parameterized effect continuations", a
     new WebAssembly.Module(
       await wasmFromSource(
         `
+    const monad = @import("prelude.monad");
     type fn Context(world: type, input: type) -> type {
       let Context = {
         world: world,
@@ -4001,78 +4095,43 @@ Deno.test("do monad specializes multiline parameterized effect continuations", a
       };
       struct(Context)
     }
-    type fn System(world: type, input: type) -> type {
-      Context(world, input)
-    }
-    type fn GameSystems() -> type {
-      System(i32, i32)
-    }
-    fn System::pure(value: Context(world, input)) -> System(
-      world,
-      input
-    ) {
-      value
-    }
-    fn System::bind(
-      value: System(world, input),
-      const step: fn(value: System(world, input)) -> System(
-        world,
-        input
-      )
-    ) -> System(world, input) {
-      step(value)
-    }
+    type fn GameSystems() -> type { Context(i32, i32) }
     fn add(systems: GameSystems, amount: i32) -> GameSystems {
       Context {world: systems.world + systems.input + amount, input: systems.input}
     }
-    fn run(systems: System(
-      i32,
-      i32
-    )) -> System(i32, i32) {
-      do @monad(System(i32, i32)) {
-        add(2);
-        add(3);
+    fn add_two(systems: GameSystems) -> GameSystems { add(systems, 2) }
+    fn add_three(systems: GameSystems) -> GameSystems { add(systems, 3) }
+    fn run() -> monad.State(GameSystems, GameSystems) {
+      do @monad(monad.State(GameSystems, _)) {
+        monad.State::modify(add_two);
+        monad.State::modify(add_three);
+        monad.State::get()
       }
     }
     pub fn main() -> i32 {
       let systems = Context {world: 10, input: 4};
-      run(systems).world
+      let result: GameSystems = monad.State::eval(run(), systems);
+      result.world
     }
   `,
-        { optMode: "release" },
+        { optMode: "release", resolveModule: resolveProjectModule },
       ),
     ),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 23);
 });
 
-Deno.test("state-threaded do monad lowers through bind and pure", async () => {
-  const instance = new WebAssembly.Instance(
-    new WebAssembly.Module(
-      await wasmFromSource(
-        `
-    type fn State(state: type, value: type) -> type { value }
-    fn State::pure(value: a) -> State(state, a) { value }
-    fn State::bind(
-      value: State(state, a),
-      const step: fn(value: a) -> State(state, b)
-    ) -> State(state, b) {
-      step(value) + 100
+Deno.test("@carrier is rejected as an unknown static builtin", async () => {
+  await assertThrowsCompile(
+    `
+    type fn State(state: type, value: type) -> type {
+      @carrier({state: state});
+      value
     }
-    fn bump(state: i32, amount: i32) -> State(i32, i32) { state + amount }
-    fn run_state(state: i32) -> State(i32, i32) {
-      do @monad(State(i32, _)) {
-        bump(2);
-        bump(3);
-      }
-    }
-    pub fn main() -> i32 { run_state(10) }
+    pub fn main() -> State(i32, i32) { 0 }
   `,
-        { optMode: "release" },
-      ),
-    ),
+    "type.unknown_static_builtin",
   );
-  assertEquals((instance.exports.main as CallableFunction)(), 215);
 });
 
 Deno.test("do monad requires strategy evidence members", async () => {
@@ -4157,6 +4216,19 @@ Deno.test("do monad strategy requires explicit constructor arity", async () => {
 });
 
 Deno.test("type holes are rejected outside do strategy arguments", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+      pub fn main() -> i32 {
+        let x: _ = 1;
+        let y: _ = x + 2;
+        y
+      }
+    `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 3);
+
   await assertThrowsCompile(
     `
     fn main(x: _) -> i32 { 1 }
@@ -4169,6 +4241,45 @@ Deno.test("type holes are rejected outside do strategy arguments", async () => {
     fn main() -> i32 { 1 }
   `,
     "type.hole_context",
+  );
+});
+
+Deno.test("inferred type holes resolve in expression-backed annotations", async () => {
+  const checked = await checkSource(`
+    type fn Box(a: type) -> struct { let Box = {value: a}; struct(Box) }
+    pub fn main() -> _ { 1 }
+    fn boxed() -> Box(_) { Box {value: 1} }
+    let top: _ = 1;
+    let nested: Box(_) = Box {value: 2};
+  `);
+  assertEquals(findFn(checked.program, "main")?.returnType, "i32");
+  assertEquals(findFn(checked.program, "boxed")?.returnType, "Box(i32)");
+  const top = checked.program.declarations.find((decl) =>
+    decl.kind === "let" && decl.name === "top"
+  );
+  const nested = checked.program.declarations.find((decl) =>
+    decl.kind === "let" && decl.name === "nested"
+  );
+  assertEquals(top?.kind === "let" ? top.type : undefined, "i32");
+  assertEquals(nested?.kind === "let" ? nested.type : undefined, "Box(i32)");
+});
+
+Deno.test("inferred type holes reject unsupported and ambiguous annotations", async () => {
+  await assertThrowsCompile("fn f(x: _) -> i32 { x }", "type.hole_context");
+  await assertThrowsCompile(
+    `
+    fn choose() -> a { @empty(a) }
+    pub fn main() -> _ { choose() }
+  `,
+    "type.inferred_type_ambiguous",
+  );
+  await assertThrowsCompile(
+    `
+    type fn Box(a: type) -> struct { let Box = {value: a}; struct(Box) }
+    type fn Other(a: type) -> struct { let Other = {value: a}; struct(Other) }
+    pub fn main() -> Box(_) { Other {value: 1} }
+  `,
+    "type.literal_mismatch",
   );
 });
 
@@ -7232,16 +7343,16 @@ Deno.test("generic assumed rewrites instantiate from do strategy proofs", async 
   assertEquals(findFn(withAssumptions, "main")?.body.expr?.kind, "block");
 });
 
-Deno.test("generic law rewrites require matching lawful proof", async () => {
+Deno.test("generic law rewrites require matching proof", async () => {
   const source = `
-    type fn LawfulFunctor(t: type fn(a: type) -> type) -> type { t }
+    type fn Functor(t: type fn(a: type) -> type) -> type { t }
     fn identity(x: a) -> a { x }
-    contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
-      const proof = LawfulFunctor(T);
+    contract fn Functor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = Functor(T);
       @assume(\\x -> T::map(identity, x), \\x -> x)
     }
     fn use_law(x: t(a)) -> t(a) {
-      const proof = LawfulFunctor(t);
+      const proof = Functor(t);
       t::map(identity, x)
     }
   `;
@@ -7251,7 +7362,7 @@ Deno.test("generic law rewrites require matching lawful proof", async () => {
   assertEquals(findFn(withAssumptions, "use_law")?.body.expr, { kind: "var", name: "x" });
 
   await assertThrowsCompile(
-    source.replace("      const proof = LawfulFunctor(t);\n", ""),
+    source.replace("      const proof = Functor(t);\n", ""),
     "type.member_requires_proof",
   );
 });
@@ -7259,14 +7370,14 @@ Deno.test("generic law rewrites require matching lawful proof", async () => {
 Deno.test("generic law rewrites instantiate from const proof parameters", async () => {
   const checked = await checkSource(`
     type fn Box(a: type) -> type { let Box = {value: a}; struct(Box) }
-    type fn LawfulFunctor(t: type fn(a: type) -> type) -> type { t }
+    type fn Functor(t: type fn(a: type) -> type) -> type { t }
     fn identity(x: a) -> a { x }
     fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) { Box {value: f(v.value)} }
-    contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
-      const proof = LawfulFunctor(T);
+    contract fn Functor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = Functor(T);
       @assume(\\x -> T::map(identity, x), \\x -> x)
     }
-    fn use_law(const _proof: LawfulFunctor(Box), x: Box(i32)) -> Box(i32) {
+    fn use_law(const _proof: Functor(Box), x: Box(i32)) -> Box(i32) {
       Box::map(identity, x)
     }
   `);
@@ -7279,18 +7390,18 @@ Deno.test("generic law rewrites instantiate from const proof parameters", async 
   );
 });
 
-Deno.test("lawful monad proof activates inherited functor law rewrites", async () => {
+Deno.test("monad proof activates inherited functor law rewrites", async () => {
   const checked = await checkSource(`
-    type fn LawfulFunctor(t: type fn(a: type) -> type) -> type { t }
-    type fn LawfulApplicative(t: type fn(a: type) -> type) -> type { t }
-    type fn LawfulMonad(t: type fn(a: type) -> type) -> type { t }
+    type fn Functor(t: type fn(a: type) -> type) -> type { t }
+    type fn Applicative(t: type fn(a: type) -> type) -> type { t }
+    type fn Monad(t: type fn(a: type) -> type) -> type { t }
     fn identity(x: a) -> a { x }
-    contract fn LawfulFunctor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
-      const proof = LawfulFunctor(T);
+    contract fn Functor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = Functor(T);
       @assume(\\x -> T::map(identity, x), \\x -> x)
     }
     fn use_law(x: t(a)) -> t(a) {
-      const proof = LawfulMonad(t);
+      const proof = Monad(t);
       t::map(identity, x)
     }
   `);
@@ -7298,18 +7409,18 @@ Deno.test("lawful monad proof activates inherited functor law rewrites", async (
   assertEquals(findFn(optimized, "use_law")?.body.expr, { kind: "var", name: "x" });
 });
 
-Deno.test("lawful monad proof activates inherited applicative law rewrites", async () => {
+Deno.test("monad proof activates inherited applicative law rewrites", async () => {
   const checked = await checkSource(`
-    type fn LawfulApplicative(t: type fn(a: type) -> type) -> type { t }
-    type fn LawfulMonad(t: type fn(a: type) -> type) -> type { t }
-    contract fn LawfulApplicative::apply_pure(
+    type fn Applicative(t: type fn(a: type) -> type) -> type { t }
+    type fn Monad(t: type fn(a: type) -> type) -> type { t }
+    contract fn Applicative::apply_pure(
       const T: type fn(a: type) -> type
     ) -> rewrite {
-      const proof = LawfulApplicative(T);
+      const proof = Applicative(T);
       @assume(\\(f, x) -> T::apply(T::pure(f), x), \\(f, x) -> T::map(f, x))
     }
     fn use_law(const f: fn(x: a) -> b, x: t(a)) -> t(b) {
-      const proof = LawfulMonad(t);
+      const proof = Monad(t);
       t::apply(t::pure(f), x)
     }
   `);
@@ -7321,23 +7432,23 @@ Deno.test("lawful monad proof activates inherited applicative law rewrites", asy
   });
 });
 
-Deno.test("lawful monad rewrites remove pure bind calls on both sides", async () => {
+Deno.test("monad rewrites remove pure bind calls on both sides", async () => {
   const checked = await checkSource(`
-    type fn LawfulMonad(t: type fn(a: type) -> type) -> type { t }
-    contract fn LawfulMonad::bind_pure_left(const T: type fn(a: type) -> type) -> rewrite {
-      const proof = LawfulMonad(T);
+    type fn Monad(t: type fn(a: type) -> type) -> type { t }
+    contract fn Monad::bind_pure_left(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = Monad(T);
       @assume(\\(x, f) -> T::bind(T::pure(x), f), \\(x, f) -> f(x))
     }
-    contract fn LawfulMonad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
-      const proof = LawfulMonad(T);
+    contract fn Monad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
+      const proof = Monad(T);
       @assume(\\m -> T::bind(m, T::pure), \\m -> m)
     }
     fn left(x: a, const f: fn(x: a) -> t(b)) -> t(b) {
-      const proof = LawfulMonad(t);
+      const proof = Monad(t);
       t::bind(t::pure(x), f)
     }
     fn right(m: t(a)) -> t(a) {
-      const proof = LawfulMonad(t);
+      const proof = Monad(t);
       t::bind(m, t::pure)
     }
   `);
@@ -7350,22 +7461,22 @@ Deno.test("lawful monad rewrites remove pure bind calls on both sides", async ()
   assertEquals(findFn(optimized, "right")?.body.expr, { kind: "var", name: "m" });
 });
 
-Deno.test("lawful monoid rewrites remove empty append calls on both sides", async () => {
+Deno.test("monoid rewrites remove empty append calls on both sides", async () => {
   const checked = await checkSource(`
     type fn Point() -> type { let Point = {x: i32}; struct(Point) }
-    type fn LawfulMonoid(t: type) -> type { t }
+    type fn Monoid(t: type) -> type { t }
     fn Point::empty() -> Point { Point {x: 0} }
     fn Point::append(a: Point, b: Point) -> Point { Point {x: a.x + b.x} }
-    contract fn LawfulMonoid::append_empty_left(const T: type) -> rewrite {
-      const proof = LawfulMonoid(T);
+    contract fn Monoid::append_empty_left(const T: type) -> rewrite {
+      const proof = Monoid(T);
       @assume(\\x -> T::append(T::empty(), x), \\x -> x)
     }
-    contract fn LawfulMonoid::append_empty_right(const T: type) -> rewrite {
-      const proof = LawfulMonoid(T);
+    contract fn Monoid::append_empty_right(const T: type) -> rewrite {
+      const proof = Monoid(T);
       @assume(\\x -> T::append(x, T::empty()), \\x -> x)
     }
     pub fn main(x: Point) -> Point {
-      const proof = LawfulMonoid(Point);
+      const proof = Monoid(Point);
       let left = Point::append(Point::empty(), x);
       Point::append(left, Point::empty())
     }
@@ -7378,13 +7489,13 @@ Deno.test("lawful monoid rewrites remove empty append calls on both sides", asyn
   assertEquals(main?.body.expr, { kind: "var", name: "left" });
 });
 
-Deno.test("prelude lawful functor rewrite works through namespaced imports", async () => {
+Deno.test("prelude functor rewrite works through namespaced imports", async () => {
   const checked = await checkSource(
     `
     const fun = @import("prelude.function");
 
     fn use_law(x: t(a)) -> t(a) {
-      const proof = fun.LawfulFunctor(t);
+      const proof = fun.Functor(t);
       t::map(fun.identity, x)
     }
     `,
