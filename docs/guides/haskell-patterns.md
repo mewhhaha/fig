@@ -1,9 +1,9 @@
 # Haskell Patterns in Fig
 
-This guide maps common Haskell idioms to Fig. Fig deliberately borrows several ideas from
-functional programming, but it is strict, explicit, and WebAssembly-oriented. There is no implicit
-typeclass search, no lazy evaluation by default, no general currying, and no hidden runtime
-dictionary passing unless you write values that behave that way.
+This guide maps common Haskell idioms to Fig. Fig deliberately borrows several ideas from functional
+programming, but it is strict, explicit, and WebAssembly-oriented. There is no implicit typeclass
+search, no lazy evaluation by default, no general currying, and no hidden runtime dictionary passing
+unless you write values that behave that way.
 
 The practical rule is:
 

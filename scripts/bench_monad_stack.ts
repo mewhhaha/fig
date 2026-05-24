@@ -43,7 +43,9 @@ const scenarios: Scenario[] = [
 const rows: BenchRow[] = [];
 let expected: number | undefined;
 
-for (const scenario of scenarios.filter((scenario) => !onlyScenario || scenario.name === onlyScenario)) {
+for (
+  const scenario of scenarios.filter((scenario) => !onlyScenario || scenario.name === onlyScenario)
+) {
   const compileStart = performance.now();
   const artifact = await compileArtifactsFromSource(scenario.source, {
     resolveModule,

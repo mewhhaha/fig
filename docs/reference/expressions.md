@@ -140,8 +140,8 @@ let wrapped: Box(_) = Box {value: 1};
 ```
 
 It remains invalid for function parameters or other positions where there is no local body,
-initializer, or do-block value type to infer from. State-threaded `do` blocks still require the state
-argument to be concrete, such as `State(World, _)` rather than `State(_, _)`.
+initializer, or do-block value type to infer from. State-threaded `do` blocks still require the
+state argument to be concrete, such as `State(World, _)` rather than `State(_, _)`.
 
 ## Local Bindings and Destructuring
 

@@ -154,8 +154,8 @@ let value: i32 = 1;
 let inferred: _ = 1;
 ```
 
-`_` in a top-level or local `let`/`const` annotation asks the checker to fill the concrete type
-from the initializer.
+`_` in a top-level or local `let`/`const` annotation asks the checker to fill the concrete type from
+the initializer.
 
 ## Functions and Parameters
 

@@ -25,11 +25,7 @@ import {
 } from "../src/unstable.ts";
 import { CompileError } from "../src/diagnostics.ts";
 import type { ConstDecl, Expr, FnDecl, Program, TypeDecl } from "../src/core_ast.ts";
-import {
-  compilerSpecialForm,
-  isCompilerSpecialForm,
-  type CompilerPlugin,
-} from "../src/plugins.ts";
+import { type CompilerPlugin, compilerSpecialForm, isCompilerSpecialForm } from "../src/plugins.ts";
 import {
   canonicalDomainKey,
   cardinality,

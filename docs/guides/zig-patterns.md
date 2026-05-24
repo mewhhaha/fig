@@ -118,21 +118,21 @@ type fn RuntimeDescriptor(row: type) -> type {
 
 Important reflection tools:
 
-| Builtin                        | Purpose                                      |
-| ------------------------------ | -------------------------------------------- |
-| `@type_slots(t)`               | Product slots as a shape                     |
-| `@type_has_slot(t, #field)`    | Check a product slot                         |
-| `@type_slot_type(t, #field)`   | Read a product slot type                     |
-| `@type_variants(t)`            | Union variants as a shape                    |
-| `@type_variant_slots(t, #Var)` | Read a union variant payload shape           |
-| `@shape_count(shape)`          | Count shape entries                          |
-| `@shape_pick(shape, keys)`     | Keep selected slots                          |
-| `@shape_omit(shape, keys)`     | Drop selected slots                          |
-| `@shape_filter(shape, pred)`   | Keep slots accepted by a mapper              |
-| `@shape_map(shape, mapper)`    | Transform slot values                        |
-| `@shape_map_with_key(...)`     | Transform slots with key and value           |
-| `@shape_concat(a, b)`          | Combine shapes, rejecting duplicate labels   |
-| `@shape_rename(shape, names)`  | Rename labels                                |
+| Builtin                        | Purpose                                    |
+| ------------------------------ | ------------------------------------------ |
+| `@type_slots(t)`               | Product slots as a shape                   |
+| `@type_has_slot(t, #field)`    | Check a product slot                       |
+| `@type_slot_type(t, #field)`   | Read a product slot type                   |
+| `@type_variants(t)`            | Union variants as a shape                  |
+| `@type_variant_slots(t, #Var)` | Read a union variant payload shape         |
+| `@shape_count(shape)`          | Count shape entries                        |
+| `@shape_pick(shape, keys)`     | Keep selected slots                        |
+| `@shape_omit(shape, keys)`     | Drop selected slots                        |
+| `@shape_filter(shape, pred)`   | Keep slots accepted by a mapper            |
+| `@shape_map(shape, mapper)`    | Transform slot values                      |
+| `@shape_map_with_key(...)`     | Transform slots with key and value         |
+| `@shape_concat(a, b)`          | Combine shapes, rejecting duplicate labels |
+| `@shape_rename(shape, names)`  | Rename labels                              |
 
 Mapper type functions used with shape builtins take static values:
 
@@ -327,9 +327,8 @@ type ScheduledMatrix = struct {
 }
 ```
 
-The checked examples `examples/perf_schedule_dsl.fig` and
-`examples/zig_static_matrix_schedule.fig` show this style. The metadata is explicit data unless a
-type function consumes it at compile time.
+The checked examples `examples/perf_schedule_dsl.fig` and `examples/zig_static_matrix_schedule.fig`
+show this style. The metadata is explicit data unless a type function consumes it at compile time.
 
 ## Host IO
 
@@ -392,8 +391,8 @@ Use `@trace("message");` in debug builds for breadcrumbs. Release builds erase t
 - Do not use `var` or assignment. Use fresh `let` names.
 - Do not use unchecked pointer arithmetic for speed. Use refined indexes, fixed inline arrays, and
   static proofs.
-- Do not encode application-specific shortcuts in the compiler. Express requirements through
-  type functions, contracts, reflection, intrinsics, or library code.
+- Do not encode application-specific shortcuts in the compiler. Express requirements through type
+  functions, contracts, reflection, intrinsics, or library code.
 
 ## Checklist
 

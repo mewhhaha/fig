@@ -300,8 +300,8 @@ When choosing a type-function pattern:
   return `struct(Shape)` or `union(...)`.
 - If you intend to require behavior on a type, write a contract `type fn` with `@require` and
   attached members such as `t::eql`, `t::append`, or `t::map`.
-- If you intend generic runtime helpers with no runtime proof cost, pass
-  `const _proof: contract(t)` and call attached members through `t::member(...)`.
+- If you intend generic runtime helpers with no runtime proof cost, pass `const _proof: contract(t)`
+  and call attached members through `t::member(...)`.
 - If you intend to abstract over a unary type constructor, accept `t: type fn(a: type) -> type`, use
   values as `t(a)`, and reflect members on `t`.
 - If you intend type-directed construction or dispatch, pass the type as `const t` or

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.2
+
+- Added explicit Rust, Haskell, and Zig pattern guides for translating idiomatic traits, functional
+  abstractions, comptime patterns, and memory-efficient value code into Fig.
+- Refreshed docs for inferred type holes, LSP hole replacement actions, debug tracing, runtime
+  profiling, compile profiling, and the current CLI surface.
+- Kept generated grammar and tokenizer artifacts formatted for the CI freshness check.
+
 ## 0.0.1
 
 - Initial Fig compiler release.

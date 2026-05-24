@@ -1,7 +1,7 @@
 # Rust Patterns in Fig
 
-This guide maps common Rust idioms to Fig. The closest fit is not a direct syntax translation:
-Rust centers traits, impls, ownership, borrowing, and monomorphization. Fig centers type functions,
+This guide maps common Rust idioms to Fig. The closest fit is not a direct syntax translation: Rust
+centers traits, impls, ownership, borrowing, and monomorphization. Fig centers type functions,
 attached members, erased proof values, Branch-Bit values, and WebAssembly lowering.
 
 The practical rule is:
@@ -176,14 +176,14 @@ const std = @import("prelude.std");
 
 Useful contracts include:
 
-| Rust idea             | Fig pattern                                        |
-| --------------------- | -------------------------------------------------- |
-| `PartialEq` / `Eq`    | `Eq(t)` requiring `t::eql(a, b) -> bool`           |
-| `Add`-like append     | `Semigroup(t)` requiring `t::append(a, b) -> t`    |
-| `Default` for empty   | `EmptyValue(t)` / `Monoid(t)` with `t::empty()`    |
-| `Iterator` step shape | `Iterator(state, item)` with `state::next(state)`  |
-| `Copy` marker         | `Copyable(t)` as a marker-style contract           |
-| `Drop` marker         | `Droppable(t)` as a marker-style contract          |
+| Rust idea             | Fig pattern                                       |
+| --------------------- | ------------------------------------------------- |
+| `PartialEq` / `Eq`    | `Eq(t)` requiring `t::eql(a, b) -> bool`          |
+| `Add`-like append     | `Semigroup(t)` requiring `t::append(a, b) -> t`   |
+| `Default` for empty   | `EmptyValue(t)` / `Monoid(t)` with `t::empty()`   |
+| `Iterator` step shape | `Iterator(state, item)` with `state::next(state)` |
+| `Copy` marker         | `Copyable(t)` as a marker-style contract          |
+| `Drop` marker         | `Droppable(t)` as a marker-style contract         |
 
 Example:
 
@@ -216,9 +216,9 @@ type fn Mapper(f: type fn(a: type) -> type) -> type {
 }
 ```
 
-The prelude already defines `Functor`, `Applicative`, and `Monad` this way. A unary type
-constructor such as `Box(a)` can satisfy them by attaching `Box::map`, `Box::pure`, `Box::apply`,
-and `Box::bind`.
+The prelude already defines `Functor`, `Applicative`, and `Monad` this way. A unary type constructor
+such as `Box(a)` can satisfy them by attaching `Box::map`, `Box::pure`, `Box::apply`, and
+`Box::bind`.
 
 ```fig
 type fn Box(a: type) -> type {
@@ -319,8 +319,8 @@ pipelines.
 
 ## Closures, Function Values, and Callbacks
 
-Rust closures that capture runtime locals do not translate directly to ordinary Fig runtime
-lambdas. Fig has const-function templates for compile-time function parameters:
+Rust closures that capture runtime locals do not translate directly to ordinary Fig runtime lambdas.
+Fig has const-function templates for compile-time function parameters:
 
 ```fig
 fn map_one(value: i32, const f: fn(x: i32) -> i32) -> i32 {
@@ -392,8 +392,8 @@ annotation; `-> _` is allowed when the checker resolves it before ABI checking.
   lifetime syntax.
 - Do not expect implicit trait solving. Carry contracts in annotations or proof parameters.
 - Do not use Rust-style method receiver syntax. Use attached members such as `Point::add(a, b)`.
-- Do not model every Rust iterator as a heap object. Prefer fixed inline arrays, range iterators,
-  or explicit state machines.
+- Do not model every Rust iterator as a heap object. Prefer fixed inline arrays, range iterators, or
+  explicit state machines.
 - Do not use dynamic dispatch when static specialization or a `union` is enough.
 
 ## Checklist

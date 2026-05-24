@@ -4,8 +4,8 @@ Fig is an experimental language/compiler focused on static type functions, Branc
 WebAssembly output.
 
 See `docs/LANGUAGE.md` for the full core-language syntax, semantics, and compiler builtin reference.
-For migration-style guides, see `docs/guides/rust-patterns.md`,
-`docs/guides/haskell-patterns.md`, and `docs/guides/zig-patterns.md`.
+For migration-style guides, see `docs/guides/rust-patterns.md`, `docs/guides/haskell-patterns.md`,
+and `docs/guides/zig-patterns.md`.
 
 ## Using Fig
 
@@ -45,8 +45,8 @@ fig version
 
 Release archives are published at `https://github.com/mewhhaha/fig/releases` with `SHA256SUMS`.
 
-Use `--compile-profile` with `check`, `wat`, `build`, or `run` to print compiler phase timings.
-Use `--runtime-profile` with `run` to collect `@profile("label") { ... }` sites. Debug builds keep
+Use `--compile-profile` with `check`, `wat`, `build`, or `run` to print compiler phase timings. Use
+`--runtime-profile` with `run` to collect `@profile("label") { ... }` sites. Debug builds keep
 `@trace("message");` statements available to `fig run`; release builds erase trace statements.
 
 ## Type Function Surface

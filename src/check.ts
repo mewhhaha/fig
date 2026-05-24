@@ -32,9 +32,9 @@ import { isCatchAllPattern, patternBindingNames } from "./patterns.ts";
 import { intrinsicWrapperId, isIntrinsicWrapper, isKnownIntrinsicId } from "./primitives.ts";
 import {
   annotationBranchHint,
-  compilerSpecialForm,
   type CompilerPluginOptions,
   type CompilerPluginRegistry,
+  compilerSpecialForm,
   createCompilerPluginRegistry,
   defaultCompilerPluginRegistry,
   isCompilerSpecialForm,

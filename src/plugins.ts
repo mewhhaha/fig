@@ -449,9 +449,7 @@ export function compilerSpecialForm(name: string): CompilerSpecialForm | undefin
   const normalized = name === "$" ? "$" : staticBuiltinName(name);
   const exact = compilerSpecialFormsByName.get(normalized);
   if (exact) return exact;
-  const prefixed = prefixedCompilerSpecialForms.find((item) =>
-    normalized.startsWith(item.prefix)
-  );
+  const prefixed = prefixedCompilerSpecialForms.find((item) => normalized.startsWith(item.prefix));
   return prefixed
     ? {
       name: normalized,
