@@ -62,6 +62,7 @@ export interface OptimizeProfile {
 export interface OptimizeOptions {
   optMode?: OptMode;
   profile?: OptimizeProfileName | OptimizeProfile;
+  runtimeProfile?: boolean;
   assumeRewrites?: boolean;
   trace?: CompileTraceSink;
 }
@@ -474,6 +475,8 @@ export function optimizeProgram(program: Program, options: OptimizeOptions = {})
       result,
     ) => optimizerTraceCounters(result),
   );
+  if (resolveOptimizeProfile(options).name !== "debug") stripDebugTraceStatements(optimized);
+  if (!options.runtimeProfile) stripRuntimeProfileExpressions(optimized);
   config.typeDecls = programTypeDecls(optimized);
   let scope = traceSync(
     options.trace,
@@ -548,7 +551,9 @@ function inlinePureForwardingWrappers(
   const rewriteBlock = (block: BlockExpr): BlockExpr => ({
     ...block,
     statements: block.statements.map((stmt) =>
-      stmt.kind === "proof_const" ? stmt : { ...stmt, value: rewriteExpr(stmt.value) }
+      stmt.kind === "let" || stmt.kind === "destructure_let"
+        ? { ...stmt, value: rewriteExpr(stmt.value) }
+        : stmt
     ),
     expr: block.expr ? rewriteExpr(block.expr) : undefined,
   });
@@ -567,6 +572,8 @@ function inlinePureForwardingWrappers(
         return rewriteBlock(expr);
       case "const_fn":
         return { ...expr, body: rewriteExpr(expr.body) };
+      case "profile":
+        return { ...expr, args: expr.args.map(rewriteExpr), body: rewriteExpr(expr.body) };
       case "index":
         return { ...expr, target: rewriteExpr(expr.target), index: rewriteExpr(expr.index) };
       case "binary":
@@ -1142,6 +1149,10 @@ function referencedRuntimeNames(expr: Expr | BlockExpr | undefined): string[] {
       case "const_fn":
         visit(item.body);
         return;
+      case "profile":
+        item.args.forEach(visit);
+        visit(item.body);
+        return;
       case "do":
         item.statements.forEach(visit);
         visit(item.expr);
@@ -1406,6 +1417,12 @@ function substituteTypeConstructorRefs(expr: Expr, typeParam: string, concrete: 
   switch (expr.kind) {
     case "const_fn":
       return { ...expr, body: substituteTypeConstructorRefs(expr.body, typeParam, concrete) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => substituteTypeConstructorRefs(arg, typeParam, concrete)),
+        body: substituteTypeConstructorRefs(expr.body, typeParam, concrete),
+      };
     case "call":
       return {
         ...expr,
@@ -1545,6 +1562,12 @@ function assumeRewriteExprChildren(
     }
     case "const_fn":
       return { ...expr, body: assumeRewriteExpr(expr.body, facts, context) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => assumeRewriteExpr(arg, facts, context)),
+        body: assumeRewriteExpr(expr.body, facts, context),
+      };
     case "call":
       return {
         ...expr,
@@ -1668,6 +1691,12 @@ function substituteRewriteTemplate(expr: Expr, bindings: Map<string, Expr>): Exp
   switch (expr.kind) {
     case "const_fn":
       return { ...expr, body: substituteRewriteTemplate(expr.body, bindings) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => substituteRewriteTemplate(arg, bindings)),
+        body: substituteRewriteTemplate(expr.body, bindings),
+      };
     case "call":
       return {
         ...expr,
@@ -2397,6 +2426,7 @@ function foldableDomainBranchReasons(
   };
   for (const stmt of block.statements) {
     if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "debug_trace") continue;
     const value = abstractExpr(stmt.value, env);
     visitExpr(stmt.value, env);
     if (stmt.kind === "let") env.set(stmt.name, value);
@@ -2410,6 +2440,8 @@ function exprChildrenForPlanning(expr: Expr): Expr[] {
   switch (expr.kind) {
     case "call":
       return [expr.callee, ...expr.args];
+    case "profile":
+      return [...expr.args, expr.body];
     case "const_fn":
       return [expr.body];
     case "index":
@@ -2482,7 +2514,9 @@ function expandFiniteStaticRecurrences(
   const rewriteBlock = (block: BlockExpr, depths: Map<string, number>): BlockExpr => ({
     ...block,
     statements: block.statements.map((stmt) =>
-      stmt.kind === "proof_const" ? stmt : { ...stmt, value: rewriteExpr(stmt.value, depths) }
+      stmt.kind === "let" || stmt.kind === "destructure_let"
+        ? { ...stmt, value: rewriteExpr(stmt.value, depths) }
+        : stmt
     ),
     expr: block.expr ? rewriteExpr(block.expr, depths) : undefined,
   });
@@ -2492,12 +2526,21 @@ function expandFiniteStaticRecurrences(
         return {
           ...expr,
           statements: expr.statements.map((stmt) =>
-            stmt.kind === "proof_const" ? stmt : { ...stmt, value: rewriteExpr(stmt.value, depths) }
+            stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+              stmt.kind === "destructure_let"
+              ? { ...stmt, value: rewriteExpr(stmt.value, depths) }
+              : stmt
           ),
           expr: expr.expr ? rewriteExpr(expr.expr, depths) : undefined,
         };
       case "const_fn":
         return { ...expr, body: rewriteExpr(expr.body, depths) };
+      case "profile":
+        return {
+          ...expr,
+          args: expr.args.map((arg) => rewriteExpr(arg, depths)),
+          body: rewriteExpr(expr.body, depths),
+        };
       case "call": {
         const callee = rewriteExpr(expr.callee, depths);
         const args = expr.args.map((arg) => rewriteExpr(arg, depths));
@@ -2651,9 +2694,9 @@ function inlineGeneratedClauseCalls(
   return {
     ...block,
     statements: block.statements.map((stmt): Statement =>
-      stmt.kind === "proof_const"
-        ? stmt
-        : { ...stmt, value: inlineGeneratedClauseExpr(stmt.value, clauses) }
+      stmt.kind === "let" || stmt.kind === "destructure_let"
+        ? { ...stmt, value: inlineGeneratedClauseExpr(stmt.value, clauses) }
+        : stmt
     ),
     expr: block.expr ? inlineGeneratedClauseExpr(block.expr, clauses) : undefined,
   };
@@ -2671,6 +2714,12 @@ function inlineGeneratedClauseExpr(expr: Expr, clauses: Map<string, FnDecl>): Ex
       return expr;
     case "const_fn":
       return { ...expr, body: inlineGeneratedClauseExpr(expr.body, clauses) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => inlineGeneratedClauseExpr(arg, clauses)),
+        body: inlineGeneratedClauseExpr(expr.body, clauses),
+      };
     case "index":
       return {
         ...expr,
@@ -2898,6 +2947,7 @@ function abstractBlock(
   const locals = new Map<string, AbstractValue>();
   for (const stmt of block.statements) {
     if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "debug_trace") continue;
     const value = abstractExpr(stmt.value, env);
     if (stmt.kind === "let") {
       env.set(stmt.name, value);
@@ -2953,6 +3003,8 @@ function abstractExpr(expr: Expr, env: Map<string, AbstractValue>): AbstractValu
       }
       return { kind: "unknown" };
     }
+    case "profile":
+      return abstractExpr(expr.body, env);
     case "block":
       return abstractBlock(expr, new Map(env)).value;
     case "pipe_bind": {
@@ -3212,6 +3264,7 @@ function foldAbstractFactsInBlock(
   const scoped = new Map(env);
   const statements = block.statements.map((stmt): Statement => {
     if (stmt.kind === "proof_const") return stmt;
+    if (stmt.kind === "debug_trace") return stmt;
     const value = foldAbstractFactsInExpr(stmt.value, scoped);
     if (stmt.kind === "let") {
       scoped.set(stmt.name, abstractExpr(value, scoped));
@@ -3229,6 +3282,12 @@ function foldAbstractFactsInBlock(
 
 function foldAbstractFactsInExpr(expr: Expr, env: Map<string, AbstractValue>): Expr {
   switch (expr.kind) {
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => foldAbstractFactsInExpr(arg, env)),
+        body: foldAbstractFactsInExpr(expr.body, env),
+      };
     case "binary": {
       const folded = {
         ...expr,
@@ -3696,6 +3755,7 @@ function pureLetValues(
   const values = new Map<string, Expr>();
   for (const stmt of block.statements) {
     if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "debug_trace") continue;
     let value = stmt.value;
     for (const [name, replacement] of values) {
       if (usedNames(value).has(name)) value = substituteVar(value, name, replacement);
@@ -3715,6 +3775,7 @@ function substituteLocalLetUses(block: BlockExpr, replacements: Map<string, Expr
   let active = new Map<string, Expr>();
   const statements = block.statements.map((stmt) => {
     if (stmt.kind === "proof_const") return stmt;
+    if (stmt.kind === "debug_trace") return stmt;
     const value = substituteMany(stmt.value, active);
     const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
     active = new Map([...active].filter(([name]) => !bindings.includes(name)));
@@ -3745,6 +3806,10 @@ function inlineSingleUsePureLets(block: BlockExpr, functions: Map<string, FnDecl
   const statements: Statement[] = [];
   for (const stmt of block.statements) {
     if (stmt.kind === "proof_const") {
+      statements.push(stmt);
+      continue;
+    }
+    if (stmt.kind === "debug_trace") {
       statements.push(stmt);
       continue;
     }
@@ -3812,6 +3877,7 @@ function foldStaticProjectionLets(
   const active = new Map(initialActive);
   const statements = block.statements.map((stmt) => {
     if (stmt.kind === "proof_const") return stmt;
+    if (stmt.kind === "debug_trace") return stmt;
     const value = optimizeExpr(
       rewriteStaticProjections(stmt.value, active, forwarding, inlineable, functions, config),
       forwarding,
@@ -4105,6 +4171,21 @@ function rewriteStaticProjections(
           config,
         ),
       };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) =>
+          rewriteStaticProjections(arg, active, forwarding, inlineable, functions, config)
+        ),
+        body: rewriteStaticProjections(
+          expr.body,
+          active,
+          forwarding,
+          inlineable,
+          functions,
+          config,
+        ),
+      };
     case "var": {
       const [base, field] = expr.name.split(".", 2);
       if (base && field) {
@@ -4204,6 +4285,184 @@ function optimizeStatement(
   return stmt;
 }
 
+function stripDebugTraceStatements(program: Program) {
+  const stripBlock = (block: BlockExpr): BlockExpr => ({
+    ...block,
+    statements: block.statements
+      .filter((stmt) => stmt.kind !== "debug_trace")
+      .map(stripStatement),
+    expr: block.expr ? stripExpr(block.expr) : undefined,
+  });
+  const stripStatement = (stmt: Statement): Statement =>
+    stmt.kind === "let" || stmt.kind === "destructure_let"
+      ? { ...stmt, value: stripExpr(stmt.value) }
+      : stmt;
+  const stripDoStatement = (stmt: DoStatement): DoStatement => {
+    if (stmt.kind === "debug_trace") return stmt;
+    return stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+        stmt.kind === "destructure_let"
+      ? { ...stmt, value: stripExpr(stmt.value) }
+      : stmt;
+  };
+  const stripExpr = (expr: Expr): Expr => {
+    switch (expr.kind) {
+      case "block":
+        return stripBlock(expr);
+      case "do":
+        return {
+          ...expr,
+          statements: expr.statements
+            .filter((stmt) => stmt.kind !== "debug_trace")
+            .map(stripDoStatement),
+          expr: expr.expr ? stripExpr(expr.expr) : undefined,
+        };
+      case "const_fn":
+        return { ...expr, body: stripExpr(expr.body) };
+      case "profile":
+        return { ...expr, args: expr.args.map(stripExpr), body: stripExpr(expr.body) };
+      case "call":
+        return { ...expr, callee: stripExpr(expr.callee), args: expr.args.map(stripExpr) };
+      case "index":
+        return { ...expr, target: stripExpr(expr.target), index: stripExpr(expr.index) };
+      case "binary":
+        return { ...expr, left: stripExpr(expr.left), right: stripExpr(expr.right) };
+      case "pipe_bind":
+        return { ...expr, value: stripExpr(expr.value), body: stripExpr(expr.body) };
+      case "match":
+        return {
+          ...expr,
+          value: stripExpr(expr.value),
+          arms: expr.arms.map((arm) => ({ ...arm, value: stripExpr(arm.value) })),
+        };
+      case "shape":
+      case "product_constructor":
+        return {
+          ...expr,
+          slots: expr.slots.map((slot) => ({
+            ...slot,
+            index: slot.index ? stripExpr(slot.index) : undefined,
+            value: stripExpr(slot.value),
+          })),
+        };
+      case "static_for_slots":
+        return {
+          ...expr,
+          source: expr.source.kind === "range"
+            ? {
+              kind: "range",
+              start: stripExpr(expr.source.start),
+              end: stripExpr(expr.source.end),
+            }
+            : { kind: "shape", shape: stripExpr(expr.source.shape) },
+          value: stripExpr(expr.value),
+        };
+      case "field":
+        return { ...expr, value: stripExpr(expr.value), key: stripExpr(expr.key) };
+      case "range":
+        return { ...expr, start: stripExpr(expr.start), end: stripExpr(expr.end) };
+      case "literal":
+      case "placeholder":
+      case "var":
+        return expr;
+    }
+  };
+  program.declarations = program.declarations.map((decl) => {
+    if (decl.kind === "fn" || decl.kind === "contract") {
+      return { ...decl, body: stripBlock(decl.body) };
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      return { ...decl, value: stripExpr(decl.value) };
+    }
+    return decl;
+  });
+}
+
+function stripRuntimeProfileExpressions(program: Program) {
+  const stripBlock = (block: BlockExpr): BlockExpr => ({
+    ...block,
+    statements: block.statements.map(stripStatement),
+    expr: block.expr ? stripExpr(block.expr) : undefined,
+  });
+  const stripStatement = (stmt: Statement): Statement =>
+    stmt.kind === "let" || stmt.kind === "destructure_let"
+      ? { ...stmt, value: stripExpr(stmt.value) }
+      : stmt;
+  const stripDoStatement = (stmt: DoStatement): DoStatement =>
+    stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+      stmt.kind === "destructure_let"
+      ? { ...stmt, value: stripExpr(stmt.value) }
+      : stmt;
+  const stripExpr = (expr: Expr): Expr => {
+    switch (expr.kind) {
+      case "profile":
+        return stripExpr(expr.body);
+      case "block":
+        return stripBlock(expr);
+      case "do":
+        return {
+          ...expr,
+          statements: expr.statements.map(stripDoStatement),
+          expr: expr.expr ? stripExpr(expr.expr) : undefined,
+        };
+      case "const_fn":
+        return { ...expr, body: stripExpr(expr.body) };
+      case "call":
+        return { ...expr, callee: stripExpr(expr.callee), args: expr.args.map(stripExpr) };
+      case "index":
+        return { ...expr, target: stripExpr(expr.target), index: stripExpr(expr.index) };
+      case "binary":
+        return { ...expr, left: stripExpr(expr.left), right: stripExpr(expr.right) };
+      case "pipe_bind":
+        return { ...expr, value: stripExpr(expr.value), body: stripExpr(expr.body) };
+      case "match":
+        return {
+          ...expr,
+          value: stripExpr(expr.value),
+          arms: expr.arms.map((arm) => ({ ...arm, value: stripExpr(arm.value) })),
+        };
+      case "shape":
+      case "product_constructor":
+        return {
+          ...expr,
+          slots: expr.slots.map((slot) => ({
+            ...slot,
+            index: slot.index ? stripExpr(slot.index) : undefined,
+            value: stripExpr(slot.value),
+          })),
+        };
+      case "static_for_slots":
+        return {
+          ...expr,
+          source: expr.source.kind === "range"
+            ? {
+              kind: "range",
+              start: stripExpr(expr.source.start),
+              end: stripExpr(expr.source.end),
+            }
+            : { kind: "shape", shape: stripExpr(expr.source.shape) },
+          value: stripExpr(expr.value),
+        };
+      case "field":
+        return { ...expr, value: stripExpr(expr.value), key: stripExpr(expr.key) };
+      case "range":
+        return { ...expr, start: stripExpr(expr.start), end: stripExpr(expr.end) };
+      case "literal":
+      case "placeholder":
+      case "var":
+        return expr;
+    }
+  };
+  program.declarations = program.declarations.map((decl) => {
+    if (decl.kind === "fn" || decl.kind === "contract") {
+      return { ...decl, body: stripBlock(decl.body) };
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      return { ...decl, value: stripExpr(decl.value) };
+    }
+    return decl;
+  });
+}
+
 function isMultiValueInlineLetCall(
   expr: Expr,
   inlineable: Map<string, FnDecl>,
@@ -4243,6 +4502,12 @@ function optimizeExpr(
       return expr;
     case "const_fn":
       return { ...expr, body: optimizeExpr(expr.body, forwarding, inlineable, functions, config) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => optimizeExpr(arg, forwarding, inlineable, functions, config)),
+        body: optimizeExpr(expr.body, forwarding, inlineable, functions, config, options),
+      };
     case "call": {
       const callee = optimizeExpr(expr.callee, forwarding, inlineable, functions, config);
       const args = expr.args.map((arg) =>
@@ -4578,6 +4843,12 @@ function rewriteExpr(expr: Expr, drops: Map<string, Set<number>>): Expr {
       return expr;
     case "const_fn":
       return { ...expr, body: rewriteExpr(expr.body, drops) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => rewriteExpr(arg, drops)),
+        body: rewriteExpr(expr.body, drops),
+      };
     case "call": {
       const callee = rewriteExpr(expr.callee, drops);
       const indexes = callee.kind === "var" ? drops.get(callee.name) : undefined;
@@ -4634,7 +4905,9 @@ function rewriteExpr(expr: Expr, drops: Map<string, Set<number>>): Expr {
       return {
         ...expr,
         statements: expr.statements.map((stmt) =>
-          stmt.kind === "proof_const" ? stmt : { ...stmt, value: rewriteExpr(stmt.value, drops) }
+          stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? { ...stmt, value: rewriteExpr(stmt.value, drops) }
+            : stmt
         ),
         expr: expr.expr ? rewriteExpr(expr.expr, drops) : undefined,
       };
@@ -5014,6 +5287,8 @@ function stableExprKey(expr: Expr | BlockExpr): string {
       return `do:${expr.strategy.name}`;
     case "const_fn":
       return `const_fn:${expr.params.join(",")}=>${stableExprKey(expr.body)}`;
+    case "profile":
+      return `profile:${expr.args.map(stableExprKey).join(",")}:${stableExprKey(expr.body)}`;
     case "literal":
       return `literal:${expr.literalKind}:${expr.value}`;
     case "var":
@@ -5052,7 +5327,11 @@ function stableExprKey(expr: Expr | BlockExpr): string {
     case "block":
       return `block:${
         expr.statements.map((stmt) =>
-          stmt.kind === "proof_const" ? "proof" : `${stmt.kind}:${stableExprKey(stmt.value)}`
+          stmt.kind === "proof_const"
+            ? "proof"
+            : stmt.kind === "debug_trace"
+            ? `debug_trace:${stmt.message ?? ""}`
+            : `${stmt.kind}:${stableExprKey(stmt.value)}`
         ).join(";")
       }:${expr.expr ? stableExprKey(expr.expr) : ""}`;
   }
@@ -5130,6 +5409,7 @@ function statementCost(stmt: Statement): number {
     case "destructure_let":
       return 1 + exprCost(stmt.value);
     case "proof_const":
+    case "debug_trace":
       return 0;
   }
 }
@@ -5140,6 +5420,8 @@ function exprCost(expr: Expr): number {
       return 100;
     case "const_fn":
       return 1 + exprCost(expr.body);
+    case "profile":
+      return 2 + expr.args.reduce((sum, arg) => sum + exprCost(arg), 0) + exprCost(expr.body);
     case "call":
       return 2 + exprCost(expr.callee) + expr.args.reduce((sum, arg) => sum + exprCost(arg), 0);
     case "index":
@@ -5187,6 +5469,9 @@ function exprCallsFunction(expr: Expr | BlockExpr | undefined, name: string): bo
       return expr.expr ? exprCallsFunction(expr.expr, name) : false;
     case "const_fn":
       return exprCallsFunction(expr.body, name);
+    case "profile":
+      return expr.args.some((arg) => exprCallsFunction(arg, name)) ||
+        exprCallsFunction(expr.body, name);
     case "call":
       return (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprCallsFunction(expr.callee, name) ||
@@ -5462,12 +5747,19 @@ function recursiveCallDetails(
         ...expr.statements.flatMap((stmt) =>
           stmt.kind === "proof_const"
             ? []
+            : stmt.kind === "debug_trace"
+            ? stmt.args.flatMap((arg) => recursiveCallDetails(arg, targets, clause, false))
             : recursiveCallDetails(stmt.value, targets, clause, false)
         ),
         ...recursiveCallDetails(expr.expr, targets, clause, tailPosition),
       ];
     case "const_fn":
       return recursiveCallDetails(expr.body, targets, clause, false);
+    case "profile":
+      return [
+        ...expr.args.flatMap((arg) => recursiveCallDetails(arg, targets, clause, false)),
+        ...recursiveCallDetails(expr.body, targets, clause, tailPosition),
+      ];
     case "index":
       return [
         ...recursiveCallDetails(expr.target, targets, clause, false),
@@ -5567,6 +5859,10 @@ function directSelfCalls(
       return result;
     case "const_fn":
       add(directSelfCalls(expr.body, name, false));
+      return result;
+    case "profile":
+      expr.args.forEach((arg) => add(directSelfCalls(arg, name, false)));
+      add(directSelfCalls(expr.body, name, tailPosition));
       return result;
     case "index":
       add(directSelfCalls(expr.target, name, false));
@@ -5750,7 +6046,8 @@ function paramUsedInEffectfulCall(
     calledSubexpressions(expr).forEach(visit);
   };
   block.statements.forEach((stmt) => {
-    if (stmt.kind !== "proof_const") visit(stmt.value);
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") visit(stmt.value);
+    else if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
   });
   visit(block.expr);
   return retained;
@@ -5767,7 +6064,8 @@ function paramUsedAsWholeValue(block: BlockExpr, name: string): boolean {
     calledSubexpressions(expr).forEach(visit);
   };
   block.statements.forEach((stmt) => {
-    if (stmt.kind !== "proof_const") visit(stmt.value);
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") visit(stmt.value);
+    else if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
   });
   visit(block.expr);
   return used;
@@ -5783,6 +6081,8 @@ function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
       return expr.expr ? [expr.expr] : [];
     case "const_fn":
       return [expr.body];
+    case "profile":
+      return [...expr.args, expr.body];
     case "call":
       return [expr.callee, ...expr.args];
     case "index":
@@ -5809,7 +6109,9 @@ function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
       return [expr.start, expr.end];
     case "block":
       return [
-        ...expr.statements.flatMap((stmt) => stmt.kind === "proof_const" ? [] : [stmt.value]),
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "proof_const" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
+        ),
         ...(expr.expr ? [expr.expr] : []),
       ];
     case "literal":
@@ -5882,6 +6184,10 @@ function renameBlockBindings(
       statements.push(stmt);
       continue;
     }
+    if (stmt.kind === "debug_trace") {
+      statements.push(stmt);
+      continue;
+    }
     const value = renameExprBindings(stmt.value, env, fnName);
     if (stmt.kind === "let") {
       const fresh = inlineBindingName(fnName, stmt.name);
@@ -5906,6 +6212,12 @@ function renameExprBindings(expr: Expr, env: Map<string, string>, fnName: string
       return expr;
     case "const_fn":
       return { ...expr, body: renameExprBindings(expr.body, env, fnName) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => renameExprBindings(arg, env, fnName)),
+        body: renameExprBindings(expr.body, env, fnName),
+      };
     case "var": {
       const base = baseName(expr.name);
       const renamed = env.get(base);
@@ -6058,6 +6370,10 @@ function removeUnusedPureLets(block: BlockExpr, functions: Map<string, FnDecl>):
   for (let index = block.statements.length - 1; index >= 0; index--) {
     const stmt = block.statements[index]!;
     if (stmt.kind === "proof_const") {
+      kept.unshift(stmt);
+      continue;
+    }
+    if (stmt.kind === "debug_trace") {
       kept.unshift(stmt);
       continue;
     }
@@ -6226,7 +6542,8 @@ function usedNameCounts(block: BlockExpr): Map<string, number> {
               visit(stmt.value);
               continue;
             }
-            if (stmt.kind !== "proof_const") visit(stmt.value);
+            if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
+            else if (stmt.kind !== "proof_const") visit(stmt.value);
           }
           visit(item.expr);
           return;
@@ -6239,7 +6556,10 @@ function usedNameCounts(block: BlockExpr): Map<string, number> {
     return result;
   };
   for (const stmt of block.statements) {
-    if (stmt.kind !== "proof_const") merge(exprCounts(stmt.value));
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") merge(exprCounts(stmt.value));
+    else if (stmt.kind === "debug_trace") {
+      for (const arg of stmt.args) merge(exprCounts(arg));
+    }
   }
   merge(exprCounts(block.expr));
   return counts;
@@ -6250,6 +6570,12 @@ function blockUsedNames(block: BlockExpr): Set<string> {
   for (let index = block.statements.length - 1; index >= 0; index--) {
     const stmt = block.statements[index]!;
     if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "debug_trace") {
+      for (const arg of stmt.args) {
+        for (const name of usedNames(arg)) used.add(name);
+      }
+      continue;
+    }
     const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
     const valueNames = usedNames(stmt.value);
     for (const name of bindings) used.delete(name);
@@ -6268,6 +6594,8 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
       return true;
     case "const_fn":
       return hasRuntimeEffect(expr.body, functions);
+    case "profile":
+      return true;
     case "call": {
       const callee = expr.callee.kind === "var" ? functions.get(expr.callee.name) : undefined;
       return (expr.callee.kind === "var" &&
@@ -6302,8 +6630,9 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
       return hasRuntimeEffect(expr.value, functions) || hasRuntimeEffect(expr.key, functions);
     case "block":
       return expr.statements.some((stmt) =>
-        (stmt.kind === "let" || stmt.kind === "destructure_let") &&
-        hasRuntimeEffect(stmt.value, functions)
+        stmt.kind === "debug_trace" ||
+        ((stmt.kind === "let" || stmt.kind === "destructure_let") &&
+          hasRuntimeEffect(stmt.value, functions))
       ) || (expr.expr ? hasRuntimeEffect(expr.expr, functions) : false);
     case "literal":
     case "var":
@@ -6339,6 +6668,12 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
       return expr.params.includes(name)
         ? expr
         : { ...expr, body: substituteVar(expr.body, name, value) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => substituteVar(arg, name, value)),
+        body: substituteVar(expr.body, name, value),
+      };
     case "var":
       if (expr.name === name) return value;
       if (
@@ -6424,6 +6759,10 @@ function substituteBlock(block: BlockExpr, name: string, value: Expr): BlockExpr
   let shadowed = false;
   for (const stmt of block.statements) {
     if (stmt.kind === "proof_const") {
+      statements.push(stmt);
+      continue;
+    }
+    if (stmt.kind === "debug_trace") {
       statements.push(stmt);
       continue;
     }

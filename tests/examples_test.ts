@@ -1,5 +1,11 @@
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
-import { checkSource, decodeFigValue, instantiateFig, wasmFromSource, watFromSource } from "../src/mod.ts";
+import {
+  checkSource,
+  decodeFigValue,
+  instantiateFig,
+  wasmFromSource,
+  watFromSource,
+} from "../src/mod.ts";
 
 const resolveModule = async (moduleName: string) => {
   try {
@@ -251,7 +257,7 @@ Deno.test("CLI defaults to debug mode and --release selects release mode", async
   await Deno.remove(path);
 });
 
-Deno.test("CLI rejects legacy --opt modes", async () => {
+Deno.test("CLI rejects removed --opt modes", async () => {
   const output = await new Deno.Command(Deno.execPath(), {
     args: ["run", "--allow-read", "src/cli.ts", "wat", "examples/hello.fig", "--opt", "debug"],
     stdout: "piped",

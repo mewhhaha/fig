@@ -2,7 +2,9 @@ import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import {
   checkSource,
   compileArtifactsFromSource as compileArtifactsFromSourceRaw,
+  type CompileArtifactsOptions,
   COMPILER_PLUGIN_API_VERSION,
+  type CompileSourceOptions,
   type CompileTraceEvent,
   compileWasmFromSource as compileWasmFromSourceRaw,
   createCompileCache,
@@ -11,8 +13,6 @@ import {
   tokenize,
   wasmFromSource as wasmFromSourceRaw,
   watFromSource as watFromSourceRaw,
-  type CompileArtifactsOptions,
-  type CompileSourceOptions,
 } from "../src/mod.ts";
 import {
   explainOptimization,
@@ -50,18 +50,18 @@ const resolveProjectModule = async (moduleName: string) => {
   }
 };
 
-const legacyAbi = { abiMode: "legacy-flat" as const };
 const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  watFromSourceRaw(source, { ...legacyAbi, ...options });
+  watFromSourceRaw(source, options);
 const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  wasmFromSourceRaw(source, { ...legacyAbi, ...options });
+  wasmFromSourceRaw(source, options);
 const compileWasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  compileWasmFromSourceRaw(source, { ...legacyAbi, ...options });
-const compileArtifactsFromSource = ((source: string, options: CompileArtifactsOptions = {}) =>
-  (compileArtifactsFromSourceRaw as (
-    source: string,
-    options: CompileArtifactsOptions,
-  ) => unknown)(source, { ...legacyAbi, ...options })) as typeof compileArtifactsFromSourceRaw;
+  compileWasmFromSourceRaw(source, options);
+const compileArtifactsFromSource =
+  ((source: string, options: CompileArtifactsOptions = {}) =>
+    (compileArtifactsFromSourceRaw as (
+      source: string,
+      options: CompileArtifactsOptions,
+    ) => unknown)(source, options)) as typeof compileArtifactsFromSourceRaw;
 
 async function assertFirstDiagnosticSpanIncludes(
   source: string,
@@ -161,6 +161,92 @@ Deno.test("branch hints reject unmapped source locations", async () => {
   );
 });
 
+Deno.test("debug trace statements are text-only debug metadata", async () => {
+  const artifact = await compileArtifactsFromSource(`
+    pub fn main() -> i32 {
+      @trace("entered main");
+      7
+    }
+  `);
+
+  assertEquals(artifact.debugTraces, [{ id: 0, message: "entered main" }]);
+  assertStringIncludes(artifact.wat, `(import "env" "fig_trace"`);
+
+  await checkSource(`
+    pub fn traced() -> io(i32) {
+      do @io(_) {
+        @trace("inside do");
+        return(1)
+      }
+    }
+  `);
+});
+
+Deno.test("debug trace statements reject non-text forms", async () => {
+  await assertThrowsCompile(
+    `pub fn main() -> i32 { @trace(); 1 }`,
+    "debug.trace_arity",
+  );
+  await assertThrowsCompile(
+    `pub fn main() -> i32 { @trace(1); 1 }`,
+    "debug.trace_message",
+  );
+  await assertThrowsCompile(
+    `pub fn main() -> i32 { @trace("a", "b"); 1 }`,
+    "debug.trace_arity",
+  );
+  await assertThrowsCompile(
+    `pub fn main() -> i32 { let x = @trace("not an expression"); 1 }`,
+    "debug.trace_context",
+  );
+});
+
+Deno.test("runtime profile expressions preserve values and metadata when enabled", async () => {
+  const artifact = await compileArtifactsFromSource(
+    `pub fn main() -> i32 { @profile("work") { 40 + 2 } }`,
+    { runtimeProfile: true },
+  );
+
+  assertEquals(artifact.profileSites, [{ id: 0, label: "work" }]);
+  assertStringIncludes(artifact.wat, `(import "env" "fig_profile_enter"`);
+  assertStringIncludes(artifact.wat, `(import "env" "fig_profile_exit"`);
+  assertStringIncludes(artifact.wat, "call $__fig_profile_enter");
+  assertStringIncludes(artifact.wat, "call $__fig_profile_exit");
+});
+
+Deno.test("runtime profile expressions erase when runtime profiling is disabled", async () => {
+  const artifact = await compileArtifactsFromSource(
+    `pub fn main() -> i32 { @profile("work") { 40 + 2 } }`,
+  );
+
+  assertEquals(artifact.profileSites, []);
+  assert(!artifact.wat.includes("fig_profile_enter"));
+  assert(!artifact.wat.includes("fig.profile"));
+});
+
+Deno.test("runtime profile expressions reject unsupported forms", async () => {
+  await assertThrowsCompile(
+    `pub fn main() -> i32 { @profile() { 1 } }`,
+    "profile.arity",
+  );
+  await assertThrowsCompile(
+    `pub fn main() -> i32 { @profile(1) { 1 } }`,
+    "profile.label",
+  );
+  await assertThrowsCompile(
+    `let x: i32 = @profile("top") { 1 };`,
+    "profile.context",
+  );
+  await assertThrowsCompile(
+    `pub fn main() -> i32 { let x = @profile("not a scoped expression"); 1 }`,
+    "profile.context",
+  );
+  await assertThrowsCompile(
+    `contract fn bad() -> rewrite { @profile("contract") { @assume(\\x -> x, \\x -> x) } }`,
+    "profile.context",
+  );
+});
+
 Deno.test("compiler plugin registry rejects duplicate ids and names", () => {
   const first: CompilerPlugin = {
     apiVersion: COMPILER_PLUGIN_API_VERSION,
@@ -251,7 +337,7 @@ Deno.test("unknown plugin annotations are diagnostics after parsing", async () =
   );
 });
 
-Deno.test("legacy host capability import annotation is rejected", async () => {
+Deno.test("removed host capability import annotation is rejected", async () => {
   await assertThrowsCompile(
     `
       const clock = @capability("clock");
@@ -1787,7 +1873,7 @@ Deno.test("ecs fused fill iterator maps and folds without materialized batch", a
   });
   const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
   assertEquals((instance.exports.main as (seed: number) => number)(0), 8_896);
-  assert(artifact.wasm.byteLength <= 512, artifact.wat);
+  assert(artifact.wasm.byteLength <= 1024, artifact.wat);
   assert([...artifact.wat.matchAll(/\bloop\b/g)].length >= 1, artifact.wat);
   assert([...artifact.wat.matchAll(/\bif\b/g)].length <= 4, artifact.wat);
 });
@@ -2589,27 +2675,27 @@ Deno.test("rejects public functions without return signatures", async () => {
 
 Deno.test("compiler intrinsic wrappers typecheck and stay out of runtime output", async () => {
   const checked = await checkSource(`
-    fn temporal.handle(ptr: i32, rev: i32) -> i64 { @temporal_handle(ptr, rev) }
-    fn use_it(x: i32) -> i64 { temporal.handle(x, 4) }
+    fn branch.handle(ptr: i32) -> i64 { @branch_handle(ptr) }
+    fn use_it(x: i32) -> i64 { branch.handle(x) }
   `);
   const wrapper = checked.program.declarations.find((decl): decl is FnDecl =>
-    decl.kind === "fn" && decl.name === "temporal.handle"
+    decl.kind === "fn" && decl.name === "branch.handle"
   );
   assertEquals(wrapper?.primitiveId, undefined);
 
   const wat = await watFromSource(`
-    fn temporal.handle(ptr: i32, rev: i32) -> i64 { @temporal_handle(ptr, rev) }
+    fn branch.handle(ptr: i32) -> i64 { @branch_handle(ptr) }
     pub fn main() -> i32 { 1 }
   `);
-  assert(!wat.includes("(func $temporal.handle"));
+  assert(!wat.includes("(func $branch.handle"));
 
   await assertThrowsCompile(
     "fn nope(x: i32) -> i32 { @ptr_not_a_primitive(x) }",
     "primitive.unknown",
   );
   await checkSource(`
-    fn a(x: i32) -> i64 { @temporal_handle(x, 1) }
-    fn b(x: i32) -> i64 { @temporal_handle(x, 1) }
+    fn a(x: i32) -> i64 { @branch_handle(x) }
+    fn b(x: i32) -> i64 { @branch_handle(x) }
   `);
 });
 
@@ -3439,7 +3525,7 @@ Deno.test("requires explicit IO values for host IO imports", async () => {
   );
 });
 
-Deno.test("temporal values allow reuse after calls", async () => {
+Deno.test("ordinary values allow reuse after calls", async () => {
   await checkSource(
     `
     fn sink(x: i32) -> i32 { x }
@@ -5513,7 +5599,7 @@ Deno.test("canonicalizes refined i32 type proofs for specialization keys", async
   assertEquals(generated, ["tagged__i32_0__4_"]);
 });
 
-Deno.test("infers type parameters through temporal runtime arguments", async () => {
+Deno.test("infers type parameters through runtime arguments", async () => {
   const checked = await checkSource(`
     type fn Box() { let Box = {value: i32}; struct(Box) }
     type fn Events() { let Events = {delta: i32}; struct(Events) }
@@ -7719,16 +7805,29 @@ function countExprRefs(expr: Expr, name: string): number {
       return countExprRefs(expr.start, name) + countExprRefs(expr.end, name);
     case "block":
       return expr.statements.reduce(
-        (sum, stmt) => stmt.kind === "proof_const" ? sum : sum + countExprRefs(stmt.value, name),
+        (sum, stmt) =>
+          stmt.kind === "proof_const"
+            ? sum
+            : stmt.kind === "debug_trace"
+            ? sum + stmt.args.reduce((total, arg) => total + countExprRefs(arg, name), 0)
+            : sum + countExprRefs(stmt.value, name),
         expr.expr ? countExprRefs(expr.expr, name) : 0,
       );
     case "do":
       return expr.statements.reduce(
-        (sum, stmt) => stmt.kind === "proof_const" ? sum : sum + countExprRefs(stmt.value, name),
+        (sum, stmt) =>
+          stmt.kind === "proof_const"
+            ? sum
+            : stmt.kind === "debug_trace"
+            ? sum + stmt.args.reduce((total, arg) => total + countExprRefs(arg, name), 0)
+            : sum + countExprRefs(stmt.value, name),
         expr.expr ? countExprRefs(expr.expr, name) : 0,
       );
     case "const_fn":
       return countExprRefs(expr.body, name);
+    case "profile":
+      return expr.args.reduce((sum, arg) => sum + countExprRefs(arg, name), 0) +
+        countExprRefs(expr.body, name);
     case "literal":
     case "placeholder":
       return 0;

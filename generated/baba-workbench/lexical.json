@@ -22,6 +22,8 @@
   ],
   "symbols": [
     "@external",
+    "@profile",
+    "@trace",
     "...",
     "<*>",
     "<$>",

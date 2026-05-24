@@ -2,7 +2,7 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import { type CompileSourceOptions, watFromSource as watFromSourceRaw } from "../src/mod.ts";
 
 const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  watFromSourceRaw(source, { abiMode: "legacy-flat", ...options });
+  watFromSourceRaw(source, options);
 
 Deno.test("golden WAT for arithmetic main", async () => {
   assertEquals(
@@ -77,12 +77,11 @@ Deno.test("golden WAT lowers optimized const-param calls directly", async () => 
   assertEquals(
     await watFromSource(
       `
-      type fn Box() { let Box = {value: i32}; struct(Box) }
       type fn Functor(f: type) { let Functor = {map: fn(x: f) -> f}; struct(Functor) }
-      fn map_box(x: Box) -> Box { {value: x.value + 1} }
-      const box_functor: Functor(Box) = {map: map_box};
-      fn mapped(const dict: Functor(Box), x: Box) -> Box { dict.map(x) }
-      pub fn main() -> Box { mapped(box_functor, {value: 41}) }
+      fn map_i32(x: i32) -> i32 { x + 1 }
+      const i32_functor: Functor(i32) = {map: map_i32};
+      fn mapped(const dict: Functor(i32), x: i32) -> i32 { dict.map(x) }
+      pub fn main() -> i32 { mapped(i32_functor, 41) }
     `,
       { optMode: "release" },
     ),

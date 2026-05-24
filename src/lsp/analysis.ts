@@ -1250,6 +1250,13 @@ function symbolsForExpr(
       ];
     case "const_fn":
       return symbolsForExpr(uri, expr.body, source, mapper, container, program, localTypes);
+    case "profile":
+      return [
+        ...expr.args.flatMap((arg) =>
+          symbolsForExpr(uri, arg, source, mapper, container, program, localTypes)
+        ),
+        ...symbolsForExpr(uri, expr.body, source, mapper, container, program, localTypes),
+      ];
     case "block": {
       const blockTypes = new Map(localTypes);
       const symbols: IndexedSymbol[] = [];
@@ -1468,7 +1475,11 @@ function symbolsForStatement(
   program?: Program,
   localTypes?: Map<string, string>,
 ): IndexedSymbol[] {
-  const names = stmt.kind === "let" || stmt.kind === "proof_const" ? [stmt.name] : stmt.names;
+  const names = stmt.kind === "let" || stmt.kind === "proof_const"
+    ? [stmt.name]
+    : stmt.kind === "destructure_let"
+    ? stmt.names
+    : [];
   return names.map((name) => {
     const range = rangeFromSpan(spanForStatementName(stmt, name), mapper) ??
       rangeFromFound(findNameRange(source, name), mapper) ?? mapper.range(0, 0);
@@ -2700,6 +2711,8 @@ function childExprs(expr: Expr): Expr[] {
       ];
     case "const_fn":
       return [expr.body];
+    case "profile":
+      return [...expr.args, expr.body];
     case "block":
       return [
         ...expr.statements.flatMap((stmt) => statementValue(stmt) ? [statementValue(stmt)!] : []),
@@ -2779,6 +2792,8 @@ function expressionSyntaxInfo(
       return { name: "do expression", kind: "local" };
     case "const_fn":
       return { name: "const function", kind: "local" };
+    case "profile":
+      return { name: "profile expression", kind: "local" };
     case "binary":
       return { name: `${expr.op} expression`, kind: "local", detail: "binary expression" };
     case "index":

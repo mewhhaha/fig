@@ -60,7 +60,19 @@ export interface BackendModule {
   data: BackendData[];
   customSections?: BackendCustomSection[];
   abi?: FigAbiManifest;
+  debugTraces: FigDebugTraceSite[];
+  profileSites: FigProfileSite[];
   branchHints: boolean;
+}
+
+export interface FigDebugTraceSite {
+  id: number;
+  message: string;
+}
+
+export interface FigProfileSite {
+  id: number;
+  label: string;
 }
 
 export interface BackendPhaseTimings {
@@ -114,15 +126,20 @@ interface BackendLocal {
 
 type ValueType = "i32" | "i64" | "f32" | "f64" | "v128";
 
-export type AbiMode = "memory-v1" | "legacy-flat";
-
 export interface FigAbiManifest {
-  name: "fig.memory.v1";
+  name: "fig.memory";
   version: 1;
   target: "wasm32-core-3-browser";
-  mode: AbiMode;
   pointer: "i32";
   endian: "little";
+  objectHeader: {
+    byteSize: 16;
+    fields: {
+      name: "layout_id" | "payload_bytes" | "flags" | "ref_count";
+      offset: number;
+      type: "i32";
+    }[];
+  };
   memories: { name: string; exportName: string; minPages: number }[];
   helpers: {
     version: "fig_abi_version";
@@ -153,10 +170,22 @@ export interface FigAbiValue {
 export interface FigAbiLayout {
   id: number;
   type: string;
-  kind: "scalar" | "record";
+  kind: "scalar" | "record" | "sum" | "heap_array";
+  category?:
+    | "primitive"
+    | "product"
+    | "inline_array"
+    | "string"
+    | "sum"
+    | "heap_array"
+    | "io"
+    | "opaque";
+  passing?: "direct" | "handle";
   size: number;
   align: number;
   fields: FigAbiLayoutField[];
+  variants?: FigAbiVariant[];
+  item?: { type: string; stride: number; fields: FigAbiLayoutField[] };
 }
 
 export interface FigAbiLayoutField {
@@ -165,6 +194,12 @@ export interface FigAbiLayoutField {
   wat: ValueType;
   offset: number;
   size: number;
+}
+
+export interface FigAbiVariant {
+  name: string;
+  tag: number;
+  fields: FigAbiLayoutField[];
 }
 
 const I32_MIN = -0x8000_0000;
@@ -249,6 +284,9 @@ interface LowerContext {
   closureDescriptors?: ClosureDescriptor[];
   closureIds?: Map<string, number>;
   closureDispatcherSignatures?: Map<string, ClosureSignature>;
+  debugTraceSites?: FigDebugTraceSite[];
+  runtimeProfile?: boolean;
+  profileSites?: FigProfileSite[];
 }
 
 interface ClosureDescriptor {
@@ -306,30 +344,18 @@ interface LayoutEnv {
 }
 
 export type TailCallMode = "opcode";
-export type MemoryModel = "temporal" | "branch-debug" | "branch";
+export type MemoryModel = "branch-debug" | "branch";
 
 export interface BackendOptions extends CompilerPluginOptions {
   tailCallMode?: TailCallMode;
   memoryModel?: MemoryModel;
-  abiMode?: AbiMode;
   optMode?: OptMode;
   profile?: OptimizeProfileName | OptimizeProfile;
+  runtimeProfile?: boolean;
   branchHints?: boolean;
   assumeRewrites?: boolean;
   compileTrace?: CompileTraceSink;
 }
-
-const EXPLICIT_MEMORY: BackendMemory = {
-  name: "memory",
-  exportName: "memory",
-  minPages: 1,
-};
-
-const TEMPORAL_MEMORIES: BackendMemory[] = [
-  { name: "fig_objects", exportName: "fig_objects", minPages: 1 },
-  { name: "fig_logs", exportName: "fig_logs", minPages: 1 },
-  { name: "fig_buffers", exportName: "fig_buffers", minPages: 1 },
-];
 
 const BRANCH_MEMORIES: BackendMemory[] = [
   { name: "fig_objects", exportName: "fig_objects", minPages: 1 },
@@ -427,19 +453,13 @@ function backendFixedArrayPlanning(
       message: `unknown memory model ${memoryModel}`,
     }]);
   }
-  const abiMode = options.abiMode ?? "memory-v1";
-  if (!isAbiMode(abiMode)) {
-    throw new CompileError([{
-      code: "backend.abi_mode",
-      message: `unknown ABI mode ${abiMode}`,
-    }]);
-  }
   const optMode = options.optMode ?? "debug";
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
   const optimized = optimizeProgram(program, {
     optMode,
     profile: options.profile,
+    runtimeProfile: options.runtimeProfile,
     assumeRewrites: options.assumeRewrites,
     trace: options.compileTrace,
   });
@@ -538,13 +558,6 @@ export function lowerProgramToBackendArtifact(
       message: `unknown memory model ${memoryModel}`,
     }]);
   }
-  const abiMode = options.abiMode ?? "memory-v1";
-  if (!isAbiMode(abiMode)) {
-    throw new CompileError([{
-      code: "backend.abi_mode",
-      message: `unknown ABI mode ${abiMode}`,
-    }]);
-  }
   const optMode = options.optMode ?? "debug";
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
@@ -553,6 +566,7 @@ export function lowerProgramToBackendArtifact(
   const optimized = optimizeProgram(program, {
     optMode,
     profile: options.profile,
+    runtimeProfile: options.runtimeProfile,
     assumeRewrites: options.assumeRewrites,
     trace: options.compileTrace,
   });
@@ -598,6 +612,9 @@ export function lowerProgramToBackendArtifact(
     closureDescriptors,
     closureIds,
     closureDispatcherSignatures: new Map(),
+    debugTraceSites: [],
+    runtimeProfile: options.runtimeProfile ?? false,
+    profileSites: [],
   };
   const reachableProjectedFns = removeUnreachablePrivateFunctions(
     projectedRuntimeFns,
@@ -629,6 +646,25 @@ export function lowerProgramToBackendArtifact(
   const lowerStart = performance.now();
   const loweredFunctions = functions.map((fn) => lowerFunction(fn, ctx));
   const closureDispatchers = lowerClosureDispatchers(ctx);
+  const debugTraceSites = (optMode === "debug" ? ctx.debugTraceSites ?? [] : [])
+    .toSorted((left, right) => left.id - right.id);
+  const debugTraceImports: BackendImport[] = debugTraceSites.length
+    ? [{ name: "__fig_trace", importName: "fig_trace", params: ["i32"], results: [] }]
+    : [];
+  const profileSites = options.runtimeProfile
+    ? (ctx.profileSites ?? []).toSorted((left, right) => left.id - right.id)
+    : [];
+  const profileImports: BackendImport[] = profileSites.length
+    ? [
+      {
+        name: "__fig_profile_enter",
+        importName: "fig_profile_enter",
+        params: ["i32"],
+        results: [],
+      },
+      { name: "__fig_profile_exit", importName: "fig_profile_exit", params: ["i32"], results: [] },
+    ]
+    : [];
   let backendFunctions =
     [...loweredFunctions, ...closureDispatchers].some((fn) =>
         instrsCallFunction(fn.body, SIMD_DOT4_I32_HELPER)
@@ -644,66 +680,66 @@ export function lowerProgramToBackendArtifact(
   const needsScratchMemory = [...ctx.scratchPlansByFunction.values()].some((plans) =>
     plans.size > 0
   );
-  const needsTemporalMemory = functions.some((fn) => usesTemporalIntrinsic(fn.body, ctx.functions));
-  const needsBranchMemory = memoryModel !== "temporal" &&
-    functions.some((fn) => usesBranchIntrinsic(fn.body, ctx.functions));
+  const needsBranchMemory = functions.some((fn) => usesBranchIntrinsic(fn.body, ctx.functions));
   const needsHeapMemory = closureDescriptors.length > 0 ||
     functions.some((fn) => usesHeapArrayIntrinsic(fn.body, ctx.functions));
-  const needsAbiMemory = abiMode === "memory-v1" &&
-    (functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, ctx.layouts)) ||
-      imports.some((fn) => functionNeedsMemoryAbi(fn, ctx.layouts)));
-  if (memoryModel !== "temporal" && needsTemporalMemory) {
-    throw new CompileError([{
-      code: "backend.temporal_in_branch_mode",
-      message: `temporal intrinsics are only available with --memory temporal`,
-    }]);
-  }
+  const needsAbiMemory =
+    functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, ctx.layouts)) ||
+    imports.some((fn) => functionNeedsMemoryAbi(fn, ctx.layouts));
   const rawMemories = needsAbiMemory
     ? ensureAbiMemories(backendMemories(
-      memoryModel,
-      needsTemporalMemory,
       needsBranchMemory,
       needsScratchMemory,
       true,
     ))
     : backendMemories(
-      memoryModel,
-      needsTemporalMemory,
       needsBranchMemory,
       needsScratchMemory,
       needsHeapMemory,
     );
   const abiManifest = createFigAbiManifest(
-    abiMode,
     rawMemories,
     functions,
     imports,
     ctx.layouts,
   );
-  const abiFunctions = abiMode === "memory-v1"
-    ? memoryAbiRuntimeFunctions(ctx.layouts, functions, imports)
-    : [];
+  const abiFunctions = memoryAbiRuntimeFunctions(ctx.layouts, functions, imports);
   const module = {
-    imports: imports.map((fn) => {
-      const wrappedImport = abiMode === "memory-v1" && functionNeedsMemoryAbi(fn, layouts);
-      return {
-        name: wrappedImport ? abiImportRawName(fn.name) : fn.name,
-        importName: fn.externalName,
-        params: wrappedImport
-          ? fn.params.flatMap((param) => abiParamWat(param.type, layouts))
-          : fn.params.flatMap((param) => flattenType(param.type, layouts).map((slot) => slot.wat)),
-        results: wrappedImport
-          ? abiResultWat(fn.returnType, layouts)
-          : flattenType(fn.returnType, layouts).map((slot) => slot.wat),
-      };
-    }),
-    functions: abiMode === "memory-v1"
-      ? memoryAbiWrappedFunctions(removeUnreachableBackendFunctions(backendFunctions), functions, imports, ctx)
-      : removeUnreachableBackendFunctions(backendFunctions),
+    imports: [
+      ...debugTraceImports,
+      ...profileImports,
+      ...imports.map((fn) => {
+        const wrappedImport = functionNeedsMemoryAbi(fn, layouts);
+        return {
+          name: wrappedImport ? abiImportRawName(fn.name) : fn.name,
+          importName: fn.externalName,
+          params: wrappedImport
+            ? fn.params.flatMap((param) => abiParamWat(param.type, layouts))
+            : fn.params.flatMap((param) =>
+              flattenType(param.type, layouts).map((slot) => slot.wat)
+            ),
+          results: wrappedImport
+            ? abiResultWat(fn.returnType, layouts)
+            : flattenType(fn.returnType, layouts).map((slot) => slot.wat),
+        };
+      }),
+    ],
+    functions: memoryAbiWrappedFunctions(
+      removeUnreachableBackendFunctions(backendFunctions),
+      functions,
+      imports,
+      ctx,
+    ),
     memories: rawMemories,
     data: [],
-    customSections: abiMode === "memory-v1" ? [figAbiCustomSection(abiManifest)] : [],
+    customSections: [
+      figAbiCustomSection(abiManifest),
+      ...(debugTraceSites.length ? [figTraceCustomSection(debugTraceSites)] : []),
+      ...(profileSites.length ? [figProfileCustomSection(profileSites)] : []),
+    ],
     abi: abiManifest,
+    debugTraces: debugTraceSites,
+    profileSites,
     branchHints: options.branchHints ?? optMode === "release",
   };
   if (abiFunctions.length) {
@@ -729,8 +765,6 @@ export function lowerProgramToBackendModule(
 }
 
 function backendMemories(
-  memoryModel: MemoryModel,
-  needsTemporalMemory: boolean,
   needsBranchMemory: boolean,
   needsScratchMemory: boolean,
   needsHeapMemory: boolean,
@@ -742,14 +776,6 @@ function backendMemories(
         : memory
     );
   const heapObjects = { ...BRANCH_MEMORIES[0]!, minPages: HEAP_MIN_PAGES };
-  if (memoryModel === "temporal") {
-    if (needsTemporalMemory) {
-      return needsHeapMemory ? withHeapCapacity(TEMPORAL_MEMORIES) : TEMPORAL_MEMORIES;
-    }
-    if (needsHeapMemory && needsScratchMemory) return [heapObjects, TEMPORAL_MEMORIES[2]!];
-    if (needsHeapMemory) return [heapObjects];
-    return needsScratchMemory ? [TEMPORAL_MEMORIES[2]!] : [];
-  }
   if (needsBranchMemory) {
     return needsHeapMemory ? withHeapCapacity(BRANCH_MEMORIES) : BRANCH_MEMORIES;
   }
@@ -759,11 +785,7 @@ function backendMemories(
 }
 
 function isMemoryModel(value: string): value is MemoryModel {
-  return value === "temporal" || value === "branch-debug" || value === "branch";
-}
-
-function isAbiMode(value: string): value is AbiMode {
-  return value === "memory-v1" || value === "legacy-flat";
+  return value === "branch-debug" || value === "branch";
 }
 
 function ensureAbiMemories(memories: BackendMemory[]): BackendMemory[] {
@@ -843,7 +865,9 @@ function memoryAbiWrappedFunctions(
   const publicByName = new Map(sourceFns.filter(isCurrentModulePublic).map((fn) => [fn.name, fn]));
   const rewritten = backendFunctions.map((fn) => {
     const source = publicByName.get(fn.name);
-    return source && functionNeedsMemoryAbi(source, ctx.layouts) ? { ...fn, exportName: undefined } : fn;
+    return source && functionNeedsMemoryAbi(source, ctx.layouts)
+      ? { ...fn, exportName: undefined }
+      : fn;
   });
   const publicWrappers = sourceFns
     .filter((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, ctx.layouts))
@@ -902,7 +926,9 @@ function memoryAbiImportWrapper(fn: FnDecl, ctx: LowerContext): BackendFunction 
     if (abiPassing(param.type, ctx.layouts) === "handle") {
       const slots = flattenBinding(param.name, param.type, ctx.layouts);
       for (const slot of slots) body.push({ op: "local.get", name: slot.name });
-      body.push(...abiEncodeStackResult(param.type, ctx.layouts, locals, `__abi_arg_${param.name}`));
+      body.push(
+        ...abiEncodeStackResult(param.type, ctx.layouts, locals, `__abi_arg_${param.name}`),
+      );
     } else {
       for (const slot of flattenBinding(param.name, param.type, ctx.layouts)) {
         body.push({ op: "local.get", name: slot.name });
@@ -925,11 +951,21 @@ function memoryAbiImportWrapper(fn: FnDecl, ctx: LowerContext): BackendFunction 
   };
 }
 
-function abiDecodeHandle(handleName: string, type: string | undefined, layouts: LayoutEnv): Instr[] {
+function abiDecodeHandle(
+  handleName: string,
+  type: string | undefined,
+  layouts: LayoutEnv,
+): Instr[] {
   const layout = abiLayoutForType(type, layouts);
   return layout.fields.map((field): Instr[] => [
     { op: "local.get", name: handleName },
-    { op: "load", type: field.wat, align: Math.min(field.size, 8), offset: ABI_OBJECT_HEADER_SIZE + field.offset, memory: "fig_objects" },
+    {
+      op: "load",
+      type: field.wat,
+      align: Math.min(field.size, 8),
+      offset: ABI_OBJECT_HEADER_SIZE + field.offset,
+      memory: "fig_objects",
+    },
   ]).flat();
 }
 
@@ -970,8 +1006,13 @@ function abiEncodeStackResult(
 
 const ABI_OBJECT_HEADER_SIZE = 16;
 
-function memoryAbiRuntimeFunctions(_layouts: LayoutEnv, functions: FnDecl[], imports: FnDecl[]): BackendFunction[] {
-  const needsAbi = functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, _layouts)) ||
+function memoryAbiRuntimeFunctions(
+  _layouts: LayoutEnv,
+  functions: FnDecl[],
+  imports: FnDecl[],
+): BackendFunction[] {
+  const needsAbi =
+    functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, _layouts)) ||
     imports.some((fn) => functionNeedsMemoryAbi(fn, _layouts));
   if (!needsAbi) return [];
   return [
@@ -1134,7 +1175,6 @@ function figRetainFunction(name: string, delta: number): BackendFunction {
 }
 
 function createFigAbiManifest(
-  mode: AbiMode,
   memories: BackendMemory[],
   functions: FnDecl[],
   imports: FnDecl[],
@@ -1142,7 +1182,7 @@ function createFigAbiManifest(
 ): FigAbiManifest {
   const layoutById = new Map<number, FigAbiLayout>();
   const value = (type: string | undefined, name?: string): FigAbiValue => {
-    const passing = mode === "memory-v1" ? abiPassing(type, layouts) : "direct";
+    const passing = abiPassing(type, layouts);
     const layout = abiLayoutForType(type, layouts);
     layoutById.set(layout.id, layout);
     return {
@@ -1154,12 +1194,20 @@ function createFigAbiManifest(
     };
   };
   return {
-    name: "fig.memory.v1",
+    name: "fig.memory",
     version: 1,
     target: "wasm32-core-3-browser",
-    mode,
     pointer: "i32",
     endian: "little",
+    objectHeader: {
+      byteSize: ABI_OBJECT_HEADER_SIZE,
+      fields: [
+        { name: "layout_id" as const, offset: 0, type: "i32" as const },
+        { name: "payload_bytes" as const, offset: 4, type: "i32" as const },
+        { name: "flags" as const, offset: 8, type: "i32" as const },
+        { name: "ref_count" as const, offset: 12, type: "i32" as const },
+      ],
+    },
     memories: memories.map((memory) => ({
       name: memory.name,
       exportName: memory.exportName,
@@ -1206,18 +1254,112 @@ function abiLayoutForType(type: string | undefined, layouts: LayoutEnv): FigAbiL
   }
   const size = alignTo(offset, align);
   const rendered = type ?? "i32";
+  const passing = abiPassing(type, layouts);
+  const kind = abiLayoutKind(rendered, fields, layouts);
+  const extra = abiLayoutMetadata(rendered, layouts);
   return {
     id: stableAbiLayoutId(rendered, fields),
     type: rendered,
-    kind: fields.length === 1 && fields[0]?.name === "value" ? "scalar" : "record",
+    kind,
+    passing,
     size,
     align,
     fields,
+    ...extra,
   };
 }
 
+function abiLayoutKind(
+  type: string,
+  fields: FigAbiLayoutField[],
+  layouts: LayoutEnv,
+): FigAbiLayout["kind"] {
+  if (typeCallArgs(type, "HeapArray") !== undefined) return "heap_array";
+  const decl = layouts.types.get(typeName(resolveAlias(type, layouts) ?? type));
+  if (decl?.normalized?.kind === "sum") return "sum";
+  return fields.length === 1 && fields[0]?.name === "value" ? "scalar" : "record";
+}
+
+function abiLayoutMetadata(
+  type: string,
+  layouts: LayoutEnv,
+): Pick<FigAbiLayout, "category" | "variants" | "item"> {
+  if (type === "string") return { category: "string" };
+  if (ioActionItemType(type)) return { category: "io" };
+  if (isPrimitiveType(type) || parseRefinedI32Type(type)) return { category: "primitive" };
+  const heapArrayArgs = typeCallArgs(type, "HeapArray");
+  if (heapArrayArgs !== undefined) {
+    const itemType = splitTypeArgs(heapArrayArgs)[0]?.trim() ?? "i32";
+    const itemFields = abiLayoutForType(itemType, layouts).fields;
+    return {
+      category: "heap_array",
+      item: {
+        type: itemType,
+        stride: alignTo(
+          itemFields.reduce((end, field) => Math.max(end, field.offset + field.size), 0),
+          4,
+        ),
+        fields: itemFields,
+      },
+    };
+  }
+  if (inlineArrayLikeTypeArgs(type, layouts)) return { category: "inline_array" };
+  const resolved = resolveAlias(type, layouts) ?? type;
+  const decl = layouts.types.get(typeName(resolved));
+  if (decl?.normalized?.kind === "sum") {
+    const callArgs = typeCallArgs(resolved, typeName(resolved));
+    const args = callArgs === undefined ? [] : splitTypeArgs(callArgs);
+    return {
+      category: "sum",
+      variants: decl.normalized.variants.map((variant, tag) => ({
+        name: variant.name,
+        tag,
+        fields: variant.shape
+          ? abiFieldsForShape(
+            substituteProductShapeTypeParams(variant.shape.slots, decl, args),
+            layouts,
+          )
+          : [],
+      })),
+    };
+  }
+  if (
+    productSlotsForType(type, layouts) || productSlotsForType(resolved, layouts) ||
+    decl?.normalized?.kind === "product"
+  ) {
+    return { category: "product" };
+  }
+  return { category: "opaque" };
+}
+
+function abiFieldsForShape(slots: ShapeTypeSlot[], layouts: LayoutEnv): FigAbiLayoutField[] {
+  const fields: FigAbiLayoutField[] = [];
+  let offset = 0;
+  for (const field of flattenShape(slots, layouts)) {
+    const size = valueTypeByteSize(field.wat);
+    const slotAlign = Math.min(size, 8);
+    offset = alignTo(offset, slotAlign);
+    fields.push({
+      name: field.suffix || "value",
+      type: field.type,
+      wat: field.wat,
+      offset,
+      size,
+    });
+    offset += size;
+  }
+  return fields;
+}
+
 function stableAbiLayoutId(type: string, fields: FigAbiLayoutField[]): number {
-  const source = JSON.stringify({ type, fields: fields.map(({ name, type, wat, offset, size }) => ({ name, type, wat, offset, size })) });
+  const layoutFields = fields.map(({ name, type, wat, offset, size }) => ({
+    name,
+    type,
+    wat,
+    offset,
+    size,
+  }));
+  const source = JSON.stringify({ type, fields: layoutFields });
   let hash = 0x811c9dc5;
   for (let index = 0; index < source.length; index++) {
     hash ^= source.charCodeAt(index);
@@ -1228,8 +1370,22 @@ function stableAbiLayoutId(type: string, fields: FigAbiLayoutField[]): number {
 
 function figAbiCustomSection(manifest: FigAbiManifest): BackendCustomSection {
   return {
-    name: "fig.abi.v1",
+    name: "fig.abi",
     bytes: Array.from(new TextEncoder().encode(JSON.stringify(manifest))),
+  };
+}
+
+function figTraceCustomSection(sites: FigDebugTraceSite[]): BackendCustomSection {
+  return {
+    name: "fig.trace",
+    bytes: Array.from(new TextEncoder().encode(JSON.stringify({ sites }))),
+  };
+}
+
+function figProfileCustomSection(sites: FigProfileSite[]): BackendCustomSection {
+  return {
+    name: "fig.profile",
+    bytes: Array.from(new TextEncoder().encode(JSON.stringify({ sites }))),
   };
 }
 
@@ -1285,6 +1441,10 @@ function directCallExprs(expr: Expr | BlockExpr): Extract<Expr, { kind: "call" }
     if (!item) return;
     if (item.kind === "call") calls.push(item);
     if (item.kind === "proof_const") return;
+    if (item.kind === "debug_trace") {
+      item.args.forEach(visit);
+      return;
+    }
     if (item.kind === "let" || item.kind === "destructure_let") {
       visit(item.value);
       return;
@@ -1437,7 +1597,8 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
       (!paramNames.has(local.name) && bodyLocals.has(local.name)) ||
       local.name.startsWith("__simd_tmp") ||
       local.name.startsWith("__tail_tmp") ||
-      local.name.startsWith("__slot_tmp")
+      local.name.startsWith("__slot_tmp") ||
+      local.name.startsWith("__profile_tmp")
     ),
   ).map((local, index) => ({ local, index })).toSorted((a, b) =>
     (useCounts.get(b.local.name) ?? 0) - (useCounts.get(a.local.name) ?? 0) ||
@@ -1869,7 +2030,8 @@ function tailTransformedFixedArrayTargets(
   };
   visit(fn.body.expr);
   for (const stmt of fn.body.statements) {
-    if (stmt.kind !== "proof_const") visit(stmt.value);
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") visit(stmt.value);
+    else if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
   }
   return found;
 }
@@ -2597,6 +2759,12 @@ function substituteExpr(expr: Expr, substitutions: Map<string, Expr>): Expr {
       return expr.expr ? substituteExpr(expr.expr, substitutions) : expr;
     case "const_fn":
       return { ...expr, body: substituteExpr(expr.body, substitutions) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => substituteExpr(arg, substitutions)),
+        body: substituteExpr(expr.body, substitutions),
+      };
     case "var":
       return substitutions.get(expr.name) ?? expr;
     case "call":
@@ -2715,7 +2883,10 @@ function cleanupInstrs(
     } else if (instr.op === "local.set" || instr.op === "local.tee") {
       constLocals.delete(instr.name);
       clearAliasesForWrite(instr.name);
-    } else if (instr.op === "if" || instr.op === "block" || instr.op === "loop") {
+    } else if (
+      instr.op === "if" || instr.op === "block" || instr.op === "loop" ||
+      (instr.op === "call" && isObservationCall(instr.name))
+    ) {
       flushConstLocals();
       localAliases.clear();
     }
@@ -3707,6 +3878,11 @@ function instrReadsLocal(instr: Instr, name: string): boolean {
   }
 }
 
+function isObservationCall(name: string): boolean {
+  return name === "__fig_profile_enter" || name === "__fig_profile_exit" ||
+    name === "__fig_trace";
+}
+
 function instrMentionsLocal(instr: Instr, name: string): boolean {
   switch (instr.op) {
     case "local.get":
@@ -4040,6 +4216,10 @@ function collectExprLocals(expr: Expr, locals: BackendLocal[], ctx: LowerContext
     case "block":
       collectBlockLocals(expr, locals, ctx);
       return;
+    case "profile":
+      for (const arg of expr.args) collectExprLocals(arg, locals, ctx);
+      collectExprLocals(expr.body, locals, ctx);
+      return;
     case "call":
       collectExprLocals(expr.callee, locals, ctx);
       for (const arg of expr.args) collectExprLocals(arg, locals, ctx);
@@ -4114,6 +4294,7 @@ function lowerStatement(
   usedLaterExpr?: Expr,
 ): Instr[] {
   if (stmt.kind === "proof_const") return [];
+  if (stmt.kind === "debug_trace") return lowerDebugTraceStatement(stmt, ctx);
   if (stmt.kind === "destructure_let") {
     const bindings = statementLocalBindings(stmt, ctx);
     for (const target of bindings.map((slot) => slot.name)) locals.add(target);
@@ -4181,6 +4362,57 @@ function lowerStatement(
   return [
     ...value,
     ...targets.toReversed().map((target): Instr => ({ op: "local.set", name: target })),
+  ];
+}
+
+function lowerDebugTraceStatement(
+  stmt: Extract<Statement, { kind: "debug_trace" }>,
+  ctx: LowerContext,
+): Instr[] {
+  if (ctx.optMode !== "debug") return [];
+  const sites = ctx.debugTraceSites ?? (ctx.debugTraceSites = []);
+  const id = sites.length;
+  sites.push({ id, message: stmt.message ?? "" });
+  return [
+    { op: "const", type: "i32", value: id },
+    { op: "call", name: "__fig_trace" },
+  ];
+}
+
+function lowerProfileExpr(
+  expr: Extract<Expr, { kind: "profile" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+  expectedType?: string,
+): Instr[] {
+  if (!ctx.runtimeProfile) return lowerExpr(expr.body, ctx, locals, expectedType);
+  const sites = ctx.profileSites ?? (ctx.profileSites = []);
+  const id = sites.length;
+  sites.push({ id, label: expr.label ?? "" });
+  const resultType = expectedType ?? exprTypeWithLocals(expr.body, ctx);
+  const slots = flattenType(resultType, ctx.layouts);
+  const enter: Instr[] = [
+    { op: "const", type: "i32", value: id },
+    { op: "call", name: "__fig_profile_enter" },
+  ];
+  const exit: Instr[] = [
+    { op: "const", type: "i32", value: id },
+    { op: "call", name: "__fig_profile_exit" },
+  ];
+  const body = lowerExpr(expr.body, ctx, locals, resultType);
+  if (!slots.length) return [...enter, ...body, ...exit];
+  const temps = slots.map((slot) => {
+    const name = `__profile_tmp${ctx.tempIndex++}`;
+    locals.add(name);
+    ctx.tempLocals.push({ name, type: slot.wat });
+    return name;
+  });
+  return [
+    ...enter,
+    ...body,
+    ...temps.toReversed().map((name): Instr => ({ op: "local.set", name })),
+    ...exit,
+    ...temps.map((name): Instr => ({ op: "local.get", name })),
   ];
 }
 
@@ -4369,7 +4601,8 @@ function fixedArrayProjectionUses(
             continue;
           }
         }
-        visit(stmt.value);
+        if (stmt.kind === "let" || stmt.kind === "destructure_let") visit(stmt.value);
+        else if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
       }
       visit(item.expr);
       return;
@@ -4497,6 +4730,10 @@ function fixedArrayAliasForwardOnly(expr: Expr | undefined, name: string): boole
       case "block":
         for (const stmt of item.statements) {
           if (stmt.kind === "proof_const") continue;
+          if (stmt.kind === "debug_trace") {
+            stmt.args.forEach((arg) => visit(arg, false));
+            continue;
+          }
           if (stmt.kind === "let" && stmt.name === name) return;
           if (stmt.kind === "destructure_let" && stmt.names.includes(name)) return;
           visit(stmt.value, false);
@@ -4505,7 +4742,8 @@ function fixedArrayAliasForwardOnly(expr: Expr | undefined, name: string): boole
         return;
       case "do":
         for (const stmt of item.statements) {
-          if (stmt.kind !== "proof_const") visit(stmt.value, false);
+          if (stmt.kind === "debug_trace") stmt.args.forEach((arg) => visit(arg, false));
+          else if (stmt.kind !== "proof_const") visit(stmt.value, false);
         }
         visit(item.expr, false);
         return;
@@ -4938,6 +5176,12 @@ function replaceExprByHoistKey(
         : expr;
     case "const_fn":
       return { ...expr, body: replaceExprByHoistKey(expr.body, replacements, invariantNames, ctx) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => replaceExprByHoistKey(arg, replacements, invariantNames, ctx)),
+        body: replaceExprByHoistKey(expr.body, replacements, invariantNames, ctx),
+      };
     case "call":
       return {
         ...expr,
@@ -5026,6 +5270,10 @@ function foldScalarVarAliasesInTailBlock(block: BlockExpr, ctx: LowerContext): B
   const statements: Statement[] = [];
   for (const stmt of block.statements) {
     if (stmt.kind === "proof_const") {
+      statements.push(stmt);
+      continue;
+    }
+    if (stmt.kind === "debug_trace") {
       statements.push(stmt);
       continue;
     }
@@ -5545,6 +5793,12 @@ function replaceExprByReuseKey(expr: Expr, replacements: Map<string, Expr>): Exp
       return expr.expr ? { ...expr, expr: replaceExprByReuseKey(expr.expr, replacements) } : expr;
     case "const_fn":
       return { ...expr, body: replaceExprByReuseKey(expr.body, replacements) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => replaceExprByReuseKey(arg, replacements)),
+        body: replaceExprByReuseKey(expr.body, replacements),
+      };
     case "call":
       return {
         ...expr,
@@ -5937,6 +6191,10 @@ function retargetBackedProductAliases(
   for (let index = 0; index < block.statements.length; index++) {
     const stmt = block.statements[index]!;
     if (stmt.kind === "proof_const") {
+      statements.push(stmt);
+      continue;
+    }
+    if (stmt.kind === "debug_trace") {
       statements.push(stmt);
       continue;
     }
@@ -6549,6 +6807,8 @@ function lowerExpr(
         type: slot.wat,
         value: 0,
       }));
+    case "profile":
+      return lowerProfileExpr(expr, ctx, locals, expectedType);
     case "placeholder":
       throw new Error("backend cannot lower unresolved $ placeholder");
     case "call": {
@@ -6580,8 +6840,6 @@ function lowerExpr(
       if (heapArray) return heapArray;
       const branch = lowerBranchIntrinsic(expr, ctx, locals);
       if (branch) return branch;
-      const temporal = lowerTemporalIntrinsic(expr, ctx, locals);
-      if (temporal) return temporal;
       const packedPrefixShift = lowerPackedPrefixShiftCall(expr, ctx, locals, expectedType);
       if (packedPrefixShift) return packedPrefixShift;
       const inlineArrayHelper = lowerInlineArrayHelperCall(expr, ctx, locals, expectedType);
@@ -8196,6 +8454,7 @@ function backendInlineBlockCost(block: BlockExpr): number {
 
 function backendInlineStatementCost(stmt: Statement): number {
   if (stmt.kind === "proof_const") return 0;
+  if (stmt.kind === "debug_trace") return 1;
   return 1 + backendInlineExprCost(stmt.value);
 }
 
@@ -8205,6 +8464,9 @@ function backendInlineExprCost(expr: Expr): number {
       return 100;
     case "const_fn":
       return 1 + backendInlineExprCost(expr.body);
+    case "profile":
+      return 2 + expr.args.reduce((sum, arg) => sum + backendInlineExprCost(arg), 0) +
+        backendInlineExprCost(expr.body);
     case "call":
       return 2 + backendInlineExprCost(expr.callee) +
         expr.args.reduce((sum, arg) => sum + backendInlineExprCost(arg), 0);
@@ -8329,6 +8591,12 @@ function renameExpr(expr: Expr, renames: Map<string, string>): Expr {
       return { ...expr, expr: expr.expr ? renameExpr(expr.expr, renames) : undefined };
     case "const_fn":
       return { ...expr, body: renameExpr(expr.body, renames) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => renameExpr(arg, renames)),
+        body: renameExpr(expr.body, renames),
+      };
     case "var":
       return renameVarExpr(expr, renames);
     case "call":
@@ -10716,7 +10984,8 @@ function exprMentionsStorageName(expr: Expr, name: string): boolean {
         return;
       case "block":
         for (const stmt of item.statements) {
-          if (stmt.kind !== "proof_const") visit(stmt.value);
+          if (stmt.kind === "let" || stmt.kind === "destructure_let") visit(stmt.value);
+          else if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
         }
         visit(item.expr);
         return;
@@ -12196,10 +12465,12 @@ function replaceSharedSubexprs(expr: Expr, replacements: Map<string, Expr>): Exp
       return {
         ...expr,
         statements: expr.statements.map((stmt) =>
-          stmt.kind === "proof_const" ? stmt : {
-            ...stmt,
-            value: replaceSharedSubexprs(stmt.value, replacements),
-          } as Statement
+          stmt.kind === "let" || stmt.kind === "destructure_let"
+            ? {
+              ...stmt,
+              value: replaceSharedSubexprs(stmt.value, replacements),
+            } as Statement
+            : stmt
         ),
         ...(expr.expr ? { expr: replaceSharedSubexprs(expr.expr, replacements) } : {}),
       };
@@ -12207,16 +12478,25 @@ function replaceSharedSubexprs(expr: Expr, replacements: Map<string, Expr>): Exp
       return {
         ...expr,
         statements: expr.statements.map((stmt) =>
-          stmt.kind === "proof_const" ? stmt : {
-            ...stmt,
-            value: replaceSharedSubexprs(stmt.value, replacements),
-          } as Statement
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
+            ? {
+              ...stmt,
+              value: replaceSharedSubexprs(stmt.value, replacements),
+            } as typeof stmt
+            : stmt
         ),
         ...(expr.expr ? { expr: replaceSharedSubexprs(expr.expr, replacements) } : {}),
       };
     case "const_fn":
       return {
         ...expr,
+        body: replaceSharedSubexprs(expr.body, replacements),
+      };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => replaceSharedSubexprs(arg, replacements)),
         body: replaceSharedSubexprs(expr.body, replacements),
       };
     case "literal":
@@ -12460,6 +12740,10 @@ function privateReturnProjectionPlans(
     for (let index = 0; index < block.statements.length; index++) {
       const stmt = block.statements[index]!;
       if (stmt.kind === "proof_const") continue;
+      if (stmt.kind === "debug_trace") {
+        stmt.args.forEach((arg) => visitExpr(arg, currentFn));
+        continue;
+      }
       const callee = directCallName(stmt.value);
       if (stmt.kind === "let" && callee && privateProductFns.has(callee) && callee !== currentFn) {
         const remaining: BlockExpr = {
@@ -12534,11 +12818,15 @@ function exprChildren(expr: Expr): Expr[] {
   switch (expr.kind) {
     case "do":
       return [
-        ...expr.statements.flatMap((stmt) => stmt.kind === "proof_const" ? [] : [stmt.value]),
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "proof_const" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
+        ),
         ...(expr.expr ? [expr.expr] : []),
       ];
     case "const_fn":
       return [expr.body];
+    case "profile":
+      return [...expr.args, expr.body];
     case "call":
       return [expr.callee, ...expr.args];
     case "index":
@@ -12565,7 +12853,9 @@ function exprChildren(expr: Expr): Expr[] {
       return [expr.start, expr.end];
     case "block":
       return [
-        ...expr.statements.flatMap((stmt) => stmt.kind === "proof_const" ? [] : [stmt.value]),
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "proof_const" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
+        ),
         ...(expr.expr ? [expr.expr] : []),
       ];
     case "literal":
@@ -12584,7 +12874,8 @@ function callCountInExpr(expr: Expr | BlockExpr, name: string): number {
   };
   if (expr.kind === "block") {
     for (const stmt of expr.statements) {
-      if (stmt.kind !== "proof_const") visit(stmt.value);
+      if (stmt.kind === "let" || stmt.kind === "destructure_let") visit(stmt.value);
+      else if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
     }
     visit(expr.expr);
   } else {
@@ -12677,6 +12968,7 @@ function statementHasSelfCall(stmt: Statement, name: string): boolean {
     case "destructure_let":
       return exprHasSelfCall(stmt.value, name);
     case "proof_const":
+    case "debug_trace":
       return false;
   }
 }
@@ -12687,6 +12979,9 @@ function exprHasSelfCall(expr: Expr, name: string): boolean {
       return expr.expr ? exprHasSelfCall(expr.expr, name) : false;
     case "const_fn":
       return exprHasSelfCall(expr.body, name);
+    case "profile":
+      return expr.args.some((arg) => exprHasSelfCall(arg, name)) ||
+        exprHasSelfCall(expr.body, name);
     case "call":
       return (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprHasSelfCall(expr.callee, name) ||
@@ -12725,7 +13020,8 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
     switch (item.kind) {
       case "do":
         for (const stmt of item.statements) {
-          if (stmt.kind !== "proof_const") visit(stmt.value);
+          if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
+          else if (stmt.kind !== "proof_const") visit(stmt.value);
         }
         visit(item.expr);
         return;
@@ -12741,6 +13037,10 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
       case "placeholder":
         return;
       case "const_fn":
+        visit(item.body);
+        return;
+      case "profile":
+        for (const arg of item.args) visit(arg);
         visit(item.body);
         return;
       case "call":
@@ -13259,7 +13559,14 @@ function encodeInstrsWithBranchHints(
     if ((instr.op === "if" || instr.op === "br_if") && instr.branchHint) {
       hints.push({ offset, hint: instr.branchHint });
     }
-    const encoded = encodeInstrWithBranchHints(instr, locals, funcIndex, typeKeys, memoryIndex, offset);
+    const encoded = encodeInstrWithBranchHints(
+      instr,
+      locals,
+      funcIndex,
+      typeKeys,
+      memoryIndex,
+      offset,
+    );
     bytes.push(...encoded.bytes);
     hints.push(...encoded.hints);
   }
@@ -13367,9 +13674,15 @@ function encodeInstr(
     case "simd":
       return simdImmediate(instr.wasm, instr.lane, instr.lanes);
     case "load":
-      return [...wasmLoadOp(instr.type), ...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex))];
+      return [
+        ...wasmLoadOp(instr.type),
+        ...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex)),
+      ];
     case "store":
-      return [...wasmStoreOp(instr.type), ...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex))];
+      return [
+        ...wasmStoreOp(instr.type),
+        ...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex)),
+      ];
     case "memory.size":
       return [0x3f, ...uleb(memoryIndexFor(instr.memory, memoryIndex))];
     case "memory.grow":
@@ -14369,61 +14682,6 @@ function alignTo(value: number, align: number): number {
   return Math.ceil(value / align) * align;
 }
 
-function lowerTemporalIntrinsic(
-  expr: Extract<Expr, { kind: "call" }>,
-  ctx: LowerContext,
-  locals: Set<string>,
-): Instr[] | undefined {
-  if (expr.callee.kind !== "var") return undefined;
-  const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
-  if (id === "temporal_handle") {
-    const ptr = expr.args.at(-2);
-    const rev = expr.args.at(-1);
-    return packTemporalHandle(
-      ptr ?? { kind: "literal", literalKind: "number", value: "0" },
-      rev ?? { kind: "literal", literalKind: "number", value: "0" },
-      ctx,
-      locals,
-    );
-  }
-  if (id === "temporal_alloc") {
-    const bytes = expr.args.at(-1);
-    return packTemporalHandle(
-      bytes ?? { kind: "literal", literalKind: "number", value: "0" },
-      { kind: "literal", literalKind: "number", value: "0" },
-      ctx,
-      locals,
-    );
-  }
-  if (id === "temporal_handle_ptr") {
-    const handle = expr.args.at(-1);
-    return [
-      ...lowerExpr(
-        handle ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-        "i64",
-      ),
-      { op: "unary", wasm: "i32.wrap_i64" },
-    ];
-  }
-  if (id === "temporal_handle_rev") {
-    const handle = expr.args.at(-1);
-    return [
-      ...lowerExpr(
-        handle ?? { kind: "literal", literalKind: "number", value: "0" },
-        ctx,
-        locals,
-        "i64",
-      ),
-      { op: "const", type: "i64", value: 32 },
-      { op: "binary", wasm: "i64.shr_u" },
-      { op: "unary", wasm: "i32.wrap_i64" },
-    ];
-  }
-  return undefined;
-}
-
 function lowerBranchIntrinsic(
   expr: Extract<Expr, { kind: "call" }>,
   ctx: LowerContext,
@@ -14432,12 +14690,6 @@ function lowerBranchIntrinsic(
   if (expr.callee.kind !== "var") return undefined;
   const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
   if (!id?.startsWith("branch_")) return undefined;
-  if (ctx.memoryModel === "temporal") {
-    throw new CompileError([{
-      code: "backend.branch_in_temporal_mode",
-      message: `branch intrinsics require --memory branch or --memory branch-debug`,
-    }]);
-  }
   const arg = expr.args.at(-1) ?? { kind: "literal", literalKind: "number", value: "0" };
   if (id === "branch_handle") {
     return [
@@ -14587,23 +14839,6 @@ function branchTemp(ctx: LowerContext, locals: Set<string>, suffix: string): str
   ctx.tempLocals.push({ name, type: "i32" });
   locals.add(name);
   return name;
-}
-
-function packTemporalHandle(
-  ptr: Expr,
-  rev: Expr,
-  ctx: LowerContext,
-  locals: Set<string>,
-): Instr[] {
-  return [
-    ...lowerExpr(ptr, ctx, locals, "i32"),
-    { op: "unary", wasm: "i64.extend_i32_u" },
-    ...lowerExpr(rev, ctx, locals, "i32"),
-    { op: "unary", wasm: "i64.extend_i32_u" },
-    { op: "const", type: "i64", value: 32 },
-    { op: "binary", wasm: "i64.shl" },
-    { op: "binary", wasm: "i64.or" },
-  ];
 }
 
 function compilerCallId(name: string, intrinsicIdsByName: Map<string, string>): string | undefined {
@@ -15337,6 +15572,7 @@ function renderBackendTypeProofArg(expr: Expr): string | undefined {
 
 function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
   if (expr.kind === "var") return varType(expr.name, ctx);
+  if (expr.kind === "profile") return exprTypeWithLocals(expr.body, ctx);
   if (expr.kind === "index") return indexedItemType(expr, ctx);
   if (expr.kind === "call") {
     if (expr.callee.kind === "var") {
@@ -15853,7 +16089,8 @@ function exprMentionsName(expr: Expr, name: string): boolean {
         return;
       case "block":
         for (const stmt of item.statements) {
-          if (stmt.kind !== "proof_const") visit(stmt.value);
+          if (stmt.kind === "let" || stmt.kind === "destructure_let") visit(stmt.value);
+          else if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
         }
         visit(item.expr);
         return;
@@ -15879,6 +16116,8 @@ function hasRuntimeEffect(
         hasRuntimeEffect(expr.callee, functions, seen) ||
         expr.args.some((arg) => hasRuntimeEffect(arg, functions, seen));
     }
+    case "profile":
+      return true;
     case "index":
       return hasRuntimeEffect(expr.target, functions, seen) ||
         hasRuntimeEffect(expr.index, functions, seen);
@@ -15908,8 +16147,9 @@ function hasRuntimeEffect(
         hasRuntimeEffect(expr.key, functions, seen);
     case "block":
       return expr.statements.some((stmt) =>
-        (stmt.kind === "let" || stmt.kind === "destructure_let") &&
-        hasRuntimeEffect(stmt.value, functions, seen)
+        stmt.kind === "debug_trace" ||
+        ((stmt.kind === "let" || stmt.kind === "destructure_let") &&
+          hasRuntimeEffect(stmt.value, functions, seen))
       ) ||
         (expr.expr ? hasRuntimeEffect(expr.expr, functions, seen) : false);
     case "do":
@@ -15934,51 +16174,6 @@ function functionHasRuntimeEffect(
   return hasRuntimeEffect(fn.body, functions, seen);
 }
 
-function usesTemporalIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {
-  const visit = (item: Expr | Statement | undefined): boolean => {
-    if (!item) return false;
-    switch (item.kind) {
-      case "do":
-        return visit(item.expr);
-      case "let":
-        return visit(item.value);
-      case "destructure_let":
-        return visit(item.value);
-      case "proof_const":
-      case "literal":
-      case "var":
-      case "placeholder":
-        return false;
-      case "const_fn":
-        return visit(item.body);
-      case "call":
-        return (item.callee.kind === "var" &&
-          isTemporalIntrinsic(item.callee.name, functions)) ||
-          visit(item.callee) || item.args.some(visit);
-      case "index":
-        return visit(item.target) || visit(item.index);
-      case "binary":
-        return visit(item.left) || visit(item.right);
-      case "pipe_bind":
-        return visit(item.value) || visit(item.body);
-      case "match":
-        return visit(item.value) || item.arms.some((arm) => visit(arm.value));
-      case "shape":
-      case "product_constructor":
-        return item.slots.some((slot) => visit(slot.value));
-      case "range":
-        return visit(item.start) || visit(item.end);
-      case "static_for_slots":
-        return visit(item.value);
-      case "field":
-        return visit(item.value) || visit(item.key);
-      case "block":
-        return item.statements.some(visit) || visit(item.expr);
-    }
-  };
-  return visit(expr);
-}
-
 function usesBranchIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {
   const visit = (item: Expr | Statement | undefined): boolean => {
     if (!item) return false;
@@ -15990,12 +16185,15 @@ function usesBranchIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
       case "destructure_let":
         return visit(item.value);
       case "proof_const":
+      case "debug_trace":
       case "literal":
       case "var":
       case "placeholder":
         return false;
       case "const_fn":
         return visit(item.body);
+      case "profile":
+        return item.args.some(visit) || visit(item.body);
       case "call":
         return (item.callee.kind === "var" &&
           isBranchIntrinsic(item.callee.name, functions)) ||
@@ -16035,12 +16233,15 @@ function usesHeapArrayIntrinsic(expr: Expr | BlockExpr, functions: Map<string, F
       case "destructure_let":
         return visit(item.value);
       case "proof_const":
+      case "debug_trace":
       case "literal":
       case "var":
       case "placeholder":
         return false;
       case "const_fn":
         return visit(item.body);
+      case "profile":
+        return item.args.some(visit) || visit(item.body);
       case "call":
         return (item.callee.kind === "var" &&
           isHeapArrayIntrinsic(item.callee.name, functions)) ||
@@ -16067,17 +16268,6 @@ function usesHeapArrayIntrinsic(expr: Expr | BlockExpr, functions: Map<string, F
     }
   };
   return visit(expr);
-}
-
-function isTemporalIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
-  if (
-    name === "@temporal_alloc" || name === "@temporal_handle" ||
-    name === "@temporal_handle_ptr" || name === "@temporal_handle_rev"
-  ) return true;
-  const fn = functions.get(name);
-  const id = fn ? intrinsicWrapperId(fn) : undefined;
-  return id === "temporal_alloc" || id === "temporal_handle" ||
-    id === "temporal_handle_ptr" || id === "temporal_handle_rev";
 }
 
 function isBranchIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
@@ -16197,7 +16387,10 @@ function wasmStoreOp(type: ValueType): number[] {
   throw new Error(`unsupported store type ${type}`);
 }
 
-function memoryIndexFor(memory: string | undefined, memoryIndex: ReadonlyMap<string, number>): number {
+function memoryIndexFor(
+  memory: string | undefined,
+  memoryIndex: ReadonlyMap<string, number>,
+): number {
   if (!memory || memory === "memory") return 0;
   return memoryIndex.get(memory) ?? 0;
 }

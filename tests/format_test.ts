@@ -76,6 +76,16 @@ pub fn main(host:io)->i32{clock(host)}`,
       "pub @unlikely fn score(x: i32) -> i32 {\n  match x {\n    @likely 0 => 1,\n    @unlikely _ => 2\n  }\n}\n",
   },
   {
+    name: "debug trace statements",
+    input: 'fn main()->i32{@trace("entered main");1}',
+    expected: 'fn main() -> i32 {\n  @trace("entered main");\n  1\n}\n',
+  },
+  {
+    name: "runtime profile expressions",
+    input: 'fn main()->i32{@profile("work"){let x=1;x+1}}',
+    expected: 'fn main() -> i32 {\n  @profile("work") {\n    let x = 1;\n    x + 1\n  }\n}\n',
+  },
+  {
     name: "formatter boolean if expression",
     input: "fn main(x:i32)->i32{if x<3{let y=x+1;y}else{x-1}}",
     expected:
@@ -221,11 +231,11 @@ _=>2 // fallback
       "fn pair() -> [i32, i32] {\n  [1, 2]\n}\n\nfn main(x: i32) -> i32 {\n  let a, b = pair();\n  const proof = Semigroup(i32);\n  append(i32, proof, a, b) + x\n}\n",
   },
   {
-    name: "pipe placeholder and fluent chains",
+    name: "named pipe fluent chains",
     input:
-      "fn main()->i32{InlineArray::Iter([1,2,3,4])\\$->$.map(double).filter(keep).fold(0,add)}",
+      "fn main()->i32{InlineArray::Iter([1,2,3,4])\\iter->iter.map(double).filter(keep).fold(0,add)}",
     expected:
-      "fn main() -> i32 {\n  InlineArray::Iter([1, 2, 3, 4])\n    \\$ -> $.map(double)\n    .filter(keep)\n    .fold(0, add)\n}\n",
+      "fn main() -> i32 {\n  InlineArray::Iter([1, 2, 3, 4])\n    \\iter -> iter\n    .map(double)\n    .filter(keep)\n    .fold(0, add)\n}\n",
   },
   {
     name: "const function literals",

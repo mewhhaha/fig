@@ -81,8 +81,8 @@ Pipe-bind evaluates the left side, binds it, and evaluates the next atom:
 1 \x -> add(x, 2)
 ```
 
-Pipe-bind requires a named binding. The old `$` placeholder form has been removed. Pipe-bind is
-intended for short one-step value flow. For state machines or update-heavy code, use fresh
+Pipe-bind requires a named binding. The `$` placeholder form is not part of the language. Pipe-bind
+is intended for short one-step value flow. For state machines or update-heavy code, use fresh
 block-local names for pure values or an explicit `do @monad(State(T, _))` sequence for ordered state
 transitions.
 

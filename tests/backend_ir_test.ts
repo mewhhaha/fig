@@ -6,16 +6,17 @@ import {
   assertStringIncludes,
 } from "jsr:@std/assert@1";
 import {
+  type CompileSourceOptions,
+  createFigHost,
+  instantiateFig,
   wasmFromSource as wasmFromSourceRaw,
   watFromSource as watFromSourceRaw,
-  type CompileSourceOptions,
 } from "../src/mod.ts";
 
-const legacyAbi = { abiMode: "legacy-flat" as const };
 const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  watFromSourceRaw(source, { ...legacyAbi, ...options });
+  watFromSourceRaw(source, options);
 const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  wasmFromSourceRaw(source, { ...legacyAbi, ...options });
+  wasmFromSourceRaw(source, options);
 
 const resolveModule = async (moduleName: string) => {
   try {
@@ -45,6 +46,13 @@ function customSection(bytes: Uint8Array<ArrayBuffer>, name: string): Uint8Array
   const module = new WebAssembly.Module(bytes);
   const section = WebAssembly.Module.customSections(module, name)[0];
   return section ? new Uint8Array(section) : undefined;
+}
+
+function numericFields(value: unknown): unknown[] {
+  assert(typeof value === "object" && value !== null);
+  return Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .map(([, item]) => item);
 }
 
 function decodeBranchHints(
@@ -101,7 +109,7 @@ Deno.test("WAT and wasm share lowered import signatures", async () => {
     pub fn main(host: io) -> i32 { clock(host) + random(host, 1) }
   `;
 
-  const wat = await watFromSource(source, { memoryModel: "temporal" });
+  const wat = await watFromSource(source);
   assertStringIncludes(wat, `(func $clock (import "env" "clock") (param i32) (result i32))`);
   assertStringIncludes(
     wat,
@@ -574,14 +582,12 @@ Deno.test("backend lowers Index::try refined-domain matches as checked bounds", 
   assertStringIncludes(wat, "i32.ge_s");
   assertStringIncludes(wat, "i32.le_s");
 
-  const instance = new WebAssembly.Instance(
-    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
-  );
-  const main = instance.exports.main as CallableFunction;
-  assertEquals(main(2, 10, 20, 30, 40), 30);
-  assertEquals(main(-1, 10, 20, 30, 40), 0);
-  assertEquals(main(4, 10, 20, 30, 40), 0);
-  const generic = instance.exports.generic as CallableFunction;
+  const fig = await instantiateFig(await wasmFromSource(source, { resolveModule }));
+  const host = createFigHost(fig.abi, fig.instance);
+  assertEquals(host.call("main", 2, [10, 20, 30, 40]), 30);
+  assertEquals(host.call("main", -1, [10, 20, 30, 40]), 0);
+  assertEquals(host.call("main", 4, [10, 20, 30, 40]), 0);
+  const generic = fig.instance.exports.generic as CallableFunction;
   assertEquals(generic(2), 3);
   assertEquals(generic(4), 0);
 });
@@ -830,7 +836,6 @@ Deno.test("benchmark-style internal loop calls private kernel directly", async (
   assertStringIncludes(benchLoop, "loop");
   assert(!benchLoop.includes("call $main"));
   assert(!benchLoop.includes("call $bench_loop"));
-  assert(!wat.includes("fig_logs"));
   assert(!wat.includes("fig_objects"));
 });
 
@@ -1075,7 +1080,7 @@ Deno.test("tail-recursive self calls lower to loops by default", async () => {
     }
     pub fn main() -> i32 { sum(100, 0) }
   `;
-  const wat = await watFromSource(source, { memoryModel: "temporal" });
+  const wat = await watFromSource(source);
   const sum = wat.match(/\(func \$sum[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(sum, "loop");
   assert(!sum.includes("call $sum"));
@@ -1407,7 +1412,7 @@ Deno.test("tail-loop lowering skips unchanged scalar parameters", async () => {
   assertEquals((instance.exports.main as CallableFunction)(10), 499500);
 });
 
-Deno.test("tail-loop lowering stores dependent scalar updates before clobbering old params", async () => {
+Deno.test("tail-loop lowering stores dependent scalar updates before clobbering prior params", async () => {
   const source = `
     fn sum_to(i: i32, limit: i32, acc: i32) -> i32 {
       match i < limit {
@@ -1496,7 +1501,7 @@ Deno.test("tail-recursive inline-array fold lowers to a loop", async () => {
       fold_loop([1, 2, 3], 0, 0)
     }
   `;
-  const wat = await watFromSource(source, { memoryModel: "temporal" });
+  const wat = await watFromSource(source);
   const fold = wat.match(/\(func \$fold_loop[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(fold, "loop");
   assert(!fold.includes("call $fold_loop"));
@@ -1728,16 +1733,16 @@ Deno.test("packed fixed-array update inlines small private scalar updater", asyn
   assertEquals((instance.exports.main as CallableFunction)(3), 122456);
 });
 
-Deno.test("packed fixed-array read/update reuses old dynamic lane", async () => {
+Deno.test("packed fixed-array read/update reuses prior dynamic lane", async () => {
   const source = `
     const layout = @import("prelude.layout");
     fn dec(x: u3) -> u3 {
       x - 1
     }
     fn update_after_read(xs: layout.InlineArray(7, u3), index: i32) -> i32 {
-      let old = xs[index];
+      let prior = xs[index];
       let ys = layout.InlineArray::update(7, u3, xs, index, dec);
-      old * 10 + ys[index]
+      prior * 10 + ys[index]
     }
     pub fn main(index: i32) -> i32 {
       update_after_read(#[0, 1, 2, 3, 4, 5, 6], index)
@@ -1780,13 +1785,14 @@ Deno.test("public fixed-array kernel uses optimized private representation clone
   assertStringIncludes(publicWrapper, `call $public_kernel__optimized`);
   assertStringIncludes(wat, `(func $public_kernel__optimized`);
   assertStringIncludes(wat, "$__fixed_array_packed_xs");
-  assert(!wat.includes("fig_buffers"));
+  assertStringIncludes(wat, `(memory $fig_buffers`);
 
-  const instance = new WebAssembly.Instance(
-    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
+  const fig = await instantiateFig(
+    await wasmFromSource(source, { resolveModule, optMode: "release" }),
   );
-  assertEquals((instance.exports.public_kernel as CallableFunction)(0, 1, 2, 3, 4, 5, 6, 2, 7), 7);
-  assertEquals((instance.exports.main as CallableFunction)(3), 7);
+  const host = createFigHost(fig.abi, fig.instance);
+  assertEquals(host.call("public_kernel", [0, 1, 2, 3, 4, 5, 6], 2, 7), 7);
+  assertEquals((fig.instance.exports.main as CallableFunction)(3), 7);
 });
 
 Deno.test("packed fixed-array swap stays loop-lowered without helpers", async () => {
@@ -2185,9 +2191,9 @@ Deno.test("backed product tail loop updates scalar parameters when product stays
       struct(State)
     }
     fn step_continue(state: State, r: i32) -> State {
-      let old = state.count[r];
+      let prior = state.count[r];
       let count = layout.InlineArray::update(4, u3, state.count, r, dec);
-      if old > 1 {
+      if prior > 1 {
         State { count: count, r: r, index: state.index + 1 }
       } else {
         step_active(State { count: count, r: r + 1, index: state.index }, r + 1)
@@ -2283,7 +2289,7 @@ Deno.test("private product fixed-array field dynamic set avoids helper calls and
   assertEquals((instance.exports.main as CallableFunction)(2), 39);
 });
 
-Deno.test("scratch fixed-array update evaluates old value without helper call", async () => {
+Deno.test("scratch fixed-array update evaluates prior value without helper call", async () => {
   const source = `
     const layout = @import("prelude.layout");
     type fn Box() -> type {
@@ -2826,8 +2832,9 @@ Deno.test("SIMD lane add matches scalar result", async () => {
       [x[0] + k, x[1] + k, x[2] + k, x[3] + k]
     }
   `;
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
-  assertEquals((instance.exports.main as CallableFunction)(1, 2, 3, 4, 10), [11, 12, 13, 14]);
+  const fig = await instantiateFig(await wasmFromSource(source));
+  const host = createFigHost(fig.abi, fig.instance);
+  assertEquals(numericFields(host.call("main", [1, 2, 3, 4], 10)), [11, 12, 13, 14]);
 });
 
 Deno.test("SIMD dot product lowers matrix multiply kernel", async () => {
@@ -2841,44 +2848,21 @@ Deno.test("SIMD dot product lowers matrix multiply kernel", async () => {
   assertStringIncludes(wat, "(func $__fig_dot4_i32");
   assertStringIncludes(wat, "call $__fig_dot4_i32");
 
-  const instance = new WebAssembly.Instance(
-    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  const fig = await instantiateFig(await wasmFromSource(source, { optMode: "release" }));
+  const host = createFigHost(fig.abi, fig.instance);
+  const result = host.call(
+    "main",
+    [1, 2, 3, 4],
+    [5, 6, 7, 8],
+    [9, 10, 11, 12],
+    [13, 14, 15, 16],
+    [1, 5, 9, 13],
+    [2, 6, 10, 14],
+    [3, 7, 11, 15],
+    [4, 8, 12, 16],
   );
   assertEquals(
-    (instance.exports.main as CallableFunction)(
-      1,
-      2,
-      3,
-      4,
-      5,
-      6,
-      7,
-      8,
-      9,
-      10,
-      11,
-      12,
-      13,
-      14,
-      15,
-      16,
-      1,
-      5,
-      9,
-      13,
-      2,
-      6,
-      10,
-      14,
-      3,
-      7,
-      11,
-      15,
-      4,
-      8,
-      12,
-      16,
-    ),
+    numericFields(result),
     [
       90,
       100,
@@ -2908,41 +2892,45 @@ Deno.test("scalar matrix multiply baseline stays scalar", async () => {
   assertStringIncludes(wat, "i32.mul");
   assertStringIncludes(wat, "i32.add");
 
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  const fig = await instantiateFig(await wasmFromSource(source));
+  const host = createFigHost(fig.abi, fig.instance);
   assertEquals(
-    (instance.exports.main as CallableFunction)(
-      1,
-      2,
-      3,
-      4,
-      5,
-      6,
-      7,
-      8,
-      9,
-      10,
-      11,
-      12,
-      13,
-      14,
-      15,
-      16,
-      1,
-      5,
-      9,
-      13,
-      2,
-      6,
-      10,
-      14,
-      3,
-      7,
-      11,
-      15,
-      4,
-      8,
-      12,
-      16,
+    numericFields(
+      host.call(
+        "main",
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        1,
+        5,
+        9,
+        13,
+        2,
+        6,
+        10,
+        14,
+        3,
+        7,
+        11,
+        15,
+        4,
+        8,
+        12,
+        16,
+      ),
     ),
     [
       90,
@@ -2965,49 +2953,7 @@ Deno.test("scalar matrix multiply baseline stays scalar", async () => {
   );
 });
 
-Deno.test("temporal intrinsics export temporal memories and pack handles", async () => {
-  const source = `
-    fn temporal.handle(ptr: i32, rev: i32) -> i64 {
-      @temporal_handle(ptr, rev)
-    }
-    fn temporal.alloc(bytes: i32) -> i64 {
-      @temporal_alloc(bytes)
-    }
-    fn temporal.handle_ptr(handle: i64) -> i32 {
-      @temporal_handle_ptr(handle)
-    }
-    fn temporal.handle_rev(handle: i64) -> i32 {
-      @temporal_handle_rev(handle)
-    }
-    pub fn main() -> i32 {
-      temporal.handle_ptr(temporal.handle(7, 2)) +
-        temporal.handle_rev(temporal.handle(7, 2)) +
-        temporal.handle_ptr(temporal.alloc(64))
-    }
-  `;
-  const wat = await watFromSource(source, { memoryModel: "temporal" });
-  assertStringIncludes(wat, `(memory $fig_objects (export "fig_objects") 1)`);
-  assertStringIncludes(wat, `(memory $fig_logs (export "fig_logs") 1)`);
-  assertStringIncludes(wat, `(memory $fig_buffers (export "fig_buffers") 1)`);
-  assert(!wat.includes(`(memory (export "memory") 1)`));
-  assertStringIncludes(wat, "i64.extend_i32_u");
-  assertStringIncludes(wat, "i64.shl");
-  assertStringIncludes(wat, "i64.or");
-
-  const instance = await WebAssembly.instantiate(
-    await wasmFromSource(source, { memoryModel: "temporal" }),
-    {},
-  );
-  assertEquals((instance.instance.exports.main as CallableFunction)(), 73);
-  assertEquals(
-    WebAssembly.Module.exports(instance.module).filter((item) => item.kind === "memory").map((
-      item,
-    ) => item.name),
-    ["fig_objects", "fig_logs", "fig_buffers"],
-  );
-});
-
-Deno.test("branch memory mode exports branch memories and packs transitional handles", async () => {
+Deno.test("branch memory mode exports branch memories and packs handles", async () => {
   const source = `
     fn branch.handle(ptr: i32) -> i64 {
       @branch_handle(ptr)
@@ -3024,7 +2970,6 @@ Deno.test("branch memory mode exports branch memories and packs transitional han
   `;
   const wat = await watFromSource(source, { memoryModel: "branch" });
   assertStringIncludes(wat, `(memory $fig_objects (export "fig_objects") 1)`);
-  assert(!wat.includes(`fig_logs`));
   assertStringIncludes(wat, `(memory $fig_buffers (export "fig_buffers") 1)`);
   assertStringIncludes(wat, "i64.extend_i32_u");
   assertStringIncludes(wat, "i32.wrap_i64");
@@ -3069,7 +3014,6 @@ Deno.test("branch intrinsics lower to header flags and copy-before-write", async
 
   const wat = await watFromSource(source, { memoryModel: "branch-debug" });
   assertStringIncludes(wat, `(memory $fig_objects (export "fig_objects") 1)`);
-  assert(!wat.includes("fig_logs"));
   assertStringIncludes(wat, "i32.load align=4 offset=8");
   assertStringIncludes(wat, "i32.store align=4 offset=8");
   assertStringIncludes(wat, "memory.copy");
@@ -3104,32 +3048,48 @@ Deno.test("branch intrinsics lower to header flags and copy-before-write", async
   assertEquals(words[copied / 4 + 5], 456);
 });
 
-Deno.test("branch mode rejects temporal intrinsics", async () => {
+Deno.test("debug trace statements import trace hook and release erases them", async () => {
   const source = `
-    fn temporal.handle(ptr: i32, rev: i32) -> i64 {
-      @temporal_handle(ptr, rev)
+    pub fn main() -> i32 {
+      @trace("entered main");
+      42
     }
-    pub fn main() -> i64 { temporal.handle(7, 2) }
   `;
-  await assertRejects(
-    () => watFromSource(source, { memoryModel: "branch" }),
-    Error,
-    "temporal intrinsics are only available with --memory temporal",
-  );
+
+  const debugWat = await watFromSource(source);
+  assertStringIncludes(debugWat, `(import "env" "fig_trace"`);
+  assertStringIncludes(debugWat, "call $__fig_trace");
+  const debugBytes = await wasmFromSource(source);
+  assert(customSection(debugBytes, "fig.trace"));
+
+  const releaseWat = await watFromSource(source, { optMode: "release" });
+  assert(!releaseWat.includes("fig_trace"));
+  assert(!releaseWat.includes("__fig_trace"));
+  const releaseBytes = await wasmFromSource(source, { optMode: "release" });
+  assertEquals(customSection(releaseBytes, "fig.trace"), undefined);
 });
 
-Deno.test("explicit temporal mode rejects branch intrinsics", async () => {
+Deno.test("runtime profile expressions import hooks and preserve result stack", async () => {
   const source = `
-    fn branch.handle(ptr: i32) -> i64 {
-      @branch_handle(ptr)
+    type fn Pair() -> type { let Pair = {left: i32, right: i32}; struct(Pair) }
+    pub fn main() -> Pair {
+      @profile("pair") { {left: 40, right: 2} }
     }
-    pub fn main() -> i64 { branch.handle(7) }
   `;
-  await assertRejects(
-    () => watFromSource(source, { memoryModel: "temporal" }),
-    Error,
-    "branch intrinsics require --memory branch or --memory branch-debug",
-  );
+
+  const wat = await watFromSource(source, { runtimeProfile: true });
+  assertStringIncludes(wat, `(import "env" "fig_profile_enter"`);
+  assertStringIncludes(wat, `(import "env" "fig_profile_exit"`);
+  assertStringIncludes(wat, "call $__fig_profile_enter");
+  assertStringIncludes(wat, "call $__fig_profile_exit");
+  assertStringIncludes(wat, "local.set $__profile_tmp");
+
+  const bytes = await wasmFromSource(source, { runtimeProfile: true });
+  assert(customSection(bytes, "fig.profile"));
+
+  const erased = await watFromSource(source);
+  assert(!erased.includes("fig_profile_enter"));
+  assert(!erased.includes("__profile_tmp"));
 });
 
 Deno.test("unsupported lane patterns fall back to scalar WAT", async () => {

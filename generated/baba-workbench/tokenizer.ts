@@ -30,6 +30,8 @@ const keywords = new Set<string>([
 ]);
 const symbols: string[] = [
   "@external",
+  "@profile",
+  "@trace",
   "...",
   "<*>",
   "<$>",

@@ -3,10 +3,10 @@
 ## Branch-Bit Values
 
 Fig's intended value model is Branch-Bit values: ordinary values are immutable, passing or assigning
-a value is conceptually cheap, and updating a value returns a new logical value while the old value
-remains valid. Heap values use hidden branch handles and copy-before-write when a physical object is
-observed through multiple logical values, but pointer identity is not part of the ordinary value
-semantics.
+a value is conceptually cheap, and updating a value returns a new logical value while the original
+value remains valid. Heap values use hidden branch handles and copy-before-write when a physical
+object is observed through multiple logical values, but pointer identity is not part of the ordinary
+value semantics.
 
 Local `let` names are unique within a statement block. Use fresh names for pure intermediate values:
 
@@ -16,7 +16,7 @@ let updated = update_player(stepped);
 updated
 ```
 
-Ordinary local `let` statements are source-ordered pure bindings, not assignment or temporal update
+Ordinary local `let` statements are source-ordered pure bindings, not assignment or in-place update
 steps. When a sequence is intentionally ordered, make that ordering explicit with a monad:
 
 ```fig
@@ -68,9 +68,9 @@ pub fn main(env: Env, seed: Store) -> i32 {
 When a computation needs more than one context, run handlers in source order with named pipe-bind.
 This keeps the values explicit without nesting handler calls.
 
-ECS code uses the same transparent layering: query-builder functions return typed
-`ecs.Query(...)` tokens, `do @monad(ecs.System(...))` sequences real system functions, and commands
-are explicitly evaluated against a world value.
+ECS code uses the same transparent layering: query-builder functions return typed `ecs.Query(...)`
+tokens, `do @monad(ecs.System(...))` sequences real system functions, and commands are explicitly
+evaluated against a world value.
 
 ## Const Evaluation and Reflection
 
@@ -132,12 +132,13 @@ Prefer the browser and Deno supported subset when adding backend behavior. Heap-
 collections and allocation-backed append APIs are intentionally not part of the current standard
 prelude. Use fixed inline arrays and host IO imports for lower-level work.
 
-The default public Wasm ABI is `memory-v1`. Scalar values stay in ordinary Wasm params and results.
-Products, fixed inline arrays, strings, heap arrays, sums, and any other value that needs more than
-one scalar slot cross public `pub fn` exports and `@external` imports as `i32` handles into
-`fig_objects`. The compiler emits a `fig.abi.v1` custom section that describes public exports,
-host imports, value layouts, memories, and helper names. Host code can parse that manifest or use
-the TypeScript helpers `instantiateFig`, `encodeFigValue`, and `decodeFigValue`.
+The public Wasm ABI is the stable Fig memory ABI. Scalar values stay in ordinary Wasm params and
+results. Products, fixed inline arrays, strings, heap arrays, sums, and any other value that needs
+more than one scalar slot cross public `pub fn` exports and `@external` imports as `i32` handles
+into `fig_objects`. The compiler emits a `fig.abi` custom section that describes public exports,
+host imports, value layouts, variant and heap-array metadata, memories, object headers, and helper
+names. Host code can parse that manifest or use the TypeScript helpers `instantiateFig`,
+`createFigHost`, `encodeFigValue`, and `decodeFigValue`.
 
 `fig_objects` stores object headers followed by flattened payload fields. The current header is
 `layout_id`, `payload_bytes`, `flags`, and `ref_count`, each a little-endian `i32`; payload fields
@@ -149,14 +150,5 @@ when the next object no longer fits.
 
 Internally, Branch-Bit code can still use flattened locals and branch heap handles. Branch code
 emits `fig_objects` and `fig_buffers` memories and currently packs internal branch handles as an
-`i64` whose high 32 bits are zero and low 32 bits contain the object pointer. The old source-facing
-exported `memory` ABI is not part of Fig's public value model; backend users that need the previous
-flat public calling convention can compile with `--abi legacy-flat`.
-
-## Temporal Compatibility
-
-The earlier Temporal Values runtime remains available behind the backend memory mode
-`--memory temporal` while migration tests compare both implementations. Temporal compatibility code
-emits `fig_objects`, `fig_logs`, and `fig_buffers` memories and packs temporal handles as an `i64`
-containing `{ptr: i32, rev: i32}`. Temporal intrinsics are rejected when compiling in `branch` or
-`branch-debug` memory mode.
+`i64` whose high 32 bits are zero and low 32 bits contain the object pointer. Source programs use
+ordinary values and public boundaries use the stable Fig memory ABI.

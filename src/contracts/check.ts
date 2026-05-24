@@ -240,6 +240,8 @@ function exprChildren(expr: Expr): Expr[] {
   switch (expr.kind) {
     case "call":
       return [expr.callee, ...expr.args];
+    case "profile":
+      return [...expr.args, expr.body];
     case "const_fn":
       return [expr.body];
     case "index":
@@ -266,7 +268,9 @@ function exprChildren(expr: Expr): Expr[] {
       return [expr.start, expr.end];
     case "block":
       return [
-        ...expr.statements.flatMap((stmt) => stmt.kind === "proof_const" ? [] : [stmt.value]),
+        ...expr.statements.flatMap((stmt) =>
+          stmt.kind === "proof_const" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
+        ),
         ...(expr.expr ? [expr.expr] : []),
       ];
     case "do":

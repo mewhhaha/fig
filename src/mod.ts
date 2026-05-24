@@ -11,6 +11,8 @@ import {
   emitWasm,
   emitWat,
   type FigAbiManifest,
+  type FigDebugTraceSite,
+  type FigProfileSite,
   lowerProgramToBackendArtifact,
   wasmFromBackendModule,
   watFromBackendModule,
@@ -40,19 +42,23 @@ import type { CompilerPluginOptions } from "./plugins.ts";
 import type { CompileTraceSink } from "./trace.ts";
 
 export {
+  createFigHost,
   decodeFigValue,
   encodeFigValue,
+  type FigHost,
+  type FigInstance,
   instantiateFig,
   parseFigAbiManifest,
-  type FigInstance,
 } from "./abi.ts";
 export type {
-  AbiMode,
   FigAbiFunction,
   FigAbiLayout,
   FigAbiLayoutField,
   FigAbiManifest,
   FigAbiValue,
+  FigAbiVariant,
+  FigDebugTraceSite,
+  FigProfileSite,
 } from "./backend.ts";
 
 export interface ModuleSource {
@@ -110,6 +116,8 @@ export interface CompileArtifactsResult {
   wat?: string;
   wasm: Uint8Array<ArrayBuffer>;
   abi?: FigAbiManifest;
+  debugTraces: readonly FigDebugTraceSite[];
+  profileSites: readonly FigProfileSite[];
   checked: ReturnType<typeof checkProgram>;
   timings: CompileArtifactTimings;
   trace?: CheckTrace;
@@ -286,6 +294,8 @@ async function compileArtifactsFromSourceImpl(
     ...(wat !== undefined ? { wat } : {}),
     wasm,
     ...(backend.abi ? { abi: backend.abi } : {}),
+    debugTraces: backend.debugTraces,
+    profileSites: backend.profileSites,
     checked,
     timings: {
       parseMs,
@@ -820,7 +830,8 @@ function referencedDeclarationNames(
             stmt.kind === "destructure_let"
           ) {
             visitExpr(stmt.value);
-          } else visitTypeExpr(stmt.value);
+          } else if (stmt.kind === "proof_const") visitTypeExpr(stmt.value);
+          else if (stmt.kind === "debug_trace") stmt.args.forEach(visitExpr);
         }
         visitExpr(expr.expr);
         return;
@@ -878,9 +889,11 @@ function referencedDeclarationNames(
         for (const stmt of expr.statements) {
           if (stmt.kind === "proof_const") {
             visitTypeExpr(stmt.value);
-          } else {
+          } else if (stmt.kind === "let" || stmt.kind === "destructure_let") {
             if (stmt.kind === "let") addTypeSource(stmt.type);
             visitExpr(stmt.value);
+          } else if (stmt.kind === "debug_trace") {
+            stmt.args.forEach(visitExpr);
           }
         }
         visitExpr(expr.expr);
@@ -1565,6 +1578,12 @@ function qualifyExpr(
         ...expr,
         body: qualifyExpr(expr.body, alias, names, withLocals(locals, expr.params)),
       });
+    case "profile":
+      return withMeta(expr, {
+        ...expr,
+        args: expr.args.map((arg) => qualifyExpr(arg, alias, names, locals)),
+        body: qualifyExpr(expr.body, alias, names, locals),
+      });
     case "index":
       return withMeta(expr, {
         ...expr,
@@ -1676,7 +1695,10 @@ function qualifyBlockBody(
       currentLocals = withLocals(currentLocals, stmt.names);
       return qualified;
     }
-    return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
+    if (stmt.kind === "proof_const") {
+      return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
+    }
+    return stmt;
   });
   return {
     statements,
@@ -1724,7 +1746,10 @@ function qualifyDoBody(
       currentLocals = withLocals(currentLocals, stmt.names);
       return qualified;
     }
-    return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
+    if (stmt.kind === "proof_const") {
+      return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
+    }
+    return stmt;
   });
   return {
     statements: qualifiedStatements,

@@ -37,11 +37,9 @@ interface WatShape {
   branch_calls: number;
   branch_ensure_editable_calls: number;
   branch_materialize_calls: number;
-  temporal_intrinsic_calls: number;
   heap_memory_loads: number;
   heap_memory_stores: number;
   fig_objects_refs: number;
-  fig_logs_refs: number;
   fig_buffers_refs: number;
   simd_ops: number;
   loops: number;
@@ -167,9 +165,7 @@ const scalarFlatShape: ShapeExpectation = {
   module: {
     branch_calls: { max: 0 },
     branch_ensure_editable_calls: { max: 0 },
-    temporal_intrinsic_calls: { max: 0 },
     fig_objects_refs: { max: 0 },
-    fig_logs_refs: { max: 0 },
     heap_memory_loads: { max: 0 },
     heap_memory_stores: { max: 0 },
     recursive_calls: { max: 0 },
@@ -255,8 +251,7 @@ const figScenarios: FigScenario[] = [
       /InlineArray\.(?:set|update)_loop/,
       /call \$.*inline_array_update/,
       /branch_(?:ensure_editable|materialize)/,
-      /temporal_/,
-      /fig_(?:objects|logs|buffers)/,
+      /fig_(?:objects|buffers)/,
     ],
     maxWatBytes: 17_000,
     source: `
@@ -286,8 +281,7 @@ const figScenarios: FigScenario[] = [
       /InlineArrayBuilder/,
       /InlineArray\.(?:set|update)_loop/,
       /branch_(?:ensure_editable|materialize)/,
-      /temporal_/,
-      /fig_(?:objects|logs|buffers)/,
+      /fig_(?:objects|buffers)/,
     ],
     maxWatBytes: 30_000,
     source: `
@@ -328,9 +322,9 @@ const figScenarios: FigScenario[] = [
         state.a + state.b + state.c + state.d + state.e + state.f + state.g + state.h
       }
       pub fn main(seed: i32) -> i32 {
-        let old: State = State {a: seed + 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8};
-        let newer = bump(old);
-        sum(old) + sum(newer)
+        let original: State = State {a: seed + 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8};
+        let newer = bump(original);
+        sum(original) + sum(newer)
       }
     `,
   },
@@ -350,8 +344,7 @@ const figScenarios: FigScenario[] = [
       /InlineArrayBuilder/,
       /InlineArray\.(?:set|update)_loop/,
       /branch_(?:ensure_editable|materialize)/,
-      /temporal_/,
-      /fig_(?:objects|logs|buffers)/,
+      /fig_(?:objects|buffers)/,
     ],
     maxWatBytes: 12_000,
     maxWasmBytes: 1_319,
@@ -382,8 +375,7 @@ const figScenarios: FigScenario[] = [
       /InlineArrayBuilder/,
       /InlineArray\.(?:set|update)_loop/,
       /branch_(?:ensure_editable|materialize)/,
-      /temporal_/,
-      /fig_(?:objects|logs|buffers)/,
+      /fig_(?:objects|buffers)/,
     ],
     maxWatBytes: 16000,
     source: `
@@ -930,11 +922,9 @@ function watShape(wat: string): WatShape {
     branch_calls: count(wat, /\$[^)\s]*branch_(?:mark|is_branched)\b/g),
     branch_ensure_editable_calls: count(wat, /\$[^)\s]*branch_ensure_editable\b/g),
     branch_materialize_calls: count(wat, /\$[^)\s]*branch_materialize\b/g),
-    temporal_intrinsic_calls: count(wat, /\$[^)\s]*temporal_/g),
     heap_memory_loads: count(wat, /\b(?:i32|i64|f32|f64)\.load\b[^\n]*\bfig_objects\b/g),
     heap_memory_stores: count(wat, /\b(?:i32|i64|f32|f64)\.store\b[^\n]*\bfig_objects\b/g),
     fig_objects_refs: count(wat, /\bfig_objects\b/g),
-    fig_logs_refs: count(wat, /\bfig_logs\b/g),
     fig_buffers_refs: count(wat, /\bfig_buffers\b/g),
     simd_ops: count(wat, /\bi(?:8|16|32|64|f32|f64)x[0-9]+\./g),
     loops: count(wat, /\bloop\b/g),
@@ -1106,18 +1096,18 @@ fn state8_sum(state: State8) -> i32 {
 }
 
 fn alias_snapshot_update(seed: i32) -> i32 {
-    let old = black_box(State8 { a: seed + 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 });
+    let original = black_box(State8 { a: seed + 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 });
     let newer = State8 {
-        a: old.a + 1,
-        b: old.b + 2,
-        c: old.c + 3,
-        d: old.d + 4,
-        e: old.e,
-        f: old.f,
-        g: old.g,
-        h: old.h,
+        a: original.a + 1,
+        b: original.b + 2,
+        c: original.c + 3,
+        d: original.d + 4,
+        e: original.e,
+        f: original.f,
+        g: original.g,
+        h: original.h,
     };
-    state8_sum(old) + state8_sum(newer)
+    state8_sum(original) + state8_sum(newer)
 }
 
 fn fixed_collection_update(seed: i32) -> i32 {

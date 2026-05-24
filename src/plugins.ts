@@ -265,10 +265,6 @@ export const coreIntrinsicsPlugin: CompilerPlugin = {
   apiVersion: COMPILER_PLUGIN_API_VERSION,
   id: "core-intrinsics",
   intrinsics: [
-    { id: "temporal_alloc" },
-    { id: "temporal_handle" },
-    { id: "temporal_handle_ptr" },
-    { id: "temporal_handle_rev" },
     { id: "branch_handle" },
     { id: "branch_handle_ptr" },
     { id: "branch_mark" },

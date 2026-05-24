@@ -3,6 +3,7 @@ import type {
   BranchHint,
   ConstDecl,
   ContractDecl,
+  DebugTraceStmt,
   Declaration,
   DestructureLetDecl,
   DoStatement,
@@ -1041,6 +1042,21 @@ function lowerProofConst(node: Node): ProofConstDecl {
   };
 }
 
+function lowerDebugTrace(node: Node): DebugTraceStmt {
+  const argsNode = optional(node, "Args");
+  const args = argsNode ? lowerArgs(argsNode) : [];
+  const firstArg = args[0];
+  return {
+    kind: "debug_trace",
+    ...spanOnly(node),
+    builtin: "trace",
+    args,
+    ...(firstArg?.kind === "literal" && firstArg.literalKind === "string"
+      ? { message: JSON.parse(firstArg.value) }
+      : {}),
+  };
+}
+
 function lowerBlock(node: Node): Extract<Expr, { kind: "block" }> {
   const statements: (Statement | DoStatement)[] = [];
   let expr: Expr | undefined;
@@ -1051,8 +1067,11 @@ function lowerBlock(node: Node): Extract<Expr, { kind: "block" }> {
       const stmt = named(child)[0];
       if (stmt.type === "BlockLetDecl") statements.push(lowerLet(stmt));
       else if (stmt.type === "BlockProofConstDecl") statements.push(lowerProofConst(stmt));
+      else if (stmt.type === "DebugTraceStmt") statements.push(lowerDebugTrace(stmt));
     } else if (child.type === "BlockProofConstDecl") {
       statements.push(lowerProofConst(child));
+    } else if (child.type === "DebugTraceStmt") {
+      statements.push(lowerDebugTrace(child));
     } else if (child.type === "Expr") {
       expr = lowerExpr(child);
     }
@@ -1087,6 +1106,8 @@ function lowerExpr(node: Node): Expr {
   switch (expr.type) {
     case "DoExpr":
       return lowerDoExpr(expr);
+    case "ProfileExpr":
+      return lowerProfileExpr(expr);
     case "IfExpr": {
       const condition = first(expr, "Expr");
       const blocks = named(expr).filter(is("Block"));
@@ -1181,6 +1202,21 @@ function lowerMatchValues(node: Node): Expr {
   };
 }
 
+function lowerProfileExpr(node: Node): Expr {
+  const argsNode = optional(node, "Args");
+  const args = argsNode ? lowerArgs(argsNode) : [];
+  const firstArg = args[0];
+  return {
+    kind: "profile",
+    ...spanOnly(node),
+    args,
+    ...(firstArg?.kind === "literal" && firstArg.literalKind === "string"
+      ? { label: JSON.parse(firstArg.value) }
+      : {}),
+    body: lowerBlock(only(node, "Block")),
+  };
+}
+
 function lowerMatchPatterns(node: Node): ParamPattern {
   const patterns = named(node).filter(is("Pattern"));
   if (patterns.length === 1) return lowerParamPattern(patterns[0]);
@@ -1219,6 +1255,8 @@ function lowerDoExpr(node: Node): Expr {
       statements.push(lowerLet(child));
     } else if (child.type === "BlockProofConstDecl") {
       statements.push(lowerProofConst(child));
+    } else if (child.type === "DebugTraceStmt") {
+      statements.push(lowerDebugTrace(child));
     } else if (child.type === "Expr") {
       expr = lowerExpr(child);
     } else {
@@ -1361,6 +1399,12 @@ function bindDollarPlaceholders(expr: Expr): Expr {
       };
     case "const_fn":
       return { ...expr, body: bindDollarPlaceholders(expr.body) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map(bindDollarPlaceholders),
+        body: bindDollarPlaceholders(expr.body),
+      };
     case "call":
       return {
         ...expr,
@@ -1626,6 +1670,8 @@ function lowerPrimary(node: Node): Expr {
       return lowerExpr(first(child, "Expr"));
     case "Expr":
       return lowerExpr(child);
+    case "ProfileExpr":
+      return lowerProfileExpr(child);
     case "ShapeValue":
       return lowerShapeValue(child);
     case "CollectionValue":
@@ -2008,7 +2054,11 @@ function firstIdentifier(node: Node): Node {
 function firstStaticBuiltinName(node: Node): Node {
   const found = named(node).find(isIdentifier);
   if (found) return found;
-  if (node.type === "StaticBuiltin" && node.text === "@import") return node;
+  if (
+    node.type === "StaticBuiltin" &&
+    (node.text === "@import" || node.text === "@capability" || node.text === "@trace" ||
+      node.text === "@profile")
+  ) return node;
   return unreachable(node, "static builtin");
 }
 

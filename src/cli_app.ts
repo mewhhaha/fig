@@ -1,13 +1,14 @@
 import {
   checkSource,
   compileArtifactsFromSource,
+  type CompileTraceEvent,
   decodeFigValue,
   formatSource,
   wasmFromSource,
   watFromSource,
 } from "./mod.ts";
 import { CompileError, formatDiagnostic } from "./diagnostics.ts";
-import type { AbiMode, MemoryModel } from "./backend.ts";
+import type { MemoryModel } from "./backend.ts";
 import { OPTIMIZE_PROFILES, type OptimizeProfileName, type OptMode } from "./optimize.ts";
 import { runStdioServer } from "./lsp/server.ts";
 import { FIG_VERSION } from "./version.ts";
@@ -23,7 +24,7 @@ export interface CliIo {
 }
 
 const USAGE =
-  "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--abi memory-v1|legacy-flat] [--release|--release-fast-compile] [--profile name] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]\n       fig lsp\n       fig version";
+  "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory branch-debug|branch] [--release|--release-fast-compile] [--profile name] [--runtime-profile|--compile-profile] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]\n       fig lsp\n       fig version";
 
 class UsageError extends Error {}
 
@@ -118,21 +119,26 @@ async function runCliUnchecked(args: string[], io: CliIo): Promise<void> {
 
   if (cmd === "check") {
     const source = await io.readTextFile(file);
-    await checkSource(source, { resolveModule: moduleResolver(file, io) });
+    const compileTrace = parseCompileProfile(commandRest) ? [] : undefined;
+    await checkSource(source, compileOptions(file, commandRest, io, compileTrace));
+    printCompileProfile(io, compileTrace);
     io.stdout("ok");
     return;
   }
 
   if (cmd === "wat") {
     const source = await io.readTextFile(file);
-    const options = compileOptions(file, commandRest, io);
+    const compileTrace = parseCompileProfile(commandRest) ? [] : undefined;
+    const options = compileOptions(file, commandRest, io, compileTrace);
     io.stdout(await watFromSource(source, options));
+    printCompileProfile(io, compileTrace);
     return;
   }
 
   if (cmd === "build") {
     const source = await io.readTextFile(file);
-    const options = compileOptions(file, commandRest, io);
+    const compileTrace = parseCompileProfile(commandRest) ? [] : undefined;
+    const options = compileOptions(file, commandRest, io, compileTrace);
     const outFlag = commandRest.indexOf("--out");
     const manifestFlag = commandRest.indexOf("--shader-manifest");
     const out = outFlag >= 0 ? commandRest[outFlag + 1] : file.replace(/\.fig$/, ".wasm");
@@ -146,23 +152,41 @@ async function runCliUnchecked(args: string[], io: CliIo): Promise<void> {
         `${JSON.stringify(checked.shaderManifest, null, 2)}\n`,
       );
     }
+    printCompileProfile(io, compileTrace);
     io.stdout(out);
     return;
   }
 
   if (cmd === "run") {
     const source = await io.readTextFile(file);
+    const compileTrace = parseCompileProfile(commandRest) ? [] : undefined;
     const artifact = await compileArtifactsFromSource(source, {
-      ...compileOptions(file, commandRest, io),
+      ...compileOptions(file, commandRest, io, compileTrace),
       includeWat: false,
     });
+    printCompileProfile(io, compileTrace);
     const module = new WebAssembly.Module(artifact.wasm);
     const imports = WebAssembly.Module.imports(module);
-    if (imports.length) {
-      const names = imports.map((item) => `${item.module}.${item.name}`).join(", ");
+    const requiredHostImports = imports.filter((item) =>
+      item.module !== "env" ||
+      (item.name !== "fig_trace" && item.name !== "fig_profile_enter" &&
+        item.name !== "fig_profile_exit")
+    );
+    if (requiredHostImports.length) {
+      const names = requiredHostImports.map((item) => `${item.module}.${item.name}`).join(", ");
       throw new Error(`host imports required: ${names}`);
     }
-    const instance = new WebAssembly.Instance(module);
+    const traceMessages = new Map(artifact.debugTraces.map((site) => [site.id, site.message]));
+    const runtimeProfile = runtimeProfileRecorder(artifact.profileSites, io);
+    const instance = new WebAssembly.Instance(module, {
+      env: {
+        fig_trace(siteId: number) {
+          io.stderr(`[trace] ${traceMessages.get(siteId) ?? `site ${siteId}`}`);
+        },
+        fig_profile_enter: runtimeProfile.enter,
+        fig_profile_exit: runtimeProfile.exit,
+      },
+    });
     const main = instance.exports.main;
     if (typeof main !== "function") throw new Error("missing exported main");
     const raw = main();
@@ -171,20 +195,28 @@ async function runCliUnchecked(args: string[], io: CliIo): Promise<void> {
       ? decodeFigValue(artifact.abi, instance, mainAbi.results[0].type, raw)
       : raw;
     io.stdout(typeof result === "object" ? JSON.stringify(result) : String(result));
+    runtimeProfile.print();
     return;
   }
 
   usage();
 }
 
-function compileOptions(file: string, args: string[], io: CliIo) {
+function compileOptions(
+  file: string,
+  args: string[],
+  io: CliIo,
+  compileTrace?: CompileTraceEvent[],
+) {
+  rejectRemovedAbiFlag(args);
   return {
     resolveModule: moduleResolver(file, io),
     memoryModel: parseMemoryModel(args),
-    abiMode: parseAbiMode(args),
     optMode: parseOptMode(args),
     profile: parseOptimizeProfile(args),
+    runtimeProfile: parseRuntimeProfile(args),
     branchHints: parseBranchHints(args),
+    ...(compileTrace ? { compileTrace } : {}),
   };
 }
 
@@ -202,16 +234,12 @@ function parseMemoryModel(args: string[]): MemoryModel | undefined {
   const eq = args.find((arg) => arg.startsWith("--memory="));
   const value = eq ? eq.slice("--memory=".length) : args[args.indexOf("--memory") + 1];
   if (!value || args.indexOf("--memory") < 0 && !eq) return undefined;
-  if (value === "temporal" || value === "branch-debug" || value === "branch") return value;
+  if (value === "branch-debug" || value === "branch") return value;
   usage();
 }
 
-function parseAbiMode(args: string[]): AbiMode | undefined {
-  const eq = args.find((arg) => arg.startsWith("--abi="));
-  const value = eq ? eq.slice("--abi=".length) : args[args.indexOf("--abi") + 1];
-  if (!value || args.indexOf("--abi") < 0 && !eq) return undefined;
-  if (value === "memory-v1" || value === "legacy-flat") return value;
-  usage();
+function rejectRemovedAbiFlag(args: string[]) {
+  if (args.some((arg) => arg === "--abi" || arg.startsWith("--abi="))) usage();
 }
 
 function parseOptMode(args: string[]): OptMode {
@@ -233,11 +261,75 @@ function parseOptimizeProfile(args: string[]): OptimizeProfileName | undefined {
   usage();
 }
 
+function parseRuntimeProfile(args: string[]): boolean {
+  if (args.some((arg) => arg.startsWith("--runtime-profile="))) usage();
+  return args.includes("--runtime-profile");
+}
+
+function parseCompileProfile(args: string[]): boolean {
+  if (args.some((arg) => arg.startsWith("--compile-profile="))) usage();
+  return args.includes("--compile-profile");
+}
+
 function parseBranchHints(args: string[]): boolean | undefined {
   if (args.includes("--branch-hints") && args.includes("--no-branch-hints")) usage();
   if (args.includes("--branch-hints")) return true;
   if (args.includes("--no-branch-hints")) return false;
   return undefined;
+}
+
+function printCompileProfile(io: CliIo, trace: CompileTraceEvent[] | undefined) {
+  if (!trace) return;
+  io.stderr("[compile-profile] phase ms");
+  for (const event of trace) {
+    io.stderr(`[compile-profile] ${event.name} ${event.durationMs.toFixed(3)}`);
+  }
+}
+
+function runtimeProfileRecorder(
+  sites: readonly { id: number; label: string }[],
+  io: CliIo,
+) {
+  const labels = new Map(sites.map((site) => [site.id, site.label]));
+  const stacks = new Map<number, number[]>();
+  const totals = new Map<number, { count: number; totalMs: number }>();
+  return {
+    enter(siteId: number) {
+      const stack = stacks.get(siteId) ?? [];
+      stack.push(performance.now());
+      stacks.set(siteId, stack);
+    },
+    exit(siteId: number) {
+      const stack = stacks.get(siteId);
+      const start = stack?.pop();
+      if (start === undefined) return;
+      const total = totals.get(siteId) ?? { count: 0, totalMs: 0 };
+      total.count += 1;
+      total.totalMs += performance.now() - start;
+      totals.set(siteId, total);
+    },
+    print() {
+      if (!sites.length) return;
+      const byLabel = new Map<string, { count: number; totalMs: number }>();
+      for (const site of sites) {
+        const current = totals.get(site.id) ?? { count: 0, totalMs: 0 };
+        const label = labels.get(site.id) ?? `site ${site.id}`;
+        const aggregate = byLabel.get(label) ?? { count: 0, totalMs: 0 };
+        aggregate.count += current.count;
+        aggregate.totalMs += current.totalMs;
+        byLabel.set(label, aggregate);
+      }
+      io.stderr("[profile] label count total_ms avg_ms");
+      for (const [label, total] of byLabel) {
+        const avg = total.count > 0 ? total.totalMs / total.count : 0;
+        io.stderr(
+          `[profile] ${JSON.stringify(label)} ${total.count} ${total.totalMs.toFixed(3)} ${
+            avg.toFixed(3)
+          }`,
+        );
+      }
+    },
+  };
 }
 
 function moduleResolver(entryFile: string, io: CliIo) {

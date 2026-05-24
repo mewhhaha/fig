@@ -59,6 +59,8 @@
 "=>" @operator
 "@" @operator
 "@external" @operator
+"@profile" @operator
+"@trace" @operator
 "[" @punctuation.bracket
 "\\" @operator
 "]" @punctuation.bracket

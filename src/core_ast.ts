@@ -124,6 +124,13 @@ export interface ProofConstDecl extends AstNodeMeta {
   value: TypeExpr;
 }
 
+export interface DebugTraceStmt extends AstNodeMeta {
+  kind: "debug_trace";
+  builtin: string;
+  args: Expr[];
+  message?: string;
+}
+
 export interface TypeDecl extends AstNodeMeta {
   kind: "type";
   doc?: string;
@@ -305,7 +312,7 @@ export interface BlockExpr extends AstNodeMeta {
   expr?: Expr;
 }
 
-export type Statement = LetDecl | DestructureLetDecl | ProofConstDecl;
+export type Statement = LetDecl | DestructureLetDecl | ProofConstDecl | DebugTraceStmt;
 export type DoStatement =
   | Statement
   | ({ kind: "do_bind"; name: string; value: Expr } & AstNodeMeta)
@@ -335,6 +342,15 @@ export type Expr =
   )
   | ({ kind: "const_fn"; params: string[]; body: Expr; allowCaptures?: boolean } & AstNodeMeta)
   | ({ kind: "pipe_bind"; value: Expr; name: string; doc?: string; body: Expr } & AstNodeMeta)
+  | (
+    & {
+      kind: "profile";
+      args: Expr[];
+      label?: string;
+      body: Expr;
+    }
+    & AstNodeMeta
+  )
   | ({ kind: "call"; callee: Expr; args: Expr[] } & AstNodeMeta)
   | ({ kind: "index"; target: Expr; index: Expr } & AstNodeMeta)
   | ({ kind: "binary"; op: string; left: Expr; right: Expr } & AstNodeMeta)

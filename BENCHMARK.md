@@ -179,10 +179,10 @@ Latest saved ECS rows are from the 2026-05-17 local run.
 
 This benchmark compares Fig batch helpers compiled to Wasm against a native Rust kernel with the
 same dense 128-element position/frame-input update and fold shape. The Rust row uses a matching
-iterator `enumerate().fold(...)` shape. The materialized batch row keeps the older
-`batch_fill -> batch_map_with_state -> batch_fold` source shape for regression tracking. The fused
-batch rows use `batch_fill_iter -> batch_iter_map_with_state_fold`, which lets the checker
-specialize map and fold into one loop without building the intermediate batch.
+iterator `enumerate().fold(...)` shape. The materialized batch row tracks the direct
+`batch_fill -> batch_map_with_state -> batch_fold` source shape. The fused batch rows use
+`batch_fill_iter -> batch_iter_map_with_state_fold`, which lets the checker specialize map and fold
+into one loop without building the intermediate batch.
 
 | Scenario                    | Runtime                                   |  Calls | Fig ns/call | Rust ns/call | Fig/Rust | Fig compile total ms | Fig Wasm bytes | WAT ifs |              Checksum |
 | --------------------------- | ----------------------------------------- | -----: | ----------: | -----------: | -------: | -------------------: | -------------: | ------: | --------------------: |
@@ -190,10 +190,10 @@ specialize map and fold into one loop without building the intermediate batch.
 | `dense_batch_move_fold_128` | `fig_wasm_host_loop_batch_iter_fused`     | 100000 |        80.1 |         87.9 |     0.91 |               26.254 |            218 |       2 | `976545792/976545792` |
 | `dense_batch_move_fold_128` | `fig_wasm_internal_loop_batch_iter_fused` | 100000 |        82.2 |         87.9 |     0.94 |               23.136 |            287 |       3 | `976545792/976545792` |
 
-The source-code issue was the materialized API shape: the old path forced a full 128-element filled
-batch, a mapped batch, and a fold over that batch, leaving 256 branch arms in WAT. The fused
-iterator helper keeps the same user-level computation but gives the compiler one explicit map-fold
-loop to specialize, cutting the focused kernel to one loop and a few branches.
+The materialized API shape builds a full 128-element filled batch, a mapped batch, and a fold over
+that batch, leaving 256 branch arms in WAT. The fused iterator helper keeps the same user-level
+computation but gives the compiler one explicit map-fold loop to specialize, cutting the focused
+kernel to one loop and a few branches.
 
 ## Fannkuch Lowering Investigation
 
@@ -286,9 +286,9 @@ variable arguments.
 but still not fully optimal: `search` still materializes intermediate products (`prepared`,
 `scored`, and `next`) and unpacks the packed count field at branch exits instead of carrying the
 packed backing all the way into every tail-loop target/result path. A prototype lexical
-product-field alias fold reduced size further but was backed out because inlined tail-loop lowering
-mutates callee parameter locals; preserving correctness there needs alias invalidation or
-destination-aware branch result lowering.
+product-field alias fold can reduce size further, but preserving correctness there needs alias
+invalidation or destination-aware branch result lowering because inlined tail-loop lowering mutates
+callee parameter locals.
 
 Recent local comparison reruns on this final tree produced `fannkuch_redux_7` internal timings of
 `103679.3`, `108065.6`, `105224.6`, `108650.2`, `120498.2`, `103818.7`, `106591.3`, `192031.7`,

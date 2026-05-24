@@ -82,6 +82,7 @@ export type AstNode =
   | BlockLetDeclAstNode
   | BlockLetTailAstNode
   | BlockProofConstDeclAstNode
+  | DebugTraceStmtAstNode
   | ExprAstNode
   | DoExprAstNode
   | DoStrategyAstNode
@@ -104,6 +105,7 @@ export type AstNode =
   | BinaryAstNode
   | CallAstNode
   | PrimaryAstNode
+  | ProfileExprAstNode
   | PlaceholderAstNode
   | ProductConstructorTailAstNode
   | ParenExprAstNode
@@ -502,6 +504,13 @@ export interface BlockProofConstDeclAstNode {
   children: AstNode[];
 }
 
+export interface DebugTraceStmtAstNode {
+  kind: "DebugTraceStmt";
+  type: "DebugTraceStmt";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface ExprAstNode {
   kind: "Expr";
   type: "Expr";
@@ -652,6 +661,13 @@ export interface CallAstNode {
 export interface PrimaryAstNode {
   kind: "Primary";
   type: "Primary";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ProfileExprAstNode {
+  kind: "ProfileExpr";
+  type: "ProfileExpr";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -1428,14 +1444,21 @@ const rules: Record<string, Expression> = {
     options: [{ kind: "literal", value: "struct" }, { kind: "literal", value: "union" }],
   },
   "StaticBuiltin": {
-    kind: "sequence",
-    items: [{ kind: "literal", value: "@" }, {
-      kind: "choice",
-      options: [{ kind: "ref", name: "LowerIdent" }, { kind: "literal", value: "import" }, {
-        kind: "literal",
-        value: "capability",
-      }],
-    }],
+    kind: "choice",
+    options: [
+      {
+        kind: "sequence",
+        items: [{ kind: "literal", value: "@" }, {
+          kind: "choice",
+          options: [{ kind: "ref", name: "LowerIdent" }, { kind: "literal", value: "import" }, {
+            kind: "literal",
+            value: "capability",
+          }],
+        }],
+      },
+      { kind: "literal", value: "@trace" },
+      { kind: "literal", value: "@profile" },
+    ],
   },
   "TypeMember": {
     kind: "sequence",
@@ -1635,7 +1658,11 @@ const rules: Record<string, Expression> = {
   },
   "BlockStmt": {
     kind: "choice",
-    options: [{ kind: "ref", name: "BlockLetDecl" }, { kind: "ref", name: "BlockProofConstDecl" }],
+    options: [
+      { kind: "ref", name: "BlockLetDecl" },
+      { kind: "ref", name: "BlockProofConstDecl" },
+      { kind: "ref", name: "DebugTraceStmt" },
+    ],
   },
   "BlockLetDecl": {
     kind: "sequence",
@@ -1698,6 +1725,16 @@ const rules: Record<string, Expression> = {
       { kind: "literal", value: ";" },
     ],
   },
+  "DebugTraceStmt": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "@trace" },
+      { kind: "literal", value: "(" },
+      { kind: "optional", expression: { kind: "ref", name: "Args" } },
+      { kind: "literal", value: ")" },
+      { kind: "literal", value: ";" },
+    ],
+  },
   "Expr": {
     kind: "choice",
     options: [{ kind: "ref", name: "ConstFn" }, { kind: "ref", name: "PipeBind" }],
@@ -1735,6 +1772,13 @@ const rules: Record<string, Expression> = {
       {
         kind: "sequence",
         items: [{ kind: "ref", name: "DoBindStmt" }, {
+          kind: "optional",
+          expression: { kind: "ref", name: "DoBlockBody" },
+        }],
+      },
+      {
+        kind: "sequence",
+        items: [{ kind: "ref", name: "DebugTraceStmt" }, {
           kind: "optional",
           expression: { kind: "ref", name: "DoBlockBody" },
         }],
@@ -1948,6 +1992,7 @@ const rules: Record<string, Expression> = {
     kind: "choice",
     options: [
       { kind: "ref", name: "DoExpr" },
+      { kind: "ref", name: "ProfileExpr" },
       { kind: "ref", name: "Literal" },
       { kind: "ref", name: "Placeholder" },
       { kind: "ref", name: "StaticBuiltin" },
@@ -1964,6 +2009,16 @@ const rules: Record<string, Expression> = {
       { kind: "ref", name: "ShapeValue" },
       { kind: "ref", name: "CollectionValue" },
       { kind: "ref", name: "TupleValue" },
+    ],
+  },
+  "ProfileExpr": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "@profile" },
+      { kind: "literal", value: "(" },
+      { kind: "optional", expression: { kind: "ref", name: "Args" } },
+      { kind: "literal", value: ")" },
+      { kind: "ref", name: "Block" },
     ],
   },
   "Placeholder": { kind: "literal", value: "$" },
@@ -3161,6 +3216,15 @@ export function projectParseNode(node: ParseNode): AstNode | null {
           child !== null
         ),
       };
+    case "DebugTraceStmt":
+      return {
+        kind: "DebugTraceStmt",
+        type: "DebugTraceStmt",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
     case "Expr":
       return {
         kind: "Expr",
@@ -3354,6 +3418,15 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "Primary",
         type: "Primary",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "ProfileExpr":
+      return {
+        kind: "ProfileExpr",
+        type: "ProfileExpr",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode =>
           child !== null

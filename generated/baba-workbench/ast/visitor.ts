@@ -30,6 +30,7 @@ import type {
   ContractFnDeclAstNode,
   ContractResultKindAstNode,
   ContractReturnSigAstNode,
+  DebugTraceStmtAstNode,
   DeclAstNode,
   DoBindStmtAstNode,
   DoBlockAstNode,
@@ -68,6 +69,7 @@ import type {
   PlaceholderAstNode,
   PrimaryAstNode,
   ProductConstructorTailAstNode,
+  ProfileExprAstNode,
   ProgramAstNode,
   PunnedShapeValueSlotAstNode,
   RangeAstNode,
@@ -199,6 +201,7 @@ export interface AstVisitor<R = void> {
   BlockLetDecl?: (node: BlockLetDeclAstNode) => R;
   BlockLetTail?: (node: BlockLetTailAstNode) => R;
   BlockProofConstDecl?: (node: BlockProofConstDeclAstNode) => R;
+  DebugTraceStmt?: (node: DebugTraceStmtAstNode) => R;
   Expr?: (node: ExprAstNode) => R;
   DoExpr?: (node: DoExprAstNode) => R;
   DoStrategy?: (node: DoStrategyAstNode) => R;
@@ -221,6 +224,7 @@ export interface AstVisitor<R = void> {
   Binary?: (node: BinaryAstNode) => R;
   Call?: (node: CallAstNode) => R;
   Primary?: (node: PrimaryAstNode) => R;
+  ProfileExpr?: (node: ProfileExprAstNode) => R;
   Placeholder?: (node: PlaceholderAstNode) => R;
   ProductConstructorTail?: (node: ProductConstructorTailAstNode) => R;
   ParenExpr?: (node: ParenExprAstNode) => R;
@@ -623,6 +627,13 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
         node,
         fields: {},
       };
+    case "DebugTraceStmt":
+      return {
+        kind: "DebugTraceStmt",
+        type: "DebugTraceStmt",
+        node,
+        fields: {},
+      };
     case "Expr":
       return {
         kind: "Expr",
@@ -774,6 +785,13 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
       return {
         kind: "Primary",
         type: "Primary",
+        node,
+        fields: {},
+      };
+    case "ProfileExpr":
+      return {
+        kind: "ProfileExpr",
+        type: "ProfileExpr",
         node,
         fields: {},
       };

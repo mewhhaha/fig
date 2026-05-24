@@ -7,23 +7,23 @@ which is a reserved IO expression builtin used to lift a pure value into `io(T)`
 ## Compiler Plugin API
 
 The compiler exposes a stable TypeScript plugin API for `@` forms. Hosts pass plugins through
-compile/check options; v1 plugins are registered in-process and are not loaded from manifests at
+compile/check options; plugins are registered in-process and are not loaded from manifests at
 runtime. Each plugin declares `apiVersion: 1`, a unique `id`, and any declaration, static,
 annotation, intrinsic, or do-strategy builtins it provides.
 
 First-party compiler behavior is registered through built-in plugins:
 
-| Plugin             | Builtins                                                          |
-| ------------------ | ----------------------------------------------------------------- |
-| `core-imports`     | `@import`, `@external`                                            |
-| `core-static`      | `@require`, `@compile_error`, `@shape_*`, `@type_*`, `@wgsl_*`    |
-| `core-annotations` | `@likely`, `@unlikely`                                            |
-| `core-intrinsics`  | backend/internal intrinsics such as `@branch_*` and `@temporal_*` |
+| Plugin             | Builtins                                                                  |
+| ------------------ | ------------------------------------------------------------------------- |
+| `core-imports`     | `@import`, `@external`                                                    |
+| `core-static`      | `@require`, `@compile_error`, `@shape_*`, `@type_*`, `@wgsl_*`            |
+| `core-annotations` | `@likely`, `@unlikely`                                                    |
+| `core-intrinsics`  | backend/internal intrinsics such as `@branch_*` and heap-array intrinsics |
 
 Plugin ids and builtin names must be unique after the built-in plugins are registered. Duplicate
-registrations are compile diagnostics. In v1, backend plugins register compiler intrinsic
-identities; the low-level lowering for those identities still runs through compiler-owned IR paths
-rather than raw Wasm byte emission.
+registrations are compile diagnostics. Backend plugins register compiler intrinsic identities; the
+low-level lowering for those identities still runs through compiler-owned IR paths rather than raw
+Wasm byte emission.
 
 ## Module and IO Builtins
 
@@ -37,6 +37,37 @@ not as ordinary expressions.
 
 `return(value)` is available in expression position when an `io(T)` result is expected. It is not a
 normal function and cannot be redefined.
+
+## Debug Trace Statements
+
+`@trace("message");` is a debug-only runtime statement for text breadcrumbs inside ordinary function
+blocks and `do` blocks. Debug builds record each trace site in compiler metadata, import
+`env.fig_trace(site_id)`, and `fig run` prints `[trace] message` to stderr when execution reaches
+the statement.
+
+Release builds erase trace statements before backend lowering. Trace metadata is intentionally not
+part of the stable `fig.abi` custom section, and trace statements are not expressions, top-level
+declarations, or type-function forms.
+
+## Runtime Profile Expressions
+
+`@profile("label") { expr }` measures a scoped runtime expression without changing its result.
+Profiling is disabled by default; disabled profile wrappers compile as if only `expr` was written.
+
+When compiling with `runtimeProfile: true` or running `fig run --runtime-profile`, the backend
+records each profile site in a `fig.profile` custom section, imports
+`env.fig_profile_enter(site_id)` and `env.fig_profile_exit(site_id)`, and surrounds the profiled
+body with those calls. `fig run --runtime-profile` prints a profile table to stderr after program
+stdout with label, count, total milliseconds, and average milliseconds.
+
+Profile labels must be string literals. Profile expressions are valid inside runtime function
+bodies; top-level values, type functions, signatures, parameters, and other non-runtime contexts
+reject them.
+
+## Compile Profiling
+
+`fig check|wat|build|run --compile-profile` prints compiler phase timings to stderr. This is
+separate from the optimizer `--profile name` flag, which selects optimization budgets.
 
 ## Diagnostics and Contracts
 
@@ -172,17 +203,13 @@ wrapper function supplies the public API and types. The public backend surface i
 heap-handle support and fixed inline-array construction helpers; explicit memory and pointer
 intrinsics are not source-facing Fig builtins.
 
-| Intrinsic                 | Arguments                     | Returns        |
-| ------------------------- | ----------------------------- | -------------- |
-| `@branch_handle`          | pointer `i32`                 | branch handle  |
-| `@branch_handle_ptr`      | branch handle                 | pointer `i32`  |
-| `@branch_mark`            | branch handle                 | branch handle  |
-| `@branch_is_branched`     | branch handle                 | bool           |
-| `@branch_ensure_editable` | branch handle                 | branch handle  |
-| `@branch_materialize`     | branch handle                 | branch handle  |
-| `@temporal_handle`        | pointer `i32`, revision `i32` | packed handle  |
-| `@temporal_handle_ptr`    | packed handle                 | pointer `i32`  |
-| `@temporal_handle_rev`    | packed handle                 | revision `i32` |
+| Intrinsic                 | Arguments     | Returns       |
+| ------------------------- | ------------- | ------------- |
+| `@branch_handle`          | pointer `i32` | branch handle |
+| `@branch_handle_ptr`      | branch handle | pointer `i32` |
+| `@branch_mark`            | branch handle | branch handle |
+| `@branch_is_branched`     | branch handle | bool          |
+| `@branch_ensure_editable` | branch handle | branch handle |
+| `@branch_materialize`     | branch handle | branch handle |
 
-The `@branch_*` intrinsics are accepted in `branch` and `branch-debug` memory modes. The
-`@temporal_*` intrinsics are compatibility-only and are accepted in `temporal` memory mode.
+The `@branch_*` intrinsics are accepted in `branch` and `branch-debug` memory modes.

@@ -91,31 +91,28 @@ Product-return destructuring still uses multi-bind:
 let left, right = split(value);
 ```
 
-The old source-facing memory model has been removed. Fig code no longer exposes `fork`, borrowed
-types or expressions, frozen references, pointer wrappers, explicit `memory` parameters, or
-`@memory_*`/`@ptr_*`/`@freeze` intrinsics. Lower-level storage is an implementation detail of the
-backend.
+Fig code does not expose `fork`, borrowed types or expressions, frozen references, pointer wrappers,
+explicit `memory` parameters, or `@memory_*`/`@ptr_*`/`@freeze` intrinsics. Lower-level storage is
+an implementation detail of the backend.
 
 For fixed-size value data, the backend flattens products and inline arrays into scalar Wasm locals
 and parameters where possible. Reusing a value usually becomes additional `local.get` instructions,
 not a runtime copy. Update-heavy fixed data paths use new flattened values and rely on Wasm locals,
 tail-loop lowering, specialization, and SIMD pattern recognition for performance.
 
-The default public Wasm ABI is `memory-v1`. Scalars cross `pub fn` exports and `@external` imports
-directly; products, fixed inline arrays, strings, heap arrays, sums, and wider flattened values
-cross as `i32` handles into `fig_objects`. Modules that need handle passing include a `fig.abi.v1`
-custom section plus helpers such as `fig_alloc_object`, `fig_alloc_buffer`, `fig_retain`, and
-`fig_release`. The TypeScript API exports `instantiateFig`, `encodeFigValue`, and `decodeFigValue`
-for host-side calls into Fig modules, including UTF-8 string slots stored through `fig_buffers`.
+The public Wasm ABI is the stable Fig memory ABI. Scalars cross `pub fn` exports and `@external`
+imports directly; products, fixed inline arrays, strings, heap arrays, sums, and wider flattened
+values cross as `i32` handles into `fig_objects`. Fig modules include a `fig.abi` custom section
+with stable layout metadata for objects, fixed arrays, strings, sums, and heap arrays, plus helpers
+such as `fig_alloc_object`, `fig_alloc_buffer`, `fig_retain`, and `fig_release`. The TypeScript API
+exports `instantiateFig`, `createFigHost`, `encodeFigValue`, and `decodeFigValue` for host-side
+calls into Fig modules, including UTF-8 string slots stored through `fig_buffers`.
 
 The Branch-Bit heap runtime uses separate Wasm memories named `fig_objects` and `fig_buffers` for
 heap objects and large byte buffers. Transitional internal branch handles are `i64` values whose
 high 32 bits are zero and whose low 32 bits contain the object pointer. Heap object headers store
 `layout_id`, payload size, flags, and refcount; writes go through copy-before-write when an object
-is branched or pinned. The previous Temporal runtime scaffold remains available behind
-`--memory temporal` for compatibility testing and additionally exports `fig_logs` for revision/undo
-metadata. Compile with `--abi legacy-flat` when comparing against the previous flat public Wasm
-calling convention.
+is branched or pinned.
 
 ## Performance Layout Sketches
 
@@ -162,8 +159,7 @@ for fixed-capacity filtered results.
 
 Heap-backed lists and growable vectors are intentionally deferred. The standard prelude does not
 provide `list`, `vector`, `vec`, `push`, `pop`, `reserve`, or allocation-backed append APIs yet;
-those should be built on the backend heap runtime rather than the removed explicit-memory token
-model.
+those should be built on the backend heap runtime.
 
 `prelude.geometry2d` is a tiny pure playground layer for geometry-shaped programs. It provides
 integer `vec2`, `vec3`, packed `rgba8`, `vertex2d_i32`, `quad2d_i32`, and `geometry2d_i32` helpers.

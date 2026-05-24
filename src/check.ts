@@ -201,12 +201,13 @@ function checkReservedCompilerNames(program: Program, diagnostics: Diagnostic[])
       for (const item of pattern.args) checkPattern(item);
     }
   };
-  const checkStatement = (stmt: Statement) => {
+  const checkStatement = (stmt: Statement, allowProfile = true) => {
     if (stmt.kind === "let" || stmt.kind === "proof_const") checkName(stmt.name, stmt);
     if (stmt.kind === "destructure_let") {
       for (const name of stmt.names) checkName(name, { span: stmt.nameSpans?.[name] ?? stmt.span });
     }
     if (stmt.kind === "let" || stmt.kind === "destructure_let") checkExpr(stmt.value);
+    if (stmt.kind === "debug_trace") stmt.args.forEach(checkExpr);
   };
   const checkDoStatement = (stmt: DoStatement) => {
     if (stmt.kind === "do_bind") checkName(stmt.name, stmt);
@@ -215,6 +216,7 @@ function checkReservedCompilerNames(program: Program, diagnostics: Diagnostic[])
       for (const name of stmt.names) checkName(name, { span: stmt.nameSpans?.[name] ?? stmt.span });
     }
     if (stmt.kind !== "proof_const" && "value" in stmt) checkExpr(stmt.value);
+    if (stmt.kind === "debug_trace") stmt.args.forEach(checkExpr);
   };
   const checkBlock = (block: BlockExpr) => {
     for (const stmt of block.statements) checkStatement(stmt);
@@ -300,10 +302,12 @@ function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
   const checkStatement = (stmt: Statement) => {
     if (stmt.kind === "let" || stmt.kind === "destructure_let") checkExpr(stmt.value);
     if (stmt.kind === "proof_const") checkTypeExpr(stmt.value);
+    if (stmt.kind === "debug_trace") stmt.args.forEach(checkExpr);
   };
   const checkDoStatement = (stmt: DoStatement) => {
     if (stmt.kind === "proof_const") checkTypeExpr(stmt.value);
     else if ("value" in stmt) checkExpr(stmt.value);
+    if (stmt.kind === "debug_trace") stmt.args.forEach(checkExpr);
   };
   const checkBlock = (block: BlockExpr) => {
     for (const stmt of block.statements) checkStatement(stmt);
@@ -391,6 +395,112 @@ function isDeclarationOnlyBuiltin(name: string): boolean {
   return name === "import" || name === "external";
 }
 
+function checkDebugTraceStatements(program: Program, diagnostics: Diagnostic[]) {
+  const checkStatement = (stmt: Statement, allowProfile = true) => {
+    if (stmt.kind === "debug_trace") {
+      if (stmt.builtin !== "trace") {
+        diagnostics.push(diagnosticAt(
+          "debug.trace_builtin",
+          `unknown debug statement @${stmt.builtin}; use @trace("message")`,
+          stmt,
+        ));
+      }
+      if (stmt.args.length !== 1) {
+        diagnostics.push(diagnosticAt(
+          "debug.trace_arity",
+          "@trace expects exactly one string literal argument",
+          stmt,
+        ));
+      } else {
+        const message = stmt.args[0];
+        if (message?.kind !== "literal" || message.literalKind !== "string") {
+          diagnostics.push(diagnosticAt(
+            "debug.trace_message",
+            "@trace expects a string literal message",
+            message ?? stmt,
+          ));
+        }
+      }
+      for (const arg of stmt.args) checkExpr(arg, allowProfile);
+      return;
+    }
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+      checkExpr(stmt.value, allowProfile);
+    }
+  };
+  const checkDoStatement = (stmt: DoStatement, allowProfile = true) => {
+    if (stmt.kind === "do_bind" || stmt.kind === "do_expr") {
+      checkExpr(stmt.value, allowProfile);
+      return;
+    }
+    checkStatement(stmt, allowProfile);
+  };
+  const checkBlock = (block: BlockExpr, allowProfile = true) => {
+    for (const stmt of block.statements) checkStatement(stmt, allowProfile);
+    if (block.expr) checkExpr(block.expr, allowProfile);
+  };
+  const checkExpr = (expr: Expr | undefined, allowProfile = true) => {
+    if (!expr) return;
+    if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "@trace") {
+      diagnostics.push(diagnosticAt(
+        "debug.trace_context",
+        '@trace is only valid as a statement, for example @trace("message");',
+        expr,
+      ));
+    }
+    if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "@profile") {
+      diagnostics.push(diagnosticAt(
+        "profile.context",
+        '@profile is only valid as a scoped expression, for example @profile("label") { value }',
+        expr,
+      ));
+    }
+    if (expr.kind === "profile") {
+      if (!allowProfile) {
+        diagnostics.push(diagnosticAt(
+          "profile.context",
+          "@profile is only valid inside runtime function bodies",
+          expr,
+        ));
+      }
+      if (expr.args.length !== 1) {
+        diagnostics.push(diagnosticAt(
+          "profile.arity",
+          "@profile expects exactly one string literal label",
+          expr,
+        ));
+      } else {
+        const label = expr.args[0];
+        if (label?.kind !== "literal" || label.literalKind !== "string") {
+          diagnostics.push(diagnosticAt(
+            "profile.label",
+            "@profile expects a string literal label",
+            label ?? expr,
+          ));
+        }
+      }
+      for (const arg of expr.args) checkExpr(arg, allowProfile);
+      checkExpr(expr.body, allowProfile);
+      return;
+    }
+    if (expr.kind === "block") {
+      checkBlock(expr, allowProfile);
+      return;
+    }
+    if (expr.kind === "do") {
+      for (const stmt of expr.statements) checkDoStatement(stmt, allowProfile);
+      checkExpr(expr.expr, allowProfile);
+      return;
+    }
+    for (const child of exprChildren(expr)) checkExpr(child);
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") checkBlock(decl.body);
+    else if (decl.kind === "contract") checkBlock(decl.body, false);
+    else if (decl.kind === "let" || decl.kind === "const") checkExpr(decl.value, false);
+  }
+}
+
 function typeExprChildren(expr: TypeExpr): TypeExpr[] {
   switch (expr.kind) {
     case "type_call":
@@ -463,6 +573,7 @@ function checkProgramInternal(
   checkExternalImportsUseExplicitIo(program, diagnostics);
   recordPhase("checkReservedCompilerNames", () => checkReservedCompilerNames(program, diagnostics));
   recordPhase("checkRemovedSyntax", () => checkRemovedSyntax(program, diagnostics));
+  recordPhase("checkDebugTraceStatements", () => checkDebugTraceStatements(program, diagnostics));
   recordPhase(
     "prepareInferredTypeAnnotations",
     () => prepareInferredTypeAnnotations(program, diagnostics),
@@ -793,6 +904,12 @@ function balanceAssociativeBinaryChains(program: Program, typeDecls: TypeDecl[])
       }
       case "pipe_bind":
         return { ...expr, value: lowerExpr(expr.value), body: lowerExpr(expr.body) };
+      case "profile":
+        return {
+          ...expr,
+          args: expr.args.map(lowerExpr),
+          body: lowerExpr(expr.body),
+        };
       case "match":
         return {
           ...expr,
@@ -1025,6 +1142,12 @@ function lowerDoExpressions(
       case "pipe_bind": {
         return { ...expr, value: lowerExpr(expr.value, env), body: lowerExpr(expr.body, env) };
       }
+      case "profile":
+        return {
+          ...expr,
+          args: expr.args.map((arg) => lowerExpr(arg, env)),
+          body: lowerExpr(expr.body, env, expectedType),
+        };
       case "match":
         return {
           ...expr,
@@ -1070,6 +1193,9 @@ function lowerDoExpressions(
           }
           if (stmt.kind === "destructure_let") {
             return { ...stmt, value: lowerExpr(stmt.value, scoped) } as Statement;
+          }
+          if (stmt.kind === "debug_trace") {
+            return { ...stmt, args: stmt.args.map((arg) => lowerExpr(arg, scoped)) } as Statement;
           }
           return stmt;
         });
@@ -1184,6 +1310,11 @@ function lowerDoExpression(
     } else if (stmt.kind === "destructure_let") {
       loweredStatements.push({ ...stmt, value: lowerDoChild(stmt.value, shadowedDoNames) });
       shadowedDoNames = shadowNames(shadowedDoNames, stmt.names);
+    } else if (stmt.kind === "debug_trace") {
+      loweredStatements.push({
+        ...stmt,
+        args: stmt.args.map((arg) => lowerDoChild(arg, shadowedDoNames)),
+      });
     } else {
       loweredStatements.push(stmt);
     }
@@ -1254,6 +1385,9 @@ function mapDoExpressionChildren(
         stmt.kind === "destructure_let"
       ) {
         return { ...stmt, value: lowerExpr(stmt.value) };
+      }
+      if (stmt.kind === "debug_trace") {
+        return { ...stmt, args: stmt.args.map(lowerExpr) };
       }
       return stmt;
     }),
@@ -1342,6 +1476,10 @@ function lowerIoDoExpression(
     }
     if (stmt.kind === "destructure_let") {
       statements.push({ ...stmt, value: lowerExpr(stmt.value) });
+      continue;
+    }
+    if (stmt.kind === "debug_trace") {
+      statements.push({ ...stmt, args: stmt.args.map(lowerExpr) });
       continue;
     }
     statements.push(stmt);
@@ -1757,6 +1895,12 @@ function rewriteDoEffectOperations(
         start: rewriteDoEffectOperations(expr.start, effect, shadowed),
         end: rewriteDoEffectOperations(expr.end, effect, shadowed),
       };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => rewriteDoEffectOperations(arg, effect, shadowed)),
+        body: rewriteDoEffectOperations(expr.body, effect, shadowed),
+      };
     case "block": {
       let scoped = new Set(shadowed);
       const statements = expr.statements.map((stmt) => {
@@ -2110,6 +2254,8 @@ function exprChildValues(expr: Expr): Expr[] {
       return [expr.left, expr.right];
     case "pipe_bind":
       return [expr.value, expr.body];
+    case "profile":
+      return [...expr.args, expr.body];
     case "match":
       return [expr.value, ...expr.arms.map((arm) => arm.value)];
     case "shape":
@@ -2410,6 +2556,12 @@ function lowerCollectorLiterals(
         return lowerDoExpression(expr, diagnostics, (child) => lowerExpr(child, undefined));
       case "const_fn":
         return { ...expr, span: expr.span, body: lowerExpr(expr.body, undefined) };
+      case "profile":
+        return {
+          ...expr,
+          args: expr.args.map((arg) => lowerExpr(arg, undefined)),
+          body: lowerExpr(expr.body, expectedType),
+        };
       case "shape": {
         if (expr.syntax !== "collection") {
           const productSlots = productSlotTypes(expectedType, typeDecls, expr.slots.length);
@@ -3966,6 +4118,12 @@ function rewriteAttachedMembersInExpr(expr: Expr, members: Map<string, string>):
       return lowerDoExpression(expr, [], (child) => rewriteAttachedMembersInExpr(child, members));
     case "const_fn":
       return { ...expr, span: expr.span, body: rewriteAttachedMembersInExpr(expr.body, members) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => rewriteAttachedMembersInExpr(arg, members)),
+        body: rewriteAttachedMembersInExpr(expr.body, members),
+      };
     case "var":
       return members.has(expr.name) ? { kind: "var", name: members.get(expr.name)! } : expr;
     case "call":
@@ -5688,6 +5846,12 @@ function specializeInferredExpr(
       );
     case "const_fn":
       return { ...expr, span: expr.span, body: specializeInferredExpr(expr.body, context, env) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => specializeInferredExpr(arg, context, env)),
+        body: specializeInferredExpr(expr.body, context, env, expectedType, reportAmbiguous),
+      };
     case "call": {
       context.stats && (context.stats.visitedCalls += 1);
       const callee = specializeInferredExpr(expr.callee, context, env);
@@ -6151,6 +6315,7 @@ function inferExprType(
     const scoped = valueType ? new Map(env).set(expr.name, valueType) : env;
     return inferExprType(expr.body, context, scoped);
   }
+  if (expr.kind === "profile") return inferExprType(expr.body, context, env);
   if (expr.kind === "field") {
     const valueType = inferExprType(expr.value, context, env);
     const label = exprLiteralLabel(expr.key);
@@ -7137,6 +7302,12 @@ function specializeExpr(
     switch (expr.kind) {
       case "do":
         return specializeDoExpr(expr, context, env);
+      case "profile":
+        return {
+          ...expr,
+          args: expr.args.map((arg) => specializeExpr(arg, context, env)),
+          body: specializeExpr(expr.body, context, env, expectedType),
+        };
       case "const_fn": {
         const expectedFn = expectedFunctionType(expectedType, context.types);
         const body = context.activeStaticValues
@@ -7678,7 +7849,9 @@ function collectExplicitConstArgNames(
   }
   if (expr.kind === "block") {
     expr.statements.forEach((stmt) => {
-      if (isRuntimeExprNode(stmt.value)) {
+      if (
+        (stmt.kind === "let" || stmt.kind === "destructure_let") && isRuntimeExprNode(stmt.value)
+      ) {
         collectExplicitConstArgNames(stmt.value, functions, names);
       }
     });
@@ -7774,6 +7947,9 @@ function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
       ) || exprCallsFunction(expr.expr, name);
     case "const_fn":
       return exprCallsFunction(expr.body, name);
+    case "profile":
+      return expr.args.some((arg) => exprCallsFunction(arg, name)) ||
+        exprCallsFunction(expr.body, name);
     case "call":
       return (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprCallsFunction(expr.callee, name) ||
@@ -8065,14 +8241,6 @@ function synthesizeConstFnHelper(
   context: ConstSpecializationContext,
   staticValues = new Map<string, ConstValue>(),
 ): { name: string; value: ConstValue } | undefined {
-  if (exprContainsPlaceholder(arg)) {
-    context.diagnostics.push({
-      code: "const.placeholder_deprecated",
-      message: "$ const fn helper is deprecated; use \\x -> ... instead",
-      span: exprDiagnosticSpan(arg) ?? context.diagnosticSpan,
-    });
-    return undefined;
-  }
   if (arg.kind !== "const_fn") return undefined;
   const signature = parseExpectedFnType(expectedType);
   if (!signature) {
@@ -8388,6 +8556,12 @@ function replacePlaceholder(expr: Expr, replacement: Expr): Expr {
       };
     case "const_fn":
       return { ...expr, body: replacePlaceholder(expr.body, replacement) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => replacePlaceholder(arg, replacement)),
+        body: replacePlaceholder(expr.body, replacement),
+      };
     case "call":
       return {
         ...expr,
@@ -8484,6 +8658,12 @@ function replaceNamedVar(expr: Expr, name: string, replacement: Expr): Expr {
       return expr.params.includes(name)
         ? expr
         : { ...expr, body: replaceNamedVar(expr.body, name, replacement) };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => replaceNamedVar(arg, name, replacement)),
+        body: replaceNamedVar(expr.body, name, replacement),
+      };
     case "call":
       return {
         ...expr,
@@ -8617,6 +8797,8 @@ function exprChildren(expr: Expr): Expr[] {
       return [expr.left, expr.right];
     case "pipe_bind":
       return [expr.value, expr.body];
+    case "profile":
+      return [...expr.args, expr.body];
     case "match":
       return [expr.value, ...expr.arms.map((arm) => arm.value)];
     case "shape":
@@ -8847,6 +9029,14 @@ function substituteSpecializedExpr(
     case "const_fn":
       return {
         ...expr,
+        body: substituteSpecializedExpr(expr.body, values, staticValues, staticArgNames, context),
+      };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) =>
+          substituteSpecializedExpr(arg, values, staticValues, staticArgNames, context)
+        ),
         body: substituteSpecializedExpr(expr.body, values, staticValues, staticArgNames, context),
       };
     case "var": {
@@ -9142,6 +9332,7 @@ function substituteSpecializedExpr(
       try {
         const statements: Statement[] = expr.statements.flatMap((stmt): Statement[] => {
           if (stmt.kind === "proof_const") return [];
+          if (stmt.kind === "debug_trace") return [stmt];
           for (const name of boundNames(stmt)) {
             scopedValues.delete(name);
             scopedStaticValues.delete(name);
@@ -11277,6 +11468,12 @@ function lowerProductConstructors(
         return lowerDoExpression(expr, diagnostics, lowerExpr);
       case "const_fn":
         return { ...expr, span: expr.span, body: lowerExpr(expr.body) };
+      case "profile":
+        return {
+          ...expr,
+          args: expr.args.map(lowerExpr),
+          body: lowerExpr(expr.body),
+        };
       case "product_constructor": {
         const product = resolveProductConstructor(expr.constructor, products, productsByTerminal);
         const anonymousShape = product ? undefined : constShapeValueFromTypeArg(expr.constructor);
@@ -14296,6 +14493,9 @@ function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
       ) || exprContainsStaticExpansion(expr.expr);
     case "const_fn":
       return exprContainsStaticExpansion(expr.body);
+    case "profile":
+      return expr.args.some(exprContainsStaticExpansion) ||
+        exprContainsStaticExpansion(expr.body);
     case "static_for_slots":
       return true;
     case "block":
@@ -16820,12 +17020,15 @@ function collectDoStatementRefs(stmt: DoStatement, refs: Set<string>) {
     collectExprRefs(stmt.value, refs, new Set());
   } else if (stmt.kind === "proof_const") {
     collectTypeExprRefs(stmt.value, refs);
+  } else if (stmt.kind === "debug_trace") {
+    for (const arg of stmt.args) collectExprRefs(arg, refs, new Set());
   }
 }
 
 function boundNames(stmt: Statement): string[] {
   if (stmt.kind === "let") return [stmt.name];
   if (stmt.kind === "proof_const") return [stmt.name];
+  if (stmt.kind === "debug_trace") return [];
   return stmt.names;
 }
 
@@ -16853,6 +17056,9 @@ function collectStatementRefs(stmt: Statement, refs: Set<string>) {
   if (stmt.kind === "let") collectExprRefs(stmt.value, refs, new Set());
   else if (stmt.kind === "destructure_let") collectExprRefs(stmt.value, refs, new Set());
   else if (stmt.kind === "proof_const") collectTypeExprRefs(stmt.value, refs);
+  else if (stmt.kind === "debug_trace") {
+    for (const arg of stmt.args) collectExprRefs(arg, refs, new Set());
+  }
 }
 
 function collectTypeExprRefs(expr: TypeExpr, refs: Set<string>) {

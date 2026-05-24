@@ -131,7 +131,7 @@ export function validateScalarDomainType(
   if (call.carrier !== "i32") {
     return {
       code: "type.scalar_domain_carrier",
-      message: `scalar domain syntax is only supported for i32 in v1; got ${call.carrier}(...)`,
+      message: `scalar domain syntax is only supported for i32; got ${call.carrier}(...)`,
     };
   }
   const parsed = parseScalarDomainType(trimmed);

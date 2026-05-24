@@ -52,6 +52,7 @@ export type AstNode =
   | BlockLetDeclAstNode
   | BlockLetTailAstNode
   | BlockProofConstDeclAstNode
+  | DebugTraceStmtAstNode
   | ExprAstNode
   | DoExprAstNode
   | DoStrategyAstNode
@@ -74,6 +75,7 @@ export type AstNode =
   | BinaryAstNode
   | CallAstNode
   | PrimaryAstNode
+  | ProfileExprAstNode
   | PlaceholderAstNode
   | ProductConstructorTailAstNode
   | ParenExprAstNode
@@ -472,6 +474,13 @@ export interface BlockProofConstDeclAstNode {
   fields: Record<string, never>;
 }
 
+export interface DebugTraceStmtAstNode {
+  kind: "DebugTraceStmt";
+  type: "DebugTraceStmt";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface ExprAstNode {
   kind: "Expr";
   type: "Expr";
@@ -622,6 +631,13 @@ export interface CallAstNode {
 export interface PrimaryAstNode {
   kind: "Primary";
   type: "Primary";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ProfileExprAstNode {
+  kind: "ProfileExpr";
+  type: "ProfileExpr";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }

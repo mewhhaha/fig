@@ -1,13 +1,7 @@
-type fn Handle() -> struct {
-  let Handle = {ptr: i32, rev: i32};
-  struct(Handle)
-}
+fn branch.handle(ptr: i32) -> i64 { @branch_handle(ptr) }
+fn branch.handle_ptr(handle: i64) -> i32 { @branch_handle_ptr(handle) }
 
-fn temporal.handle(ptr: i32, rev: i32) -> Handle { @temporal_handle(ptr, rev) }
-fn temporal.handle_ptr(handle: Handle) -> i32 { @temporal_handle_ptr(handle) }
-fn temporal.handle_rev(handle: Handle) -> i32 { @temporal_handle_rev(handle) }
-
-pub fn main(ptr: i32, rev: i32) -> i32 {
-  let handle = temporal.handle(ptr, rev);
-  temporal.handle_ptr(handle) + temporal.handle_rev(handle)
+pub fn main(ptr: i32) -> i32 {
+  let handle = branch.handle(ptr);
+  branch.handle_ptr(handle)
 }

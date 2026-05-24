@@ -74,6 +74,56 @@ Deno.test("CLI wat honors debug and release flags", async () => {
   assert(!release.stdout.join("\n").includes("call $add1"));
 });
 
+Deno.test("CLI run prints debug traces to stderr and release erases them", async () => {
+  const source = `
+    pub fn main() -> i32 {
+      @trace("entered main");
+      42
+    }
+  `;
+
+  const debug = mockIo({ "main.fig": source });
+  assertEquals(await runCli(["run", "main.fig"], debug.io), 0);
+  assertEquals(debug.stdout, ["42"]);
+  assertEquals(debug.stderr, ["[trace] entered main"]);
+
+  const release = mockIo({ "main.fig": source });
+  assertEquals(await runCli(["run", "main.fig", "--release"], release.io), 0);
+  assertEquals(release.stdout, ["42"]);
+  assertEquals(release.stderr, []);
+});
+
+Deno.test("CLI run prints runtime profile summary when enabled", async () => {
+  const source = `pub fn main() -> i32 { @profile("work") { 42 } }`;
+  const harness = mockIo({ "main.fig": source });
+
+  assertEquals(await runCli(["run", "main.fig", "--runtime-profile"], harness.io), 0);
+  assertEquals(harness.stdout, ["42"]);
+  assertStringIncludes(harness.stderr.join("\n"), "[profile] label count total_ms avg_ms");
+  assertStringIncludes(harness.stderr.join("\n"), `[profile] "work" 1`);
+});
+
+Deno.test("CLI compile profile reports compiler phase timings", async () => {
+  const harness = mockIo({ "main.fig": "pub fn main() -> i32 { 42 }" });
+
+  assertEquals(await runCli(["check", "main.fig", "--compile-profile"], harness.io), 0);
+  assertEquals(harness.stdout, ["ok"]);
+  assertStringIncludes(harness.stderr.join("\n"), "[compile-profile] phase ms");
+  assertStringIncludes(harness.stderr.join("\n"), "parse.syntax");
+});
+
+Deno.test("CLI rejects removed ABI mode flag", async () => {
+  const harness = mockIo({ "main.fig": "pub fn main() -> i32 { 42 }" });
+  assertEquals(await runCli(["wat", "main.fig", "--abi", "removed"], harness.io), 2);
+  assertStringIncludes(harness.stderr.join("\n"), "usage: fig");
+});
+
+Deno.test("CLI rejects removed memory mode", async () => {
+  const harness = mockIo({ "main.fig": "pub fn main() -> i32 { 42 }" });
+  assertEquals(await runCli(["wat", "main.fig", "--memory", "removed"], harness.io), 2);
+  assertStringIncludes(harness.stderr.join("\n"), "usage: fig");
+});
+
 Deno.test("CLI build writes explicit output path", async () => {
   const harness = mockIo({ "main.fig": "pub fn main() -> i32 { 42 }" });
   assertEquals(await runCli(["build", "main.fig", "--out", "out/main.wasm"], harness.io), 0);
