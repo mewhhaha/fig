@@ -44,7 +44,7 @@ expose it as `array.layout` through its own namespace import.
 | `prelude.schedule`     | Static schedule metadata vocabulary.                                                                         |
 | `prelude.geometry2d`   | Pure fixed 2D geometry layout helpers.                                                                       |
 | `web.canvas`           | Browser canvas/GPU/event host IO imports plus WGSL shader metadata helpers.                                  |
-| `engine.ecs`           | Experimental ECS sketch retained for parser coverage while shape-recursive value builders are redesigned.    |
+| `engine.ecs`           | Experimental ECS sketch for query and system examples built from ordinary Fig module and type-function code. |
 
 Prelude modules are intended to remain pure and portable across the browser and Deno WebAssembly
 target. Browser-specific host IO imports live under `web.*`.

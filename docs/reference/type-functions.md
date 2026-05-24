@@ -1,6 +1,6 @@
 # Fig Type Functions
 
-Direct type declarations cover fixed product, sum, and alias layouts:
+Fixed product, sum, and alias layouts can use type declaration sugar:
 
 ```fig
 type Point = struct {x: i32, y: i32}
@@ -8,8 +8,8 @@ type Option(a) = union {None, Some(value: a)}
 type Count = i32
 ```
 
-They lower to ordinary type functions. Use explicit `type fn` declarations when the type is computed
-at compile time:
+The sugar lowers to ordinary type functions. Use explicit `type fn` declarations when the layout is
+computed at compile time:
 
 ```fig
 type fn Pair(a: type, b: type) -> struct {
@@ -18,8 +18,8 @@ type fn Pair(a: type, b: type) -> struct {
 }
 ```
 
-Type function bodies contain `let` or `const` bindings and type expressions. a final type expression
-is the Result. Result kinds are `type`, `struct`, `union`, and `operator`.
+Type function bodies contain `let` or `const` bindings and type expressions. The final type
+expression is the result. Result kinds are `type`, `struct`, `union`, and `operator`.
 
 ## Parameters and Clauses
 

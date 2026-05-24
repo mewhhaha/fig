@@ -96,6 +96,9 @@ The current server provides:
 - Workspace symbols for indexed declarations, imports, members, variants, and public generated
   symbols already known to the server.
 - Conservative quick fixes for diagnostics where the server has a clear single-edit replacement.
+- `Replace inferred type holes` code actions for checker-resolved `_` annotation holes. The action
+  appears when the selected range overlaps one or more resolved hole spans and replaces the `_`
+  token text directly.
 - Document formatting through the canonical Fig formatter.
 - UTF-16 LSP position mapping.
 - File and module resolution for relative imports, dotted imports, `prelude.*`, `web.*`, and
@@ -114,8 +117,7 @@ files already indexed by the server; unopened workspace files are not scanned ea
 The next useful work is to make the server behave more like a mature daily-use LSP:
 
 - Expand cross-file rename beyond already-indexed documents.
-- Add more diagnostic-specific quick fixes once checker diagnostics expose reliable replacement
-  spans.
+- Add more diagnostic-specific quick fixes for diagnostics that expose reliable replacement spans.
 - Tighten member completion filtering with checked receiver types.
 - Add broader protocol fixtures for aliased imports, generated members, malformed documents, and
   local-binding edge cases.

@@ -15,8 +15,13 @@ fn(x: i32) -> i32
 type
 ```
 
-The `_` token is not a general inferred type annotation. It is reserved for direct arguments in `do`
-strategy type calls, such as `Option(_)` or `State(World, _)`.
+The `_` token marks an inferred type hole only where the checker has a local expression to inspect.
+It is accepted in function return annotations, local and top-level `let`/`const` annotations, nested
+annotation positions such as `Box(_)`, and value positions in `do` strategy type calls such as
+`Option(_)` or `State(World, _)`.
+
+Holes are rejected in parameter types, external import signatures, type-function bodies, contract
+signatures, product fields, and other positions without a local value expression to infer from.
 
 Primitive scalar types currently include `bool`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `string`,
 the compiler-owned IO executor type `io`, and unsigned widths `u1` through `u64`.
@@ -46,7 +51,7 @@ Tuple types use brackets and lower to positional product shapes:
 [i32; 3]
 ```
 
-Define concrete product and sum layouts with direct type declarations when the layout is fixed:
+Define fixed product and sum layouts with type declaration sugar:
 
 ```fig
 type Point = struct {x: i32, y: i32}

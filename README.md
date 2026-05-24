@@ -4,6 +4,8 @@ Fig is an experimental language/compiler focused on static type functions, Branc
 WebAssembly output.
 
 See `docs/LANGUAGE.md` for the full core-language syntax, semantics, and compiler builtin reference.
+For migration-style guides, see `docs/guides/rust-patterns.md`,
+`docs/guides/haskell-patterns.md`, and `docs/guides/zig-patterns.md`.
 
 ## Using Fig
 
@@ -17,7 +19,10 @@ Run the CLI from a source checkout:
 
 ```bash
 deno run --allow-read src/cli.ts check examples/hello.fig
+deno run --allow-read src/cli.ts fmt examples/hello.fig
+deno run --allow-read src/cli.ts wat examples/hello.fig
 deno run --allow-read --allow-write src/cli.ts build examples/hello.fig
+deno run --allow-read src/cli.ts run examples/hello.fig
 ```
 
 Run the language server over stdio from a source checkout:
@@ -30,12 +35,19 @@ Download native `fig` binaries from GitHub Releases:
 
 ```bash
 fig check examples/hello.fig
+fig fmt examples/hello.fig
+fig wat examples/hello.fig
 fig build examples/hello.fig
+fig run examples/hello.fig
 fig lsp
 fig version
 ```
 
 Release archives are published at `https://github.com/mewhhaha/fig/releases` with `SHA256SUMS`.
+
+Use `--compile-profile` with `check`, `wat`, `build`, or `run` to print compiler phase timings.
+Use `--runtime-profile` with `run` to collect `@profile("label") { ... }` sites. Debug builds keep
+`@trace("message");` statements available to `fig run`; release builds erase trace statements.
 
 ## Type Function Surface
 
@@ -43,8 +55,8 @@ Type functions currently cover several compile-time concepts:
 
 - Layout constructors: products, sums, aliases, function types, shape types, and counted inline
   arrays.
-- Direct data declarations for fixed layouts, such as `type Point = struct {x: i32, y: i32}` and
-  `type Option(a) = union {None, Some(value: a)}`.
+- Type declaration sugar for fixed layouts, such as `type Point = struct {x: i32, y: i32}` and
+  `type Option(a) = union {None, Some(value: a)}`, plus `type fn` for computed layouts.
 - Static reflection: product/sum/alias checks, slot lookup, variant lookup, and attached member
   lookup.
 - Static contracts: `@require`-checked proofs such as `Eq(t)`, `Functor(t)`, `Droppable(t)`, and

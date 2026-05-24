@@ -92,9 +92,10 @@ Generated grammar/parser updates require `deno task codegen`.
 
 ## Source Files and Modules
 
-Write Fig files with `.fig` extension. a program is a sequence of declarations:
+Write Fig files with `.fig` extension. A program is a sequence of declarations:
 
 - `type fn` declarations for compile-time type functions.
+- `type` declaration sugar for fixed product, sum, and alias layouts.
 - `const` declarations for compile-time constants, dictionaries, host IO imports, and imports.
 - `fn` or `pub fn` declarations for value functions.
 - Top-level `let` declarations for simple Values.
@@ -206,7 +207,7 @@ locals with `let`. Let statements require semicolons.
 
 ## Pattern Matching and Ordered Clauses
 
-Use `match` for variants, literals, and ordered pattern dispatch. a `match` expression has one
+Use `match` for variants, literals, and ordered pattern dispatch. A `match` expression has one
 scrutinee expression and ordered arms. Patterns support `_`, literals, lowercase bindings,
 PascalCase variant names, and variant payload deconstruction:
 
@@ -256,7 +257,7 @@ type fn InlineArray(n: count, a: type) -> type {
 }
 ```
 
-Indexing a fixed inline array with a literal is bounds-Checked. Dynamic indexing requires an
+Indexing a fixed inline array with a literal is bounds-checked. Dynamic indexing requires an
 `Index(N)` proof type matching the array length; otherwise use a checked helper that returns an
 `option`.
 
@@ -300,8 +301,7 @@ When choosing a type-function pattern:
 - If you intend to require behavior on a type, write a contract `type fn` with `@require` and
   attached members such as `t::eql`, `t::append`, or `t::map`.
 - If you intend generic runtime helpers with no runtime proof cost, pass
-  `const _proof:
-  contract(t)` and call attached members through `t::member(...)`.
+  `const _proof: contract(t)` and call attached members through `t::member(...)`.
 - If you intend to abstract over a unary type constructor, accept `t: type fn(a: type) -> type`, use
   values as `t(a)`, and reflect members on `t`.
 - If you intend type-directed construction or dispatch, pass the type as `const t` or
@@ -311,6 +311,12 @@ When choosing a type-function pattern:
   static dispatch.
 - If you intend static layout/count specialization, use `const n: count`, `const a: type`, or
   another `const` parameter.
+
+Use `_` as an inferred type hole only where a local expression provides the concrete type: function
+returns, local or top-level `let`/`const` annotations, nested annotations such as `Box(_)`, and
+supported do-strategy value positions. Do not use `_` in parameters, external signatures,
+type-function bodies, contracts, product fields, or other positions without an expression-backed
+source of inference.
 
 ## Static Reflection and Shape Builtins
 
@@ -415,8 +421,8 @@ pub fn main() -> i32 {
 }
 ```
 
-Do notation requires the strategy to spell the effect at its declared arity. Use `_` only for the
-value type argument inferred by the block:
+Do notation requires the strategy to spell the effect at its declared arity. Use `_` for value type
+arguments inferred by the block:
 
 ```fig
 pub fn from_option() -> Option(i32) {
@@ -435,8 +441,8 @@ pub fn from_state(world: World) -> State(World, World) {
 ```
 
 Do not write bare or partial strategies such as `do @monad(Box)`, `do @monad(Option)`, or
-`do @monad(State(World))`. `_` is not a general type annotation placeholder; it is accepted only as
-a direct argument inside a do-strategy type call.
+`do @monad(State(World))`. State-threaded strategies still need a concrete state argument, such as
+`State(World, _)` rather than `State(_, _)`.
 
 Define applicative-like types with `map`, `pure`, and `apply`:
 
@@ -557,7 +563,7 @@ Product-return destructuring uses multi-bind:
 let first, second = make_pair();
 ```
 
-The arity must match the flattened product Result.
+The binder count must match the flattened product result slots.
 
 ## Effects and Capabilities
 

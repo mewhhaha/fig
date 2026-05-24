@@ -1,7 +1,7 @@
 # Fig Syntax
 
-Fig source files use the `.fig` extension. a program is a sequence of `type fn`, `contract fn`,
-`const`, `fn`, `pub fn`, and top-level `let` declarations.
+Fig source files use the `.fig` extension. A program is a sequence of `type`, `type fn`,
+`contract fn`, `const`, `fn`, `pub fn`, and top-level `let` declarations.
 
 ## Names
 
@@ -151,15 +151,21 @@ Top-level `let` binds a simple value:
 ```fig
 let size = 4;
 let value: i32 = 1;
+let inferred: _ = 1;
 ```
+
+`_` in a top-level or local `let`/`const` annotation asks the checker to fill the concrete type
+from the initializer.
 
 ## Functions and Parameters
 
 Functions use `fn name(params) -> Type { ... }`. `pub fn` exports through the WebAssembly backend
-and must include an explicit return type.
+and must include an explicit return annotation; `-> _` is accepted when the body resolves to a
+concrete exportable type.
 
 ```fig
 fn add(a: i32, b: i32) -> i32 { a + b }
+fn inferred() -> _ { 1 }
 pub fn main() -> i32 { add(40, 2) }
 ```
 

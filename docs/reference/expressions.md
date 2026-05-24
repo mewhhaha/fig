@@ -130,19 +130,18 @@ do @monad(Box) { ... }          // invalid: missing Box value argument
 do @monad(State(World)) { ... } // invalid: State has arity 2
 ```
 
-`_` is not a general type placeholder. It is only valid as a direct argument inside a do-strategy
-type call, and state-threaded `do` blocks require the state argument to be concrete, such as
-`State(World, _)` rather than `State(_, _)`.
-
-The `_` annotation can also be used for local value bindings when the initializer determines the
-type:
+`_` can also appear in expression-backed type annotations when the body or initializer determines
+the concrete type:
 
 ```fig
+fn next() -> _ { 1 }
 let next: _ = current + 1;
+let wrapped: Box(_) = Box {value: 1};
 ```
 
-It remains invalid for function parameters or other positions where there is no expected type or
-initializer to infer from.
+It remains invalid for function parameters or other positions where there is no local body,
+initializer, or do-block value type to infer from. State-threaded `do` blocks still require the state
+argument to be concrete, such as `State(World, _)` rather than `State(_, _)`.
 
 ## Local Bindings and Destructuring
 
@@ -222,7 +221,7 @@ swapped
 ```
 
 Angle-bracket collection literals are target-typed and lower through collector members on the
-expected type. a spread can append a tail collection when the expected collector supports it:
+expected type. A spread can append a tail collection when the expected collector supports it:
 
 ```fig
 let tail: Layout.InlineArrayList(3, i32) = #[1, 2, 3];

@@ -20,6 +20,8 @@ fixtures under `tests/fixtures/language` when behavior and prose disagree.
 7. [Modules](reference/modules.md) summarizes the roles of prelude, web, and engine modules.
 8. [Examples](EXAMPLES.md) pairs tested good and bad examples with the reason each bad pattern
    fails.
+9. [Pattern Guides](guides/README.md) explain how to reproduce idiomatic Rust, Haskell, and Zig
+   patterns in Fig.
 
 For the longer-term type-system and optimizer direction around refined `i32(...)` domains, recursion
 analysis, and type-directed partial evaluation, see
