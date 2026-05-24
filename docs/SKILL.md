@@ -575,15 +575,20 @@ pub fn main(host: io) -> io(i32) {
 ```
 
 Host imports take the `io` executor value explicitly and lower to Wasm imports from module `env`.
-Use typed `prelude.effect` rows such as `effect.Eff({state: Store, reader: Env}, A)` for
-library-level reader/state effect modeling, and handle them with `run_state` and `run_reader`.
+Under the default `memory-v1` ABI, compound host import params/results cross as `i32` handles and
+are described by the emitted `fig.abi.v1` custom section. Use typed `prelude.effect` rows such as
+`effect.Eff({state: Store, reader: Env}, A)` for library-level reader/state effect modeling, and
+handle them with `run_state` and `run_reader`.
 
 ## Heap Runtime Intrinsics
 
-The backend targets WebAssembly and uses internal branch memories for heap values: `fig_objects` and
-`fig_buffers`. Public Fig code should model data as values and fixed inline arrays; explicit
-source-level memory tokens, pointer wrappers, and memory load/store intrinsics are no longer part of
-the language surface.
+The backend targets WebAssembly and uses branch memories for heap values and the public memory ABI:
+`fig_objects` and `fig_buffers`. Public Fig code should model data as values and fixed inline
+arrays; explicit source-level memory tokens, pointer wrappers, and memory load/store intrinsics are
+no longer part of the language surface. Host embeddings should use the ABI manifest and exported
+helpers (`fig_alloc_object`, `fig_alloc_buffer`, `fig_retain`, `fig_release`) rather than relying on
+flattened product slots. `--abi legacy-flat` remains available for old backend tests and transition
+work.
 
 Compiler-recognized branch intrinsics such as `@branch_handle`, `@branch_mark`, and
 `@branch_ensure_editable` may appear behind narrow internal wrappers while the runtime scaffold is

@@ -1,5 +1,8 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { watFromSource } from "../src/mod.ts";
+import { type CompileSourceOptions, watFromSource as watFromSourceRaw } from "../src/mod.ts";
+
+const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  watFromSourceRaw(source, { abiMode: "legacy-flat", ...options });
 
 Deno.test("golden WAT for arithmetic main", async () => {
   assertEquals(

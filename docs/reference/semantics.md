@@ -132,10 +132,26 @@ Prefer the browser and Deno supported subset when adding backend behavior. Heap-
 collections and allocation-backed append APIs are intentionally not part of the current standard
 prelude. Use fixed inline arrays and host IO imports for lower-level work.
 
-The Branch-Bit runtime uses multiple internal memories for ordinary heap values: object data and
-large byte buffers. Branch code emits `fig_objects` and `fig_buffers` memories and currently packs
-branch handles as an `i64` whose high 32 bits are zero and low 32 bits contain the object pointer.
-The old source-facing exported `memory` ABI is not part of Fig's public value model.
+The default public Wasm ABI is `memory-v1`. Scalar values stay in ordinary Wasm params and results.
+Products, fixed inline arrays, strings, heap arrays, sums, and any other value that needs more than
+one scalar slot cross public `pub fn` exports and `@external` imports as `i32` handles into
+`fig_objects`. The compiler emits a `fig.abi.v1` custom section that describes public exports,
+host imports, value layouts, memories, and helper names. Host code can parse that manifest or use
+the TypeScript helpers `instantiateFig`, `encodeFigValue`, and `decodeFigValue`.
+
+`fig_objects` stores object headers followed by flattened payload fields. The current header is
+`layout_id`, `payload_bytes`, `flags`, and `ref_count`, each a little-endian `i32`; payload fields
+start 16 bytes after the handle. String payload slots store a pointer to a `fig_buffers` UTF-8 byte
+buffer. `fig_buffers` uses the same header shape for byte buffers with layout id zero. The runtime
+exports `fig_abi_version`, `fig_alloc_object`, `fig_alloc_buffer`, `fig_retain`, and `fig_release`
+when a module needs ABI heap passing. The allocators are bump allocators and grow the target memory
+when the next object no longer fits.
+
+Internally, Branch-Bit code can still use flattened locals and branch heap handles. Branch code
+emits `fig_objects` and `fig_buffers` memories and currently packs internal branch handles as an
+`i64` whose high 32 bits are zero and low 32 bits contain the object pointer. The old source-facing
+exported `memory` ABI is not part of Fig's public value model; backend users that need the previous
+flat public calling convention can compile with `--abi legacy-flat`.
 
 ## Temporal Compatibility
 

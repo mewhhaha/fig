@@ -1,5 +1,17 @@
 # Fig Good and Bad Examples
 
+## Runnable Examples
+
+The `examples/` directory contains checked and runnable programs. These files are especially useful
+for comparing Fig against familiar Haskell and Zig patterns:
+
+| Example                                  | Pattern explored                                                                  |
+| ---------------------------------------- | --------------------------------------------------------------------------------- |
+| `haskell_validation_pipeline.fig`        | Functor/Applicative/Monad members, independent applicative combination, and dependent monadic flow. |
+| `haskell_reader_state_program.fig`       | Reader configuration, State updates, and monadic sequencing.                      |
+| `zig_comptime_record_layout.fig`         | Type reflection, shape filtering/mapping, and compile-time layout checks.         |
+| `zig_static_matrix_schedule.fig`         | Count-parameterized arrays, operation configuration, and static schedule metadata. |
+
 In a source checkout, the examples in `tests/fixtures/language` are compiled by
 `tests/language_reference_examples_test.ts`. Good fixtures must pass `checkSource`; bad fixtures
 must fail with the diagnostic code in their first line.

@@ -1,6 +1,13 @@
-import { checkSource, formatSource, wasmFromSource, watFromSource } from "./mod.ts";
+import {
+  checkSource,
+  compileArtifactsFromSource,
+  decodeFigValue,
+  formatSource,
+  wasmFromSource,
+  watFromSource,
+} from "./mod.ts";
 import { CompileError, formatDiagnostic } from "./diagnostics.ts";
-import type { MemoryModel } from "./backend.ts";
+import type { AbiMode, MemoryModel } from "./backend.ts";
 import { OPTIMIZE_PROFILES, type OptimizeProfileName, type OptMode } from "./optimize.ts";
 import { runStdioServer } from "./lsp/server.ts";
 import { FIG_VERSION } from "./version.ts";
@@ -16,7 +23,7 @@ export interface CliIo {
 }
 
 const USAGE =
-  "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--release|--release-fast-compile] [--profile name] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]\n       fig lsp\n       fig version";
+  "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory temporal|branch-debug|branch] [--abi memory-v1|legacy-flat] [--release|--release-fast-compile] [--profile name] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]\n       fig lsp\n       fig version";
 
 class UsageError extends Error {}
 
@@ -145,8 +152,11 @@ async function runCliUnchecked(args: string[], io: CliIo): Promise<void> {
 
   if (cmd === "run") {
     const source = await io.readTextFile(file);
-    const wasm = await wasmFromSource(source, compileOptions(file, commandRest, io));
-    const module = new WebAssembly.Module(wasm);
+    const artifact = await compileArtifactsFromSource(source, {
+      ...compileOptions(file, commandRest, io),
+      includeWat: false,
+    });
+    const module = new WebAssembly.Module(artifact.wasm);
     const imports = WebAssembly.Module.imports(module);
     if (imports.length) {
       const names = imports.map((item) => `${item.module}.${item.name}`).join(", ");
@@ -155,7 +165,12 @@ async function runCliUnchecked(args: string[], io: CliIo): Promise<void> {
     const instance = new WebAssembly.Instance(module);
     const main = instance.exports.main;
     if (typeof main !== "function") throw new Error("missing exported main");
-    io.stdout(String(main()));
+    const raw = main();
+    const mainAbi = artifact.abi?.exports.find((item) => item.name === "main");
+    const result = mainAbi?.results[0] && artifact.abi
+      ? decodeFigValue(artifact.abi, instance, mainAbi.results[0].type, raw)
+      : raw;
+    io.stdout(typeof result === "object" ? JSON.stringify(result) : String(result));
     return;
   }
 
@@ -166,6 +181,7 @@ function compileOptions(file: string, args: string[], io: CliIo) {
   return {
     resolveModule: moduleResolver(file, io),
     memoryModel: parseMemoryModel(args),
+    abiMode: parseAbiMode(args),
     optMode: parseOptMode(args),
     profile: parseOptimizeProfile(args),
     branchHints: parseBranchHints(args),
@@ -187,6 +203,14 @@ function parseMemoryModel(args: string[]): MemoryModel | undefined {
   const value = eq ? eq.slice("--memory=".length) : args[args.indexOf("--memory") + 1];
   if (!value || args.indexOf("--memory") < 0 && !eq) return undefined;
   if (value === "temporal" || value === "branch-debug" || value === "branch") return value;
+  usage();
+}
+
+function parseAbiMode(args: string[]): AbiMode | undefined {
+  const eq = args.find((arg) => arg.startsWith("--abi="));
+  const value = eq ? eq.slice("--abi=".length) : args[args.indexOf("--abi") + 1];
+  if (!value || args.indexOf("--abi") < 0 && !eq) return undefined;
+  if (value === "memory-v1" || value === "legacy-flat") return value;
   usage();
 }
 

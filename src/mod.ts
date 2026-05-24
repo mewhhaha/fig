@@ -10,6 +10,7 @@ import {
   type BackendOptions,
   emitWasm,
   emitWat,
+  type FigAbiManifest,
   lowerProgramToBackendArtifact,
   wasmFromBackendModule,
   watFromBackendModule,
@@ -37,6 +38,22 @@ import { CompileError, type Diagnostic } from "./diagnostics.ts";
 import { copyAstMetadata, hideAstMetadata } from "./ast_meta.ts";
 import type { CompilerPluginOptions } from "./plugins.ts";
 import type { CompileTraceSink } from "./trace.ts";
+
+export {
+  decodeFigValue,
+  encodeFigValue,
+  instantiateFig,
+  parseFigAbiManifest,
+  type FigInstance,
+} from "./abi.ts";
+export type {
+  AbiMode,
+  FigAbiFunction,
+  FigAbiLayout,
+  FigAbiLayoutField,
+  FigAbiManifest,
+  FigAbiValue,
+} from "./backend.ts";
 
 export interface ModuleSource {
   text: string;
@@ -92,6 +109,7 @@ export interface CompileArtifactTimings {
 export interface CompileArtifactsResult {
   wat?: string;
   wasm: Uint8Array<ArrayBuffer>;
+  abi?: FigAbiManifest;
   checked: ReturnType<typeof checkProgram>;
   timings: CompileArtifactTimings;
   trace?: CheckTrace;
@@ -267,6 +285,7 @@ async function compileArtifactsFromSourceImpl(
   return {
     ...(wat !== undefined ? { wat } : {}),
     wasm,
+    ...(backend.abi ? { abi: backend.abi } : {}),
     checked,
     timings: {
       parseMs,

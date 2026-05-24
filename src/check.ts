@@ -1226,27 +1226,11 @@ function lowerDoExpression(
   }
   const finalExpr = trailingExprStmt?.value ?? lowerDoChild(expr.expr!, shadowedDoNames);
   if (strategy === "applicative") {
-    const binds = loweredStatements.filter((stmt) => stmt.kind === "do_bind");
-    if (binds.length > 1) {
-      if (!hasDoEffectMember(functionNames, effect, "bind")) {
-        diagnostics.push({
-          code: "do.applicative_unsupported",
-          message:
-            "@applicative do with multiple <- bindings currently requires bind on the effect",
-          span: expr.span,
-        });
-      }
-      return withDoStrategyProof(
-        expr.strategy.effect,
-        strategy,
-        monadicDo(effect, loweredStatements, finalExpr),
-        types,
-      );
-    }
+    validateApplicativeDoDependencies(loweredStatements, diagnostics);
     return withDoStrategyProof(
       expr.strategy.effect,
       strategy,
-      applicativeDo(effect, loweredStatements, finalExpr),
+      applicativeDo(effect, loweredStatements, finalExpr, diagnostics, expr.span),
       types,
     );
   }
@@ -1444,7 +1428,7 @@ function validateDoStrategyEvidence(
   span?: Span,
 ) {
   if (!functionNames) return;
-  const required = strategy === "monad" ? ["bind", "pure"] : ["map", "pure"];
+  const required = strategy === "monad" ? ["bind", "pure"] : ["map", "pure", "apply"];
   const missing = required.filter((member) =>
     !hasDoEffectMember(functionNames, runtimeEffect, member)
   );
@@ -1927,32 +1911,177 @@ function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): 
   return { kind: "block", statements: [head], expr: monadicDo(effect, tail, finalExpr) };
 }
 
-function applicativeDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
-  const [head, ...tail] = statements;
-  if (!head) return finalExpr;
-  if (head.kind === "do_bind") {
-    return callExpr(`${effect}::map`, [
-      {
-        kind: "const_fn",
-        params: [head.name],
-        body: monadicDo(effect, tail, finalExpr),
-        allowCaptures: true,
-      },
-      head.value,
-    ]);
+function validateApplicativeDoDependencies(
+  statements: DoStatement[],
+  diagnostics: Diagnostic[],
+) {
+  const derived = new Set<string>();
+  for (const stmt of statements) {
+    if (stmt.kind === "do_bind" || stmt.kind === "do_expr") {
+      const refs = new Set<string>();
+      collectExprRefs(stmt.value, refs, new Set());
+      const dependency = firstSetIntersection(refs, derived);
+      if (dependency) {
+        diagnostics.push({
+          code: "do.applicative_dependency",
+          message:
+            `@applicative action cannot depend on previous applicative binding ${dependency}`,
+          span: stmt.span,
+        });
+      }
+      if (stmt.kind === "do_bind") derived.add(stmt.name);
+      continue;
+    }
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+      const refs = new Set<string>();
+      collectExprRefs(stmt.value, refs, new Set());
+      if (firstSetIntersection(refs, derived)) {
+        for (const name of doBoundNames(stmt)) derived.add(name);
+      }
+    }
   }
-  if (head.kind === "do_expr") {
-    return callExpr(`${effect}::bind`, [
-      head.value,
-      {
-        kind: "const_fn",
-        params: ["_"],
-        body: applicativeDo(effect, tail, finalExpr),
-        allowCaptures: true,
-      },
-    ]);
+}
+
+function applicativeDo(
+  effect: string,
+  statements: DoStatement[],
+  finalExpr: Expr,
+  diagnostics: Diagnostic[],
+  span?: Span,
+): Expr {
+  const analysis = applicativeDoAnalysis(statements);
+  const pureValue = applicativePureValue(finalExpr, effect);
+  let finalValue = pureValue;
+  const actions = [...analysis.actions];
+  if (!actions.length) return blockWithStatements(analysis.outerStatements, finalExpr);
+  if (!finalValue) {
+    const refs = new Set<string>();
+    collectExprRefs(finalExpr, refs, new Set());
+    const dependency = firstSetIntersection(refs, analysis.derivedNames);
+    if (dependency) {
+      diagnostics.push({
+        code: "do.applicative_return",
+        message:
+          `@applicative final expression depends on ${dependency}; wrap the return value with pure(...)`,
+        span: finalExpr.span ?? span,
+      });
+      return blockWithStatements(analysis.outerStatements, finalExpr);
+    }
+    const name = freshApplicativeName("__do_applicative_final", statements, finalExpr);
+    actions.push({ name, value: finalExpr });
+    finalValue = { kind: "var", name };
   }
-  return { kind: "block", statements: [head], expr: applicativeDo(effect, tail, finalExpr) };
+  const body: Expr = analysis.innerStatements.length
+    ? { kind: "block", statements: analysis.innerStatements, expr: finalValue }
+    : finalValue;
+  const lowered = applicativeActionChain(effect, actions, body);
+  return analysis.outerStatements.length
+    ? { kind: "block", statements: analysis.outerStatements, expr: lowered }
+    : lowered;
+}
+
+function blockWithStatements(statements: Statement[], expr: Expr): Expr {
+  return statements.length ? { kind: "block", statements, expr } : expr;
+}
+
+function applicativeDoAnalysis(statements: DoStatement[]): {
+  actions: { name: string; value: Expr }[];
+  outerStatements: Statement[];
+  innerStatements: Statement[];
+  derivedNames: Set<string>;
+} {
+  const actions: { name: string; value: Expr }[] = [];
+  const outerStatements: Statement[] = [];
+  const innerStatements: Statement[] = [];
+  const derivedNames = new Set<string>();
+  let discardIndex = 0;
+  for (const stmt of statements) {
+    if (stmt.kind === "do_bind") {
+      actions.push({ name: stmt.name, value: stmt.value });
+      derivedNames.add(stmt.name);
+      continue;
+    }
+    if (stmt.kind === "do_expr") {
+      actions.push({ name: `__do_applicative_discard${discardIndex++}`, value: stmt.value });
+      continue;
+    }
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+      const refs = new Set<string>();
+      collectExprRefs(stmt.value, refs, new Set());
+      if (firstSetIntersection(refs, derivedNames)) {
+        innerStatements.push(stmt);
+        for (const name of doBoundNames(stmt)) derivedNames.add(name);
+      } else {
+        outerStatements.push(stmt);
+      }
+      continue;
+    }
+    outerStatements.push(stmt);
+  }
+  return { actions, outerStatements, innerStatements, derivedNames };
+}
+
+function applicativePureValue(expr: Expr, effect: string): Expr | undefined {
+  if (expr.kind !== "call" || expr.args.length !== 1 || expr.callee.kind !== "var") {
+    return undefined;
+  }
+  const name = expr.callee.name;
+  if (name === "pure" || name === `${effect}::pure` || name === `${effect}.pure`) {
+    return expr.args[0];
+  }
+  return undefined;
+}
+
+function applicativeActionChain(
+  effect: string,
+  actions: { name: string; value: Expr }[],
+  body: Expr,
+): Expr {
+  const [first, ...rest] = actions;
+  if (!first) return body;
+  let combined = callExpr(`${effect}::map`, [
+    curriedConstFn(actions.map((action) => action.name), body),
+    first.value,
+  ]);
+  for (const action of rest) {
+    combined = callExpr(`${effect}::apply`, [combined, action.value]);
+  }
+  return combined;
+}
+
+function curriedConstFn(params: string[], body: Expr): Expr {
+  const [head, ...tail] = params;
+  if (!head) return body;
+  return {
+    kind: "const_fn",
+    params: [head],
+    body: curriedConstFn(tail, body),
+    allowCaptures: true,
+  };
+}
+
+function firstSetIntersection(left: Set<string>, right: Set<string>): string | undefined {
+  for (const value of left) {
+    if (right.has(value)) return value;
+  }
+  return undefined;
+}
+
+function freshApplicativeName(prefix: string, statements: DoStatement[], finalExpr: Expr): string {
+  const used = new Set<string>();
+  for (const stmt of statements) {
+    for (const name of doBoundNames(stmt)) used.add(name);
+    if (stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let") {
+      collectExprRefs(stmt.value, used, new Set());
+    } else if (stmt.kind === "destructure_let") {
+      collectExprRefs(stmt.value, used, new Set());
+    }
+  }
+  collectExprRefs(finalExpr, used, new Set());
+  let name = prefix;
+  let index = 0;
+  while (used.has(name)) name = `${prefix}${++index}`;
+  return name;
 }
 
 function callExpr(name: string, args: Expr[]): Expr {

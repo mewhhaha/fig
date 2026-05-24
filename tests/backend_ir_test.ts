@@ -5,7 +5,17 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "jsr:@std/assert@1";
-import { wasmFromSource, watFromSource } from "../src/mod.ts";
+import {
+  wasmFromSource as wasmFromSourceRaw,
+  watFromSource as watFromSourceRaw,
+  type CompileSourceOptions,
+} from "../src/mod.ts";
+
+const legacyAbi = { abiMode: "legacy-flat" as const };
+const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  watFromSourceRaw(source, { ...legacyAbi, ...options });
+const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  wasmFromSourceRaw(source, { ...legacyAbi, ...options });
 
 const resolveModule = async (moduleName: string) => {
   try {

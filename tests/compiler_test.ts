@@ -1,16 +1,18 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import {
   checkSource,
-  compileArtifactsFromSource,
+  compileArtifactsFromSource as compileArtifactsFromSourceRaw,
   COMPILER_PLUGIN_API_VERSION,
   type CompileTraceEvent,
-  compileWasmFromSource,
+  compileWasmFromSource as compileWasmFromSourceRaw,
   createCompileCache,
   createCompilerPluginRegistry,
   parse,
   tokenize,
-  wasmFromSource,
-  watFromSource,
+  wasmFromSource as wasmFromSourceRaw,
+  watFromSource as watFromSourceRaw,
+  type CompileArtifactsOptions,
+  type CompileSourceOptions,
 } from "../src/mod.ts";
 import {
   explainOptimization,
@@ -47,6 +49,19 @@ const resolveProjectModule = async (moduleName: string) => {
     return undefined;
   }
 };
+
+const legacyAbi = { abiMode: "legacy-flat" as const };
+const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  watFromSourceRaw(source, { ...legacyAbi, ...options });
+const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  wasmFromSourceRaw(source, { ...legacyAbi, ...options });
+const compileWasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  compileWasmFromSourceRaw(source, { ...legacyAbi, ...options });
+const compileArtifactsFromSource = ((source: string, options: CompileArtifactsOptions = {}) =>
+  (compileArtifactsFromSourceRaw as (
+    source: string,
+    options: CompileArtifactsOptions,
+  ) => unknown)(source, { ...legacyAbi, ...options })) as typeof compileArtifactsFromSourceRaw;
 
 async function assertFirstDiagnosticSpanIncludes(
   source: string,
@@ -4323,7 +4338,8 @@ Deno.test("do applicative supports query-style bind then final expression", asyn
         `
     type fn Query(a: type) -> type { a }
     fn Query::pure(value: a) -> Query(a) { value }
-    fn Query::map(const f: fn(x: a) -> Query(b), value: Query(a)) -> Query(b) { f(value) }
+    fn Query::map(const f: fn(x: a) -> b, value: Query(a)) -> Query(b) { f(value) }
+    fn Query::apply(value: Query(fn(x: a) -> b), arg: Query(a)) -> Query(b) { value(arg) }
     fn each(query: i32) -> Query(i32) { query }
     pub fn main() -> i32 {
       do @applicative(Query(_)) {
@@ -4339,15 +4355,15 @@ Deno.test("do applicative supports query-style bind then final expression", asyn
   assertEquals((instance.exports.main as CallableFunction)(), 5);
 });
 
-Deno.test("do applicative supports multiple query-style binds when effect has bind", async () => {
+Deno.test("do applicative supports multiple independent binds with apply", async () => {
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
       await wasmFromSource(
         `
     type fn Query(a: type) -> type { a }
     fn Query::pure(value: a) -> Query(a) { value }
-    fn Query::map(const f: fn(x: a) -> Query(b), value: Query(a)) -> Query(b) { f(value) }
-    fn Query::bind(value: Query(a), const f: fn(x: a) -> Query(b)) -> Query(b) { f(value) }
+    fn Query::map(const f: fn(x: a) -> b, value: Query(a)) -> Query(b) { f(value) }
+    fn Query::apply(value: Query(fn(x: a) -> b), arg: Query(a)) -> Query(b) { value(arg) }
     fn each(query: i32) -> Query(i32) { query }
     pub fn main() -> i32 {
       do @applicative(Query(_)) {
@@ -4364,6 +4380,76 @@ Deno.test("do applicative supports multiple query-style binds when effect has bi
   assertEquals((instance.exports.main as CallableFunction)(), 10);
 });
 
+Deno.test("do applicative rejects dependent action binds", async () => {
+  const source = `
+    type fn Query(a: type) -> type { a }
+    fn Query::pure(value: a) -> Query(a) { value }
+    fn Query::map(const f: fn(x: a) -> b, value: Query(a)) -> Query(b) { f(value) }
+    fn Query::apply(value: Query(fn(x: a) -> b), arg: Query(a)) -> Query(b) { value(arg) }
+    fn each(query: i32) -> Query(i32) { query }
+    pub fn main() -> i32 {
+      do @applicative(Query(_)) {
+        x <- each(4);
+        y <- each(x);
+        pure(x + y)
+      }
+    }
+  `;
+  await assertThrowsCompile(source, "do.applicative_dependency");
+});
+
+Deno.test("do applicative rejects transitive dependent action binds", async () => {
+  const source = `
+    type fn Query(a: type) -> type { a }
+    fn Query::pure(value: a) -> Query(a) { value }
+    fn Query::map(const f: fn(x: a) -> b, value: Query(a)) -> Query(b) { f(value) }
+    fn Query::apply(value: Query(fn(x: a) -> b), arg: Query(a)) -> Query(b) { value(arg) }
+    fn each(query: i32) -> Query(i32) { query }
+    pub fn main() -> i32 {
+      do @applicative(Query(_)) {
+        x <- each(4);
+        let k = x + 1;
+        y <- each(k);
+        pure(x + y)
+      }
+    }
+  `;
+  await assertThrowsCompile(source, "do.applicative_dependency");
+});
+
+Deno.test("do applicative requires pure for dependent final values", async () => {
+  const source = `
+    type fn Query(a: type) -> type { a }
+    fn Query::pure(value: a) -> Query(a) { value }
+    fn Query::map(const f: fn(x: a) -> b, value: Query(a)) -> Query(b) { f(value) }
+    fn Query::apply(value: Query(fn(x: a) -> b), arg: Query(a)) -> Query(b) { value(arg) }
+    fn each(query: i32) -> Query(i32) { query }
+    pub fn main() -> i32 {
+      do @applicative(Query(_)) {
+        x <- each(4);
+        x + 1
+      }
+    }
+  `;
+  await assertThrowsCompile(source, "do.applicative_return");
+});
+
+Deno.test("do applicative requires apply evidence", async () => {
+  const source = `
+    type fn Query(a: type) -> type { a }
+    fn Query::pure(value: a) -> Query(a) { value }
+    fn Query::map(const f: fn(x: a) -> b, value: Query(a)) -> Query(b) { f(value) }
+    fn each(query: i32) -> Query(i32) { query }
+    pub fn main() -> i32 {
+      do @applicative(Query(_)) {
+        x <- each(4);
+        pure(x)
+      }
+    }
+  `;
+  await assertThrowsCompile(source, "do.missing_strategy_proof");
+});
+
 Deno.test("anonymous record values infer structural product types", async () => {
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -4371,7 +4457,8 @@ Deno.test("anonymous record values infer structural product types", async () => 
         `
     type fn Query(a: type) -> type { a }
     fn Query::pure(value: a) -> Query(a) { value }
-    fn Query::map(const f: fn(x: a) -> Query(b), value: Query(a)) -> Query(b) { f(value) }
+    fn Query::map(const f: fn(x: a) -> b, value: Query(a)) -> Query(b) { f(value) }
+    fn Query::apply(value: Query(fn(x: a) -> b), arg: Query(a)) -> Query(b) { value(arg) }
     fn each(value: i32) -> Query(i32) { value }
     type fn SlotsOk(row: type) -> type {
       let Slots = @type_slots(row);

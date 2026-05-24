@@ -1,5 +1,5 @@
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
-import { checkSource, wasmFromSource, watFromSource } from "../src/mod.ts";
+import { checkSource, decodeFigValue, instantiateFig, wasmFromSource, watFromSource } from "../src/mod.ts";
 
 const resolveModule = async (moduleName: string) => {
   try {
@@ -93,11 +93,10 @@ Deno.test("engine playground release build handles generated ECS systems", async
 
 Deno.test("engine playground frame builds, ticks, and renders visible sprites", async () => {
   const source = await Deno.readTextFile("examples/engine_playground.fig");
-  const module = new WebAssembly.Module(await wasmFromSource(source, { resolveModule }));
   const drawCalls: number[][] = [];
   let began = 0;
   let presented = 0;
-  const instance = new WebAssembly.Instance(module, {
+  const fig = await instantiateFig(await wasmFromSource(source, { resolveModule }), {
     env: {
       tick_millis: () => 16,
       input_axis_x: () => 1,
@@ -123,12 +122,17 @@ Deno.test("engine playground frame builds, ticks, and renders visible sprites", 
       event_poll: () => 0,
     },
   });
+  const instance = fig.instance;
   assertEquals((instance.exports.playground_world_len as () => number)(), 2);
   assertEquals((instance.exports.playground_probe as (host: number) => number)(0), 8);
-  const frame = (instance.exports.main as (host: number) => number[])(0);
-  assertEquals(frame[0], 20);
-  assertEquals(frame[5], 2);
-  assertEquals(frame[48], 8);
+  const frameHandle = (instance.exports.main as (host: number) => number)(0);
+  const frame = decodeFigValue(fig.abi, instance, "RenderBatch", frameHandle) as Record<
+    string,
+    number
+  >;
+  assertEquals(frame["items$0$x"], 20);
+  assertEquals(frame["items$0$rgba"], 2);
+  assertEquals(frame.len, 8);
   const rendered = (instance.exports.render_frame as (
     host: number,
     target: number,
@@ -163,6 +167,22 @@ Deno.test("prelude effect examples run", async () => {
     ["examples/prelude_reader_config.fig", 42],
     ["examples/prelude_state_counter.fig", 42],
     ["examples/prelude_reader_state_common.fig", 42],
+  ]);
+  for (const [file, value] of expected) {
+    const source = await Deno.readTextFile(file);
+    const instance = new WebAssembly.Instance(
+      new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+    );
+    assertEquals((instance.exports.main as CallableFunction)(), value);
+  }
+});
+
+Deno.test("Haskell and Zig inspired examples run", async () => {
+  const expected = new Map([
+    ["examples/haskell_validation_pipeline.fig", 55],
+    ["examples/haskell_reader_state_program.fig", 42],
+    ["examples/zig_comptime_record_layout.fig", 37],
+    ["examples/zig_static_matrix_schedule.fig", 134],
   ]);
   for (const [file, value] of expected) {
     const source = await Deno.readTextFile(file);

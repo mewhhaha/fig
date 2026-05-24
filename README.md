@@ -101,12 +101,21 @@ and parameters where possible. Reusing a value usually becomes additional `local
 not a runtime copy. Update-heavy fixed data paths use new flattened values and rely on Wasm locals,
 tail-loop lowering, specialization, and SIMD pattern recognition for performance.
 
-The Branch-Bit heap ABI uses separate Wasm memories named `fig_objects` and `fig_buffers` for heap
-objects and large byte buffers. Transitional branch handles are `i64` values whose high 32 bits are
-zero and whose low 32 bits contain the object pointer. Heap object headers store `type_id`,
-`size_or_len`, and `flags`; writes go through copy-before-write when an object is branched or
-pinned. The previous Temporal runtime scaffold remains available behind `--memory temporal` for
-compatibility testing and additionally exports `fig_logs` for revision/undo metadata.
+The default public Wasm ABI is `memory-v1`. Scalars cross `pub fn` exports and `@external` imports
+directly; products, fixed inline arrays, strings, heap arrays, sums, and wider flattened values
+cross as `i32` handles into `fig_objects`. Modules that need handle passing include a `fig.abi.v1`
+custom section plus helpers such as `fig_alloc_object`, `fig_alloc_buffer`, `fig_retain`, and
+`fig_release`. The TypeScript API exports `instantiateFig`, `encodeFigValue`, and `decodeFigValue`
+for host-side calls into Fig modules, including UTF-8 string slots stored through `fig_buffers`.
+
+The Branch-Bit heap runtime uses separate Wasm memories named `fig_objects` and `fig_buffers` for
+heap objects and large byte buffers. Transitional internal branch handles are `i64` values whose
+high 32 bits are zero and whose low 32 bits contain the object pointer. Heap object headers store
+`layout_id`, payload size, flags, and refcount; writes go through copy-before-write when an object
+is branched or pinned. The previous Temporal runtime scaffold remains available behind
+`--memory temporal` for compatibility testing and additionally exports `fig_logs` for revision/undo
+metadata. Compile with `--abi legacy-flat` when comparing against the previous flat public Wasm
+calling convention.
 
 ## Performance Layout Sketches
 

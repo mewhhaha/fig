@@ -58,6 +58,8 @@ export interface BackendModule {
   functions: BackendFunction[];
   memories: BackendMemory[];
   data: BackendData[];
+  customSections?: BackendCustomSection[];
+  abi?: FigAbiManifest;
   branchHints: boolean;
 }
 
@@ -84,6 +86,11 @@ interface BackendData {
   bytes: number[];
 }
 
+interface BackendCustomSection {
+  name: string;
+  bytes: number[];
+}
+
 interface BackendImport {
   name: string;
   importName?: string;
@@ -107,6 +114,59 @@ interface BackendLocal {
 
 type ValueType = "i32" | "i64" | "f32" | "f64" | "v128";
 
+export type AbiMode = "memory-v1" | "legacy-flat";
+
+export interface FigAbiManifest {
+  name: "fig.memory.v1";
+  version: 1;
+  target: "wasm32-core-3-browser";
+  mode: AbiMode;
+  pointer: "i32";
+  endian: "little";
+  memories: { name: string; exportName: string; minPages: number }[];
+  helpers: {
+    version: "fig_abi_version";
+    allocObject: "fig_alloc_object";
+    allocBuffer: "fig_alloc_buffer";
+    retain: "fig_retain";
+    release: "fig_release";
+  };
+  exports: FigAbiFunction[];
+  imports: FigAbiFunction[];
+  layouts: FigAbiLayout[];
+}
+
+export interface FigAbiFunction {
+  name: string;
+  params: FigAbiValue[];
+  results: FigAbiValue[];
+}
+
+export interface FigAbiValue {
+  name?: string;
+  type: string;
+  passing: "direct" | "handle";
+  wat: ValueType[];
+  layoutId?: number;
+}
+
+export interface FigAbiLayout {
+  id: number;
+  type: string;
+  kind: "scalar" | "record";
+  size: number;
+  align: number;
+  fields: FigAbiLayoutField[];
+}
+
+export interface FigAbiLayoutField {
+  name: string;
+  type: string;
+  wat: ValueType;
+  offset: number;
+  size: number;
+}
+
 const I32_MIN = -0x8000_0000;
 const I32_MAX = 0x7fff_ffff;
 
@@ -123,6 +183,8 @@ type Instr =
   | { op: "simd"; wasm: SimdOp; lane?: number; lanes?: number[] }
   | { op: "load"; type: ValueType; align: number; offset: number; memory?: string }
   | { op: "store"; type: ValueType; align: number; offset: number; memory?: string }
+  | { op: "memory.size"; memory?: string }
+  | { op: "memory.grow"; memory?: string }
   | { op: "memory.copy"; memory?: string }
   | { op: "drop" }
   | { op: "unreachable" }
@@ -249,6 +311,7 @@ export type MemoryModel = "temporal" | "branch-debug" | "branch";
 export interface BackendOptions extends CompilerPluginOptions {
   tailCallMode?: TailCallMode;
   memoryModel?: MemoryModel;
+  abiMode?: AbiMode;
   optMode?: OptMode;
   profile?: OptimizeProfileName | OptimizeProfile;
   branchHints?: boolean;
@@ -364,6 +427,13 @@ function backendFixedArrayPlanning(
       message: `unknown memory model ${memoryModel}`,
     }]);
   }
+  const abiMode = options.abiMode ?? "memory-v1";
+  if (!isAbiMode(abiMode)) {
+    throw new CompileError([{
+      code: "backend.abi_mode",
+      message: `unknown ABI mode ${abiMode}`,
+    }]);
+  }
   const optMode = options.optMode ?? "debug";
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   if (pluginRegistry.diagnostics.length) throw new CompileError([...pluginRegistry.diagnostics]);
@@ -466,6 +536,13 @@ export function lowerProgramToBackendArtifact(
     throw new CompileError([{
       code: "backend.memory_model",
       message: `unknown memory model ${memoryModel}`,
+    }]);
+  }
+  const abiMode = options.abiMode ?? "memory-v1";
+  if (!isAbiMode(abiMode)) {
+    throw new CompileError([{
+      code: "backend.abi_mode",
+      message: `unknown ABI mode ${abiMode}`,
     }]);
   }
   const optMode = options.optMode ?? "debug";
@@ -572,32 +649,66 @@ export function lowerProgramToBackendArtifact(
     functions.some((fn) => usesBranchIntrinsic(fn.body, ctx.functions));
   const needsHeapMemory = closureDescriptors.length > 0 ||
     functions.some((fn) => usesHeapArrayIntrinsic(fn.body, ctx.functions));
+  const needsAbiMemory = abiMode === "memory-v1" &&
+    (functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, ctx.layouts)) ||
+      imports.some((fn) => functionNeedsMemoryAbi(fn, ctx.layouts)));
   if (memoryModel !== "temporal" && needsTemporalMemory) {
     throw new CompileError([{
       code: "backend.temporal_in_branch_mode",
       message: `temporal intrinsics are only available with --memory temporal`,
     }]);
   }
-  const module = {
-    imports: imports.map((fn) => ({
-      name: fn.name,
-      importName: fn.externalName,
-      params: fn.params.flatMap((param) =>
-        flattenType(param.type, layouts).map((slot) => slot.wat)
-      ),
-      results: flattenType(fn.returnType, layouts).map((slot) => slot.wat),
-    })),
-    functions: removeUnreachableBackendFunctions(backendFunctions),
-    memories: backendMemories(
+  const rawMemories = needsAbiMemory
+    ? ensureAbiMemories(backendMemories(
+      memoryModel,
+      needsTemporalMemory,
+      needsBranchMemory,
+      needsScratchMemory,
+      true,
+    ))
+    : backendMemories(
       memoryModel,
       needsTemporalMemory,
       needsBranchMemory,
       needsScratchMemory,
       needsHeapMemory,
-    ),
+    );
+  const abiManifest = createFigAbiManifest(
+    abiMode,
+    rawMemories,
+    functions,
+    imports,
+    ctx.layouts,
+  );
+  const abiFunctions = abiMode === "memory-v1"
+    ? memoryAbiRuntimeFunctions(ctx.layouts, functions, imports)
+    : [];
+  const module = {
+    imports: imports.map((fn) => {
+      const wrappedImport = abiMode === "memory-v1" && functionNeedsMemoryAbi(fn, layouts);
+      return {
+        name: wrappedImport ? abiImportRawName(fn.name) : fn.name,
+        importName: fn.externalName,
+        params: wrappedImport
+          ? fn.params.flatMap((param) => abiParamWat(param.type, layouts))
+          : fn.params.flatMap((param) => flattenType(param.type, layouts).map((slot) => slot.wat)),
+        results: wrappedImport
+          ? abiResultWat(fn.returnType, layouts)
+          : flattenType(fn.returnType, layouts).map((slot) => slot.wat),
+      };
+    }),
+    functions: abiMode === "memory-v1"
+      ? memoryAbiWrappedFunctions(removeUnreachableBackendFunctions(backendFunctions), functions, imports, ctx)
+      : removeUnreachableBackendFunctions(backendFunctions),
+    memories: rawMemories,
     data: [],
+    customSections: abiMode === "memory-v1" ? [figAbiCustomSection(abiManifest)] : [],
+    abi: abiManifest,
     branchHints: options.branchHints ?? optMode === "release",
   };
+  if (abiFunctions.length) {
+    module.functions = [...module.functions, ...abiFunctions];
+  }
   const cleanupMs = performance.now() - cleanupStart;
   return {
     module,
@@ -649,6 +760,477 @@ function backendMemories(
 
 function isMemoryModel(value: string): value is MemoryModel {
   return value === "temporal" || value === "branch-debug" || value === "branch";
+}
+
+function isAbiMode(value: string): value is AbiMode {
+  return value === "memory-v1" || value === "legacy-flat";
+}
+
+function ensureAbiMemories(memories: BackendMemory[]): BackendMemory[] {
+  const byName = new Map(memories.map((memory) => [memory.name, memory]));
+  const objects = byName.get("fig_objects") ?? { ...BRANCH_MEMORIES[0]!, minPages: HEAP_MIN_PAGES };
+  const buffers = byName.get("fig_buffers") ?? BRANCH_MEMORIES[1]!;
+  const ordered = [
+    { ...objects, minPages: Math.max(objects.minPages, HEAP_MIN_PAGES) },
+    buffers,
+  ];
+  for (const memory of memories) {
+    if (memory.name !== "fig_objects" && memory.name !== "fig_buffers") ordered.push(memory);
+  }
+  return ordered;
+}
+
+function abiImportRawName(name: string): string {
+  return `__fig_import_${name}`;
+}
+
+function functionNeedsMemoryAbi(fn: FnDecl, layouts: LayoutEnv): boolean {
+  return fn.params.some((param) => abiPassing(param.type, layouts) === "handle") ||
+    abiPassing(fn.returnType, layouts) === "handle";
+}
+
+function abiParamWat(type: string | undefined, layouts: LayoutEnv): ValueType[] {
+  return abiPassing(type, layouts) === "handle"
+    ? ["i32"]
+    : flattenType(type, layouts).map((slot) => slot.wat);
+}
+
+function abiResultWat(type: string | undefined, layouts: LayoutEnv): ValueType[] {
+  return abiPassing(type, layouts) === "handle"
+    ? ["i32"]
+    : flattenType(type, layouts).map((slot) => slot.wat);
+}
+
+function abiPassing(type: string | undefined, layouts: LayoutEnv): "direct" | "handle" {
+  if (typeNeedsMemoryAbiValue(type, layouts)) return "handle";
+  const stripped = stripBorrowType(type)?.trim();
+  if (!stripped) return "direct";
+  const resolved = resolveAlias(stripped, layouts) ?? stripped;
+  if (parseBackendFnSignature(resolved)) return "direct";
+  if (isPrimitiveType(resolved) || parseRefinedI32Type(resolved)) return "direct";
+  return flattenType(stripped, layouts).length > 1 ? "handle" : "direct";
+}
+
+function typeNeedsMemoryAbiValue(
+  type: string | undefined,
+  layouts: LayoutEnv,
+  seen = new Set<string>(),
+): boolean {
+  const stripped = stripBorrowType(type)?.trim();
+  if (!stripped || seen.has(stripped)) return false;
+  seen.add(stripped);
+  const resolved = resolveAlias(stripped, layouts) ?? stripped;
+  if (resolved !== stripped && typeNeedsMemoryAbiValue(resolved, layouts, seen)) return true;
+  if (resolved === "string") return true;
+  if (parseBackendFnSignature(resolved)) return false;
+  if (typeCallArgs(resolved, "HeapArray") !== undefined) return true;
+  const decl = layouts.types.get(typeName(resolved));
+  if (decl?.normalized?.kind === "product" || decl?.normalized?.kind === "sum") return true;
+  const open = resolved.indexOf("(");
+  if (open > 0 && resolved.endsWith(")")) {
+    const args = splitTypeArgs(resolved.slice(open + 1, -1));
+    if (args.some((arg) => typeNeedsMemoryAbiValue(arg, layouts, seen))) return true;
+  }
+  return false;
+}
+
+function memoryAbiWrappedFunctions(
+  backendFunctions: BackendFunction[],
+  sourceFns: FnDecl[],
+  imports: FnDecl[],
+  ctx: LowerContext,
+): BackendFunction[] {
+  const publicByName = new Map(sourceFns.filter(isCurrentModulePublic).map((fn) => [fn.name, fn]));
+  const rewritten = backendFunctions.map((fn) => {
+    const source = publicByName.get(fn.name);
+    return source && functionNeedsMemoryAbi(source, ctx.layouts) ? { ...fn, exportName: undefined } : fn;
+  });
+  const publicWrappers = sourceFns
+    .filter((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, ctx.layouts))
+    .map((fn) => memoryAbiExportWrapper(fn, ctx));
+  const importWrappers = imports
+    .filter((fn) => functionNeedsMemoryAbi(fn, ctx.layouts))
+    .map((fn) => memoryAbiImportWrapper(fn, ctx));
+  return [...rewritten, ...importWrappers, ...publicWrappers];
+}
+
+function memoryAbiExportWrapper(fn: FnDecl, ctx: LowerContext): BackendFunction {
+  const params = fn.params.flatMap((param) =>
+    abiPassing(param.type, ctx.layouts) === "handle"
+      ? [{ name: param.name, type: "i32" as const }]
+      : flattenBinding(param.name, param.type, ctx.layouts).map((slot) => ({
+        name: slot.name,
+        type: slot.wat,
+      }))
+  );
+  const locals: BackendLocal[] = [];
+  const body: Instr[] = [];
+  for (const param of fn.params) {
+    if (abiPassing(param.type, ctx.layouts) === "handle") {
+      body.push(...abiDecodeHandle(param.name, param.type, ctx.layouts));
+    } else {
+      for (const slot of flattenBinding(param.name, param.type, ctx.layouts)) {
+        body.push({ op: "local.get", name: slot.name });
+      }
+    }
+  }
+  body.push({ op: "call", name: fn.name });
+  const resultType = fn.returnType;
+  if (abiPassing(resultType, ctx.layouts) === "handle") {
+    body.push(...abiEncodeStackResult(resultType, ctx.layouts, locals, `__abi_ret`));
+  }
+  return {
+    name: `__fig_abi_export_${fn.name}`,
+    exportName: fn.name,
+    params,
+    results: abiResultWat(fn.returnType, ctx.layouts),
+    locals,
+    body,
+  };
+}
+
+function memoryAbiImportWrapper(fn: FnDecl, ctx: LowerContext): BackendFunction {
+  const params = fn.params.flatMap((param) =>
+    flattenBinding(param.name, param.type, ctx.layouts).map((slot) => ({
+      name: slot.name,
+      type: slot.wat,
+    }))
+  );
+  const locals: BackendLocal[] = [];
+  const body: Instr[] = [];
+  for (const param of fn.params) {
+    if (abiPassing(param.type, ctx.layouts) === "handle") {
+      const slots = flattenBinding(param.name, param.type, ctx.layouts);
+      for (const slot of slots) body.push({ op: "local.get", name: slot.name });
+      body.push(...abiEncodeStackResult(param.type, ctx.layouts, locals, `__abi_arg_${param.name}`));
+    } else {
+      for (const slot of flattenBinding(param.name, param.type, ctx.layouts)) {
+        body.push({ op: "local.get", name: slot.name });
+      }
+    }
+  }
+  body.push({ op: "call", name: abiImportRawName(fn.name) });
+  if (abiPassing(fn.returnType, ctx.layouts) === "handle") {
+    const handle = `__abi_import_result${locals.length}`;
+    locals.push({ name: handle, type: "i32" });
+    body.push({ op: "local.set", name: handle });
+    body.push(...abiDecodeHandle(handle, fn.returnType, ctx.layouts));
+  }
+  return {
+    name: fn.name,
+    params,
+    results: flattenType(fn.returnType, ctx.layouts).map((slot) => slot.wat),
+    locals,
+    body,
+  };
+}
+
+function abiDecodeHandle(handleName: string, type: string | undefined, layouts: LayoutEnv): Instr[] {
+  const layout = abiLayoutForType(type, layouts);
+  return layout.fields.map((field): Instr[] => [
+    { op: "local.get", name: handleName },
+    { op: "load", type: field.wat, align: Math.min(field.size, 8), offset: ABI_OBJECT_HEADER_SIZE + field.offset, memory: "fig_objects" },
+  ]).flat();
+}
+
+function abiEncodeStackResult(
+  type: string | undefined,
+  layouts: LayoutEnv,
+  locals: BackendLocal[],
+  prefix: string,
+): Instr[] {
+  const layout = abiLayoutForType(type, layouts);
+  const valueLocals = layout.fields.map((field, index) => ({
+    name: `${prefix}_${index}`,
+    type: field.wat,
+    field,
+  }));
+  const ptr = `${prefix}_ptr`;
+  locals.push(...valueLocals.map((item) => ({ name: item.name, type: item.type })));
+  locals.push({ name: ptr, type: "i32" });
+  return [
+    ...valueLocals.toReversed().map((item): Instr => ({ op: "local.set", name: item.name })),
+    { op: "const", type: "i32", value: signedI32Const(layout.id) },
+    { op: "const", type: "i32", value: layout.size },
+    { op: "call", name: "fig_alloc_object" },
+    { op: "local.tee", name: ptr },
+    ...valueLocals.flatMap((item): Instr[] => [
+      { op: "local.get", name: ptr },
+      { op: "local.get", name: item.name },
+      {
+        op: "store",
+        type: item.type,
+        align: Math.min(item.field.size, 8),
+        offset: ABI_OBJECT_HEADER_SIZE + item.field.offset,
+        memory: "fig_objects",
+      },
+    ]),
+  ];
+}
+
+const ABI_OBJECT_HEADER_SIZE = 16;
+
+function memoryAbiRuntimeFunctions(_layouts: LayoutEnv, functions: FnDecl[], imports: FnDecl[]): BackendFunction[] {
+  const needsAbi = functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, _layouts)) ||
+    imports.some((fn) => functionNeedsMemoryAbi(fn, _layouts));
+  if (!needsAbi) return [];
+  return [
+    figAbiVersionFunction(),
+    figAllocObjectFunction(),
+    figAllocBufferFunction(),
+    figRetainFunction("fig_retain", 1),
+    figRetainFunction("fig_release", -1),
+  ];
+}
+
+function figAbiVersionFunction(): BackendFunction {
+  return {
+    name: "fig_abi_version",
+    exportName: "fig_abi_version",
+    params: [],
+    results: ["i32"],
+    locals: [],
+    body: [{ op: "const", type: "i32", value: 1 }],
+  };
+}
+
+function figAllocObjectFunction(): BackendFunction {
+  return figAllocInMemoryFunction("fig_alloc_object", "fig_objects", true);
+}
+
+function figAllocBufferFunction(): BackendFunction {
+  return figAllocInMemoryFunction("fig_alloc_buffer", "fig_buffers", false);
+}
+
+function figAllocInMemoryFunction(
+  name: string,
+  memory: string,
+  hasLayoutId: boolean,
+): BackendFunction {
+  const sizeValue = hasLayoutId ? "payload_bytes" : "byte_len";
+  return {
+    name,
+    exportName: name,
+    params: [
+      ...(hasLayoutId ? [{ name: "layout_id", type: "i32" as const }] : []),
+      { name: sizeValue, type: "i32" },
+    ],
+    results: ["i32"],
+    locals: [
+      { name: "size", type: "i32" },
+      { name: "current", type: "i32" },
+      { name: "next", type: "i32" },
+      { name: "pages", type: "i32" },
+    ],
+    body: [
+      { op: "local.get", name: sizeValue },
+      { op: "const", type: "i32", value: ABI_OBJECT_HEADER_SIZE + 15 },
+      { op: "binary", wasm: "i32.add" },
+      { op: "const", type: "i32", value: -16 },
+      { op: "binary", wasm: "i32.and" },
+      { op: "local.set", name: "size" },
+      { op: "const", type: "i32", value: 0 },
+      { op: "load", type: "i32", align: 4, offset: 0, memory },
+      { op: "local.tee", name: "current" },
+      { op: "const", type: "i32", value: 0 },
+      { op: "binary", wasm: "i32.eq" },
+      {
+        op: "if",
+        results: ["i32"],
+        thenBody: [{ op: "const", type: "i32", value: 16 }],
+        elseBody: [{ op: "local.get", name: "current" }],
+      },
+      { op: "local.set", name: "current" },
+      { op: "local.get", name: "current" },
+      { op: "local.get", name: "size" },
+      { op: "binary", wasm: "i32.add" },
+      { op: "local.set", name: "next" },
+      { op: "memory.size", memory },
+      { op: "local.tee", name: "pages" },
+      { op: "const", type: "i32", value: 16 },
+      { op: "binary", wasm: "i32.shl" },
+      { op: "local.get", name: "next" },
+      { op: "binary", wasm: "i32.lt_u" },
+      {
+        op: "if",
+        results: [],
+        thenBody: [
+          { op: "local.get", name: "next" },
+          { op: "const", type: "i32", value: 0xffff },
+          { op: "binary", wasm: "i32.add" },
+          { op: "const", type: "i32", value: 16 },
+          { op: "binary", wasm: "i32.shr_u" },
+          { op: "local.get", name: "pages" },
+          { op: "binary", wasm: "i32.sub" },
+          { op: "memory.grow", memory },
+          { op: "const", type: "i32", value: -1 },
+          { op: "binary", wasm: "i32.eq" },
+          {
+            op: "if",
+            results: [],
+            thenBody: [{ op: "unreachable" }],
+            elseBody: [],
+          },
+        ],
+        elseBody: [],
+      },
+      { op: "const", type: "i32", value: 0 },
+      { op: "local.get", name: "next" },
+      { op: "store", type: "i32", align: 4, offset: 0, memory },
+      ...(hasLayoutId
+        ? [
+          { op: "local.get", name: "current" } as Instr,
+          { op: "local.get", name: "layout_id" } as Instr,
+          { op: "store", type: "i32", align: 4, offset: 0, memory } as Instr,
+        ]
+        : [
+          { op: "local.get", name: "current" } as Instr,
+          { op: "const", type: "i32", value: 0 } as Instr,
+          { op: "store", type: "i32", align: 4, offset: 0, memory } as Instr,
+        ]),
+      { op: "local.get", name: "current" },
+      { op: "local.get", name: sizeValue },
+      { op: "store", type: "i32", align: 4, offset: 4, memory },
+      { op: "local.get", name: "current" },
+      { op: "const", type: "i32", value: 0 },
+      { op: "store", type: "i32", align: 4, offset: 8, memory },
+      { op: "local.get", name: "current" },
+      { op: "const", type: "i32", value: 1 },
+      { op: "store", type: "i32", align: 4, offset: 12, memory },
+      { op: "local.get", name: "current" },
+    ],
+  };
+}
+
+function figRetainFunction(name: string, delta: number): BackendFunction {
+  return {
+    name,
+    exportName: name,
+    params: [{ name: "ptr", type: "i32" }],
+    results: ["i32"],
+    locals: [{ name: "count", type: "i32" }],
+    body: [
+      { op: "local.get", name: "ptr" },
+      { op: "const", type: "i32", value: 0 },
+      { op: "binary", wasm: "i32.eq" },
+      {
+        op: "if",
+        results: ["i32"],
+        thenBody: [{ op: "const", type: "i32", value: 0 }],
+        elseBody: [
+          { op: "local.get", name: "ptr" },
+          { op: "load", type: "i32", align: 4, offset: 12, memory: "fig_objects" },
+          { op: "const", type: "i32", value: delta },
+          { op: "binary", wasm: "i32.add" },
+          { op: "local.set", name: "count" },
+          { op: "local.get", name: "ptr" },
+          { op: "local.get", name: "count" },
+          { op: "store", type: "i32", align: 4, offset: 12, memory: "fig_objects" },
+          { op: "local.get", name: "ptr" },
+        ],
+      },
+    ],
+  };
+}
+
+function createFigAbiManifest(
+  mode: AbiMode,
+  memories: BackendMemory[],
+  functions: FnDecl[],
+  imports: FnDecl[],
+  layouts: LayoutEnv,
+): FigAbiManifest {
+  const layoutById = new Map<number, FigAbiLayout>();
+  const value = (type: string | undefined, name?: string): FigAbiValue => {
+    const passing = mode === "memory-v1" ? abiPassing(type, layouts) : "direct";
+    const layout = abiLayoutForType(type, layouts);
+    layoutById.set(layout.id, layout);
+    return {
+      ...(name ? { name } : {}),
+      type: type ?? "i32",
+      passing,
+      wat: passing === "handle" ? ["i32"] : flattenType(type, layouts).map((slot) => slot.wat),
+      ...(passing === "handle" ? { layoutId: layout.id } : {}),
+    };
+  };
+  return {
+    name: "fig.memory.v1",
+    version: 1,
+    target: "wasm32-core-3-browser",
+    mode,
+    pointer: "i32",
+    endian: "little",
+    memories: memories.map((memory) => ({
+      name: memory.name,
+      exportName: memory.exportName,
+      minPages: memory.minPages,
+    })),
+    helpers: {
+      version: "fig_abi_version",
+      allocObject: "fig_alloc_object",
+      allocBuffer: "fig_alloc_buffer",
+      retain: "fig_retain",
+      release: "fig_release",
+    },
+    exports: functions.filter(isCurrentModulePublic).map((fn) => ({
+      name: fn.name,
+      params: fn.params.map((param) => value(param.type, param.name)),
+      results: fn.returnType ? [value(fn.returnType)] : [],
+    })),
+    imports: imports.map((fn) => ({
+      name: fn.externalName ?? fn.name,
+      params: fn.params.map((param) => value(param.type, param.name)),
+      results: fn.returnType ? [value(fn.returnType)] : [],
+    })),
+    layouts: [...layoutById.values()].toSorted((left, right) => left.id - right.id),
+  };
+}
+
+function abiLayoutForType(type: string | undefined, layouts: LayoutEnv): FigAbiLayout {
+  const fields: FigAbiLayoutField[] = [];
+  let offset = 0;
+  let align = 4;
+  for (const slot of flattenType(type, layouts)) {
+    const size = valueTypeByteSize(slot.wat);
+    const slotAlign = Math.min(size, 8);
+    offset = alignTo(offset, slotAlign);
+    align = Math.max(align, slotAlign);
+    fields.push({
+      name: slot.suffix || "value",
+      type: slot.type,
+      wat: slot.wat,
+      offset,
+      size,
+    });
+    offset += size;
+  }
+  const size = alignTo(offset, align);
+  const rendered = type ?? "i32";
+  return {
+    id: stableAbiLayoutId(rendered, fields),
+    type: rendered,
+    kind: fields.length === 1 && fields[0]?.name === "value" ? "scalar" : "record",
+    size,
+    align,
+    fields,
+  };
+}
+
+function stableAbiLayoutId(type: string, fields: FigAbiLayoutField[]): number {
+  const source = JSON.stringify({ type, fields: fields.map(({ name, type, wat, offset, size }) => ({ name, type, wat, offset, size })) });
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < source.length; index++) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function figAbiCustomSection(manifest: FigAbiManifest): BackendCustomSection {
+  return {
+    name: "fig.abi.v1",
+    bytes: Array.from(new TextEncoder().encode(JSON.stringify(manifest))),
+  };
 }
 
 function inferTailParamScalarFacts(functions: FnDecl[]): Map<string, Map<string, ScalarFacts>> {
@@ -12380,6 +12962,10 @@ function emitInstrWat(
           watMemidx(instr.memory)
         } align=${instr.align} offset=${instr.offset}`,
       ];
+    case "memory.size":
+      return [`${prefix}memory.size${watMemidx(instr.memory)}`];
+    case "memory.grow":
+      return [`${prefix}memory.grow${watMemidx(instr.memory)}`];
     case "memory.copy":
       return [`${prefix}memory.copy${watMemidx(instr.memory)}`];
     case "drop":
@@ -12483,6 +13069,9 @@ export function backendModuleToWasm(
       vecItems(module.memories.map((memory) => [0x00, ...uleb(memory.minPages)])),
     );
   }
+  for (const custom of module.customSections ?? []) {
+    section(bytes, 0, [...nameBytes(custom.name), ...custom.bytes]);
+  }
   const exports = module.functions.filter((fn) => fn.exportName).map((fn) => [
     ...nameBytes(fn.exportName ?? fn.name),
     0x00,
@@ -12494,8 +13083,9 @@ export function backendModuleToWasm(
   }
   if (exports.length) section(bytes, 7, vecItems(exports));
   if (module.functions.length) {
+    const memoryIndex = new Map(module.memories.map((memory, index) => [memory.name, index]));
     const encodedFunctions = module.functions.map((fn, index) =>
-      encodeFunction(fn, module.imports.length + index, funcIndex, typeKeys)
+      encodeFunction(fn, module.imports.length + index, funcIndex, typeKeys, memoryIndex)
     );
     if (module.branchHints) {
       const branchHintSection = wasmBranchHintSection(encodedFunctions);
@@ -12611,6 +13201,7 @@ function encodeFunction(
   functionIndex: number,
   funcIndex: Map<string, number>,
   typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
 ): { bytes: number[]; branchHints: FunctionBranchHints } {
   const localIndex = new Map<string, number>();
   [...fn.params, ...fn.locals].forEach((slot, index) => localIndex.set(slot.name, index));
@@ -12622,12 +13213,13 @@ function encodeFunction(
       localIndex,
       funcIndex,
       typeKeys,
+      memoryIndex,
       locals.length,
     );
   } catch (error) {
     if (!(error instanceof RangeError && /call stack/i.test(error.message))) throw error;
     encoded = {
-      bytes: encodeInstrs(fn.body, localIndex, funcIndex, typeKeys),
+      bytes: encodeInstrs(fn.body, localIndex, funcIndex, typeKeys, memoryIndex),
       hints: [],
     };
   }
@@ -12657,6 +13249,7 @@ function encodeInstrsWithBranchHints(
   locals: Map<string, number>,
   funcIndex: Map<string, number>,
   typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
   startOffset: number,
 ): { bytes: number[]; hints: BranchHintEntry[] } {
   const bytes: number[] = [];
@@ -12666,7 +13259,7 @@ function encodeInstrsWithBranchHints(
     if ((instr.op === "if" || instr.op === "br_if") && instr.branchHint) {
       hints.push({ offset, hint: instr.branchHint });
     }
-    const encoded = encodeInstrWithBranchHints(instr, locals, funcIndex, typeKeys, offset);
+    const encoded = encodeInstrWithBranchHints(instr, locals, funcIndex, typeKeys, memoryIndex, offset);
     bytes.push(...encoded.bytes);
     hints.push(...encoded.hints);
   }
@@ -12678,6 +13271,7 @@ function encodeInstrWithBranchHints(
   locals: Map<string, number>,
   funcIndex: Map<string, number>,
   typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
   offset: number,
 ): { bytes: number[]; hints: BranchHintEntry[] } {
   if (instr.op === "if") {
@@ -12687,6 +13281,7 @@ function encodeInstrWithBranchHints(
       locals,
       funcIndex,
       typeKeys,
+      memoryIndex,
       offset + prefix.length,
     );
     const elseOffset = offset + prefix.length + thenEncoded.bytes.length + 1;
@@ -12695,6 +13290,7 @@ function encodeInstrWithBranchHints(
       locals,
       funcIndex,
       typeKeys,
+      memoryIndex,
       elseOffset,
     );
     return {
@@ -12712,11 +13308,12 @@ function encodeInstrWithBranchHints(
       locals,
       funcIndex,
       typeKeys,
+      memoryIndex,
       offset + prefix.length,
     );
     return { bytes: [...prefix, ...body.bytes, 0x0b], hints: body.hints };
   }
-  return { bytes: encodeInstr(instr, locals, funcIndex, typeKeys), hints: [] };
+  return { bytes: encodeInstr(instr, locals, funcIndex, typeKeys, memoryIndex), hints: [] };
 }
 
 function encodeInstrs(
@@ -12724,8 +13321,9 @@ function encodeInstrs(
   locals: Map<string, number>,
   funcIndex: Map<string, number>,
   typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
 ): number[] {
-  return instrs.flatMap((instr) => encodeInstr(instr, locals, funcIndex, typeKeys));
+  return instrs.flatMap((instr) => encodeInstr(instr, locals, funcIndex, typeKeys, memoryIndex));
 }
 
 function encodeInstr(
@@ -12733,6 +13331,7 @@ function encodeInstr(
   locals: Map<string, number>,
   funcIndex: Map<string, number>,
   typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
 ): number[] {
   switch (instr.op) {
     case "const":
@@ -12768,11 +13367,20 @@ function encodeInstr(
     case "simd":
       return simdImmediate(instr.wasm, instr.lane, instr.lanes);
     case "load":
-      return [...wasmLoadOp(instr.type), ...memarg(instr.align, instr.offset)];
+      return [...wasmLoadOp(instr.type), ...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex))];
     case "store":
-      return [...wasmStoreOp(instr.type), ...memarg(instr.align, instr.offset)];
+      return [...wasmStoreOp(instr.type), ...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex))];
+    case "memory.size":
+      return [0x3f, ...uleb(memoryIndexFor(instr.memory, memoryIndex))];
+    case "memory.grow":
+      return [0x40, ...uleb(memoryIndexFor(instr.memory, memoryIndex))];
     case "memory.copy":
-      return [0xfc, ...uleb(0x0a), 0x00, 0x00];
+      return [
+        0xfc,
+        ...uleb(0x0a),
+        ...uleb(memoryIndexFor(instr.memory, memoryIndex)),
+        ...uleb(memoryIndexFor(instr.memory, memoryIndex)),
+      ];
     case "drop":
       return [0x1a];
     case "unreachable":
@@ -12781,23 +13389,23 @@ function encodeInstr(
       return [
         0x04,
         ...blockType(instr.results, typeKeys),
-        ...encodeInstrs(instr.thenBody, locals, funcIndex, typeKeys),
+        ...encodeInstrs(instr.thenBody, locals, funcIndex, typeKeys, memoryIndex),
         0x05,
-        ...encodeInstrs(instr.elseBody, locals, funcIndex, typeKeys),
+        ...encodeInstrs(instr.elseBody, locals, funcIndex, typeKeys, memoryIndex),
         0x0b,
       ];
     case "block":
       return [
         0x02,
         ...blockType(instr.results, typeKeys),
-        ...encodeInstrs(instr.body, locals, funcIndex, typeKeys),
+        ...encodeInstrs(instr.body, locals, funcIndex, typeKeys, memoryIndex),
         0x0b,
       ];
     case "loop":
       return [
         0x03,
         ...blockType(instr.results, typeKeys),
-        ...encodeInstrs(instr.body, locals, funcIndex, typeKeys),
+        ...encodeInstrs(instr.body, locals, funcIndex, typeKeys, memoryIndex),
         0x0b,
       ];
     case "br":
@@ -15530,6 +16138,7 @@ function wasmBinaryOp(op: string): number {
     "i32.eq": 0x46,
     "i32.ne": 0x47,
     "i32.lt_s": 0x48,
+    "i32.lt_u": 0x49,
     "i32.le_u": 0x4d,
     "i32.le_s": 0x4c,
     "i32.gt_s": 0x4a,
@@ -15588,8 +16197,15 @@ function wasmStoreOp(type: ValueType): number[] {
   throw new Error(`unsupported store type ${type}`);
 }
 
-function memarg(align: number, offset: number): number[] {
-  return [...uleb(Math.log2(align)), ...uleb(offset)];
+function memoryIndexFor(memory: string | undefined, memoryIndex: ReadonlyMap<string, number>): number {
+  if (!memory || memory === "memory") return 0;
+  return memoryIndex.get(memory) ?? 0;
+}
+
+function memarg(align: number, offset: number, memory = 0): number[] {
+  const alignLog = Math.log2(align);
+  if (memory === 0) return [...uleb(alignLog), ...uleb(offset)];
+  return [...uleb(alignLog + 0x40), ...uleb(memory), ...uleb(offset)];
 }
 
 function wasmType(wat: ValueType): number {

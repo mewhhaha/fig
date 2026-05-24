@@ -1,0 +1,68 @@
+// Haskell-style pipelines in ordinary Fig: Functor/Applicative/Monad
+// members are attached to a small identity effect, then used through do.
+
+type fn Id(a: type) -> type {
+  a
+}
+
+fn Id::map(const f: fn(x: a) -> b, value: Id(a)) -> Id(b) {
+  f(value)
+}
+
+fn Id::pure(value: a) -> Id(a) {
+  value
+}
+
+fn Id::apply(value: Id(fn(x: a) -> b), arg: Id(a)) -> Id(b) {
+  value(arg)
+}
+
+fn Id::bind(value: Id(a), const f: fn(x: a) -> Id(b)) -> Id(b) {
+  f(value)
+}
+
+fn checked_total(left: i32, right: i32) -> i32 {
+  left + right - 5
+}
+
+fn expected_total(value: i32) -> Id(i32) {
+  match value == 40 {
+    true => value,
+    false => 0,
+  }
+}
+
+fn checked_half(value: i32) -> Id(i32) {
+  match value == 40 {
+    true => 20,
+    false => 0,
+  }
+}
+
+fn add_ten(value: i32) -> i32 {
+  value + 10
+}
+
+fn functor_validation() -> Id(i32) {
+  Id::map(add_ten, 0)
+}
+
+fn independent_validation() -> Id(i32) {
+  do @applicative(Id(_)) {
+    left <- 10;
+    right <- 20;
+    pure(checked_total(left, right))
+  }
+}
+
+fn dependent_validation() -> Id(i32) {
+  do @monad(Id(_)) {
+    total <- expected_total(40);
+    half <- checked_half(total);
+    pure(half)
+  }
+}
+
+pub fn main() -> i32 {
+  independent_validation() + dependent_validation() + functor_validation()
+}
