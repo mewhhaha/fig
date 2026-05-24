@@ -25,7 +25,11 @@ import {
 } from "../src/unstable.ts";
 import { CompileError } from "../src/diagnostics.ts";
 import type { ConstDecl, Expr, FnDecl, Program, TypeDecl } from "../src/core_ast.ts";
-import type { CompilerPlugin } from "../src/plugins.ts";
+import {
+  compilerSpecialForm,
+  isCompilerSpecialForm,
+  type CompilerPlugin,
+} from "../src/plugins.ts";
 import {
   canonicalDomainKey,
   cardinality,
@@ -335,6 +339,17 @@ Deno.test("unknown plugin annotations are diagnostics after parsing", async () =
     `,
     "plugin.unknown_annotation",
   );
+});
+
+Deno.test("compiler special form classifier covers source and internal contexts", () => {
+  assertEquals(compilerSpecialForm("@import")?.kind, "declaration");
+  assertEquals(compilerSpecialForm("@applicative")?.kind, "do_strategy");
+  assertEquals(compilerSpecialForm("@assume")?.kind, "rewrite");
+  assertEquals(compilerSpecialForm("@type_slots")?.kind, "static");
+  assertEquals(compilerSpecialForm("@branch_handle")?.kind, "internal");
+  assertEquals(compilerSpecialForm("$")?.kind, "removed");
+  assertEquals(compilerSpecialForm("@branch_handle")?.sourceFacing, false);
+  assert(isCompilerSpecialForm("@external", "declaration"));
 });
 
 Deno.test("removed host capability import annotation is rejected", async () => {
@@ -3226,6 +3241,10 @@ Deno.test("rejects declaration-only compiler builtins in expressions", async () 
     'pub fn main() -> i32 { @import("prelude.core") }',
     "syntax.declaration_builtin",
   );
+  await assertThrowsCompile(
+    "pub fn main() -> i32 { const bad = @import; 1 }",
+    "syntax.declaration_builtin",
+  );
 });
 
 Deno.test("do @io unwraps IO actions and requires final IO action", async () => {
@@ -4453,9 +4472,10 @@ Deno.test("do applicative supports multiple independent binds with apply", async
     fn each(query: i32) -> Query(i32) { query }
     pub fn main() -> i32 {
       do @applicative(Query(_)) {
+        let scale = 2;
         x <- each(4);
         y <- each(6);
-        pure(x + y)
+        pure(x + y + scale)
       }
     }
   `,
@@ -4463,7 +4483,7 @@ Deno.test("do applicative supports multiple independent binds with apply", async
       ),
     ),
   );
-  assertEquals((instance.exports.main as CallableFunction)(), 10);
+  assertEquals((instance.exports.main as CallableFunction)(), 12);
 });
 
 Deno.test("do applicative rejects dependent action binds", async () => {

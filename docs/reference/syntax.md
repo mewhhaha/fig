@@ -15,6 +15,17 @@ associated contracts, for example `prelude.option.Option`, `Point::eql`, or
 `Geometry.Layout::vertex2d_i32`. Literal tags begin with `#`, for example `#field`, `#Some`, and
 `#infixl`.
 
+## Surface Shape
+
+Fig’s syntax is intentionally explicit about phase and evidence. The Zig-like part is compile-time
+computation through `type fn`, `const` parameters, static reflection, and erased proofs. The
+Haskell-like part is contracts, attached members, operators, and `do` strategies for monadic,
+applicative, and IO sequencing.
+
+There is no implicit typeclass search. Generic behavior is carried by visible contracts, proof
+constants, attached members, or fully spelled do-strategy types such as `State(World, _)`.
+Compiler-owned `@...` forms are valid only in their documented contexts.
+
 ## Contract Rewrites
 
 Compiler-facing rewrite facts use `contract fn ... -> rewrite`. This is the only rewrite declaration

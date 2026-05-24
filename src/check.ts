@@ -32,10 +32,12 @@ import { isCatchAllPattern, patternBindingNames } from "./patterns.ts";
 import { intrinsicWrapperId, isIntrinsicWrapper, isKnownIntrinsicId } from "./primitives.ts";
 import {
   annotationBranchHint,
+  compilerSpecialForm,
   type CompilerPluginOptions,
   type CompilerPluginRegistry,
   createCompilerPluginRegistry,
   defaultCompilerPluginRegistry,
+  isCompilerSpecialForm,
   isStaticBuiltinName,
   staticBuiltinName,
   staticBuiltinParamKind,
@@ -290,10 +292,11 @@ function checkReservedCompilerNames(program: Program, diagnostics: Diagnostic[])
 function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
   const checkTypeExpr = (expr: TypeExpr | undefined) => {
     if (!expr) return;
-    if (expr.kind === "type_static_ref" && isDeclarationOnlyBuiltin(expr.name)) {
+    if (expr.kind === "type_static_ref" && isCompilerSpecialForm(expr.name, "declaration")) {
+      const form = compilerSpecialForm(expr.name);
       diagnostics.push(diagnosticAt(
         "syntax.declaration_builtin",
-        `@${expr.name} is only valid as a top-level const declaration value`,
+        `${form?.spelling ?? `@${expr.name}`} is only valid as a top-level const declaration value`,
         expr,
       ));
     }
@@ -324,10 +327,11 @@ function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
         ));
         return;
       case "var":
-        if (expr.name.startsWith("@") && isDeclarationOnlyBuiltin(expr.name.slice(1))) {
+        if (expr.name.startsWith("@") && isCompilerSpecialForm(expr.name, "declaration")) {
+          const form = compilerSpecialForm(expr.name);
           diagnostics.push(diagnosticAt(
             "syntax.declaration_builtin",
-            `${expr.name} is only valid as a top-level const declaration value`,
+            `${form?.spelling ?? expr.name} is only valid as a top-level const declaration value`,
             expr,
           ));
         }
@@ -389,10 +393,6 @@ function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
       checkTypeExpr(decl.body.expr);
     }
   }
-}
-
-function isDeclarationOnlyBuiltin(name: string): boolean {
-  return name === "import" || name === "external";
 }
 
 function checkDebugTraceStatements(program: Program, diagnostics: Diagnostic[]) {

@@ -35,6 +35,7 @@ import { hideAstMetadata, stripAstMetadata } from "./ast_meta.ts";
 import { patternBindingNames } from "./patterns.ts";
 import {
   annotationBranchHint,
+  compilerSpecialForm,
   defaultCompilerPluginRegistry,
   staticBuiltinName,
 } from "./plugins.ts";
@@ -2054,11 +2055,7 @@ function firstIdentifier(node: Node): Node {
 function firstStaticBuiltinName(node: Node): Node {
   const found = named(node).find(isIdentifier);
   if (found) return found;
-  if (
-    node.type === "StaticBuiltin" &&
-    (node.text === "@import" || node.text === "@capability" || node.text === "@trace" ||
-      node.text === "@profile")
-  ) return node;
+  if (node.type === "StaticBuiltin" && compilerSpecialForm(node.text)) return node;
   return unreachable(node, "static builtin");
 }
 

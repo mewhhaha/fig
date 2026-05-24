@@ -103,6 +103,23 @@ export interface CompilerPluginOptions {
   plugins?: readonly CompilerPlugin[];
 }
 
+export type CompilerSpecialFormKind =
+  | "declaration"
+  | "static"
+  | "do_strategy"
+  | "annotation"
+  | "instrumentation"
+  | "rewrite"
+  | "internal"
+  | "removed";
+
+export interface CompilerSpecialForm {
+  name: string;
+  spelling: string;
+  kind: CompilerSpecialFormKind;
+  sourceFacing: boolean;
+}
+
 const shapeFirstArg = new Set([
   "shape_map",
   "shape_concat",
@@ -368,6 +385,93 @@ export const defaultCompilerPluginRegistry = createCompilerPluginRegistry();
 
 export function staticBuiltinName(name: string): string {
   return name.startsWith("@") ? name.slice(1) : name;
+}
+
+const exactCompilerSpecialForms = [
+  { name: "$", kind: "removed", sourceFacing: false },
+  { name: "import", kind: "declaration", sourceFacing: true },
+  { name: "external", kind: "declaration", sourceFacing: true },
+  { name: "capability", kind: "removed", sourceFacing: false },
+  { name: "io", kind: "do_strategy", sourceFacing: true },
+  { name: "monad", kind: "do_strategy", sourceFacing: true },
+  { name: "applicative", kind: "do_strategy", sourceFacing: true },
+  { name: "likely", kind: "annotation", sourceFacing: true },
+  { name: "unlikely", kind: "annotation", sourceFacing: true },
+  { name: "trace", kind: "instrumentation", sourceFacing: true },
+  { name: "profile", kind: "instrumentation", sourceFacing: true },
+  { name: "assume", kind: "rewrite", sourceFacing: true },
+  { name: "satisfies", kind: "static", sourceFacing: true },
+  { name: "field", kind: "internal", sourceFacing: false },
+  { name: "replace_field", kind: "internal", sourceFacing: false },
+  { name: "empty", kind: "internal", sourceFacing: false },
+  { name: "index_cursor_next", kind: "internal", sourceFacing: false },
+  { name: "heap_array_new", kind: "internal", sourceFacing: false },
+  { name: "heap_array_ensure_capacity", kind: "internal", sourceFacing: false },
+  { name: "heap_array_get", kind: "internal", sourceFacing: false },
+  { name: "heap_array_set", kind: "internal", sourceFacing: false },
+  { name: "heap_array_push", kind: "internal", sourceFacing: false },
+  { name: "inline_array_builder_start", kind: "internal", sourceFacing: false },
+  { name: "inline_array_builder_push", kind: "internal", sourceFacing: false },
+  { name: "inline_array_builder_finish", kind: "internal", sourceFacing: false },
+  ...coreStaticBuiltinNames.map((name) => ({
+    name,
+    kind: "static" as const,
+    sourceFacing: true,
+  })),
+] as const satisfies readonly {
+  name: string;
+  kind: CompilerSpecialFormKind;
+  sourceFacing: boolean;
+}[];
+
+const compilerSpecialFormsByName = new Map<string, CompilerSpecialForm>();
+for (const form of exactCompilerSpecialForms) {
+  compilerSpecialFormsByName.set(form.name, {
+    ...form,
+    spelling: form.name === "$" ? "$" : `@${form.name}`,
+  });
+}
+
+const prefixedCompilerSpecialForms = [
+  { prefix: "type_", kind: "static", sourceFacing: true },
+  { prefix: "shape_", kind: "static", sourceFacing: true },
+  { prefix: "type_list_", kind: "static", sourceFacing: true },
+  { prefix: "wgsl_", kind: "static", sourceFacing: true },
+  { prefix: "inline_array_", kind: "internal", sourceFacing: false },
+  { prefix: "branch_", kind: "internal", sourceFacing: false },
+] as const satisfies readonly {
+  prefix: string;
+  kind: CompilerSpecialFormKind;
+  sourceFacing: boolean;
+}[];
+
+export function compilerSpecialForm(name: string): CompilerSpecialForm | undefined {
+  const normalized = name === "$" ? "$" : staticBuiltinName(name);
+  const exact = compilerSpecialFormsByName.get(normalized);
+  if (exact) return exact;
+  const prefixed = prefixedCompilerSpecialForms.find((item) =>
+    normalized.startsWith(item.prefix)
+  );
+  return prefixed
+    ? {
+      name: normalized,
+      spelling: `@${normalized}`,
+      kind: prefixed.kind,
+      sourceFacing: prefixed.sourceFacing,
+    }
+    : undefined;
+}
+
+export function compilerSpecialFormKind(name: string): CompilerSpecialFormKind | undefined {
+  return compilerSpecialForm(name)?.kind;
+}
+
+export function isCompilerSpecialForm(
+  name: string,
+  kind?: CompilerSpecialFormKind,
+): boolean {
+  const form = compilerSpecialForm(name);
+  return !!form && (!kind || form.kind === kind);
 }
 
 export function isStaticBuiltinName(
