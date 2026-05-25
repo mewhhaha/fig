@@ -9,7 +9,13 @@ import { fail } from "./diagnostics.ts";
 type item = TokenItem | CommentItem;
 type BraceMode = "block";
 type Delimiter = "(" | "[" | "{" | "#[";
-type TopLevelDeclKind = "ConstDecl" | "TopLetDecl" | "FnDecl" | "TypeFnDecl";
+type TopLevelDeclKind =
+  | "ConstDecl"
+  | "OperatorDecl"
+  | "TopLetDecl"
+  | "FnDecl"
+  | "TypeFnDecl"
+  | "TypeSugarDecl";
 
 const MAX_LINE_WIDTH = 100;
 
@@ -48,7 +54,6 @@ const binaryOperators = new Set([
   "<$>",
   "<*>",
   ">>=",
-  "zip",
   "..",
 ]);
 
@@ -370,8 +375,9 @@ function collectTopLevelDecls(root: RuleParseNode | null, source: string): TopLe
     .map((decl) =>
       decl.children.find((child): child is RuleParseNode =>
         child.kind === "rule" &&
-        (child.name === "ConstDecl" || child.name === "TopLetDecl" || child.name === "FnDecl" ||
-          child.name === "TypeFnDecl")
+        (child.name === "ConstDecl" || child.name === "OperatorDecl" ||
+          child.name === "TopLetDecl" || child.name === "FnDecl" ||
+          child.name === "TypeFnDecl" || child.name === "TypeSugarDecl")
       )
     )
     .filter((decl): decl is RuleParseNode => !!decl)
@@ -496,6 +502,10 @@ function separate(
     return;
   }
   if (left.text === "match" && right.text === "(") {
+    writer.space();
+    return;
+  }
+  if (left.text === "const" && right.text === "(") {
     writer.space();
     return;
   }

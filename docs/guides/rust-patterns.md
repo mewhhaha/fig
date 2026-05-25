@@ -221,10 +221,7 @@ such as `Box(a)` can satisfy them by attaching `Box::map`, `Box::pure`, `Box::ap
 `Box::bind`.
 
 ```fig
-type fn Box(a: type) -> type {
-  let Box = {value: a};
-  struct(Box)
-}
+type Box(a) = struct {value: a}
 
 fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}

@@ -61,15 +61,10 @@ type Option(a) = union {None, Some(value: a)}
 Use `type fn` when the layout is computed or needs type-level control flow:
 
 ```fig
-type fn Point() -> struct {
-  let Point = {x: i32, y: i32};
-  struct(Point)
-}
-
-type fn Option(a: type) -> union {
-  let None = {};
-  let Some = {value: a};
-  union(None, Some)
+type fn RuntimeDescriptor(row: type) -> struct {
+  let Slots = @type_slots(row);
+  let RuntimeSlots = @shape_pick(Slots, {id: true, score: true});
+  struct(RuntimeSlots)
 }
 ```
 

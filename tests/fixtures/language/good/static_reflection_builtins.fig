@@ -1,32 +1,58 @@
-type fn Point() -> struct {
-  let Point = {x: i32, y: i32};
-  struct(Point)
+type Point = struct {x: i32, y: i32}
+
+type Option(a) = union {
+  None, Some(value: a)
 }
 
-type fn Option(a: type) -> union {
-  let None = {};
-  let Some = {value: a};
-  union(None, Some)
+fn Point::eql(a: Point, b: Point) -> bool {
+  a.x == b.x
 }
-
-fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
 
 type fn Reflected(t: type) -> type {
   let Expected = fn(a: Point, b: Point) -> bool;
-  @require(@type_is_product(Point), "point is product");
-  @require(@type_is_sum(Option(i32)), "option is sum");
+  @require(
+    @type_is_product(Point),
+    "point is product"
+  );
+  @require(
+    @type_is_sum(Option(i32)),
+    "option is sum"
+  );
   @require(@type_has_slot(Point, #x), "point has x");
-  @require(@type_slot_type(Point, #x) == i32, "x is i32");
-  @require(@type_has_member(Point, #eql), "point has eql");
-  @require(@type_member_type(Point, #eql) == Expected, "eql type");
-  @require(@type_has_variant(Option(i32), #Some), "option has Some");
-  @require(@type_variant_has_slot(Option(i32), #Some, #value), "Some has value");
+  @require(
+    @type_slot_type(Point, #x) == i32,
+    "x is i32"
+  );
+  @require(
+    @type_has_member(Point, #eql),
+    "point has eql"
+  );
+  @require(
+    @type_member_type(Point, #eql) == Expected,
+    "eql type"
+  );
+  @require(
+    @type_has_variant(Option(i32), #Some),
+    "option has Some"
+  );
+  @require(
+    @type_variant_has_slot(Option(i32), #Some, #value),
+    "Some has value"
+  );
   let Slots = @type_slots(Point);
   let Variants = @type_variants(Option(i32));
-  let SomeSlots = @type_variant_slots(Option(i32), #Some);
+  let SomeSlots = @type_variant_slots(
+    Option(i32),
+    #Some
+  );
   let Count = @type_slot_count(Point);
-  let Out = {Count*@shape_slot(Slots, #x), value: @shape_slot(SomeSlots, #value)};
+  let Out = {
+    Count*@shape_slot(Slots, #x),
+    value: @shape_slot(SomeSlots, #value)
+  };
   struct(Out)
 }
 
-pub fn main(value: Reflected(i32)) -> i32 { value.value }
+pub fn main(value: Reflected(i32)) -> i32 {
+  value.value
+}

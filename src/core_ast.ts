@@ -24,7 +24,7 @@ export interface ResolvedTypeHole {
   replacement: string;
 }
 
-export type Declaration = FnDecl | ContractDecl | LetDecl | ConstDecl | TypeDecl;
+export type Declaration = FnDecl | ContractDecl | LetDecl | ConstDecl | OperatorDecl | TypeDecl;
 export type BranchHint = string;
 
 export interface EffectImport extends AstNodeMeta {
@@ -108,6 +108,17 @@ export interface ConstDecl extends AstNodeMeta {
   value: Expr;
 }
 
+export interface OperatorDecl extends AstNodeMeta {
+  kind: "operator";
+  doc?: string;
+  name: string;
+  symbol: string;
+  fixity: "#infixl" | "#infixr" | "#infix";
+  precedence: number;
+  target: string;
+  imported?: boolean;
+}
+
 export interface DestructureLetDecl extends AstNodeMeta {
   kind: "destructure_let";
   names: string[];
@@ -144,7 +155,7 @@ export interface TypeDecl extends AstNodeMeta {
   clauses?: TypeDecl[];
 }
 
-export type TypeResultKind = "type" | "struct" | "union" | "operator";
+export type TypeResultKind = "type" | "struct" | "union";
 
 export type TypeParamKind =
   | "type"
@@ -180,11 +191,10 @@ export interface TypeLetDecl extends AstNodeMeta {
 export type TypeBody =
   | { kind: "alias"; type: string }
   | { kind: "product"; name: string; constructor: string; shape: ShapeType; members?: TypeMember[] }
-  | { kind: "sum"; variants: TypeVariant[]; members?: TypeMember[] }
-  | { kind: "operator"; descriptor: OperatorDescriptor };
+  | { kind: "sum"; variants: TypeVariant[]; members?: TypeMember[] };
 
 export interface OperatorDescriptor {
-  fixity: "#prefix" | "#postfix" | "#infixl" | "#infixr" | "#infix" | "#nullary";
+  fixity: "#infixl" | "#infixr" | "#infix";
   precedence: number;
   symbol: string;
   target: string;
@@ -223,9 +233,12 @@ export type TypeExpr =
   | ({ kind: "type_fn"; source: string } & AstNodeMeta)
   | ({ kind: "type_shape"; shape: TypeShape } & AstNodeMeta)
   | ({ kind: "type_match"; value: TypeExpr; arms: TypeMatchArm[] } & AstNodeMeta)
-  | ({ kind: "type_operator"; descriptor: OperatorDescriptor } & AstNodeMeta)
   | (
-    & { kind: "type_binary"; op: "==" | "!=" | "|" | ".."; left: TypeExpr; right: TypeExpr }
+    & { kind: "type_scalar_domain"; carrier: string; members: TypeScalarDomainMember[] }
+    & AstNodeMeta
+  )
+  | (
+    & { kind: "type_binary"; op: "==" | "!=" | "|"; left: TypeExpr; right: TypeExpr }
     & AstNodeMeta
   )
   | ({ kind: "type_bool"; value: boolean } & AstNodeMeta)
@@ -233,6 +246,16 @@ export type TypeExpr =
   | ({ kind: "type_char"; value: string } & AstNodeMeta)
   | ({ kind: "type_string"; value: string } & AstNodeMeta)
   | ({ kind: "type_literal"; value: string } & AstNodeMeta);
+
+export interface TypeScalarDomainMember extends AstNodeMeta {
+  start: TypeScalarDomainEndpoint;
+  end?: TypeScalarDomainEndpoint;
+}
+
+export interface TypeScalarDomainEndpoint extends AstNodeMeta {
+  kind: "literal" | "symbol";
+  source: string;
+}
 
 export interface TypeMatchArm extends AstNodeMeta {
   pattern: TypePattern;
@@ -330,7 +353,6 @@ export type Expr =
     inferredType?: string;
   } & AstNodeMeta)
   | ({ kind: "var"; name: string } & AstNodeMeta)
-  | ({ kind: "placeholder" } & AstNodeMeta)
   | (
     & {
       kind: "do";
@@ -354,6 +376,14 @@ export type Expr =
   | ({ kind: "call"; callee: Expr; args: Expr[] } & AstNodeMeta)
   | ({ kind: "index"; target: Expr; index: Expr } & AstNodeMeta)
   | ({ kind: "binary"; op: string; left: Expr; right: Expr } & AstNodeMeta)
+  | (
+    & {
+      kind: "operator_chain";
+      first: Expr;
+      rest: ({ op: string; value: Expr } & AstNodeMeta)[];
+    }
+    & AstNodeMeta
+  )
   | (
     & {
       kind: "match";

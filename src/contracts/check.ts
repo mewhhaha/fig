@@ -248,6 +248,8 @@ function exprChildren(expr: Expr): Expr[] {
       return [expr.target, expr.index];
     case "binary":
       return [expr.left, expr.right];
+    case "operator_chain":
+      return [expr.first, ...expr.rest.map((item) => item.value)];
     case "pipe_bind":
       return [expr.value, expr.body];
     case "match":
@@ -282,7 +284,6 @@ function exprChildren(expr: Expr): Expr[] {
       ];
     case "literal":
     case "var":
-    case "placeholder":
       return [];
   }
 }

@@ -6,21 +6,21 @@ fn neq_point(a: Point, b: Point) -> bool {
   a.x != b.x
 }
 
-type fn Point() {
-  let Point = {x: i32, y: i32};
-  struct(Point)
-}
+type Point = struct {x: i32, y: i32}
 
 type fn Eq(t: type) {
   let Expected = fn(a: t, b: t) -> bool;
-  @require(@type_has_member(t, #eql), "Eq requires eql");
-  @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
+  @require(
+    @type_has_member(t, #eql),
+    "Eq requires eql"
+  );
+  @require(
+    @type_member_type(t, #eql) == Expected,
+    "Eq.eql has wrong type"
+  );
 }
 
-type fn Box(a: type) -> type {
-  let Box = {value: a};
-  struct(Box)
-}
+type Box(a) = struct {value: a}
 
 fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
@@ -28,8 +28,14 @@ fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
 
 type fn Functor(t: type fn(a: type) -> type) -> type {
   let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
-  @require(@type_has_member(t, #map), "Functor requires map");
-  @require(@type_member_type(t, #map) == Expected, "Functor.map has wrong type");
+  @require(
+    @type_has_member(t, #map),
+    "Functor requires map"
+  );
+  @require(
+    @type_member_type(t, #map) == Expected,
+    "Functor.map has wrong type"
+  );
   t
 }
 
@@ -44,11 +50,24 @@ fn same(const t, const _proof: Eq(t), a: t, b: t) -> i32 {
   }
 }
 
-fn Mapper(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
+fn Mapper(
+  v: t(a),
+  const f: fn(x: a) -> b,
+  const _proof: Functor(t)
+) -> t(b) {
   t::map(f, v)
 }
 
 pub fn main() -> i32 {
-  let mapped = Mapper(Box {value: 1}, inc, Functor(Box));
-  same(Point, Eq(Point), Point {x: 1, y: 2}, Point {x: 1, y: 2}) + mapped.value
+  let mapped = Mapper(
+    Box {value: 1},
+    inc,
+    Functor(Box)
+  );
+  same(
+    Point,
+    Eq(Point),
+    Point {x: 1, y: 2},
+    Point {x: 1, y: 2}
+  ) + mapped.value
 }

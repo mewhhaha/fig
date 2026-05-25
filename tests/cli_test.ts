@@ -112,15 +112,15 @@ Deno.test("CLI compile profile reports compiler phase timings", async () => {
   assertStringIncludes(harness.stderr.join("\n"), "parse.syntax");
 });
 
-Deno.test("CLI rejects removed ABI mode flag", async () => {
+Deno.test("CLI rejects unsupported ABI mode flag", async () => {
   const harness = mockIo({ "main.fig": "pub fn main() -> i32 { 42 }" });
-  assertEquals(await runCli(["wat", "main.fig", "--abi", "removed"], harness.io), 2);
+  assertEquals(await runCli(["wat", "main.fig", "--abi", "legacy"], harness.io), 2);
   assertStringIncludes(harness.stderr.join("\n"), "usage: fig");
 });
 
-Deno.test("CLI rejects removed memory mode", async () => {
+Deno.test("CLI rejects unsupported memory mode", async () => {
   const harness = mockIo({ "main.fig": "pub fn main() -> i32 { 42 }" });
-  assertEquals(await runCli(["wat", "main.fig", "--memory", "removed"], harness.io), 2);
+  assertEquals(await runCli(["wat", "main.fig", "--memory", "legacy"], harness.io), 2);
   assertStringIncludes(harness.stderr.join("\n"), "usage: fig");
 });
 

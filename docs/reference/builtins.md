@@ -30,16 +30,15 @@ Wasm byte emission.
 The compiler classifies first-party special forms by the context where each one is valid. This keeps
 `@...` syntax explicit instead of treating all prefixed names as interchangeable builtins.
 
-| Category          | Forms                                                                                        | Valid context                                          |
-| ----------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| Declaration       | `@import`, `@external`                                                                       | top-level `const` declaration values                   |
-| Static/type-level | `@type_*`, `@type_list_*`, `@shape_*`, `@require`, `@compile_error`, `@satisfies`, `@wgsl_*` | type and const evaluation, as documented per form      |
-| Do strategy       | `@io`, `@monad`, `@applicative`                                                              | `do @strategy(...) { ... }`                            |
-| Annotation        | `@likely`, `@unlikely`                                                                       | branch hints on functions and match arms               |
-| Instrumentation   | `@trace`, `@profile`                                                                         | runtime function bodies                                |
-| Rewrite           | `@assume`                                                                                    | final expression of `contract fn ... -> rewrite`       |
-| Internal support  | `@field`, `@replace_field`, `@empty`, `@inline_array_*`, `@branch_*`                         | compiler-generated or narrow library wrapper code      |
-| Removed           | `$`, `@capability`                                                                           | rejected; parser tolerance exists only for diagnostics |
+| Category          | Forms                                                                                        | Valid context                                     |
+| ----------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Declaration       | `@import`, `@external`                                                                       | top-level `const` declaration values              |
+| Static/type-level | `@type_*`, `@type_list_*`, `@shape_*`, `@require`, `@compile_error`, `@satisfies`, `@wgsl_*` | type and const evaluation, as documented per form |
+| Do strategy       | `@io`, `@monad`, `@applicative`                                                              | `do @strategy(...) { ... }`                       |
+| Annotation        | `@likely`, `@unlikely`                                                                       | branch hints on functions and match arms          |
+| Instrumentation   | `@trace`, `@profile`                                                                         | runtime function bodies                           |
+| Rewrite           | `@assume`                                                                                    | final expression of `contract fn ... -> rewrite`  |
+| Internal support  | `@field`, `@replace_field`, `@empty`, `@inline_array_*`, `@branch_*`                         | compiler-generated or narrow library wrapper code |
 
 `static_for_slots` is an internal checked-AST form used by generated fixed-layout code. It is not
 source syntax; source-level `static for` and record/product `for` slots are rejected.

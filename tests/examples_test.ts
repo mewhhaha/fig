@@ -257,7 +257,7 @@ Deno.test("CLI defaults to debug mode and --release selects release mode", async
   await Deno.remove(path);
 });
 
-Deno.test("CLI rejects removed --opt modes", async () => {
+Deno.test("CLI rejects unsupported --opt modes", async () => {
   const output = await new Deno.Command(Deno.execPath(), {
     args: ["run", "--allow-read", "src/cli.ts", "wat", "examples/hello.fig", "--opt", "debug"],
     stdout: "piped",

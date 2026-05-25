@@ -7,7 +7,7 @@ import type {
   DoStatement,
   Expr,
   FnDecl,
-  OperatorDescriptor,
+  OperatorDecl,
   Param,
   ParamPattern,
   Program,
@@ -171,7 +171,9 @@ export function runtimeProgramFromProgram(program: Program): Program {
     ...program,
     declarations: program.declarations.filter((
       decl,
-    ): decl is Exclude<Declaration, { kind: "contract" }> => decl.kind !== "contract"),
+    ): decl is Exclude<Declaration, { kind: "contract" | "operator" }> =>
+      decl.kind !== "contract" && decl.kind !== "operator"
+    ),
   };
 }
 
@@ -319,13 +321,6 @@ function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
   const checkExpr = (expr: Expr | undefined) => {
     if (!expr) return;
     switch (expr.kind) {
-      case "placeholder":
-        diagnostics.push(diagnosticAt(
-          "syntax.placeholder_removed",
-          "$ placeholder syntax has been removed; use a named binding",
-          expr,
-        ));
-        return;
       case "var":
         if (expr.name.startsWith("@") && isCompilerSpecialForm(expr.name, "declaration")) {
           const form = compilerSpecialForm(expr.name);
@@ -337,13 +332,6 @@ function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
         }
         return;
       case "pipe_bind":
-        if (expr.name === "$") {
-          diagnostics.push(diagnosticAt(
-            "syntax.placeholder_removed",
-            "$ placeholder pipe-bind has been removed; use a named pipe-bind variable",
-            expr,
-          ));
-        }
         checkExpr(expr.value);
         checkExpr(expr.body);
         return;
@@ -509,13 +497,14 @@ function typeExprChildren(expr: TypeExpr): TypeExpr[] {
       return expr.shape.slots.map((slot) => slot.type);
     case "type_match":
       return [expr.value, ...expr.arms.map((arm) => arm.value)];
+    case "type_scalar_domain":
+      return [];
     case "type_binary":
       return [expr.left, expr.right];
     case "type_ref":
     case "type_hole":
     case "type_static_ref":
     case "type_fn":
-    case "type_operator":
     case "type_bool":
     case "type_number":
     case "type_char":
@@ -876,13 +865,7 @@ function checkProgramInternal(
 }
 
 function balanceAssociativeBinaryChains(program: Program, typeDecls: TypeDecl[]) {
-  const descriptorOps = new Set<string>();
-  for (const decl of typeDecls) {
-    if (decl.resultKind === "operator" && decl.normalized?.kind === "operator") {
-      descriptorOps.add(decl.normalized.descriptor.symbol);
-    }
-  }
-  const balanceableOps = new Set(["+", "*", "&&", "||"].filter((op) => !descriptorOps.has(op)));
+  const balanceableOps = new Set(["+", "*", "&&", "||"]);
   if (!balanceableOps.size) return;
 
   const lowerExpr = (expr: Expr): Expr => {
@@ -902,6 +885,12 @@ function balanceAssociativeBinaryChains(program: Program, typeDecls: TypeDecl[])
         }
         return { ...expr, left: lowerExpr(expr.left), right: lowerExpr(expr.right) };
       }
+      case "operator_chain":
+        return {
+          ...expr,
+          first: lowerExpr(expr.first),
+          rest: expr.rest.map((item) => ({ ...item, value: lowerExpr(item.value) })),
+        };
       case "pipe_bind":
         return { ...expr, value: lowerExpr(expr.value), body: lowerExpr(expr.body) };
       case "profile":
@@ -954,7 +943,6 @@ function balanceAssociativeBinaryChains(program: Program, typeDecls: TypeDecl[])
         };
       case "do":
       case "literal":
-      case "placeholder":
       case "var":
         return expr;
     }
@@ -1087,7 +1075,7 @@ function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]
     } else if (decl.kind === "contract") {
       for (const param of decl.params) checkType(param.type, "param", param);
       checkExpr(decl.body);
-    } else {
+    } else if (decl.kind === "type") {
       for (const stmt of decl.body.statements) checkType(renderTypeExpr(stmt.value), "owned", stmt);
       if (decl.body.expr) checkType(renderTypeExpr(decl.body.expr), "owned", decl);
     }
@@ -1139,6 +1127,12 @@ function lowerDoExpressions(
         return { ...expr, target: lowerExpr(expr.target, env), index: lowerExpr(expr.index, env) };
       case "binary":
         return { ...expr, left: lowerExpr(expr.left, env), right: lowerExpr(expr.right, env) };
+      case "operator_chain":
+        return {
+          ...expr,
+          first: lowerExpr(expr.first, env),
+          rest: expr.rest.map((item) => ({ ...item, value: lowerExpr(item.value, env) })),
+        };
       case "pipe_bind": {
         return { ...expr, value: lowerExpr(expr.value, env), body: lowerExpr(expr.body, env) };
       }
@@ -1180,6 +1174,12 @@ function lowerDoExpressions(
         return { ...expr, value: lowerExpr(expr.value, env), key: lowerExpr(expr.key, env) };
       case "range":
         return { ...expr, start: lowerExpr(expr.start, env), end: lowerExpr(expr.end, env) };
+      case "profile":
+        return {
+          ...expr,
+          args: expr.args.map((arg) => lowerExpr(arg, env)),
+          body: lowerExpr(expr.body, env),
+        };
       case "block": {
         const scoped = new Map(env);
         const statements = expr.statements.map((stmt) => {
@@ -1206,7 +1206,6 @@ function lowerDoExpressions(
         };
       }
       case "literal":
-      case "placeholder":
       case "var":
         return expr;
     }
@@ -1678,6 +1677,8 @@ function typeExprContainsHole(expr: TypeExpr): boolean {
     case "type_match":
       return typeExprContainsHole(expr.value) ||
         expr.arms.some((arm) => typeExprContainsHole(arm.value));
+    case "type_scalar_domain":
+      return false;
     case "type_binary":
       return typeExprContainsHole(expr.left) || typeExprContainsHole(expr.right);
     default:
@@ -1839,6 +1840,15 @@ function rewriteDoEffectOperations(
         left: rewriteDoEffectOperations(expr.left, effect, shadowed),
         right: rewriteDoEffectOperations(expr.right, effect, shadowed),
       };
+    case "operator_chain":
+      return {
+        ...expr,
+        first: rewriteDoEffectOperations(expr.first, effect, shadowed),
+        rest: expr.rest.map((item) => ({
+          ...item,
+          value: rewriteDoEffectOperations(item.value, effect, shadowed),
+        })),
+      };
     case "match":
       return {
         ...expr,
@@ -1924,7 +1934,6 @@ function rewriteDoEffectOperations(
     }
     case "do":
     case "literal":
-    case "placeholder":
       return expr;
   }
 }
@@ -2252,6 +2261,8 @@ function exprChildValues(expr: Expr): Expr[] {
       return [expr.target, expr.index];
     case "binary":
       return [expr.left, expr.right];
+    case "operator_chain":
+      return [expr.first, ...expr.rest.map((item) => item.value)];
     case "pipe_bind":
       return [expr.value, expr.body];
     case "profile":
@@ -2274,7 +2285,6 @@ function exprChildValues(expr: Expr): Expr[] {
       return [expr.start, expr.end];
     case "block":
     case "literal":
-    case "placeholder":
     case "var":
       return [];
   }
@@ -2297,6 +2307,14 @@ function structuralExprKey(expr: Expr): string | undefined {
       const left = structuralExprKey(expr.left);
       const right = structuralExprKey(expr.right);
       return left && right ? `bin:${expr.op}(${left},${right})` : undefined;
+    }
+    case "operator_chain": {
+      const first = structuralExprKey(expr.first);
+      const rest = expr.rest.map((item) => {
+        const value = structuralExprKey(item.value);
+        return value ? `${item.op}:${value}` : undefined;
+      });
+      return first && rest.every(Boolean) ? `opchain(${first};${rest.join(",")})` : undefined;
     }
     case "product_constructor":
     case "shape": {
@@ -2333,7 +2351,6 @@ function structuralExprKey(expr: Expr): string | undefined {
     case "static_for_slots":
     case "const_fn":
     case "do":
-    case "placeholder":
       return undefined;
   }
 }
@@ -2392,13 +2409,10 @@ function lowerResolvedOperators(
   diagnostics: Diagnostic[],
   memo?: CheckMemo,
 ) {
-  const descriptors = typeDecls
-    .flatMap((decl): { decl: TypeDecl; descriptor: OperatorDescriptor }[] =>
-      decl.resultKind === "operator" && decl.normalized?.kind === "operator"
-        ? [{ decl, descriptor: decl.normalized.descriptor }]
-        : []
-    );
-  if (!descriptors.length) return;
+  const operators = program.declarations.filter((decl): decl is OperatorDecl =>
+    decl.kind === "operator"
+  );
+  checkOperatorDeclarationConflicts(operators, diagnostics);
   const functions = new Map(fnDecls.map((fn) => [fn.name, fn]));
   const constructorTypes = new Map(
     typeDecls.flatMap((decl) =>
@@ -2413,17 +2427,19 @@ function lowerResolvedOperators(
 
   const lowerExpr = (expr: Expr, env: Map<string, string>): Expr => {
     switch (expr.kind) {
+      case "operator_chain": {
+        const values = [expr.first, ...expr.rest.map((item) => item.value)].map((item) =>
+          lowerExpr(item, env)
+        );
+        const ops = expr.rest.map((item) => item.op);
+        return lowerExpr(buildOperatorTree(values, ops, operators, diagnostics, expr), env);
+      }
       case "binary": {
         const left = lowerExpr(expr.left, env);
         const right = lowerExpr(expr.right, env);
         const leftType = inferRuntimeType(left, env, functions, constructorTypes, memo);
         const rightType = inferRuntimeType(right, env, functions, constructorTypes, memo);
-        if (
-          isPrimitiveBinaryOperator(expr.op, leftType, rightType, typeDecls) ||
-          (!leftType && !rightType)
-        ) {
-          return { ...expr, left, right };
-        }
+        if (!leftType && !rightType) return { ...expr, left, right };
         const resolved = resolveInfixOperator(
           expr.op,
           left,
@@ -2431,21 +2447,26 @@ function lowerResolvedOperators(
           env,
           functions,
           constructorTypes,
-          descriptors,
+          typeDecls,
+          operators,
           memo,
         );
         if (!resolved) {
+          if (isPrimitiveBinaryOperator(expr.op, leftType, rightType, typeDecls)) {
+            return { ...expr, left, right };
+          }
           if (!leftType || !rightType) return { ...expr, left, right };
           diagnostics.push({
             code: "operator.missing",
-            message: `no visible operator descriptor matches ${expr.op}`,
+            message: `no visible operator declaration matches ${expr.op}` +
+              ` for ${leftType ?? "unknown"} and ${rightType ?? "unknown"}`,
           });
           return { ...expr, left, right };
         }
         if (resolved === "ambiguous") {
           diagnostics.push({
             code: "operator.ambiguous",
-            message: `multiple visible operator descriptors match ${expr.op}`,
+            message: `multiple visible operator declarations match ${expr.op}`,
           });
           return { ...expr, left, right };
         }
@@ -2459,6 +2480,8 @@ function lowerResolvedOperators(
         };
       case "index":
         return { ...expr, target: lowerExpr(expr.target, env), index: lowerExpr(expr.index, env) };
+      case "field":
+        return { ...expr, value: lowerExpr(expr.value, env), key: lowerExpr(expr.key, env) };
       case "pipe_bind":
         return { ...expr, value: lowerExpr(expr.value, env), body: lowerExpr(expr.body, env) };
       case "match":
@@ -2487,6 +2510,26 @@ function lowerResolvedOperators(
         };
       case "range":
         return { ...expr, start: lowerExpr(expr.start, env), end: lowerExpr(expr.end, env) };
+      case "profile":
+        return {
+          ...expr,
+          args: expr.args.map((arg) => lowerExpr(arg, env)),
+          body: lowerExpr(expr.body, env),
+        };
+      case "static_for_slots":
+        return {
+          ...expr,
+          source: expr.source.kind === "range"
+            ? {
+              kind: "range",
+              start: lowerExpr(expr.source.start, env),
+              end: lowerExpr(expr.source.end, env),
+            }
+            : { kind: "shape", shape: lowerExpr(expr.source.shape, env) },
+          value: lowerExpr(expr.value, env),
+        };
+      case "const_fn":
+        return { ...expr, body: lowerExpr(expr.body, env) };
       case "block": {
         const scoped = new Map(env);
         const statements = expr.statements.map((stmt) => {
@@ -2518,18 +2561,143 @@ function lowerResolvedOperators(
   }
 }
 
+function checkOperatorDeclarationConflicts(
+  operators: OperatorDecl[],
+  diagnostics: Diagnostic[],
+) {
+  const bySymbol = new Map<string, OperatorDecl>();
+  for (const decl of operators) {
+    if (!["#infixl", "#infixr", "#infix"].includes(decl.fixity)) {
+      diagnostics.push(diagnosticAt(
+        "operator.fixity",
+        `unsupported operator fixity ${decl.fixity}`,
+        decl,
+      ));
+      continue;
+    }
+    if (!Number.isInteger(decl.precedence)) {
+      diagnostics.push(diagnosticAt(
+        "operator.precedence",
+        `operator ${decl.symbol} precedence must be an integer`,
+        decl,
+      ));
+      continue;
+    }
+    const previous = bySymbol.get(decl.symbol);
+    if (!previous) {
+      bySymbol.set(decl.symbol, decl);
+      continue;
+    }
+    if (previous.fixity !== decl.fixity || previous.precedence !== decl.precedence) {
+      diagnostics.push(diagnosticAt(
+        "operator.conflict",
+        `operator ${decl.symbol} has conflicting fixity or precedence`,
+        decl,
+      ));
+    }
+  }
+}
+
+function buildOperatorTree(
+  values: Expr[],
+  ops: string[],
+  operators: OperatorDecl[],
+  diagnostics: Diagnostic[],
+  source: Expr,
+): Expr {
+  const exprs = values.length ? [values[0]!] : [];
+  const stack: string[] = [];
+  const reduce = () => {
+    const op = stack.pop()!;
+    const right = exprs.pop()!;
+    const left = exprs.pop()!;
+    exprs.push({ kind: "binary", span: joinExprSpans(left, right), op, left, right });
+  };
+  for (let index = 0; index < ops.length; index++) {
+    const op = ops[index]!;
+    const meta = operatorMetadata(op, operators);
+    while (stack.length) {
+      const top = stack.at(-1)!;
+      const topMeta = operatorMetadata(top, operators);
+      if (
+        topMeta.precedence > meta.precedence ||
+        (topMeta.precedence === meta.precedence && meta.fixity !== "#infixr")
+      ) {
+        if (
+          topMeta.precedence === meta.precedence &&
+          (topMeta.fixity === "#infix" || meta.fixity === "#infix")
+        ) {
+          diagnostics.push(diagnosticAt(
+            "operator.associativity",
+            `operator ${op} is non-associative; add parentheses`,
+            source,
+          ));
+        }
+        reduce();
+        continue;
+      }
+      break;
+    }
+    stack.push(op);
+    exprs.push(values[index + 1]!);
+  }
+  while (stack.length) reduce();
+  return exprs[0] ?? { kind: "literal", literalKind: "number", value: "0" };
+}
+
+function operatorMetadata(
+  symbol: string,
+  operators: OperatorDecl[],
+): Pick<OperatorDecl, "fixity" | "precedence"> {
+  const declared = operators.find((decl) => decl.symbol === symbol);
+  if (declared) return declared;
+  return builtinOperatorMetadata(symbol);
+}
+
+function builtinOperatorMetadata(symbol: string): Pick<OperatorDecl, "fixity" | "precedence"> {
+  const table: Record<string, Pick<OperatorDecl, "fixity" | "precedence">> = {
+    ">>=": { fixity: "#infixl", precedence: 10 },
+    "<>": { fixity: "#infixr", precedence: 55 },
+    "||": { fixity: "#infixr", precedence: 20 },
+    "^^": { fixity: "#infixr", precedence: 25 },
+    "&&": { fixity: "#infixr", precedence: 30 },
+    "==": { fixity: "#infix", precedence: 40 },
+    "!=": { fixity: "#infix", precedence: 40 },
+    "<": { fixity: "#infix", precedence: 50 },
+    "<=": { fixity: "#infix", precedence: 50 },
+    ">": { fixity: "#infix", precedence: 50 },
+    ">=": { fixity: "#infix", precedence: 50 },
+    "<$>": { fixity: "#infixl", precedence: 65 },
+    "<*>": { fixity: "#infixl", precedence: 65 },
+    "+": { fixity: "#infixl", precedence: 60 },
+    "-": { fixity: "#infixl", precedence: 60 },
+    "*": { fixity: "#infixl", precedence: 70 },
+    "/": { fixity: "#infixl", precedence: 70 },
+    "%": { fixity: "#infixl", precedence: 70 },
+  };
+  return table[symbol] ?? { fixity: "#infixl", precedence: 50 };
+}
+
 function isPrimitiveBinaryOperator(
   op: string,
   left: string | undefined,
   right: string | undefined,
   types: TypeDecl[],
 ): boolean {
-  if (op === "..") return true;
+  if (left === "bool" && right === "bool" && ["&&", "||", "^^", "==", "!="].includes(op)) {
+    return true;
+  }
   if (["==", "!="].includes(op) && (literalTypeCarrier(left) || literalTypeCarrier(right))) {
     return (literalTypeCarrier(left) ?? left) === (literalTypeCarrier(right) ?? right);
   }
   const leftRuntime = primitiveNumericRuntimeType(left, types);
   const rightRuntime = primitiveNumericRuntimeType(right, types);
+  if (
+    genericNumericOperatorOperands(left, right, leftRuntime, rightRuntime) &&
+    ["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">="].includes(op)
+  ) {
+    return true;
+  }
   return leftRuntime === "i32" && rightRuntime === "i32" &&
     ["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">="].includes(op);
 }
@@ -2538,9 +2706,36 @@ function primitiveNumericRuntimeType(
   type: string | undefined,
   types: TypeDecl[],
 ): string | undefined {
-  const resolved = resolveAliasType(type, types) ?? type;
+  const effectValue = unwrapUnaryType("io", type);
+  const resolved = resolveAliasType(effectValue ?? type, types) ?? effectValue ?? type;
   const runtime = scalarDomainRuntimeType(resolved);
-  return runtime === "count" ? "i32" : runtime;
+  if (runtime === "count") return "i32";
+  if (runtime && unsignedBitWidth(runtime) !== undefined) return "i32";
+  return runtime;
+}
+
+function unwrapUnaryType(name: string, type: string | undefined): string | undefined {
+  const trimmed = type?.trim();
+  if (!trimmed) return undefined;
+  const args = typeCallArgsForBase(trimmed, name);
+  if (args === undefined) return undefined;
+  const parts = splitTypeArgs(args);
+  return parts.length === 1 ? parts[0]?.trim() : undefined;
+}
+
+function genericNumericOperatorOperands(
+  left: string | undefined,
+  right: string | undefined,
+  leftRuntime: string | undefined,
+  rightRuntime: string | undefined,
+): boolean {
+  if (!left || !right) return false;
+  const leftGeneric = isInferredTypeVarName(left);
+  const rightGeneric = isInferredTypeVarName(right);
+  if (leftGeneric && rightGeneric) return left === right;
+  if (leftGeneric) return rightRuntime === "i32";
+  if (rightGeneric) return leftRuntime === "i32";
+  return false;
 }
 
 function lowerCollectorLiterals(
@@ -2688,6 +2883,12 @@ function lowerCollectorLiterals(
           left: lowerExpr(expr.left, undefined),
           right: lowerExpr(expr.right, undefined),
         };
+      case "operator_chain":
+        return {
+          ...expr,
+          first: lowerExpr(expr.first, undefined),
+          rest: expr.rest.map((item) => ({ ...item, value: lowerExpr(item.value, undefined) })),
+        };
       case "pipe_bind":
         return {
           ...expr,
@@ -2748,7 +2949,6 @@ function lowerCollectorLiterals(
           expr: expr.expr ? lowerExpr(expr.expr, expectedType) : undefined,
         };
       case "literal":
-      case "placeholder":
       case "var":
         return expr;
     }
@@ -2980,27 +3180,88 @@ function resolveInfixOperator(
   env: Map<string, string>,
   functions: Map<string, FnDecl>,
   constructorTypes: Map<string, TypeDecl>,
-  descriptors: { decl: TypeDecl; descriptor: OperatorDescriptor }[],
+  typeDecls: TypeDecl[],
+  operators: OperatorDecl[],
   memo?: CheckMemo,
 ): string | "ambiguous" | undefined {
   const leftType = inferRuntimeType(left, env, functions, constructorTypes, memo);
   const rightType = inferRuntimeType(right, env, functions, constructorTypes, memo);
   const matches: string[] = [];
-  for (const { decl, descriptor } of descriptors) {
-    if (descriptor.symbol !== symbol || !descriptor.fixity.startsWith("#infix")) continue;
-    const target = substituteOperatorTarget(
-      descriptor.target,
-      decl,
-      [leftType, rightType],
-      functions,
-    );
-    const fn = functions.get(target);
-    if (!fn || fn.params.length !== 2) continue;
-    if (!operandMatchesParam(fn.params[0].type, left, leftType, functions, memo)) continue;
-    if (!operandMatchesParam(fn.params[1].type, right, rightType, functions, memo)) continue;
-    matches.push(target);
+  for (const decl of operators) {
+    if (decl.symbol !== symbol || !decl.fixity.startsWith("#infix")) continue;
+    const fn = functions.get(decl.target);
+    if (
+      !fn ||
+      !operatorTargetMatches(fn, left, right, leftType, rightType, functions, typeDecls, memo)
+    ) {
+      continue;
+    }
+    matches.push(decl.target);
   }
   return matches.length > 1 ? "ambiguous" : matches[0];
+}
+
+function operatorTargetMatches(
+  fn: FnDecl,
+  left: Expr,
+  right: Expr,
+  leftType: string | undefined,
+  rightType: string | undefined,
+  functions: Map<string, FnDecl>,
+  typeDecls: TypeDecl[],
+  memo?: CheckMemo,
+): boolean {
+  if (fn.params.length < 2 || fn.params.slice(2).some((param) => !param.const)) return false;
+  const bindings = new Map<string, string>();
+  bindTypePattern(fn.params[0]!.type, leftType, bindings, typeDecls);
+  bindTypePattern(fn.params[1]!.type, rightType, bindings, typeDecls);
+  if (left.kind === "var") inferFnTypeArgs(fn.params[0]!.type, functions.get(left.name), bindings);
+  if (right.kind === "var") {
+    inferFnTypeArgs(fn.params[1]!.type, functions.get(right.name), bindings);
+  }
+  const leftExpected = substituteTypeVars(fn.params[0]!.type, bindings);
+  const rightExpected = substituteTypeVars(fn.params[1]!.type, bindings);
+  return operandMatchesParam(leftExpected, left, leftType, functions, memo) &&
+    operandMatchesParam(rightExpected, right, rightType, functions, memo) &&
+    operatorConstProofParamsSatisfied(fn.params.slice(2), bindings, typeDecls);
+}
+
+function operatorConstProofParamsSatisfied(
+  params: Param[],
+  bindings: Map<string, string>,
+  typeDecls: TypeDecl[],
+): boolean {
+  for (const param of params) {
+    if (!param.const) return false;
+    const proofType = substituteTypeVars(param.type, bindings);
+    const base = typeNameOf(proofType);
+    const args = typeCallArgsForBase(proofType, base);
+    if (args === undefined) continue;
+    const decl = typeDecls.find((item) =>
+      item.name === base || terminalName(item.name) === terminalName(base)
+    );
+    if (!decl) continue;
+    const required = typeDeclRequiredMembers(decl);
+    if (!required.length) continue;
+    const argValues = splitTypeArgs(args).map((arg) => arg.trim());
+    for (const member of required) {
+      const index = decl.params.findIndex((item) => item.name === member.paramName);
+      const targetType = index >= 0 ? argValues[index] : undefined;
+      if (targetType && isInferredTypeVarName(targetType)) continue;
+      if (!targetType || !typeHasAttachedMember(targetType, member.member, typeDecls)) return false;
+    }
+  }
+  return true;
+}
+
+function typeHasAttachedMember(type: string, member: string, typeDecls: TypeDecl[]): boolean {
+  const name = typeNameOf(type);
+  const decl = typeDecls.find((item) =>
+    item.name === name || terminalName(item.name) === terminalName(name)
+  );
+  const normalized = decl?.normalized;
+  if (normalized?.kind !== "product" && normalized?.kind !== "sum") return false;
+  return (normalized.members ?? []).some((item) => item.name === member);
 }
 
 function operandMatchesParam(
@@ -3013,27 +3274,6 @@ function operandMatchesParam(
   if (actual && typeMatches(expected, actual, memo)) return true;
   if (expr.kind !== "var") return false;
   return fnTypeMatches(expected, functions.get(expr.name));
-}
-
-function substituteOperatorTarget(
-  target: string,
-  decl: TypeDecl,
-  operandTypes: (string | undefined)[],
-  functions: Map<string, FnDecl>,
-): string {
-  if (!decl.params.length) return target;
-  const bases = operandTypes
-    .filter((type): type is string => !!type && !type.startsWith("fn("))
-    .map((type) => type.replace(/\(.*\)$/, ""));
-  for (const base of bases) {
-    let result = target;
-    for (const param of decl.params) {
-      result = result.replace(new RegExp(`\\b${param.name}\\.`, "g"), `${base}.`);
-      result = result.replace(new RegExp(`\\b${param.name}::`, "g"), `${base}::`);
-    }
-    if (functions.has(result)) return result;
-  }
-  return target;
 }
 
 function typeMatches(expected: string, actual: string, memo?: CheckMemo): boolean {
@@ -3172,7 +3412,21 @@ function inferRuntimeType(
     );
   }
   if (expr.kind === "call" && expr.callee.kind === "var") {
-    return finish(functions.get(expr.callee.name)?.returnType);
+    const fn = functions.get(expr.callee.name);
+    if (!fn) return finish(undefined);
+    if (!fn.returnType) return finish(undefined);
+    const bindings = new Map<string, string>();
+    fn.params.forEach((param, index) => {
+      if (param.const) return;
+      const arg = expr.args[index];
+      if (!arg) return;
+      bindTypePattern(
+        param.type,
+        inferRuntimeType(arg, env, functions, constructorTypes, memo),
+        bindings,
+      );
+    });
+    return finish(substituteTypeVars(fn.returnType, bindings));
   }
   if (expr.kind === "product_constructor") {
     return finish(inferProductConstructorType(expr, env, functions, constructorTypes, memo));
@@ -3589,6 +3843,10 @@ function checkBranchHintsInExpr(
       checkBranchHintsInExpr(expr.left, diagnostics, pluginRegistry);
       checkBranchHintsInExpr(expr.right, diagnostics, pluginRegistry);
       return;
+    case "operator_chain":
+      checkBranchHintsInExpr(expr.first, diagnostics, pluginRegistry);
+      expr.rest.forEach((item) => checkBranchHintsInExpr(item.value, diagnostics, pluginRegistry));
+      return;
     case "pipe_bind":
       checkBranchHintsInExpr(expr.value, diagnostics, pluginRegistry);
       checkBranchHintsInExpr(expr.body, diagnostics, pluginRegistry);
@@ -3618,7 +3876,6 @@ function checkBranchHintsInExpr(
       return;
     case "literal":
     case "var":
-    case "placeholder":
       return;
   }
 }
@@ -4144,6 +4401,15 @@ function rewriteAttachedMembersInExpr(expr: Expr, members: Map<string, string>):
         left: rewriteAttachedMembersInExpr(expr.left, members),
         right: rewriteAttachedMembersInExpr(expr.right, members),
       };
+    case "operator_chain":
+      return {
+        ...expr,
+        first: rewriteAttachedMembersInExpr(expr.first, members),
+        rest: expr.rest.map((item) => ({
+          ...item,
+          value: rewriteAttachedMembersInExpr(item.value, members),
+        })),
+      };
     case "pipe_bind":
       return {
         ...expr,
@@ -4195,7 +4461,6 @@ function rewriteAttachedMembersInExpr(expr: Expr, members: Map<string, string>):
     case "block":
       return rewriteAttachedMembersInBlock(expr, members);
     case "literal":
-    case "placeholder":
       return expr;
   }
 }
@@ -4649,6 +4914,18 @@ class ConstEvaluator {
         return this.evalCall(expr, locals, callStack);
       case "binary":
         return this.evalBinary(expr, locals, callStack);
+      case "operator_chain":
+        return this.evalExpr(
+          buildOperatorTree(
+            [expr.first, ...expr.rest.map((item) => item.value)],
+            expr.rest.map((item) => item.op),
+            [],
+            this.diagnostics,
+            expr,
+          ),
+          locals,
+          callStack,
+        );
       case "pipe_bind": {
         const value = this.evalExpr(expr.value, locals, callStack);
         if (!value) return undefined;
@@ -5267,8 +5544,6 @@ class ConstEvaluator {
             })) ?? [],
           })),
         };
-      case "operator":
-        return { kind: "operator", descriptor: body.descriptor };
     }
   }
 
@@ -5883,6 +6158,15 @@ function specializeInferredExpr(
         left: specializeInferredExpr(expr.left, context, env),
         right: specializeInferredExpr(expr.right, context, env),
       };
+    case "operator_chain":
+      return {
+        ...expr,
+        first: specializeInferredExpr(expr.first, context, env),
+        rest: expr.rest.map((item) => ({
+          ...item,
+          value: specializeInferredExpr(item.value, context, env),
+        })),
+      };
     case "pipe_bind": {
       const value = specializeInferredExpr(expr.value, context, env);
       const valueType = inferExprType(value, context, env);
@@ -5943,7 +6227,6 @@ function specializeInferredExpr(
       return specializeInferredBlock(expr, context, env, expectedType, reportAmbiguous);
     case "literal":
     case "var":
-    case "placeholder":
       return expr;
   }
 }
@@ -6008,7 +6291,6 @@ function specializeInferredCall(
       const param = fn.params[index];
       const arg = argsByParam[index];
       if (!param.const || !arg) continue;
-      if (exprContainsPlaceholder(arg)) continue;
       if (!staticConstArgValue(arg, substituteTypeVars(param.type, types), context)) {
         return undefined;
       }
@@ -6794,6 +7076,15 @@ function bindTypePattern(
   }
   actual = actual.includes("(") ? actual : resolveAliasType(actual, typeDecls) ?? actual;
   if (pattern === actual) return;
+  const pFn = parseFnSignature(pattern);
+  const aFn = parseFnSignature(actual);
+  if (pFn && aFn && pFn.params.length === aFn.params.length) {
+    for (let index = 0; index < pFn.params.length; index++) {
+      bindTypePattern(pFn.params[index], aFn.params[index], types, typeDecls, consts, seen);
+    }
+    bindTypePattern(pFn.returnType, aFn.returnType, types, typeDecls, consts, seen);
+    return;
+  }
   if (
     pattern.startsWith("&(") && pattern.endsWith(")") && actual.startsWith("&(") &&
     actual.endsWith(")")
@@ -6908,8 +7199,25 @@ function substituteTypeVarsInTypeExpr(
         left: substituteTypeVarsInTypeExpr(expr.left, types, staticNames),
         right: substituteTypeVarsInTypeExpr(expr.right, types, staticNames),
       };
-    case "type_operator":
-      return expr;
+    case "type_scalar_domain":
+      return {
+        ...expr,
+        members: expr.members.map((member) => {
+          const substituteEndpoint = (
+            endpoint: Extract<TypeExpr, { kind: "type_scalar_domain" }>["members"][number][
+              "start"
+            ],
+          ) =>
+            endpoint.kind === "symbol" && staticNames.has(endpoint.source)
+              ? { ...endpoint, kind: "literal" as const, source: staticNames.get(endpoint.source)! }
+              : endpoint;
+          return {
+            ...member,
+            start: substituteEndpoint(member.start),
+            ...(member.end ? { end: substituteEndpoint(member.end) } : {}),
+          };
+        }),
+      };
     case "type_shape":
       return {
         ...expr,
@@ -7372,6 +7680,15 @@ function specializeExpr(
           left: specializeExpr(expr.left, context, env),
           right: specializeExpr(expr.right, context, env),
         };
+      case "operator_chain":
+        return {
+          ...expr,
+          first: specializeExpr(expr.first, context, env),
+          rest: expr.rest.map((item) => ({
+            ...item,
+            value: specializeExpr(item.value, context, env),
+          })),
+        };
       case "pipe_bind":
         const pipeValue = specializeExpr(expr.value, context, env);
         return {
@@ -7448,7 +7765,6 @@ function specializeExpr(
           return runtimeClosureMakeExpr(expr.name, []);
         }
         return expr;
-      case "placeholder":
         return expr;
     }
   } finally {
@@ -7958,6 +8274,9 @@ function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
       return exprCallsFunction(expr.target, name) || exprCallsFunction(expr.index, name);
     case "binary":
       return exprCallsFunction(expr.left, name) || exprCallsFunction(expr.right, name);
+    case "operator_chain":
+      return exprCallsFunction(expr.first, name) ||
+        expr.rest.some((item) => exprCallsFunction(item.value, name));
     case "pipe_bind":
       return exprCallsFunction(expr.value, name) || exprCallsFunction(expr.body, name);
     case "match":
@@ -7984,7 +8303,6 @@ function exprCallsFunction(expr: Expr | undefined, name: string): boolean {
       ) || exprCallsFunction(expr.expr, name);
     case "literal":
     case "var":
-    case "placeholder":
       return false;
   }
 }
@@ -8475,11 +8793,6 @@ function findMatchingParen(source: string, openIndex: number): number {
   return -1;
 }
 
-function exprContainsPlaceholder(expr: Expr): boolean {
-  if (expr.kind === "placeholder") return true;
-  return exprChildren(expr).some(exprContainsPlaceholder);
-}
-
 function exprRuntimeCaptures(expr: Expr): Set<string> {
   const captures = new Set<string>();
   const visit = (item: Expr, bound = new Set<string>()) => {
@@ -8540,106 +8853,6 @@ function exprRuntimeCaptures(expr: Expr): Set<string> {
   return captures;
 }
 
-function replacePlaceholder(expr: Expr, replacement: Expr): Expr {
-  if (expr.kind === "placeholder") return cloneExpr(replacement);
-  switch (expr.kind) {
-    case "do":
-      return {
-        ...expr,
-        statements: expr.statements.map((stmt) =>
-          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
-            stmt.kind === "destructure_let"
-            ? { ...stmt, value: replacePlaceholder(stmt.value, replacement) }
-            : stmt
-        ),
-        expr: expr.expr ? replacePlaceholder(expr.expr, replacement) : undefined,
-      };
-    case "const_fn":
-      return { ...expr, body: replacePlaceholder(expr.body, replacement) };
-    case "profile":
-      return {
-        ...expr,
-        args: expr.args.map((arg) => replacePlaceholder(arg, replacement)),
-        body: replacePlaceholder(expr.body, replacement),
-      };
-    case "call":
-      return {
-        ...expr,
-        callee: replacePlaceholder(expr.callee, replacement),
-        args: expr.args.map((arg) => replacePlaceholder(arg, replacement)),
-      };
-    case "index":
-      return {
-        ...expr,
-        target: replacePlaceholder(expr.target, replacement),
-        index: replacePlaceholder(expr.index, replacement),
-      };
-    case "binary":
-      return {
-        ...expr,
-        left: replacePlaceholder(expr.left, replacement),
-        right: replacePlaceholder(expr.right, replacement),
-      };
-    case "pipe_bind":
-      return {
-        ...expr,
-        value: replacePlaceholder(expr.value, replacement),
-        body: replacePlaceholder(expr.body, replacement),
-      };
-    case "match":
-      return {
-        ...expr,
-        value: replacePlaceholder(expr.value, replacement),
-        arms: expr.arms.map((arm) => ({
-          ...arm,
-          value: replacePlaceholder(arm.value, replacement),
-        })),
-      };
-    case "shape":
-    case "product_constructor":
-      return {
-        ...expr,
-        slots: expr.slots.map((slot) => ({
-          ...slot,
-          value: replacePlaceholder(slot.value, replacement),
-        })),
-      };
-    case "static_for_slots":
-      return {
-        ...expr,
-        source: replaceStaticForSourcePlaceholder(expr.source, replacement),
-        value: replacePlaceholder(expr.value, replacement),
-      };
-    case "field":
-      return {
-        ...expr,
-        value: replacePlaceholder(expr.value, replacement),
-        key: replacePlaceholder(expr.key, replacement),
-      };
-    case "range":
-      return {
-        ...expr,
-        start: replacePlaceholder(expr.start, replacement),
-        end: replacePlaceholder(expr.end, replacement),
-      };
-    case "block":
-      return {
-        ...expr,
-        statements: expr.statements.map((stmt) =>
-          stmt.kind === "let"
-            ? { ...stmt, value: replacePlaceholder(stmt.value, replacement) }
-            : stmt.kind === "destructure_let"
-            ? { ...stmt, value: replacePlaceholder(stmt.value, replacement) }
-            : stmt
-        ),
-        expr: expr.expr ? replacePlaceholder(expr.expr, replacement) : undefined,
-      };
-    case "literal":
-    case "var":
-      return expr;
-  }
-}
-
 function replaceNamedVar(expr: Expr, name: string, replacement: Expr): Expr {
   if (expr.kind === "var" && expr.name === name) return cloneExpr(replacement);
   switch (expr.kind) {
@@ -8681,6 +8894,15 @@ function replaceNamedVar(expr: Expr, name: string, replacement: Expr): Expr {
         ...expr,
         left: replaceNamedVar(expr.left, name, replacement),
         right: replaceNamedVar(expr.right, name, replacement),
+      };
+    case "operator_chain":
+      return {
+        ...expr,
+        first: replaceNamedVar(expr.first, name, replacement),
+        rest: expr.rest.map((item) => ({
+          ...item,
+          value: replaceNamedVar(item.value, name, replacement),
+        })),
       };
     case "pipe_bind":
       return {
@@ -8742,23 +8964,9 @@ function replaceNamedVar(expr: Expr, name: string, replacement: Expr): Expr {
         expr: expr.expr ? replaceNamedVar(expr.expr, name, replacement) : undefined,
       };
     case "literal":
-    case "placeholder":
     case "var":
       return expr;
   }
-}
-
-function replaceStaticForSourcePlaceholder(
-  source: Extract<Expr, { kind: "static_for_slots" }>["source"],
-  replacement: Expr,
-): Extract<Expr, { kind: "static_for_slots" }>["source"] {
-  return source.kind === "range"
-    ? {
-      kind: "range",
-      start: replacePlaceholder(source.start, replacement),
-      end: replacePlaceholder(source.end, replacement),
-    }
-    : { kind: "shape", shape: replacePlaceholder(source.shape, replacement) };
 }
 
 function replaceStaticForSourceNamedVar(
@@ -8795,6 +9003,8 @@ function exprChildren(expr: Expr): Expr[] {
       return [expr.target, expr.index];
     case "binary":
       return [expr.left, expr.right];
+    case "operator_chain":
+      return [expr.first, ...expr.rest.map((item) => item.value)];
     case "pipe_bind":
       return [expr.value, expr.body];
     case "profile":
@@ -8824,7 +9034,6 @@ function exprChildren(expr: Expr): Expr[] {
       ];
     case "literal":
     case "var":
-    case "placeholder":
       return [];
   }
 }
@@ -9210,6 +9419,27 @@ function substituteSpecializedExpr(
           context,
         ),
       };
+    case "operator_chain":
+      return {
+        ...expr,
+        first: substituteSpecializedExpr(
+          expr.first,
+          values,
+          staticValues,
+          staticArgNames,
+          context,
+        ),
+        rest: expr.rest.map((item) => ({
+          ...item,
+          value: substituteSpecializedExpr(
+            item.value,
+            values,
+            staticValues,
+            staticArgNames,
+            context,
+          ),
+        })),
+      };
     case "pipe_bind":
       return {
         ...expr,
@@ -9378,7 +9608,6 @@ function substituteSpecializedExpr(
       }
     }
     case "literal":
-    case "placeholder":
       return expr;
   }
 }
@@ -9833,6 +10062,19 @@ function staticConstExprValue(
     }
     return finish(undefined);
   }
+  if (expr.kind === "operator_chain") {
+    return finish(staticConstExprValue(
+      buildOperatorTree(
+        [expr.first, ...expr.rest.map((item) => item.value)],
+        expr.rest.map((item) => item.op),
+        [],
+        context?.diagnostics ?? [],
+        expr,
+      ),
+      staticValues,
+      context,
+    ));
+  }
   if (expr.kind === "shape") {
     return finish({
       kind: "shape",
@@ -10079,6 +10321,8 @@ function visitTypeExpr(expr: TypeExpr, visit: (expr: TypeExpr) => void) {
       visitTypeExpr(expr.value, visit);
       for (const arm of expr.arms) visitTypeExpr(arm.value, visit);
       return;
+    case "type_scalar_domain":
+      return;
     case "type_binary":
       visitTypeExpr(expr.left, visit);
       visitTypeExpr(expr.right, visit);
@@ -10087,7 +10331,6 @@ function visitTypeExpr(expr: TypeExpr, visit: (expr: TypeExpr) => void) {
     case "type_hole":
     case "type_static_ref":
     case "type_fn":
-    case "type_operator":
     case "type_bool":
     case "type_number":
     case "type_char":
@@ -10107,6 +10350,8 @@ function validateTypeExprScalarDomains(expr: TypeExpr, diagnostics: Diagnostic[]
   } else if (expr.kind === "type_match") {
     validateTypeExprScalarDomains(expr.value, diagnostics);
     for (const arm of expr.arms) validateTypeExprScalarDomains(arm.value, diagnostics);
+  } else if (expr.kind === "type_scalar_domain") {
+    diagnoseScalarDomainTypeExpr(expr, diagnostics);
   } else if (expr.kind === "type_binary") {
     validateTypeExprScalarDomains(expr.left, diagnostics);
     validateTypeExprScalarDomains(expr.right, diagnostics);
@@ -10131,6 +10376,8 @@ function validateTypeExprHoles(expr: TypeExpr, diagnostics: Diagnostic[]) {
     } else if (node.kind === "type_match") {
       visit(node.value);
       for (const arm of node.arms) visit(arm.value);
+    } else if (node.kind === "type_scalar_domain") {
+      return;
     } else if (node.kind === "type_binary") {
       visit(node.left);
       visit(node.right);
@@ -10600,6 +10847,8 @@ function checkTypeExprCasing(
     for (const arm of expr.arms) {
       checkTypeExprCasing(arm.value, typeNames, diagnostics);
     }
+  } else if (expr.kind === "type_scalar_domain") {
+    diagnoseScalarDomainTypeExpr(expr, diagnostics);
   } else if (expr.kind === "type_binary") {
     checkTypeExprCasing(expr.left, typeNames, diagnostics);
     checkTypeExprCasing(expr.right, typeNames, diagnostics);
@@ -10626,7 +10875,7 @@ function checkTypeAnnotationCasing(
 }
 
 function diagnoseScalarDomainTypeExpr(
-  expr: Extract<TypeExpr, { kind: "type_call" }>,
+  expr: Extract<TypeExpr, { kind: "type_call" | "type_scalar_domain" }>,
   diagnostics: Diagnostic[],
 ) {
   const diagnostic = validateScalarDomainType(renderTypeExpr(expr));
@@ -10721,7 +10970,19 @@ function inferKinds(
     }
     return;
   }
-  if (expr.kind === "type_operator") return;
+  if (expr.kind === "type_scalar_domain") {
+    for (const member of expr.members) {
+      for (const endpoint of [member.start, member.end]) {
+        if (
+          endpoint?.kind === "symbol" &&
+          decl.params.some((param) => param.name === endpoint.source)
+        ) {
+          markKind(decl, kinds, endpoint.source, "count", diagnostics);
+        }
+      }
+    }
+    return;
+  }
   if (expr.kind === "type_binary") {
     inferKinds(expr.left, decl, kinds, locals, byName, diagnostics, expected);
     inferKinds(expr.right, decl, kinds, locals, byName, diagnostics, expected);
@@ -10810,14 +11071,14 @@ function isTypeConstructorKind(kind: TypeParamKind): boolean {
 }
 
 function typeConstructorKindArity(kind: TypeParamKind): number | undefined {
-  const match = kind.match(/^type\s+fn\s*\((.*)\)\s*->\s*(type|struct|union|operator)$/);
+  const match = kind.match(/^type\s+fn\s*\((.*)\)\s*->\s*(type|struct|union)$/);
   if (!match) return undefined;
   const params = match[1].trim();
   return params ? params.split(",").length : 0;
 }
 
 function typeConstructorResultKind(kind: TypeParamKind): TypeResultKind | undefined {
-  const match = kind.match(/^type\s+fn\s*\(.*\)\s*->\s*(type|struct|union|operator)$/);
+  const match = kind.match(/^type\s+fn\s*\(.*\)\s*->\s*(type|struct|union)$/);
   return match?.[1] as TypeResultKind | undefined;
 }
 
@@ -10837,7 +11098,6 @@ function checkTypeResultKind(
   if (!normalized || decl.resultKind === "type") return;
   if (decl.resultKind === "struct" && normalized.kind === "product") return;
   if (decl.resultKind === "union" && normalized.kind === "sum") return;
-  if (decl.resultKind === "operator" && normalized.kind === "operator") return;
   diagnostics.push({
     code: "type.result_kind",
     message:
@@ -10855,9 +11115,6 @@ function normalizeTop(
 ): TypeBody {
   const resolved = resolveLocal(expr, locals);
   const typeLetDocs = new Map(decl.body.statements.map((stmt) => [stmt.name, stmt.doc]));
-  if (resolved.kind === "type_operator") {
-    return { kind: "operator", descriptor: resolved.descriptor };
-  }
   const builder = typeBuilderCall(resolved);
   if (builder?.name === "struct") {
     const arg = builder.args[0];
@@ -11030,8 +11287,8 @@ function renderTypeExpr(expr: TypeExpr): string {
         expr.arms.map((arm) => `${renderTypePattern(arm.pattern)} => ${renderTypeExpr(arm.value)}`)
           .join(", ")
       } }`;
-    case "type_operator":
-      return `operator(${expr.descriptor.fixity}, ${expr.descriptor.precedence}, "${expr.descriptor.symbol}", ${expr.descriptor.target})`;
+    case "type_scalar_domain":
+      return renderTypeScalarDomainExpr(expr);
     case "type_binary":
       return `${renderTypeExpr(expr.left)} ${expr.op} ${renderTypeExpr(expr.right)}`;
     case "type_bool":
@@ -11045,6 +11302,26 @@ function renderTypeExpr(expr: TypeExpr): string {
     case "type_literal":
       return `#${expr.value}`;
   }
+}
+
+function renderTypeScalarDomainExpr(
+  expr: Extract<TypeExpr, { kind: "type_scalar_domain" }>,
+): string {
+  return `${expr.carrier}(${expr.members.map(renderTypeScalarDomainMember).join(" | ")})`;
+}
+
+function renderTypeScalarDomainMember(
+  member: Extract<TypeExpr, { kind: "type_scalar_domain" }>["members"][number],
+): string {
+  const start = renderTypeScalarDomainEndpoint(member.start);
+  const end = member.end ? renderTypeScalarDomainEndpoint(member.end) : undefined;
+  return end ? `${start}..${end}` : start;
+}
+
+function renderTypeScalarDomainEndpoint(
+  endpoint: Extract<TypeExpr, { kind: "type_scalar_domain" }>["members"][number]["start"],
+): string {
+  return endpoint.source;
 }
 
 type LiteralTypeMember = {
@@ -11517,6 +11794,12 @@ function lowerProductConstructors(
         };
       case "binary":
         return { ...expr, left: lowerExpr(expr.left), right: lowerExpr(expr.right) };
+      case "operator_chain":
+        return {
+          ...expr,
+          first: lowerExpr(expr.first),
+          rest: expr.rest.map((item) => ({ ...item, value: lowerExpr(item.value) })),
+        };
       case "pipe_bind":
         return { ...expr, value: lowerExpr(expr.value), body: lowerExpr(expr.body) };
       case "match":
@@ -11554,7 +11837,6 @@ function lowerProductConstructors(
         };
       case "literal":
       case "var":
-      case "placeholder":
         return expr;
     }
   };
@@ -11765,15 +12047,6 @@ class TypeEvaluator {
         };
       case "type_fn":
         return { kind: "type", name: substituteTypeSource(expr.source, locals) };
-      case "type_operator":
-        return {
-          kind: "type",
-          name: renderTypeExpr(expr),
-          normalized: {
-            kind: "operator",
-            descriptor: expr.descriptor,
-          },
-        };
       case "type_match": {
         const value = this.eval(expr.value, locals);
         if (!value) return undefined;
@@ -11787,6 +12060,10 @@ class TypeEvaluator {
           message: "type match has no matching arm",
         });
         return { kind: "never" };
+      }
+      case "type_scalar_domain": {
+        const rendered = renderTypeExpr(expr);
+        return this.namedType(refinedI32TypeCanonical(rendered) ?? rendered);
       }
       case "type_binary": {
         const left = this.eval(expr.left, locals);
@@ -11807,9 +12084,6 @@ class TypeEvaluator {
           const rightMembers = literalTypeMembersFromEval(right);
           if (leftMembers && rightMembers) return this.namedType(renderLiteralUnionType(members));
           return this.namedType(`${renderTypeEvalValue(left)} | ${renderTypeEvalValue(right)}`);
-        }
-        if (expr.op === "..") {
-          return this.namedType(`${renderTypeEvalValue(left)}..${renderTypeEvalValue(right)}`);
         }
         return this.unsupported(
           "type.unsupported_expr",
@@ -12420,6 +12694,18 @@ class TypeEvaluator {
           `operator ${expr.op} is not type-evaluable`,
         );
       }
+      case "operator_chain":
+        return this.evalStaticExpr(
+          buildOperatorTree(
+            [expr.first, ...expr.rest.map((item) => item.value)],
+            expr.rest.map((item) => item.op),
+            [],
+            this.diagnostics,
+            expr,
+          ),
+          locals,
+          callStack,
+        );
       case "pipe_bind": {
         const value = this.evalStaticExpr(expr.value, locals, callStack);
         if (!value) return undefined;
@@ -13270,8 +13556,6 @@ class TypeEvaluator {
             })) ?? [],
           })),
         };
-      case "operator":
-        return { kind: "operator", descriptor: body.descriptor };
     }
   }
 }
@@ -13353,14 +13637,6 @@ function checkExternalImportsUseExplicitIo(program: Program, diagnostics: Diagno
       diagnostics.push({
         code: "external.io_return",
         message: `external import ${item.name} must return io(T)`,
-        span: item.span,
-      });
-    }
-    if (item.effects.length > 0) {
-      diagnostics.push({
-        code: "external.io_effects_removed",
-        message:
-          "external imports use the primitive io parameter instead of function effect syntax",
         span: item.span,
       });
     }
@@ -13949,6 +14225,7 @@ function substituteTypeExpr(expr: TypeExpr, locals: Map<string, TypeEvalValue>):
       })),
     };
   }
+  if (expr.kind === "type_scalar_domain") return substituteScalarDomainExpr(expr, locals);
   if (expr.kind === "type_binary") {
     return {
       kind: "type_binary",
@@ -13957,8 +14234,29 @@ function substituteTypeExpr(expr: TypeExpr, locals: Map<string, TypeEvalValue>):
       right: substituteTypeExpr(expr.right, locals),
     };
   }
-  if (expr.kind === "type_operator") return expr;
   return expr;
+}
+
+function substituteScalarDomainExpr(
+  expr: Extract<TypeExpr, { kind: "type_scalar_domain" }>,
+  locals: Map<string, TypeEvalValue>,
+): TypeExpr {
+  const substituteEndpoint = (
+    endpoint: Extract<TypeExpr, { kind: "type_scalar_domain" }>["members"][number]["start"],
+  ) => {
+    const local = endpoint.kind === "symbol" ? locals.get(endpoint.source) : undefined;
+    return local?.kind === "number"
+      ? { ...endpoint, kind: "literal" as const, source: local.value }
+      : endpoint;
+  };
+  return {
+    ...expr,
+    members: expr.members.map((member) => ({
+      ...member,
+      start: substituteEndpoint(member.start),
+      ...(member.end ? { end: substituteEndpoint(member.end) } : {}),
+    })),
+  };
 }
 
 function substituteShape(shape: TypeShape, locals: Map<string, TypeEvalValue>): TypeShape {
@@ -14023,8 +14321,6 @@ function substituteTypeBodyEval(body: TypeBody, locals: Map<string, TypeEvalValu
             : undefined,
         })),
       };
-    case "operator":
-      return body;
   }
 }
 
@@ -14044,6 +14340,8 @@ function collectTypeCalls(expr: TypeExpr): TypeExpr[] {
     for (const arm of expr.arms) nested.push(...collectTypeCalls(arm.value));
   } else if (expr.kind === "type_shape") {
     for (const slot of expr.shape.slots) nested.push(...collectTypeCalls(slot.type));
+  } else if (expr.kind === "type_scalar_domain") {
+    return nested;
   } else if (expr.kind === "type_fn") {
     for (const item of expr.source.match(/[A-Za-z_][A-Za-z0-9_]*(?:\([^()]*\))/g) ?? []) {
       if (item.startsWith("fn(")) continue;
@@ -14076,25 +14374,13 @@ class AnnotationTypeParser {
   }
 
   private parseUnion(): TypeExpr | undefined {
-    let expr = this.parseRange();
+    let expr = this.parsePrimaryType();
     if (!expr) return undefined;
     while (this.peek("|")) {
       this.index++;
-      const right = this.parseRange();
-      if (!right) return undefined;
-      expr = { kind: "type_binary", op: "|", left: expr, right };
-    }
-    return expr;
-  }
-
-  private parseRange(): TypeExpr | undefined {
-    let expr = this.parsePrimaryType();
-    if (!expr) return undefined;
-    if (this.peek("..")) {
-      this.index += 2;
       const right = this.parsePrimaryType();
       if (!right) return undefined;
-      expr = { kind: "type_binary", op: "..", left: expr, right };
+      expr = { kind: "type_binary", op: "|", left: expr, right };
     }
     return expr;
   }
@@ -14163,6 +14449,8 @@ class AnnotationTypeParser {
       if (!part) break;
       fullName += `.${part}`;
     }
+    const scalarDomain = this.parseScalarDomainType(fullName);
+    if (scalarDomain) return scalarDomain;
     let expr: TypeExpr = { kind: "type_ref", name: fullName };
     this.skip();
     while (this.peek("(")) {
@@ -14186,6 +14474,81 @@ class AnnotationTypeParser {
       this.skip();
     }
     return expr;
+  }
+
+  private parseScalarDomainType(carrier: string): TypeExpr | undefined {
+    if (!["i32", "i64", "u32", "u64", "f32", "f64"].includes(carrier)) return undefined;
+    this.skip();
+    if (!this.peek("(")) return undefined;
+    this.index++;
+    this.skip();
+    const members: Extract<TypeExpr, { kind: "type_scalar_domain" }>["members"] = [];
+    while (!this.peek(")") && this.index < this.source.length) {
+      const start = this.parseScalarDomainEndpoint();
+      if (!start) break;
+      this.skip();
+      let end: typeof start | undefined;
+      if (this.peek("..")) {
+        this.index += 2;
+        end = this.parseScalarDomainEndpoint();
+        if (!end) break;
+        this.skip();
+      }
+      members.push({ start, ...(end ? { end } : {}) });
+      if (this.peek("|")) {
+        this.index++;
+        this.skip();
+        continue;
+      }
+      break;
+    }
+    if (this.peek(")")) {
+      this.index++;
+      return { kind: "type_scalar_domain", carrier, members };
+    }
+    return undefined;
+  }
+
+  private parseScalarDomainEndpoint():
+    | Extract<TypeExpr, { kind: "type_scalar_domain" }>["members"][number]["start"]
+    | undefined {
+    this.skip();
+    const number = this.source.slice(this.index).match(/^-?[0-9]+/);
+    if (number) {
+      this.index += number[0].length;
+      return { kind: "literal", source: number[0] };
+    }
+    if (this.peek('"')) {
+      const text = this.quoted('"');
+      return text === undefined ? undefined : { kind: "literal", source: text };
+    }
+    if (this.peek("'")) {
+      const text = this.quoted("'");
+      return text === undefined ? undefined : { kind: "literal", source: text };
+    }
+    if (this.peek("#")) {
+      this.index++;
+      const value = this.ident();
+      return value ? { kind: "literal", source: `#${value}` } : undefined;
+    }
+    if (this.peekKeyword("true")) {
+      this.index += "true".length;
+      return { kind: "literal", source: "true" };
+    }
+    if (this.peekKeyword("false")) {
+      this.index += "false".length;
+      return { kind: "literal", source: "false" };
+    }
+    const name = this.ident();
+    if (!name) return undefined;
+    let source = name;
+    while (this.peek(".")) {
+      this.index++;
+      const part = this.ident();
+      if (!part) break;
+      source += `.${part}`;
+    }
+    return { kind: "symbol", source };
   }
 
   private quoted(quote: '"' | "'"): string | undefined {
@@ -14510,6 +14873,9 @@ function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
       return exprContainsStaticExpansion(expr.target) || exprContainsStaticExpansion(expr.index);
     case "binary":
       return exprContainsStaticExpansion(expr.left) || exprContainsStaticExpansion(expr.right);
+    case "operator_chain":
+      return exprContainsStaticExpansion(expr.first) ||
+        expr.rest.some((item) => exprContainsStaticExpansion(item.value));
     case "pipe_bind":
       return exprContainsStaticExpansion(expr.value) || exprContainsStaticExpansion(expr.body);
     case "match":
@@ -14523,7 +14889,6 @@ function exprContainsStaticExpansion(expr: Expr | undefined): boolean {
     case "range":
       return exprContainsStaticExpansion(expr.start) || exprContainsStaticExpansion(expr.end);
     case "literal":
-    case "placeholder":
     case "var":
       return false;
   }
@@ -14810,6 +15175,7 @@ function typeExprContainsContractCheck(
     return typeExprContainsContractCheck(expr.value, types, seen) ||
       expr.arms.some((arm) => typeExprContainsContractCheck(arm.value, types, seen));
   }
+  if (expr.kind === "type_scalar_domain") return false;
   if (expr.kind === "type_binary") {
     return typeExprContainsContractCheck(expr.left, types, seen) ||
       typeExprContainsContractCheck(expr.right, types, seen);
@@ -14940,7 +15306,6 @@ function checkTypeVariableMemberProofs(
         visitExpr(expr.expr, proofs);
         return;
       case "literal":
-      case "placeholder":
         return;
     }
   };
@@ -14981,7 +15346,7 @@ function typeExprIsConcreteProofTarget(expr: TypeExpr): boolean {
     case "type_fn":
     case "type_shape":
     case "type_match":
-    case "type_operator":
+    case "type_scalar_domain":
     case "type_binary":
     case "type_bool":
     case "type_number":
@@ -15043,6 +15408,8 @@ function typeDeclRequiredMembers(decl: TypeDecl): { paramName: string; member: s
         visit(expr.value);
         for (const arm of expr.arms) visit(arm.value);
         return;
+      case "type_scalar_domain":
+        return;
       case "type_binary":
         visit(expr.left);
         visit(expr.right);
@@ -15053,7 +15420,6 @@ function typeDeclRequiredMembers(decl: TypeDecl): { paramName: string; member: s
       case "type_ref":
       case "type_hole":
       case "type_static_ref":
-      case "type_operator":
       case "type_bool":
       case "type_number":
       case "type_char":
@@ -15179,12 +15545,6 @@ function checkExprImpl(
       }
       return;
     }
-    case "placeholder":
-      diagnostics.push({
-        code: "const.placeholder_context",
-        message: "$ is only valid in a pipeline stage or expected unary const fn argument",
-      });
-      return;
     case "call": {
       const calleeName = expr.callee.kind === "var" ? expr.callee.name : undefined;
       if (calleeName === "return") {
@@ -16888,6 +17248,11 @@ function resolveAliasType(type: string | undefined, types: TypeDecl[]): string |
   const seen = new Set<string>();
   while (current && !seen.has(current)) {
     seen.add(current);
+    const staticResolved = resolveStaticAliasTypeSource(current);
+    if (staticResolved && staticResolved !== current) {
+      current = staticResolved;
+      continue;
+    }
     const decl = byName.get(current) ?? byTerminal.get(terminalName(current));
     if (decl) {
       if (decl.normalized?.kind !== "alias") return current;
@@ -16908,6 +17273,18 @@ function resolveAliasType(type: string | undefined, types: TypeDecl[]): string |
     return current;
   }
   return current;
+}
+
+function resolveStaticAliasTypeSource(source: string): string | undefined {
+  const call = source.trim().match(/^@shape_slot\(([\s\S]*)\)$/);
+  if (!call) return undefined;
+  const args = splitTypeArgs(call[1] ?? "");
+  if (args.length !== 2) return undefined;
+  const shape = parseAnnotationType(args[0]!.trim());
+  const key = args[1]!.trim().replace(/^#/, "");
+  if (shape?.kind !== "type_shape" || !key) return undefined;
+  const slot = shape.shape.slots.find((item) => item.label === key);
+  return slot ? renderTypeExpr(slot.type) : undefined;
 }
 
 function typeCallArgsForBase(type: string, baseName: string): string | undefined {
@@ -17077,6 +17454,8 @@ function collectTypeExprRefs(expr: TypeExpr, refs: Set<string>) {
       collectTypeExprRefs(expr.value, refs);
       for (const arm of expr.arms) collectTypeExprRefs(arm.value, refs);
       return;
+    case "type_scalar_domain":
+      return;
     case "type_binary":
       collectTypeExprRefs(expr.left, refs);
       collectTypeExprRefs(expr.right, refs);
@@ -17084,7 +17463,6 @@ function collectTypeExprRefs(expr: TypeExpr, refs: Set<string>) {
     case "type_hole":
     case "type_static_ref":
     case "type_fn":
-    case "type_operator":
     case "type_bool":
     case "type_number":
     case "type_char":
@@ -17110,6 +17488,10 @@ function collectExprRefs(expr: Expr, refs: Set<string>, shadowed: Set<string>) {
     case "binary":
       collectExprRefs(expr.left, refs, shadowed);
       collectExprRefs(expr.right, refs, shadowed);
+      return;
+    case "operator_chain":
+      collectExprRefs(expr.first, refs, shadowed);
+      for (const item of expr.rest) collectExprRefs(item.value, refs, shadowed);
       return;
     case "const_fn": {
       collectExprRefs(expr.body, refs, shadowNames(shadowed, expr.params));
@@ -17170,7 +17552,6 @@ function collectExprRefs(expr: Expr, refs: Set<string>, shadowed: Set<string>) {
       collectDoRefs(expr, refs, shadowed);
       return;
     case "literal":
-    case "placeholder":
       return;
   }
 }

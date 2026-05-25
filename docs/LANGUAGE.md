@@ -13,7 +13,7 @@ fixtures under `tests/fixtures/language` when behavior and prose disagree.
 3. [Expressions](reference/expressions.md) covers calls, constructors, match, operators, pipe-bind,
    local bindings, and destructuring.
 4. [Type Functions](reference/type-functions.md) covers type blocks, result kinds, type parameters,
-   `struct`, `union`, `operator`, and static matches.
+   `struct`, `union`, operators, and static matches.
 5. [Builtins](reference/builtins.md) lists every compiler builtin and backend intrinsic.
 6. [Semantics](reference/semantics.md) covers Branch-Bit values, effects, const evaluation,
    reflection, and WebAssembly portability constraints.
@@ -32,10 +32,7 @@ analysis, and type-directed partial evaluation, see
 ```fig
 const std = @import("prelude.std");
 
-type fn Point() -> struct {
-  let Point = {x: i32, y: i32};
-  struct(Point)
-}
+type Point = struct {x: i32, y: i32}
 
 fn Point::add(a: Point, b: Point) -> Point {
   Point {x: a.x + b.x, y: a.y + b.y}

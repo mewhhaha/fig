@@ -1,9 +1,6 @@
 const merge = @import("prelude.std");
 
-type fn Point() -> type {
-  let Point = {x: i32, y: i32};
-  struct(Point)
-}
+type Point = struct {x: i32, y: i32}
 
 fn Point::eql(a: Point, b: Point) -> bool {
   a.x == b.x
@@ -13,10 +10,7 @@ fn Point::append(a: Point, b: Point) -> Point {
   Point {x: a.x + b.x, y: a.y + b.y}
 }
 
-type fn Box(a: type) -> type {
-  let Box = {value: a};
-  struct(Box)
-}
+type Box(a) = struct {value: a}
 
 fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}

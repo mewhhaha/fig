@@ -231,10 +231,12 @@ let ys: Layout.InlineArrayList(4, i32) = #[0, ...tail];
 ## Operators
 
 The parser accepts these binary operator symbols: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`,
-`>`, `>=`, `&&`, `||`, `^^`, `<>`, `<$>`, `<*>`, `>>=`, `zip`, and `..`.
+`>`, `>=`, `&&`, `||`, `^^`, `<>`, `<$>`, `<*>`, and `>>=`.
+
+Ranges use dedicated `start .. end` syntax. `..` is not an overloadable operator.
 
 Primitive operators are available for primitive types where implemented. Other operator calls are
-resolved through visible operator descriptors, commonly imported through `prelude.operators` or
+resolved through visible operator declarations, commonly imported through `prelude.operators` or
 `prelude.std`.
 
 Type expressions support `==` and `!=` for compile-time comparison.

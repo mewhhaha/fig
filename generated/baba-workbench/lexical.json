@@ -5,23 +5,28 @@
     "contract",
     "do",
     "else",
+    "f32",
+    "f64",
     "false",
     "fn",
+    "i32",
+    "i64",
     "if",
     "import",
     "let",
     "match",
-    "operator",
     "pub",
     "rewrite",
     "struct",
     "true",
     "type",
-    "union",
-    "zip"
+    "u32",
+    "u64",
+    "union"
   ],
   "symbols": [
     "@external",
+    "@operator",
     "@profile",
     "@trace",
     "...",
@@ -62,8 +67,7 @@
     "<",
     "=",
     ">",
-    "|",
-    "$"
+    "|"
   ],
   "tokens": [
     {

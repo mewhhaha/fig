@@ -40,10 +40,25 @@ export type AstNode =
   | ProgramAstNode
   | FieldNameAstNode
   | DeclAstNode
+  | TypeSugarDeclAstNode
+  | TypeSugarParamsAstNode
+  | TypeSugarParamListAstNode
+  | TypeSugarParamAstNode
+  | TypeSugarBodyAstNode
+  | TypeSugarStructAstNode
+  | TypeSugarUnionAstNode
+  | TypeSugarVariantsAstNode
+  | TypeSugarVariantAstNode
+  | TypeSugarVariantPayloadAstNode
+  | TypeSugarVariantPayloadBodyAstNode
   | TypeFnDeclAstNode
   | TypeBlockAstNode
   | TypeBlockItemAstNode
   | TypeLetDeclAstNode
+  | OperatorDeclAstNode
+  | OperatorBindingNameAstNode
+  | OperatorValueAstNode
+  | OperatorTargetAstNode
   | TypeExprAstNode
   | TypeMatchAstNode
   | TypeArmAstNode
@@ -51,6 +66,11 @@ export type AstNode =
   | TypeBinaryAstNode
   | TypeCallAstNode
   | TypePrimaryAstNode
+  | ScalarDomainTypeAstNode
+  | ScalarCarrierAstNode
+  | ScalarDomainAstNode
+  | ScalarDomainMemberAstNode
+  | ScalarDomainEndpointAstNode
   | TypeHoleAstNode
   | TypeOperatorDescriptorAstNode
   | TypeOperatorTargetAstNode
@@ -106,7 +126,6 @@ export type AstNode =
   | CallAstNode
   | PrimaryAstNode
   | ProfileExprAstNode
-  | PlaceholderAstNode
   | ProductConstructorTailAstNode
   | ParenExprAstNode
   | ShapeValueAstNode
@@ -210,6 +229,83 @@ export interface DeclAstNode {
   children: AstNode[];
 }
 
+export interface TypeSugarDeclAstNode {
+  kind: "TypeSugarDecl";
+  type: "TypeSugarDecl";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarParamsAstNode {
+  kind: "TypeSugarParams";
+  type: "TypeSugarParams";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarParamListAstNode {
+  kind: "TypeSugarParamList";
+  type: "TypeSugarParamList";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarParamAstNode {
+  kind: "TypeSugarParam";
+  type: "TypeSugarParam";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarBodyAstNode {
+  kind: "TypeSugarBody";
+  type: "TypeSugarBody";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarStructAstNode {
+  kind: "TypeSugarStruct";
+  type: "TypeSugarStruct";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarUnionAstNode {
+  kind: "TypeSugarUnion";
+  type: "TypeSugarUnion";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarVariantsAstNode {
+  kind: "TypeSugarVariants";
+  type: "TypeSugarVariants";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarVariantAstNode {
+  kind: "TypeSugarVariant";
+  type: "TypeSugarVariant";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarVariantPayloadAstNode {
+  kind: "TypeSugarVariantPayload";
+  type: "TypeSugarVariantPayload";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeSugarVariantPayloadBodyAstNode {
+  kind: "TypeSugarVariantPayloadBody";
+  type: "TypeSugarVariantPayloadBody";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface TypeFnDeclAstNode {
   kind: "TypeFnDecl";
   type: "TypeFnDecl";
@@ -234,6 +330,34 @@ export interface TypeBlockItemAstNode {
 export interface TypeLetDeclAstNode {
   kind: "TypeLetDecl";
   type: "TypeLetDecl";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface OperatorDeclAstNode {
+  kind: "OperatorDecl";
+  type: "OperatorDecl";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface OperatorBindingNameAstNode {
+  kind: "OperatorBindingName";
+  type: "OperatorBindingName";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface OperatorValueAstNode {
+  kind: "OperatorValue";
+  type: "OperatorValue";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface OperatorTargetAstNode {
+  kind: "OperatorTarget";
+  type: "OperatorTarget";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -283,6 +407,41 @@ export interface TypeCallAstNode {
 export interface TypePrimaryAstNode {
   kind: "TypePrimary";
   type: "TypePrimary";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ScalarDomainTypeAstNode {
+  kind: "ScalarDomainType";
+  type: "ScalarDomainType";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ScalarCarrierAstNode {
+  kind: "ScalarCarrier";
+  type: "ScalarCarrier";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ScalarDomainAstNode {
+  kind: "ScalarDomain";
+  type: "ScalarDomain";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ScalarDomainMemberAstNode {
+  kind: "ScalarDomainMember";
+  type: "ScalarDomainMember";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ScalarDomainEndpointAstNode {
+  kind: "ScalarDomainEndpoint";
+  type: "ScalarDomainEndpoint";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -668,13 +827,6 @@ export interface PrimaryAstNode {
 export interface ProfileExprAstNode {
   kind: "ProfileExpr";
   type: "ProfileExpr";
-  node: RuleParseNode;
-  children: AstNode[];
-}
-
-export interface PlaceholderAstNode {
-  kind: "Placeholder";
-  type: "Placeholder";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -1265,12 +1417,108 @@ const rules: Record<string, Expression> = {
   "Decl": {
     kind: "choice",
     options: [
+      { kind: "ref", name: "TypeSugarDecl" },
       { kind: "ref", name: "TypeFnDecl" },
       { kind: "ref", name: "ContractFnDecl" },
+      { kind: "ref", name: "OperatorDecl" },
       { kind: "ref", name: "ConstDecl" },
       { kind: "ref", name: "FnDecl" },
       { kind: "ref", name: "TopLetDecl" },
     ],
+  },
+  "TypeSugarDecl": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "type" },
+      { kind: "ref", name: "PascalIdent" },
+      { kind: "optional", expression: { kind: "ref", name: "TypeSugarParams" } },
+      { kind: "literal", value: "=" },
+      { kind: "ref", name: "TypeSugarBody" },
+      { kind: "optional", expression: { kind: "literal", value: ";" } },
+    ],
+  },
+  "TypeSugarParams": {
+    kind: "sequence",
+    items: [{ kind: "literal", value: "(" }, {
+      kind: "optional",
+      expression: { kind: "ref", name: "TypeSugarParamList" },
+    }, { kind: "literal", value: ")" }],
+  },
+  "TypeSugarParamList": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "TypeSugarParam" }, {
+      kind: "repeat",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeSugarParam" }],
+      },
+    }, { kind: "optional", expression: { kind: "literal", value: "," } }],
+  },
+  "TypeSugarParam": {
+    kind: "sequence",
+    items: [{
+      kind: "choice",
+      options: [{ kind: "ref", name: "PascalIdent" }, { kind: "ref", name: "LowerIdent" }],
+    }, {
+      kind: "optional",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: ":" }, { kind: "ref", name: "TypeParamKind" }],
+      },
+    }],
+  },
+  "TypeSugarBody": {
+    kind: "choice",
+    options: [
+      { kind: "ref", name: "TypeSugarStruct" },
+      { kind: "ref", name: "TypeSugarUnion" },
+      { kind: "ref", name: "TypeExpr" },
+    ],
+  },
+  "TypeSugarStruct": {
+    kind: "sequence",
+    items: [{ kind: "literal", value: "struct" }, { kind: "ref", name: "TypeShape" }],
+  },
+  "TypeSugarUnion": {
+    kind: "sequence",
+    items: [{ kind: "literal", value: "union" }, { kind: "literal", value: "{" }, {
+      kind: "optional",
+      expression: { kind: "ref", name: "TypeSugarVariants" },
+    }, { kind: "literal", value: "}" }],
+  },
+  "TypeSugarVariants": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "TypeSugarVariant" }, {
+      kind: "repeat",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeSugarVariant" }],
+      },
+    }, { kind: "optional", expression: { kind: "literal", value: "," } }],
+  },
+  "TypeSugarVariant": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "PascalIdent" }, {
+      kind: "optional",
+      expression: { kind: "ref", name: "TypeSugarVariantPayload" },
+    }],
+  },
+  "TypeSugarVariantPayload": {
+    kind: "sequence",
+    items: [{ kind: "literal", value: "(" }, {
+      kind: "optional",
+      expression: { kind: "ref", name: "TypeSugarVariantPayloadBody" },
+    }, { kind: "literal", value: ")" }],
+  },
+  "TypeSugarVariantPayloadBody": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "TypeShapeSlot" }, {
+      kind: "repeat",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TypeShapeSlot" }],
+      },
+    }, { kind: "optional", expression: { kind: "literal", value: "," } }],
   },
   "TypeFnDecl": {
     kind: "sequence",
@@ -1315,6 +1563,50 @@ const rules: Record<string, Expression> = {
       { kind: "literal", value: ";" },
     ],
   },
+  "OperatorDecl": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "const" },
+      { kind: "ref", name: "OperatorBindingName" },
+      { kind: "literal", value: "=" },
+      { kind: "ref", name: "OperatorValue" },
+      { kind: "optional", expression: { kind: "literal", value: ";" } },
+    ],
+  },
+  "OperatorBindingName": {
+    kind: "sequence",
+    items: [{ kind: "literal", value: "(" }, { kind: "ref", name: "Op" }, {
+      kind: "literal",
+      value: ")",
+    }],
+  },
+  "OperatorValue": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "@operator" },
+      { kind: "literal", value: "(" },
+      { kind: "ref", name: "LiteralType" },
+      { kind: "literal", value: "," },
+      { kind: "ref", name: "Number" },
+      { kind: "literal", value: "," },
+      { kind: "ref", name: "OperatorTarget" },
+      { kind: "literal", value: ")" },
+    ],
+  },
+  "OperatorTarget": {
+    kind: "sequence",
+    items: [
+      {
+        kind: "choice",
+        options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }, {
+          kind: "ref",
+          name: "ScalarCarrier",
+        }],
+      },
+      { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } },
+      { kind: "optional", expression: { kind: "ref", name: "TypeAssociatedTail" } },
+    ],
+  },
   "TypeExpr": {
     kind: "choice",
     options: [{ kind: "ref", name: "TypeMatch" }, { kind: "ref", name: "FnType" }, {
@@ -1342,6 +1634,9 @@ const rules: Record<string, Expression> = {
   "TypePattern": {
     kind: "choice",
     options: [{ kind: "literal", value: "_" }, { kind: "ref", name: "Literal" }, {
+      kind: "ref",
+      name: "ScalarCarrier",
+    }, {
       kind: "ref",
       name: "LowerIdent",
     }, { kind: "ref", name: "PascalIdent" }],
@@ -1372,13 +1667,74 @@ const rules: Record<string, Expression> = {
   "TypePrimary": {
     kind: "choice",
     options: [
-      { kind: "ref", name: "TypeOperatorDescriptor" },
       { kind: "ref", name: "TypeTuple" },
       { kind: "ref", name: "TypeShape" },
       { kind: "ref", name: "StaticBuiltin" },
       { kind: "ref", name: "Literal" },
       { kind: "ref", name: "TypeHole" },
       { kind: "ref", name: "TypeBuilderName" },
+      { kind: "ref", name: "ScalarDomainType" },
+      { kind: "ref", name: "ScalarCarrier" },
+      {
+        kind: "sequence",
+        items: [{ kind: "ref", name: "LowerIdent" }, {
+          kind: "optional",
+          expression: { kind: "ref", name: "TypeQualifiedTail" },
+        }],
+      },
+      {
+        kind: "sequence",
+        items: [{ kind: "ref", name: "PascalIdent" }, {
+          kind: "optional",
+          expression: { kind: "ref", name: "TypeQualifiedTail" },
+        }],
+      },
+    ],
+  },
+  "ScalarDomainType": {
+    kind: "sequence",
+    items: [
+      { kind: "ref", name: "ScalarCarrier" },
+      { kind: "literal", value: "(" },
+      { kind: "optional", expression: { kind: "ref", name: "ScalarDomain" } },
+      { kind: "literal", value: ")" },
+    ],
+  },
+  "ScalarCarrier": {
+    kind: "choice",
+    options: [
+      { kind: "literal", value: "i32" },
+      { kind: "literal", value: "i64" },
+      { kind: "literal", value: "u32" },
+      { kind: "literal", value: "u64" },
+      { kind: "literal", value: "f32" },
+      { kind: "literal", value: "f64" },
+    ],
+  },
+  "ScalarDomain": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "ScalarDomainMember" }, {
+      kind: "repeat",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: "|" }, { kind: "ref", name: "ScalarDomainMember" }],
+      },
+    }],
+  },
+  "ScalarDomainMember": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "ScalarDomainEndpoint" }, {
+      kind: "optional",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: ".." }, { kind: "ref", name: "ScalarDomainEndpoint" }],
+      },
+    }],
+  },
+  "ScalarDomainEndpoint": {
+    kind: "choice",
+    options: [
+      { kind: "ref", name: "Literal" },
       {
         kind: "sequence",
         items: [{ kind: "ref", name: "LowerIdent" }, {
@@ -1416,7 +1772,10 @@ const rules: Record<string, Expression> = {
     items: [
       {
         kind: "choice",
-        options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }],
+        options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }, {
+          kind: "ref",
+          name: "ScalarCarrier",
+        }],
       },
       { kind: "optional", expression: { kind: "ref", name: "TypeQualifiedTail" } },
       { kind: "optional", expression: { kind: "ref", name: "TypeAssociatedTail" } },
@@ -1426,7 +1785,10 @@ const rules: Record<string, Expression> = {
     kind: "sequence",
     items: [{ kind: "literal", value: "::" }, {
       kind: "choice",
-      options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }],
+      options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }, {
+        kind: "ref",
+        name: "ScalarCarrier",
+      }],
     }],
   },
   "TypeQualifiedTail": {
@@ -1435,7 +1797,10 @@ const rules: Record<string, Expression> = {
       kind: "sequence",
       items: [{ kind: "literal", value: "." }, {
         kind: "choice",
-        options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }],
+        options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }, {
+          kind: "ref",
+          name: "ScalarCarrier",
+        }],
       }],
     },
   },
@@ -1450,10 +1815,7 @@ const rules: Record<string, Expression> = {
         kind: "sequence",
         items: [{ kind: "literal", value: "@" }, {
           kind: "choice",
-          options: [{ kind: "ref", name: "LowerIdent" }, { kind: "literal", value: "import" }, {
-            kind: "literal",
-            value: "capability",
-          }],
+          options: [{ kind: "ref", name: "LowerIdent" }, { kind: "literal", value: "import" }],
         }],
       },
       { kind: "literal", value: "@trace" },
@@ -1528,14 +1890,20 @@ const rules: Record<string, Expression> = {
     kind: "sequence",
     items: [{
       kind: "choice",
-      options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }],
+      options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }, {
+        kind: "ref",
+        name: "ScalarCarrier",
+      }],
     }, {
       kind: "repeat",
       expression: {
         kind: "sequence",
         items: [{ kind: "literal", value: "." }, {
           kind: "choice",
-          options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }],
+          options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }, {
+            kind: "ref",
+            name: "ScalarCarrier",
+          }],
         }],
       },
     }, { kind: "optional", expression: { kind: "ref", name: "TypeAssociatedTail" } }],
@@ -1867,7 +2235,7 @@ const rules: Record<string, Expression> = {
     kind: "choice",
     options: [{ kind: "ref", name: "IfExpr" }, { kind: "ref", name: "MatchExpr" }, {
       kind: "ref",
-      name: "Binary",
+      name: "Range",
     }],
   },
   "IfExpr": {
@@ -1941,10 +2309,7 @@ const rules: Record<string, Expression> = {
       },
     }, { kind: "optional", expression: { kind: "literal", value: "," } }],
   },
-  "PipeBindName": {
-    kind: "choice",
-    options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "Placeholder" }],
-  },
+  "PipeBindName": { kind: "ref", name: "LowerIdent" },
   "Binary": {
     kind: "sequence",
     items: [{ kind: "ref", name: "Call" }, {
@@ -1973,7 +2338,10 @@ const rules: Record<string, Expression> = {
             kind: "sequence",
             items: [{ kind: "literal", value: "." }, {
               kind: "choice",
-              options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }],
+              options: [{ kind: "ref", name: "LowerIdent" }, { kind: "ref", name: "PascalIdent" }, {
+                kind: "ref",
+                name: "ScalarCarrier",
+              }],
             }],
           },
           { kind: "ref", name: "TypeAssociatedTail" },
@@ -1994,9 +2362,10 @@ const rules: Record<string, Expression> = {
       { kind: "ref", name: "DoExpr" },
       { kind: "ref", name: "ProfileExpr" },
       { kind: "ref", name: "Literal" },
-      { kind: "ref", name: "Placeholder" },
       { kind: "ref", name: "StaticBuiltin" },
       { kind: "ref", name: "TypeBuilderName" },
+      { kind: "ref", name: "ScalarDomainType" },
+      { kind: "ref", name: "ScalarCarrier" },
       { kind: "ref", name: "LowerIdent" },
       {
         kind: "sequence",
@@ -2021,7 +2390,6 @@ const rules: Record<string, Expression> = {
       { kind: "ref", name: "Block" },
     ],
   },
-  "Placeholder": { kind: "literal", value: "$" },
   "ProductConstructorTail": { kind: "ref", name: "ShapeValue" },
   "ParenExpr": {
     kind: "sequence",
@@ -2058,9 +2426,12 @@ const rules: Record<string, Expression> = {
   },
   "Range": {
     kind: "sequence",
-    items: [{ kind: "ref", name: "Expr" }, { kind: "literal", value: ".." }, {
-      kind: "ref",
-      name: "Expr",
+    items: [{ kind: "ref", name: "Binary" }, {
+      kind: "optional",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: ".." }, { kind: "ref", name: "Binary" }],
+      },
     }],
   },
   "ShapeValueTail": {
@@ -2167,17 +2538,7 @@ const rules: Record<string, Expression> = {
     kind: "choice",
     options: [{ kind: "ref", name: "IfExpr" }, { kind: "ref", name: "MatchExpr" }, {
       kind: "ref",
-      name: "CollectionBinary",
-    }],
-  },
-  "CollectionBinary": {
-    kind: "sequence",
-    items: [{ kind: "ref", name: "Call" }, {
-      kind: "repeat",
-      expression: {
-        kind: "sequence",
-        items: [{ kind: "ref", name: "Op" }, { kind: "ref", name: "Call" }],
-      },
+      name: "Range",
     }],
   },
   "TupleValue": {
@@ -2331,6 +2692,12 @@ const rules: Record<string, Expression> = {
             kind: "optional",
             expression: { kind: "ref", name: "ParamTail" },
           }],
+        }, {
+          kind: "sequence",
+          items: [{ kind: "ref", name: "ScalarCarrier" }, {
+            kind: "optional",
+            expression: { kind: "ref", name: "ParamTail" },
+          }],
         }],
       }],
     }],
@@ -2397,6 +2764,8 @@ const rules: Record<string, Expression> = {
           expression: { kind: "ref", name: "TypeArgs" },
         }],
       },
+      { kind: "ref", name: "ScalarDomainType" },
+      { kind: "ref", name: "ScalarCarrier" },
       {
         kind: "sequence",
         items: [{ kind: "ref", name: "LowerIdent" }, {
@@ -2461,6 +2830,10 @@ const rules: Record<string, Expression> = {
         },
         {
           kind: "sequence",
+          items: [{ kind: "ref", name: "ScalarCarrier" }, { kind: "literal", value: ":" }],
+        },
+        {
+          kind: "sequence",
           items: [{ kind: "ref", name: "Literal" }, { kind: "literal", value: ":" }],
         },
         {
@@ -2506,7 +2879,7 @@ const rules: Record<string, Expression> = {
     options: [{ kind: "literal", value: "type" }, { kind: "literal", value: "struct" }, {
       kind: "literal",
       value: "union",
-    }, { kind: "literal", value: "operator" }],
+    }],
   },
   "TypeAnn": {
     kind: "sequence",
@@ -2767,8 +3140,6 @@ const rules: Record<string, Expression> = {
       { kind: "literal", value: "<$>" },
       { kind: "literal", value: "<*>" },
       { kind: "literal", value: ">>=" },
-      { kind: "literal", value: "zip" },
-      { kind: "literal", value: ".." },
     ],
   },
   "TypeOp": {
@@ -2776,7 +3147,7 @@ const rules: Record<string, Expression> = {
     options: [{ kind: "literal", value: "==" }, { kind: "literal", value: "!=" }, {
       kind: "literal",
       value: "|",
-    }, { kind: "literal", value: ".." }],
+    }],
   },
 };
 const rootRuleName = "Program";
@@ -2838,6 +3209,105 @@ export function projectParseNode(node: ParseNode): AstNode | null {
           child !== null
         ),
       };
+    case "TypeSugarDecl":
+      return {
+        kind: "TypeSugarDecl",
+        type: "TypeSugarDecl",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarParams":
+      return {
+        kind: "TypeSugarParams",
+        type: "TypeSugarParams",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarParamList":
+      return {
+        kind: "TypeSugarParamList",
+        type: "TypeSugarParamList",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarParam":
+      return {
+        kind: "TypeSugarParam",
+        type: "TypeSugarParam",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarBody":
+      return {
+        kind: "TypeSugarBody",
+        type: "TypeSugarBody",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarStruct":
+      return {
+        kind: "TypeSugarStruct",
+        type: "TypeSugarStruct",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarUnion":
+      return {
+        kind: "TypeSugarUnion",
+        type: "TypeSugarUnion",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarVariants":
+      return {
+        kind: "TypeSugarVariants",
+        type: "TypeSugarVariants",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarVariant":
+      return {
+        kind: "TypeSugarVariant",
+        type: "TypeSugarVariant",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarVariantPayload":
+      return {
+        kind: "TypeSugarVariantPayload",
+        type: "TypeSugarVariantPayload",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "TypeSugarVariantPayloadBody":
+      return {
+        kind: "TypeSugarVariantPayloadBody",
+        type: "TypeSugarVariantPayloadBody",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
     case "TypeFnDecl":
       return {
         kind: "TypeFnDecl",
@@ -2869,6 +3339,42 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "TypeLetDecl",
         type: "TypeLetDecl",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "OperatorDecl":
+      return {
+        kind: "OperatorDecl",
+        type: "OperatorDecl",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "OperatorBindingName":
+      return {
+        kind: "OperatorBindingName",
+        type: "OperatorBindingName",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "OperatorValue":
+      return {
+        kind: "OperatorValue",
+        type: "OperatorValue",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "OperatorTarget":
+      return {
+        kind: "OperatorTarget",
+        type: "OperatorTarget",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode =>
           child !== null
@@ -2932,6 +3438,51 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "TypePrimary",
         type: "TypePrimary",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "ScalarDomainType":
+      return {
+        kind: "ScalarDomainType",
+        type: "ScalarDomainType",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "ScalarCarrier":
+      return {
+        kind: "ScalarCarrier",
+        type: "ScalarCarrier",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "ScalarDomain":
+      return {
+        kind: "ScalarDomain",
+        type: "ScalarDomain",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "ScalarDomainMember":
+      return {
+        kind: "ScalarDomainMember",
+        type: "ScalarDomainMember",
+        node,
+        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
+          child !== null
+        ),
+      };
+    case "ScalarDomainEndpoint":
+      return {
+        kind: "ScalarDomainEndpoint",
+        type: "ScalarDomainEndpoint",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode =>
           child !== null
@@ -3427,15 +3978,6 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "ProfileExpr",
         type: "ProfileExpr",
-        node,
-        children: node.children.map(projectParseNode).filter((child): child is AstNode =>
-          child !== null
-        ),
-      };
-    case "Placeholder":
-      return {
-        kind: "Placeholder",
-        type: "Placeholder",
         node,
         children: node.children.map(projectParseNode).filter((child): child is AstNode =>
           child !== null

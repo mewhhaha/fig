@@ -1,10 +1,6 @@
 // Zig-style comptime reflection: derive a compact runtime descriptor from a
 // source record's slots and reject unsupported shapes at compile time.
-
-type fn Payload() -> struct {
-  let Payload = {id: i32, score: i32, debug: bool};
-  struct(Payload)
-}
+type Payload = struct {id: i32, score: i32, debug: bool}
 
 type fn KeepRuntimeSlot(key: const, _value: const) -> type {
   match key {
@@ -24,16 +20,43 @@ type fn DescriptorSlot(key: const, value: const) -> type {
 
 type fn RuntimeDescriptor(row: type) -> type {
   let Slots = @type_slots(row);
-  let RuntimeSlots = @shape_filter(Slots, KeepRuntimeSlot);
-  let CheckedSlots = @shape_map_with_key(RuntimeSlots, DescriptorSlot);
-  let Layout = @shape_concat({field_count: i32}, CheckedSlots);
+  let RuntimeSlots = @shape_filter(
+    Slots,
+    KeepRuntimeSlot
+  );
+  let CheckedSlots = @shape_map_with_key(
+    RuntimeSlots,
+    DescriptorSlot
+  );
+  let Layout = @shape_concat(
+    {field_count: i32},
+    CheckedSlots
+  );
   let RuntimeDescriptor = {field_count: i32, id: i32, score: i32};
-  @require(@shape_count(RuntimeSlots) == 2, "descriptor expects two runtime slots");
-  @require(@shape_slot(RuntimeSlots, #id) == i32, "id must stay i32");
-  @require(@shape_slot(RuntimeSlots, #score) == i32, "score must stay i32");
-  @require(@shape_has_slot(Layout, #field_count), "layout has field count");
-  @require(@shape_has_slot(Layout, #id), "layout has id");
-  @require(@shape_has_slot(Layout, #score), "layout has score");
+  @require(
+    @shape_count(RuntimeSlots) == 2,
+    "descriptor expects two runtime slots"
+  );
+  @require(
+    @shape_slot(RuntimeSlots, #id) == i32,
+    "id must stay i32"
+  );
+  @require(
+    @shape_slot(RuntimeSlots, #score) == i32,
+    "score must stay i32"
+  );
+  @require(
+    @shape_has_slot(Layout, #field_count),
+    "layout has field count"
+  );
+  @require(
+    @shape_has_slot(Layout, #id),
+    "layout has id"
+  );
+  @require(
+    @shape_has_slot(Layout, #score),
+    "layout has score"
+  );
   struct(RuntimeDescriptor)
 }
 

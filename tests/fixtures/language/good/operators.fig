@@ -1,19 +1,25 @@
 const ops = @import("prelude.operators");
 
-type fn Box() -> struct {
-  let Box = {value: i32};
-  struct(Box)
+type Box = struct {value: i32}
+
+fn Box::add(a: Box, b: Box) -> Box {
+  Box {value: a.value + b.value}
 }
 
-fn Box::add(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
-fn Box::eql(a: Box, b: Box) -> bool { a.value == b.value }
-fn Box::append(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+fn Box::eql(a: Box, b: Box) -> bool {
+  a.value == b.value
+}
+
+fn Box::append(a: Box, b: Box) -> Box {
+  Box {value: a.value + b.value}
+}
 
 pub fn main(a: Box, b: Box) -> i32 {
   let added = a + b;
   let appended = added <> Box {value: 1};
-  match appended == Box {value: 3} {
-    true => 1,
-    false => 0,
+  match appended == Box {
+    value: 3
+  } {
+    true => 1, false => 0,
   }
 }

@@ -531,7 +531,12 @@ Deno.test("prelude std exposes common operators for custom types", async () => {
         ? decl.body.expr.callee.name
         : ""
     );
-  assertEquals(callees, ["Point::add", "Point::eql", "Point::lt", "Point::append"]);
+  assertEquals(callees, [
+    "merge.operators.op_add",
+    "merge.operators.op_eql",
+    "merge.operators.op_lt",
+    "merge.operators.op_append",
+  ]);
 });
 
 Deno.test("prelude std exposes bool infix operators", async () => {
@@ -574,16 +579,16 @@ Deno.test("prelude std exposes applicative apply operator", async () => {
     `
     const merge = @import("prelude.std");
 
-    type fn Box() -> type {
-      let Box = {value: i32};
+    type fn Box(a: type) -> type {
+      let Box = {value: a};
       struct(Box)
     }
 
-    fn Box::apply(v: Box, x: Box) -> Box {
-      Box {value: v.value + x.value}
+    fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
+      Box {value: v.value(x.value)}
     }
 
-    pub fn main(f: Box, x: Box) -> Box {
+    pub fn main(f: Box(fn(x: i32) -> i32), x: Box(i32)) -> Box(i32) {
       f <*> x
     }
     `,
@@ -596,7 +601,7 @@ Deno.test("prelude std exposes applicative apply operator", async () => {
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "call");
   if (main.body.expr?.kind === "call" && main.body.expr.callee.kind === "var") {
-    assertEquals(main.body.expr.callee.name, "Box::apply");
+    assertEquals(main.body.expr.callee.name, "merge.operators.op_apply");
   }
 });
 
@@ -647,8 +652,12 @@ Deno.test("prelude std exposes functor map and monad bind operators", async () =
         args: decl.body.expr.args.map((arg) => arg.kind),
       };
     });
-  assert(calls.some((call) => call?.callee === "Box::map" && call.args.join(",") === "var,shape"));
-  assert(calls.some((call) => call?.callee === "Box::bind" && call.args.join(",") === "shape,var"));
+  assert(calls.some((call) =>
+    call?.callee === "merge.operators.op_map" && call.args.join(",") === "var,shape"
+  ));
+  assert(calls.some((call) =>
+    call?.callee === "merge.operators.op_bind" && call.args.join(",") === "shape,var"
+  ));
 });
 
 Deno.test("prelude std rejects functional operators without matching members", async () => {
@@ -893,7 +902,7 @@ Deno.test("prelude fig modules are pure", async () => {
       continue;
     }
     const source = await Deno.readTextFile(`prelude/${entry.name}`);
-    assert(!source.includes("@effect("), `${entry.name} declares a removed effect import`);
+    assert(!source.includes("@effect("), `${entry.name} declares an unsupported effect import`);
   }
 
   const std = await Deno.readTextFile("prelude/std.fig");

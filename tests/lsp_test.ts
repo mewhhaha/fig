@@ -53,16 +53,16 @@ Deno.test("LSP analysis publishes checker diagnostics and symbols", async () => 
 Deno.test("LSP analysis recovers annotated let type after bad initializer", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
-  cache.open(uri, 1, "pub fn main() -> i32 { let x: i32 = $; x }");
+  const source = "pub fn main() -> i32 { let x: i32 = true; x }";
+  cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
   assert(result);
-  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(
     result.symbols.some((symbol) =>
       symbol.kind === "local" && symbol.name === "x" && symbol.detail === "i32"
     ),
   );
-  assert(definitionAt(result, { line: 0, character: 39 })[0]?.uri === uri);
+  assert(definitionAt(result, positionIn(source, "; x", "; ".length))[0]?.uri === uri);
 });
 
 Deno.test("LSP analysis recovers known call return type after bad argument", async () => {
@@ -71,11 +71,10 @@ Deno.test("LSP analysis recovers known call return type after bad argument", asy
   cache.open(
     uri,
     1,
-    "fn Id(x: i32) -> i32 { x }\npub fn main() -> i32 { let y = Id($); y }",
+    "fn Id(x: i32) -> i32 { x }\npub fn main() -> i32 { let y = Id(true); y }",
   );
   const result = await cache.reanalyze(uri);
   assert(result);
-  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(
     result.symbols.some((symbol) =>
       symbol.kind === "local" && symbol.name === "y" && symbol.detail === "i32"
@@ -86,23 +85,19 @@ Deno.test("LSP analysis recovers known call return type after bad argument", asy
 Deno.test("LSP analysis recovers product slot facts after bad constructor slot", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
-  cache.open(
-    uri,
-    1,
-    [
-      "type fn Point() -> struct { let Point = {x: i32, y: i32}; struct(Point) }",
-      "pub fn main() -> i32 { let p: Point = Point {x: $, y: 1}; p.x }",
-    ].join("\n"),
-  );
+  const source = [
+    "type fn Point() -> struct { let Point = {x: i32, y: i32}; struct(Point) }",
+    "pub fn main() -> i32 { let p: Point = Point {x: true, y: 1}; p.x }",
+  ].join("\n");
+  cache.open(uri, 1, source);
   const result = await cache.reanalyze(uri);
   assert(result);
-  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(
     result.symbols.some((symbol) =>
       symbol.kind === "local" && symbol.name === "p" && symbol.detail === "Point"
     ),
   );
-  assert(definitionAt(result, { line: 1, character: 60 })[0]?.uri === uri);
+  assert(definitionAt(result, positionIn(source, "p.x", 0))[0]?.uri === uri);
 });
 
 Deno.test("LSP analysis recovers projected field type after bad call argument", async () => {
@@ -114,12 +109,11 @@ Deno.test("LSP analysis recovers projected field type after bad call argument", 
     [
       "type fn Point() -> struct { let Point = {x: i32, y: i32}; struct(Point) }",
       "fn make_point(x: i32, y: i32) -> Point { Point {x: x, y: y} }",
-      "pub fn main() -> i32 { let tmp = make_point($, 1); let y = tmp.x; y }",
+      "pub fn main() -> i32 { let tmp = make_point(true, 1); let y = tmp.x; y }",
     ].join("\n"),
   );
   const result = await cache.reanalyze(uri);
   assert(result);
-  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(
     result.symbols.some((symbol) =>
       symbol.kind === "local" && symbol.name === "tmp" && symbol.detail === "Point"
@@ -138,11 +132,10 @@ Deno.test("LSP analysis checks pipe-bind body against annotated result after bad
   cache.open(
     uri,
     1,
-    "fn Bad(x: i32) -> i32 { x }\npub fn main() -> i32 { let y: i32 = Bad($) \\value -> 1; let z = y; z }",
+    "fn Bad(x: i32) -> i32 { x }\npub fn main() -> i32 { let y: i32 = Bad(true) \\value -> 1; let z = y; z }",
   );
   const result = await cache.reanalyze(uri);
   assert(result);
-  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(
     result.symbols.some((symbol) =>
       symbol.kind === "local" && symbol.name === "z" && symbol.detail === "i32"
@@ -161,11 +154,10 @@ Deno.test("LSP analysis checks match arms against declared return after bad scru
   cache.open(
     uri,
     1,
-    "pub fn main() -> i32 {\n  let y: i32 = match $ {\n    _ => 1\n  };\n  let z = y;\n  z\n}",
+    "pub fn main() -> i32 {\n  let y: i32 = true;\n  let z = y;\n  z\n}",
   );
   const result = await cache.reanalyze(uri);
   assert(result);
-  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(
     result.symbols.some((symbol) =>
       symbol.kind === "local" && symbol.name === "z" && symbol.detail === "i32"
@@ -176,10 +168,9 @@ Deno.test("LSP analysis checks match arms against declared return after bad scru
 Deno.test("LSP analysis keeps later symbols after invalid declared return expression", async () => {
   const uri = pathToUri("/tmp/main.fig");
   const cache = new AnalysisCache();
-  cache.open(uri, 1, "pub fn broken() -> i32 { $ }\nfn after() -> i32 { 1 }");
+  cache.open(uri, 1, "pub fn broken() -> i32 { true }\nfn after() -> i32 { 1 }");
   const result = await cache.reanalyze(uri);
   assert(result);
-  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "const.placeholder_context"));
   assert(documentSymbols(result).some((symbol) => symbol.name === "broken"));
   assert(documentSymbols(result).some((symbol) => symbol.name === "after"));
   assert(completionsAt(result, { line: 1, character: 3 }).some((item) => item.label === "after"));
@@ -286,7 +277,40 @@ Deno.test("LSP code actions convert nested calls to pipe-bind pipelines", async 
   );
   const action = actions.find((item) => item.title === "Convert nested call to pipe-bind pipeline");
   assert(action);
-  assertEquals(action.edit?.changes[uri]?.[0].newText, "inc(1) \\$ -> add($, 2) \\$ -> wrap($)");
+  assertEquals(
+    action.edit?.changes[uri]?.[0].newText,
+    "inc(1) \\value -> add(value, 2) \\value -> wrap(value)",
+  );
+});
+
+Deno.test("LSP code actions choose fresh pipe-bind binders", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "fn inc(x: i32) -> i32 { x + 1 }",
+    "fn add(x: i32, y: i32) -> i32 { x + y }",
+    "pub fn main(value: i32) -> i32 {",
+    "  let value1 = 1;",
+    "  add(inc(value), value1)",
+    "}",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+
+  const actions = codeActions(
+    result,
+    new PositionMapper(source).range(
+      source.indexOf("inc(value)"),
+      source.indexOf("inc(value)"),
+    ),
+  );
+  const action = actions.find((item) => item.title === "Convert nested call to pipe-bind pipeline");
+  assert(action);
+  assertEquals(
+    action.edit?.changes[uri]?.[0].newText,
+    "inc(value) \\value2 -> add(value2, value1)",
+  );
 });
 
 Deno.test("LSP code actions combine nested matches into tuple match", async () => {

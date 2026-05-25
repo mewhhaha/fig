@@ -1,14 +1,8 @@
 const monad = @import("prelude.monad");
 
-type fn Config() -> type {
-  let Config = {start: i32, step: i32};
-  struct(Config)
-}
+type Config = struct {start: i32, step: i32}
 
-type fn Counter() -> type {
-  let Counter = {count: i32};
-  struct(Counter)
-}
+type Counter = struct {count: i32}
 
 fn read_step() -> monad.Reader(Config, i32) {
   do @monad(monad.Reader(Config, _)) {
@@ -26,7 +20,10 @@ fn add_step(step: i32) -> monad.State(Counter, Counter) {
   }
 }
 
-fn configured_counter(config: Config) -> monad.State(Counter, Counter) {
+fn configured_counter(config: Config) -> monad.State(
+  Counter,
+  Counter
+) {
   let step = read_step()
     \program -> monad.Reader::run(program, config);
   add_step(step)
@@ -35,6 +32,9 @@ fn configured_counter(config: Config) -> monad.State(Counter, Counter) {
 pub fn main() -> i32 {
   let config = Config {start: 35, step: 7};
   let final = configured_counter(config)
-    \program -> monad.State::eval(program, Counter {count: config.start});
+    \program -> monad.State::eval(
+    program,
+    Counter {count: config.start}
+  );
   final.count
 }

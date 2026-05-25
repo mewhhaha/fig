@@ -78,6 +78,10 @@ for (const file of bundle.files) {
   let content = file.content;
   if (file.path === "grammar.js") {
     content = content.replace("Comment: $ => /\\\\/\\\\/[^\\n]*/", "Comment: $ => /\\/\\/[^\\n]*/");
+    content = content.replace(
+      "[$.MatchValues],\n  ],",
+      "[$.MatchValues],\n    [$.Primary, $.ScalarDomainType],\n    [$.TypePrimary, $.ScalarDomainType],\n  ],",
+    );
   }
   if (file.path === "queries/highlights.scm") {
     content = content
@@ -90,6 +94,7 @@ for (const file of bundle.files) {
       .replace("(TypeFnDecl (PascalIdent) @type.definition)", "(TypeFnDecl (PascalIdent) @type)")
       .replace("(TypeLetDecl (PascalIdent) @type)\n", "")
       .replace("(BlockProofConstDecl (PascalIdent) @type)\n", "")
+      .replace("(Placeholder) @operator\n", "")
       .replace(
         "(ImportBindingItems (PascalIdent) @type.definition)",
         "(ImportBindingItems (PascalIdent) @type)",
@@ -131,7 +136,6 @@ const tokenKinds = [
   "match",
   "pub",
   "bool",
-  "zip",
   "identifier",
   "number",
   "string",

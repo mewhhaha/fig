@@ -13,13 +13,12 @@ export const tokenKinds = [
   "match",
   "pub",
   "bool",
-  "zip",
   "identifier",
   "number",
   "string",
   "char",
   "multiline",
   "literalType",
-  "symbol",
+  "symbol"
 ] as const;
 export type GeneratedTokenKind = typeof tokenKinds[number];

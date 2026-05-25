@@ -1,54 +1,157 @@
-type fn OpAdd(t: type) -> operator {
-  operator(#infixl, 60, "+", t::add)
+type fn OpAdd(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #add), "operator + requires add");
+  @require(@type_member_type(t, #add) == Expected, "operator + add has wrong type");
+  t
 }
 
-type fn OpSub(t: type) -> operator {
-  operator(#infixl, 60, "-", t.sub)
+fn op_add(a: t, b: t, const _proof: OpAdd(t)) -> t {
+  t::add(a, b)
 }
 
-type fn OpMul(t: type) -> operator {
-  operator(#infixl, 70, "*", t.mul)
+const (+) = @operator(#infixl, 60, op_add);
+
+type fn OpSub(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #sub), "operator - requires sub");
+  @require(@type_member_type(t, #sub) == Expected, "operator - sub has wrong type");
+  t
 }
 
-type fn OpDiv(t: type) -> operator {
-  operator(#infixl, 70, "/", t.div)
+fn op_sub(a: t, b: t, const _proof: OpSub(t)) -> t {
+  t::sub(a, b)
 }
 
-type fn OpRem(t: type) -> operator {
-  operator(#infixl, 70, "%", t.rem)
+const (-) = @operator(#infixl, 60, op_sub);
+
+type fn OpMul(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #mul), "operator * requires mul");
+  @require(@type_member_type(t, #mul) == Expected, "operator * mul has wrong type");
+  t
 }
 
-type fn OpEql(t: type) -> operator {
-  operator(#infix, 40, "==", t::eql)
+fn op_mul(a: t, b: t, const _proof: OpMul(t)) -> t {
+  t::mul(a, b)
 }
 
-type fn OpNeq(t: type) -> operator {
-  operator(#infix, 40, "!=", t.neq)
+const (*) = @operator(#infixl, 70, op_mul);
+
+type fn OpDiv(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #div), "operator / requires div");
+  @require(@type_member_type(t, #div) == Expected, "operator / div has wrong type");
+  t
 }
 
-type fn OpLt(t: type) -> operator {
-  operator(#infix, 50, "<", t::lt)
+fn op_div(a: t, b: t, const _proof: OpDiv(t)) -> t {
+  t::div(a, b)
 }
 
-type fn OpLte(t: type) -> operator {
-  operator(#infix, 50, "<=", t::lte)
+const (/) = @operator(#infixl, 70, op_div);
+
+type fn OpRem(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #rem), "operator % requires rem");
+  @require(@type_member_type(t, #rem) == Expected, "operator % rem has wrong type");
+  t
 }
 
-type fn OpGt(t: type) -> operator {
-  operator(#infix, 50, ">", t.gt)
+fn op_rem(a: t, b: t, const _proof: OpRem(t)) -> t {
+  t::rem(a, b)
 }
 
-type fn OpGte(t: type) -> operator {
-  operator(#infix, 50, ">=", t.gte)
+const (%) = @operator(#infixl, 70, op_rem);
+
+type fn OpEq(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #eql), "operator == requires eql");
+  @require(@type_member_type(t, #eql) == Expected, "operator == eql has wrong type");
+  t
 }
+
+fn op_eql(a: t, b: t, const _proof: OpEq(t)) -> bool {
+  t::eql(a, b)
+}
+
+const (==) = @operator(#infix, 40, op_eql);
+
+type fn OpNeq(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #neq), "operator != requires neq");
+  @require(@type_member_type(t, #neq) == Expected, "operator != neq has wrong type");
+  t
+}
+
+fn op_neq(a: t, b: t, const _proof: OpNeq(t)) -> bool {
+  t::neq(a, b)
+}
+
+const (!=) = @operator(#infix, 40, op_neq);
+
+type fn OpLt(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #lt), "operator < requires lt");
+  @require(@type_member_type(t, #lt) == Expected, "operator < lt has wrong type");
+  t
+}
+
+fn op_lt(a: t, b: t, const _proof: OpLt(t)) -> bool {
+  t::lt(a, b)
+}
+
+const (<) = @operator(#infix, 50, op_lt);
+
+type fn OpLte(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #lte), "operator <= requires lte");
+  @require(@type_member_type(t, #lte) == Expected, "operator <= lte has wrong type");
+  t
+}
+
+fn op_lte(a: t, b: t, const _proof: OpLte(t)) -> bool {
+  t::lte(a, b)
+}
+
+const (<=) = @operator(#infix, 50, op_lte);
+
+type fn OpGt(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #gt), "operator > requires gt");
+  @require(@type_member_type(t, #gt) == Expected, "operator > gt has wrong type");
+  t
+}
+
+fn op_gt(a: t, b: t, const _proof: OpGt(t)) -> bool {
+  t::gt(a, b)
+}
+
+const (>) = @operator(#infix, 50, op_gt);
+
+type fn OpGte(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #gte), "operator >= requires gte");
+  @require(@type_member_type(t, #gte) == Expected, "operator >= gte has wrong type");
+  t
+}
+
+fn op_gte(a: t, b: t, const _proof: OpGte(t)) -> bool {
+  t::gte(a, b)
+}
+
+const (>=) = @operator(#infix, 50, op_gte);
 
 fn op_and_impl(a: bool, b: bool) -> bool {
   match a { true => b, false => false }
 }
 
+const (&&) = @operator(#infixr, 30, op_and_impl);
+
 fn op_or_impl(a: bool, b: bool) -> bool {
   match a { true => true, false => b }
 }
+
+const (||) = @operator(#infixr, 20, op_or_impl);
 
 fn op_xor_impl(a: bool, b: bool) -> bool {
   match a {
@@ -57,46 +160,80 @@ fn op_xor_impl(a: bool, b: bool) -> bool {
   }
 }
 
+const (^^) = @operator(#infixr, 25, op_xor_impl);
+
 fn op_bool_eq_impl(a: bool, b: bool) -> bool {
   match a { true => b, false => match b { true => false, false => true } }
 }
+
+const (==) = @operator(#infix, 40, op_bool_eq_impl);
 
 fn op_bool_neq_impl(a: bool, b: bool) -> bool {
   op_xor_impl(a, b)
 }
 
-type fn OpBoolAnd() -> operator {
-  operator(#infixr, 30, "&&", op_and_impl)
+const (!=) = @operator(#infix, 40, op_bool_neq_impl);
+
+type fn OpAppend(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #append), "operator <> requires append");
+  @require(@type_member_type(t, #append) == Expected, "operator <> append has wrong type");
+  t
 }
 
-type fn OpBoolOr() -> operator {
-  operator(#infixr, 20, "||", op_or_impl)
+fn op_append(a: t, b: t, const _proof: OpAppend(t)) -> t {
+  t::append(a, b)
 }
 
-type fn OpBoolXor() -> operator {
-  operator(#infixr, 25, "^^", op_xor_impl)
+const (<>) = @operator(#infixr, 55, op_append);
+
+type fn OpApply(t: type fn(a: type) -> type) -> type {
+  let Expected = fn(v: t(fn(x: a) -> b), x: t(a)) -> t(b);
+  @require(@type_has_member(t, #apply), "operator <*> requires apply");
+  @require(@type_member_type(t, #apply) == Expected, "operator <*> apply has wrong type");
+  t
 }
 
-type fn OpBoolEq() -> operator {
-  operator(#infix, 40, "==", op_bool_eq_impl)
+fn op_apply(
+  v: t(fn(x: a) -> b),
+  x: t(a),
+  const _proof: OpApply(t)
+) -> t(b) {
+  t::apply(v, x)
 }
 
-type fn OpBoolNeq() -> operator {
-  operator(#infix, 40, "!=", op_bool_neq_impl)
+const (<*>) = @operator(#infixl, 65, op_apply);
+
+type fn OpMap(t: type fn(a: type) -> type) -> type {
+  let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
+  @require(@type_has_member(t, #map), "operator <$> requires map");
+  @require(@type_member_type(t, #map) == Expected, "operator <$> map has wrong type");
+  t
 }
 
-type fn OpAppend(t: type) -> operator {
-  operator(#infixr, 55, "<>", t::append)
+fn op_map(
+  const f: fn(x: a) -> b,
+  v: t(a),
+  const _proof: OpMap(t)
+) -> t(b) {
+  t::map(f, v)
 }
 
-type fn OpApply(t: type) -> operator {
-  operator(#infixl, 65, "<*>", t::apply)
+const (<$>) = @operator(#infixl, 65, op_map);
+
+type fn OpBind(t: type fn(a: type) -> type) -> type {
+  let Expected = fn(v: t(a), const f: fn(x: a) -> t(b)) -> t(b);
+  @require(@type_has_member(t, #bind), "operator >>= requires bind");
+  @require(@type_member_type(t, #bind) == Expected, "operator >>= bind has wrong type");
+  t
 }
 
-type fn OpMap(t: type) -> operator {
-  operator(#infixl, 65, "<$>", t::map)
+fn op_bind(
+  v: t(a),
+  const f: fn(x: a) -> t(b),
+  const _proof: OpBind(t)
+) -> t(b) {
+  t::bind(v, f)
 }
 
-type fn OpBind(t: type) -> operator {
-  operator(#infixl, 10, ">>=", t::bind)
-}
+const (>>=) = @operator(#infixl, 10, op_bind);

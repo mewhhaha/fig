@@ -23,6 +23,7 @@ import type {
   Expr,
   FnDecl,
   LetDecl,
+  OperatorDecl,
   ParamPattern,
   Program,
   ShapeType,
@@ -853,6 +854,13 @@ function referencedDeclarationNames(
         visitExpr(expr.left);
         visitExpr(expr.right);
         return;
+      case "operator_chain":
+        visitExpr(expr.first);
+        for (const item of expr.rest) {
+          add(`operator:${item.op}`);
+          visitExpr(item.value);
+        }
+        return;
       case "pipe_bind":
         visitExpr(expr.value);
         visitExpr(expr.body);
@@ -899,7 +907,6 @@ function referencedDeclarationNames(
         visitExpr(expr.expr);
         return;
       case "literal":
-      case "placeholder":
         return;
     }
   };
@@ -929,8 +936,11 @@ function referencedDeclarationNames(
           visitTypeExpr(arm.value);
         }
         return;
-      case "type_operator":
-        add(expr.descriptor.target);
+      case "type_scalar_domain":
+        for (const member of expr.members) {
+          if (member.start.kind === "symbol") add(member.start.source);
+          if (member.end?.kind === "symbol") add(member.end.source);
+        }
         return;
       case "type_binary":
         visitTypeExpr(expr.left);
@@ -997,6 +1007,10 @@ function referencedDeclarationNames(
       visitExpr(item.body);
       return;
     }
+    if (item.kind === "operator") {
+      add(item.target);
+      return;
+    }
     addTypeSource(item.type);
     visitExpr(item.value);
   };
@@ -1045,7 +1059,8 @@ function nameFirstSegment(name: string): string {
 }
 
 function importedDeclarationsCanShareName(left: Declaration, right: Declaration): boolean {
-  return left.kind === "fn" && right.kind === "fn";
+  return (left.kind === "fn" && right.kind === "fn") ||
+    (left.kind === "operator" && right.kind === "operator");
 }
 
 function destructureImportedDeclarations(
@@ -1107,6 +1122,7 @@ function unqualifiedSelectedDeclaration(decl: Declaration, name: string): Declar
     return withMeta(decl, { ...decl, name, imported: true, rootPublic: false });
   }
   if (decl.kind === "type") return withMeta(decl, { ...decl, name });
+  if (decl.kind === "operator") return withMeta(decl, { ...decl, imported: true });
   return withMeta(decl, { ...decl, name });
 }
 
@@ -1119,6 +1135,7 @@ function markPrivate(decl: Declaration): Declaration {
 
 function markImportedDeclaration(decl: Declaration): Declaration {
   if (decl.kind === "fn") return withMeta(decl, { ...decl, imported: true, rootPublic: false });
+  if (decl.kind === "operator") return withMeta(decl, { ...decl, imported: true });
   return decl;
 }
 
@@ -1291,7 +1308,11 @@ function recordCompileTrace(
 }
 
 function declarationName(decl: Declaration): string {
-  return decl.name;
+  return decl.kind === "operator" ? operatorDeclarationName(decl) : decl.name;
+}
+
+function operatorDeclarationName(decl: OperatorDecl): string {
+  return `operator:${decl.symbol}`;
 }
 
 function qualifyImportedDeclarations(declarations: Declaration[], alias: string): Declaration[] {
@@ -1385,6 +1406,7 @@ function splitTopLevelComma(source: string): string[] {
 }
 
 function collectDeclarationNames(decl: Declaration): string[] {
+  if (decl.kind === "operator") return [operatorDeclarationName(decl)];
   if (decl.kind !== "type") return [decl.name];
   return [
     decl.name,
@@ -1443,6 +1465,13 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
   }
   if (decl.kind === "type") return qualifyTypeDecl(decl, alias, names);
   if (decl.kind === "const") return qualifyConstLike(decl, alias, names);
+  if (decl.kind === "operator") {
+    return withMeta(decl, {
+      ...decl,
+      imported: true,
+      target: qualifyReference(decl.target, alias, names),
+    });
+  }
   return withMeta(decl, {
     ...decl,
     name: qualifyName(decl.name, alias),
@@ -1596,6 +1625,14 @@ function qualifyExpr(
         left: qualifyExpr(expr.left, alias, names, locals),
         right: qualifyExpr(expr.right, alias, names, locals),
       });
+    case "operator_chain":
+      return withMeta(expr, {
+        ...expr,
+        first: qualifyExpr(expr.first, alias, names, locals),
+        rest: expr.rest.map((item) =>
+          withMeta(item, { ...item, value: qualifyExpr(item.value, alias, names, locals) })
+        ),
+      });
     case "pipe_bind":
       return withMeta(expr, {
         ...expr,
@@ -1665,7 +1702,6 @@ function qualifyExpr(
     case "block":
       return withMeta(expr, { ...expr, ...qualifyBlockBody(expr, alias, names, locals) });
     case "literal":
-    case "placeholder":
       return expr;
   }
 }
@@ -1788,13 +1824,26 @@ function qualifyTypeExpr(expr: TypeExpr, alias: string, names: Set<string>): Typ
         left: qualifyTypeExpr(expr.left, alias, names),
         right: qualifyTypeExpr(expr.right, alias, names),
       });
-    case "type_operator":
+    case "type_scalar_domain":
       return withMeta(expr, {
         ...expr,
-        descriptor: {
-          ...expr.descriptor,
-          target: qualifyReference(expr.descriptor.target, alias, names),
-        },
+        members: expr.members.map((member) =>
+          withMeta(member, {
+            ...member,
+            start: member.start.kind === "symbol"
+              ? withMeta(member.start, {
+                ...member.start,
+                source: qualifyReference(member.start.source, alias, names),
+              })
+              : member.start,
+            end: member.end?.kind === "symbol"
+              ? withMeta(member.end, {
+                ...member.end,
+                source: qualifyReference(member.end.source, alias, names),
+              })
+              : member.end,
+          })
+        ),
       });
     case "type_fn":
       return withMeta(expr, { ...expr, source: qualifyTypeSource(expr.source, alias, names) });

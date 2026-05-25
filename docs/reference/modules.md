@@ -1,7 +1,7 @@
 # Fig Modules
 
 Prefer `const std = @import("prelude.std");` for ordinary programs. It collects common pure
-fragments and operator descriptors. This page summarizes module roles, not full APIs.
+fragments and operator declarations. This page summarizes module roles, not full APIs.
 
 Use a namespace import when you want the module surface qualified:
 
@@ -34,7 +34,7 @@ expose it as `array.layout` through its own namespace import.
 | `prelude.function`     | Function composition and typeclass-like `functor`, `applicative`, and `monad` helpers.                       |
 | `prelude.monad`        | Binary `State(S, A)` and explicit `Reader(R, A)` helpers for ordered flows.                                  |
 | `prelude.effect`       | Transparent capability-tag helpers such as `Eff`, `Reader`, `State`, `Debug`, `With`, and `WithAll`.         |
-| `prelude.operators`    | Operator descriptors for arithmetic, comparison, boolean, append, functor, applicative, and monad syntax.    |
+| `prelude.operators`    | Operator declarations for arithmetic, comparison, boolean, append, functor, applicative, and monad syntax.   |
 | `prelude.option`       | Pure option constructors and helpers.                                                                        |
 | `prelude.result`       | Pure result constructors and helpers.                                                                        |
 | `prelude.tuple`        | Tuple and pair helpers.                                                                                      |

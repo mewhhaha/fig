@@ -76,6 +76,21 @@ interface OptimizerConfig {
   typeDecls: TypeDecl[];
 }
 
+function operatorChainValues(expr: Extract<Expr, { kind: "operator_chain" }>): Expr[] {
+  return [expr.first, ...expr.rest.map((item) => item.value)];
+}
+
+function rewriteOperatorChain(
+  expr: Extract<Expr, { kind: "operator_chain" }>,
+  rewrite: (expr: Expr) => Expr,
+): Expr {
+  return {
+    ...expr,
+    first: rewrite(expr.first),
+    rest: expr.rest.map((item) => ({ ...item, value: rewrite(item.value) })),
+  };
+}
+
 export interface OptimizationScope {
   runtimeRoots: Set<string>;
   reachableFunctions: Set<string>;
@@ -578,6 +593,8 @@ function inlinePureForwardingWrappers(
         return { ...expr, target: rewriteExpr(expr.target), index: rewriteExpr(expr.index) };
       case "binary":
         return { ...expr, left: rewriteExpr(expr.left), right: rewriteExpr(expr.right) };
+      case "operator_chain":
+        return rewriteOperatorChain(expr, rewriteExpr);
       case "pipe_bind":
         return { ...expr, value: rewriteExpr(expr.value), body: rewriteExpr(expr.body) };
       case "match":
@@ -615,7 +632,6 @@ function inlinePureForwardingWrappers(
       case "do":
       case "literal":
       case "var":
-      case "placeholder":
         return expr;
     }
   };
@@ -1106,6 +1122,14 @@ function referencedRuntimeNames(expr: Expr | BlockExpr | undefined): string[] {
         visit(item.left);
         visit(item.right);
         return;
+      case "operator_chain":
+        visit(item.first);
+        item.rest.forEach((part) => visit(part.value));
+        return;
+      case "operator_chain":
+        visit(item.first);
+        item.rest.forEach((part) => visit(part.value));
+        return;
       case "pipe_bind":
         visit(item.value);
         visit(item.body);
@@ -1159,7 +1183,6 @@ function referencedRuntimeNames(expr: Expr | BlockExpr | undefined): string[] {
         return;
       case "proof_const":
       case "literal":
-      case "placeholder":
         return;
     }
   };
@@ -1441,6 +1464,10 @@ function substituteTypeConstructorRefs(expr: Expr, typeParam: string, concrete: 
         left: substituteTypeConstructorRefs(expr.left, typeParam, concrete),
         right: substituteTypeConstructorRefs(expr.right, typeParam, concrete),
       };
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) =>
+        substituteTypeConstructorRefs(item, typeParam, concrete)
+      );
     case "pipe_bind":
       return {
         ...expr,
@@ -1507,7 +1534,6 @@ function substituteTypeConstructorRefs(expr: Expr, typeParam: string, concrete: 
       };
     case "do":
     case "literal":
-    case "placeholder":
       return expr;
   }
 }
@@ -1586,6 +1612,8 @@ function assumeRewriteExprChildren(
         left: assumeRewriteExpr(expr.left, facts, context),
         right: assumeRewriteExpr(expr.right, facts, context),
       };
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) => assumeRewriteExpr(item, facts, context));
     case "pipe_bind":
       return {
         ...expr,
@@ -1637,7 +1665,6 @@ function assumeRewriteExprChildren(
     case "block":
       return assumeRewriteBlock(expr, facts, [], context);
     case "literal":
-    case "placeholder":
     case "var":
       return expr;
   }
@@ -1664,8 +1691,6 @@ function matchRewriteTemplate(
         pattern.literalKind === actual.literalKind;
     case "var":
       return actual.kind === "var" && pattern.name === actual.name;
-    case "placeholder":
-      return actual.kind === "placeholder";
     case "call":
       return actual.kind === "call" &&
         matchRewriteTemplate(pattern.callee, actual.callee, params, bindings) &&
@@ -1681,6 +1706,8 @@ function matchRewriteTemplate(
       return actual.kind === "binary" && pattern.op === actual.op &&
         matchRewriteTemplate(pattern.left, actual.left, params, bindings) &&
         matchRewriteTemplate(pattern.right, actual.right, params, bindings);
+    case "operator_chain":
+      return actual.kind === "operator_chain" && stableExprKey(pattern) === stableExprKey(actual);
     default:
       return stableExprKey(pattern) === stableExprKey(actual);
   }
@@ -1715,6 +1742,8 @@ function substituteRewriteTemplate(expr: Expr, bindings: Map<string, Expr>): Exp
         left: substituteRewriteTemplate(expr.left, bindings),
         right: substituteRewriteTemplate(expr.right, bindings),
       };
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) => substituteRewriteTemplate(item, bindings));
     case "pipe_bind":
       return {
         ...expr,
@@ -1774,7 +1803,6 @@ function substituteRewriteTemplate(expr: Expr, bindings: Map<string, Expr>): Exp
         expr: expr.expr ? substituteRewriteTemplate(expr.expr, bindings) : undefined,
       };
     case "literal":
-    case "placeholder":
     case "do":
       return expr;
   }
@@ -2448,6 +2476,8 @@ function exprChildrenForPlanning(expr: Expr): Expr[] {
       return [expr.target, expr.index];
     case "binary":
       return [expr.left, expr.right];
+    case "operator_chain":
+      return operatorChainValues(expr);
     case "pipe_bind":
       return [expr.value, expr.body];
     case "shape":
@@ -2470,7 +2500,6 @@ function exprChildrenForPlanning(expr: Expr): Expr[] {
     case "do":
     case "literal":
     case "var":
-    case "placeholder":
       return [];
   }
 }
@@ -2571,6 +2600,8 @@ function expandFiniteStaticRecurrences(
           left: rewriteExpr(expr.left, depths),
           right: rewriteExpr(expr.right, depths),
         };
+      case "operator_chain":
+        return rewriteOperatorChain(expr, (item) => rewriteExpr(item, depths));
       case "pipe_bind":
         return {
           ...expr,
@@ -2615,7 +2646,6 @@ function expandFiniteStaticRecurrences(
         return rewriteBlock(expr, depths);
       case "literal":
       case "var":
-      case "placeholder":
         return expr;
     }
   };
@@ -2732,6 +2762,8 @@ function inlineGeneratedClauseExpr(expr: Expr, clauses: Map<string, FnDecl>): Ex
         left: inlineGeneratedClauseExpr(expr.left, clauses),
         right: inlineGeneratedClauseExpr(expr.right, clauses),
       };
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) => inlineGeneratedClauseExpr(item, clauses));
     case "pipe_bind":
       return {
         ...expr,
@@ -2779,7 +2811,6 @@ function inlineGeneratedClauseExpr(expr: Expr, clauses: Map<string, FnDecl>): Ex
       return inlineGeneratedClauseCalls(expr, clauses);
     case "literal":
     case "var":
-    case "placeholder":
       return expr;
   }
 }
@@ -2977,6 +3008,8 @@ function abstractExpr(expr: Expr, env: Map<string, AbstractValue>): AbstractValu
       return abstractVar(expr.name, env);
     case "binary":
       return abstractBinary(expr, env);
+    case "operator_chain":
+      return { kind: "unknown" };
     case "match":
       return abstractMatch(expr, env);
     case "shape":
@@ -3018,7 +3051,6 @@ function abstractExpr(expr: Expr, env: Map<string, AbstractValue>): AbstractValu
     case "const_fn":
     case "static_for_slots":
     case "range":
-    case "placeholder":
       return { kind: "unknown" };
   }
 }
@@ -3296,6 +3328,8 @@ function foldAbstractFactsInExpr(expr: Expr, env: Map<string, AbstractValue>): E
       };
       return abstractConstantExpr(abstractExpr(folded, env)) ?? folded;
     }
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) => foldAbstractFactsInExpr(item, env));
     case "match": {
       const value = foldAbstractFactsInExpr(expr.value, env);
       const valueFact = abstractExpr(value, env);
@@ -3382,7 +3416,6 @@ function foldAbstractFactsInExpr(expr: Expr, env: Map<string, AbstractValue>): E
       return expr;
     case "literal":
     case "var":
-    case "placeholder":
       return abstractConstantExpr(abstractExpr(expr, env)) ?? expr;
   }
 }
@@ -3839,12 +3872,13 @@ function isSpeculablePureInlineValue(expr: Expr, functions: Map<string, FnDecl>)
   switch (expr.kind) {
     case "literal":
     case "var":
-    case "placeholder":
       return true;
     case "binary":
       return expr.op !== "/" && expr.op !== "%" &&
         isSpeculablePureInlineValue(expr.left, functions) &&
         isSpeculablePureInlineValue(expr.right, functions);
+    case "operator_chain":
+      return operatorChainValues(expr).every((item) => isSpeculablePureInlineValue(item, functions));
     case "field":
       return isSpeculablePureInlineValue(expr.value, functions) &&
         isSpeculablePureInlineValue(expr.key, functions);
@@ -4021,6 +4055,10 @@ function rewriteStaticProjections(
           config,
         ),
       };
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) =>
+        rewriteStaticProjections(item, active, forwarding, inlineable, functions, config)
+      );
     case "call":
       return {
         ...expr,
@@ -4209,7 +4247,6 @@ function rewriteStaticProjections(
     }
     case "do":
     case "literal":
-    case "placeholder":
       return expr;
   }
 }
@@ -4326,6 +4363,8 @@ function stripDebugTraceStatements(program: Program) {
         return { ...expr, target: stripExpr(expr.target), index: stripExpr(expr.index) };
       case "binary":
         return { ...expr, left: stripExpr(expr.left), right: stripExpr(expr.right) };
+      case "operator_chain":
+        return rewriteOperatorChain(expr, stripExpr);
       case "pipe_bind":
         return { ...expr, value: stripExpr(expr.value), body: stripExpr(expr.body) };
       case "match":
@@ -4361,7 +4400,6 @@ function stripDebugTraceStatements(program: Program) {
       case "range":
         return { ...expr, start: stripExpr(expr.start), end: stripExpr(expr.end) };
       case "literal":
-      case "placeholder":
       case "var":
         return expr;
     }
@@ -4412,6 +4450,8 @@ function stripRuntimeProfileExpressions(program: Program) {
         return { ...expr, target: stripExpr(expr.target), index: stripExpr(expr.index) };
       case "binary":
         return { ...expr, left: stripExpr(expr.left), right: stripExpr(expr.right) };
+      case "operator_chain":
+        return rewriteOperatorChain(expr, stripExpr);
       case "pipe_bind":
         return { ...expr, value: stripExpr(expr.value), body: stripExpr(expr.body) };
       case "match":
@@ -4447,7 +4487,6 @@ function stripRuntimeProfileExpressions(program: Program) {
       case "range":
         return { ...expr, start: stripExpr(expr.start), end: stripExpr(expr.end) };
       case "literal":
-      case "placeholder":
       case "var":
         return expr;
     }
@@ -4547,6 +4586,10 @@ function optimizeExpr(
         functions,
         config,
       );
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) =>
+        optimizeExpr(item, forwarding, inlineable, functions, config)
+      );
     case "pipe_bind": {
       const value = optimizeExpr(expr.value, forwarding, inlineable, functions, config);
       if (expr.name === "$") {
@@ -4633,7 +4676,6 @@ function optimizeExpr(
     }
     case "literal":
     case "var":
-    case "placeholder":
       return expr;
   }
 }
@@ -4697,6 +4739,14 @@ function directCallsTo(program: Program, target: string): Extract<Expr, { kind: 
         visit(item.left);
         visit(item.right);
         return;
+      case "operator_chain":
+        visit(item.first);
+        item.rest.forEach((part) => visit(part.value));
+        return;
+      case "operator_chain":
+        visit(item.first);
+        item.rest.forEach((part) => visit(part.value));
+        return;
       case "pipe_bind":
         visit(item.value);
         visit(item.body);
@@ -4735,7 +4785,6 @@ function directCallsTo(program: Program, target: string): Extract<Expr, { kind: 
       case "proof_const":
       case "literal":
       case "var":
-      case "placeholder":
         return;
     }
   };
@@ -4774,6 +4823,10 @@ function functionValueUses(program: Program, functions: Map<string, FnDecl>): Se
         visit(item.left);
         visit(item.right);
         return;
+      case "operator_chain":
+        visit(item.first);
+        item.rest.forEach((part) => visit(part.value));
+        return;
       case "pipe_bind":
         visit(item.value);
         visit(item.body);
@@ -4811,7 +4864,6 @@ function functionValueUses(program: Program, functions: Map<string, FnDecl>): Se
         return;
       case "proof_const":
       case "literal":
-      case "placeholder":
         return;
     }
   };
@@ -4869,6 +4921,8 @@ function rewriteExpr(expr: Expr, drops: Map<string, Set<number>>): Expr {
         left: rewriteExpr(expr.left, drops),
         right: rewriteExpr(expr.right, drops),
       };
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) => rewriteExpr(item, drops));
     case "pipe_bind":
       return {
         ...expr,
@@ -4913,7 +4967,6 @@ function rewriteExpr(expr: Expr, drops: Map<string, Set<number>>): Expr {
       };
     case "literal":
     case "var":
-    case "placeholder":
       return expr;
   }
 }
@@ -5010,6 +5063,8 @@ function localEqualityNodeCount(expr: Expr): number {
   switch (expr.kind) {
     case "binary":
       return 1 + localEqualityNodeCount(expr.left) + localEqualityNodeCount(expr.right);
+    case "operator_chain":
+      return 1 + operatorChainValues(expr).reduce((sum, item) => sum + localEqualityNodeCount(item), 0);
     case "literal":
     case "var":
       return 1;
@@ -5293,10 +5348,12 @@ function stableExprKey(expr: Expr | BlockExpr): string {
       return `literal:${expr.literalKind}:${expr.value}`;
     case "var":
       return `var:${expr.name}`;
-    case "placeholder":
-      return "placeholder";
     case "binary":
       return `binary:${expr.op}:${stableExprKey(expr.left)}:${stableExprKey(expr.right)}`;
+    case "operator_chain":
+      return `operator_chain:${stableExprKey(expr.first)}:${
+        expr.rest.map((item) => `${item.op}:${stableExprKey(item.value)}`).join(":")
+      }`;
     case "index":
       return `index:${stableExprKey(expr.target)}:${stableExprKey(expr.index)}`;
     case "field":
@@ -5428,6 +5485,8 @@ function exprCost(expr: Expr): number {
       return 2 + exprCost(expr.target) + exprCost(expr.index);
     case "binary":
       return 1 + exprCost(expr.left) + exprCost(expr.right);
+    case "operator_chain":
+      return 1 + operatorChainValues(expr).reduce((sum, item) => sum + exprCost(item), 0);
     case "pipe_bind":
       return 1 + exprCost(expr.value) + exprCost(expr.body);
     case "match":
@@ -5451,7 +5510,6 @@ function exprCost(expr: Expr): number {
         (expr.expr ? exprCost(expr.expr) : 0);
     case "literal":
     case "var":
-    case "placeholder":
       return 1;
   }
 }
@@ -5480,6 +5538,8 @@ function exprCallsFunction(expr: Expr | BlockExpr | undefined, name: string): bo
       return exprCallsFunction(expr.target, name) || exprCallsFunction(expr.index, name);
     case "binary":
       return exprCallsFunction(expr.left, name) || exprCallsFunction(expr.right, name);
+    case "operator_chain":
+      return operatorChainValues(expr).some((item) => exprCallsFunction(item, name));
     case "pipe_bind":
       return exprCallsFunction(expr.value, name) || exprCallsFunction(expr.body, name);
     case "match":
@@ -5507,7 +5567,6 @@ function exprCallsFunction(expr: Expr | BlockExpr | undefined, name: string): bo
       ) || exprCallsFunction(expr.expr, name);
     case "literal":
     case "var":
-    case "placeholder":
       return false;
   }
 }
@@ -5770,6 +5829,10 @@ function recursiveCallDetails(
         ...recursiveCallDetails(expr.left, targets, clause, false),
         ...recursiveCallDetails(expr.right, targets, clause, false),
       ];
+    case "operator_chain":
+      return operatorChainValues(expr).flatMap((item) =>
+        recursiveCallDetails(item, targets, clause, false)
+      );
     case "shape":
     case "product_constructor":
       return expr.slots.flatMap((slot) => [
@@ -5797,7 +5860,6 @@ function recursiveCallDetails(
         ...recursiveCallDetails(expr.end, targets, clause, false),
       ];
     case "literal":
-    case "placeholder":
     case "var":
       return [];
   }
@@ -5872,6 +5934,9 @@ function directSelfCalls(
       add(directSelfCalls(expr.left, name, false));
       add(directSelfCalls(expr.right, name, false));
       return result;
+    case "operator_chain":
+      operatorChainValues(expr).forEach((item) => add(directSelfCalls(item, name, false)));
+      return result;
     case "shape":
     case "product_constructor":
       expr.slots.forEach((slot) => {
@@ -5898,7 +5963,6 @@ function directSelfCalls(
       return result;
     case "literal":
     case "var":
-    case "placeholder":
       return result;
   }
 }
@@ -5967,7 +6031,6 @@ function calledFunctionList(expr: Expr | BlockExpr | undefined): string[] {
       case "proof_const":
       case "literal":
       case "var":
-      case "placeholder":
         return;
     }
   };
@@ -6089,6 +6152,8 @@ function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
       return [expr.target, expr.index];
     case "binary":
       return [expr.left, expr.right];
+    case "operator_chain":
+      return operatorChainValues(expr);
     case "pipe_bind":
       return [expr.value, expr.body];
     case "match":
@@ -6116,7 +6181,6 @@ function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
       ];
     case "literal":
     case "var":
-    case "placeholder":
       return [];
   }
 }
@@ -6241,6 +6305,8 @@ function renameExprBindings(expr: Expr, env: Map<string, string>, fnName: string
         left: renameExprBindings(expr.left, env, fnName),
         right: renameExprBindings(expr.right, env, fnName),
       };
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) => renameExprBindings(item, env, fnName));
     case "pipe_bind": {
       const scoped = new Map(env);
       const fresh = inlineBindingName(fnName, expr.name);
@@ -6293,7 +6359,6 @@ function renameExprBindings(expr: Expr, env: Map<string, string>, fnName: string
     case "block":
       return renameBlockBindings(expr, env, fnName);
     case "literal":
-    case "placeholder":
       return expr;
   }
 }
@@ -6445,7 +6510,6 @@ function usedNames(expr: Expr | undefined): Set<string> {
         }
         return;
       case "literal":
-      case "placeholder":
         return;
     }
   };
@@ -6490,6 +6554,10 @@ function usedNameCounts(block: BlockExpr): Map<string, number> {
         case "binary":
           visit(item.left);
           visit(item.right);
+          return;
+        case "operator_chain":
+          visit(item.first);
+          item.rest.forEach((part) => visit(part.value));
           return;
         case "pipe_bind": {
           visit(item.value);
@@ -6548,7 +6616,6 @@ function usedNameCounts(block: BlockExpr): Map<string, number> {
           visit(item.expr);
           return;
         case "literal":
-        case "placeholder":
           return;
       }
     };
@@ -6607,6 +6674,8 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
       return hasRuntimeEffect(expr.target, functions) || hasRuntimeEffect(expr.index, functions);
     case "binary":
       return hasRuntimeEffect(expr.left, functions) || hasRuntimeEffect(expr.right, functions);
+    case "operator_chain":
+      return operatorChainValues(expr).some((item) => hasRuntimeEffect(item, functions));
     case "pipe_bind":
       return hasRuntimeEffect(expr.value, functions) || hasRuntimeEffect(expr.body, functions);
     case "match":
@@ -6636,7 +6705,6 @@ function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
       ) || (expr.expr ? hasRuntimeEffect(expr.expr, functions) : false);
     case "literal":
     case "var":
-    case "placeholder":
       return false;
   }
 }
@@ -6701,6 +6769,8 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
         left: substituteVar(expr.left, name, value),
         right: substituteVar(expr.right, name, value),
       };
+    case "operator_chain":
+      return rewriteOperatorChain(expr, (item) => substituteVar(item, name, value));
     case "match":
       return {
         ...expr,
@@ -6749,7 +6819,6 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
     case "block":
       return substituteBlock(expr, name, value);
     case "literal":
-    case "placeholder":
       return expr;
   }
 }

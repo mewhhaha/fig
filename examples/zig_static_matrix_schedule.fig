@@ -1,6 +1,5 @@
 // Zig-style static parameters: concrete matrix shape, operation dictionaries,
 // and schedule metadata are encoded in types and const values.
-
 type fn InlineArray(n: count, a: type) -> type {
   let InlineArray = {n*a};
   struct(InlineArray)
@@ -14,10 +13,7 @@ type fn Matrix2x3I32() -> type {
   InlineArray(2, Row3I32)
 }
 
-type fn ScaleOps() -> type {
-  let ScaleOps = {factor: i32};
-  struct(ScaleOps)
-}
+type ScaleOps = struct {factor: i32}
 
 type fn Schedule2x3() -> type {
   let Schedule2x3 = {rows: i32, cols: i32, vector_width: i32, unroll: i32};
@@ -41,10 +37,16 @@ fn double_i32() -> ScaleOps {
 }
 
 fn map2x3(ops: ScaleOps, matrix: Matrix2x3I32) -> Matrix2x3I32 {
-  #[
-    #[scale_i32(ops, matrix[0][0]), scale_i32(ops, matrix[0][1]), scale_i32(ops, matrix[0][2])],
-    #[scale_i32(ops, matrix[1][0]), scale_i32(ops, matrix[1][1]), scale_i32(ops, matrix[1][2])]
-  ]
+  #[ #[ scale_i32(ops, matrix[0][0]), scale_i32(
+    ops,
+    matrix[0][1]
+  ), scale_i32(ops, matrix[0][2])], #[ scale_i32(
+    ops,
+    matrix[1][0]
+  ), scale_i32(ops, matrix[1][1]), scale_i32(
+    ops,
+    matrix[1][2]
+  )]]
 }
 
 fn make_plan(matrix: Matrix2x3I32) -> ScheduledMatrix2x3 {
@@ -55,12 +57,17 @@ fn make_plan(matrix: Matrix2x3I32) -> ScheduledMatrix2x3 {
 }
 
 fn consume(plan: ScheduledMatrix2x3) -> i32 {
-  plan.data[0][0] + plan.data[0][1] + plan.data[1][2] +
-    plan.schedule.rows + plan.schedule.cols +
-    plan.schedule.vector_width + plan.schedule.unroll + 105
+  plan.data[0][0]
+    + plan.data[0][1]
+    + plan.data[1][2]
+    + plan.schedule.rows
+    + plan.schedule.cols
+    + plan.schedule.vector_width
+    + plan.schedule.unroll
+    + 105
 }
 
 pub fn main() -> i32 {
-  let matrix: Matrix2x3I32 = #[#[1, 2, 3], #[4, 5, 6]];
+  let matrix: Matrix2x3I32 = #[ #[ 1, 2, 3], #[ 4, 5, 6]];
   consume(make_plan(matrix))
 }

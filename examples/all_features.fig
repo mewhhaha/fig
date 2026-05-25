@@ -1,24 +1,22 @@
-const clock = @external("clock", fn(host: io) -> io(i64));
-const random = @external("random", fn(host: io) -> io(i32));
+const clock = @external(
+  "clock",
+  fn(host: io) -> io(i64)
+);
+const random = @external(
+  "random",
+  fn(host: io) -> io(i32)
+);
 
-type fn Id() {
-  i32
-}
+type Id = i32
 
 type fn Pair(a: type) {
   let Pair = {fst: a, snd: a};
   struct(Pair)
 }
 
-type fn Point() {
-  let Point = {x: i32, y: i32};
-  struct(Point)
-}
+type Point = struct {x: i32, y: i32}
 
-type fn Box() {
-  let Box = {value: i32};
-  struct(Box)
-}
+type Box = struct {value: i32}
 
 type fn Buffer(n: count) {
   let Buffer = {n*i32};
@@ -34,16 +32,12 @@ type fn Thunk() {
   fn() -> i32
 }
 
-type fn Option(a: type) {
-  let None = {};
-  let Some = {value: a};
-  union(None, Some)
+type Option(a) = union {
+  None, Some(value: a)
 }
 
-type fn Result(a: type) {
-  let Ok = {value: a};
-  let Err = {message: string};
-  union(Ok, Err)
+type Result(a) = union {
+  Ok(value: a), Err(message: string)
 }
 
 type fn Eq(t: type) {
@@ -108,15 +102,10 @@ fn bind_box(x: Box) -> Box {
   {value: x.value + 10}
 }
 
-const point_eq: Eq(Point) = {eql: eql_point, neq: neq_point}
-;
-const box_functor: Functor(Box) = {map: map_box}
-;
-const box_applicative: Applicative(Box) = {pure: pure_box, apply: apply_box}
-;
-const box_monad: Monad(Box) = {bind: bind_box}
-
-;
+const point_eq: Eq(Point) = {eql: eql_point, neq: neq_point};
+const box_functor: Functor(Box) = {map: map_box};
+const box_applicative: Applicative(Box) = {pure: pure_box, apply: apply_box};
+const box_monad: Monad(Box) = {bind: bind_box};
 let module_tag = #Demo;
 
 fn sink(x: i32) -> i32 {
@@ -172,7 +161,7 @@ fn classify(x: i32) -> i32 {
 pub fn main(host: io) -> i32 {
   let n: Id = 40;
   let point: Point = Point {x: 1, y: 2};
-  let xs: Buffer(i32) = #[1, 2, 3, 4];
+  let xs: Buffer(i32) = #[ 1, 2, 3, 4];
   let pair: Pair(i32) = {fst: 1, snd: 2};
   let weird: Weird = {fst: 1, [0]: 2, [1]: 3, [2]: 4, [3]: 5, [4]: 6};
   let label = "fig";
@@ -182,12 +171,15 @@ line```;
   let literal = #Widget;
   let ok = true;
   let span = 1 .. 4;
-  let zipped = 1 zip 2;
+  let pair_sum = pair.fst + pair.snd;
   let now = clock(host);
   let entropy = random(host);
   let owned = 7;
   let sunk = sink(owned);
-  let matched = same(Point {x: 1, y: 2}, Point {x: 1, y: 2});
+  let matched = same(
+    Point {x: 1, y: 2},
+    Point {x: 1, y: 2}
+  );
   let mapped_value = mapped({value: 1});
   let applied_value = applied(2);
   let bound_value = bound({value: 3});

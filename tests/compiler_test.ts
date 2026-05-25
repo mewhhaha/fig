@@ -343,15 +343,15 @@ Deno.test("compiler special form classifier covers source and internal contexts"
   assertEquals(compilerSpecialForm("@assume")?.kind, "rewrite");
   assertEquals(compilerSpecialForm("@type_slots")?.kind, "static");
   assertEquals(compilerSpecialForm("@branch_handle")?.kind, "internal");
-  assertEquals(compilerSpecialForm("$")?.kind, "removed");
+  assertEquals(compilerSpecialForm("$"), undefined);
   assertEquals(compilerSpecialForm("@branch_handle")?.sourceFacing, false);
   assert(isCompilerSpecialForm("@external", "declaration"));
 });
 
-Deno.test("removed host capability import annotation is rejected", async () => {
+Deno.test("unsupported host import annotation is rejected", async () => {
   await assertThrowsCompile(
     `
-      const clock = @capability("clock");
+      const clock = @host_import("clock");
       pub fn main() -> i32 { clock() }
     `,
     "const.runtime_call",
@@ -827,7 +827,7 @@ Deno.test("target-typed collection literals lower through collector members", as
 Deno.test("collection literals require target collector context", async () => {
   await assertThrowsCompile(
     "pub fn Bad() -> i32 { <1, 2> }",
-    "syntax.collection_angle_removed",
+    "parse.syntax",
   );
   await assertThrowsCompile(
     `
@@ -1557,7 +1557,7 @@ Deno.test("static type-list builtins support membership and type-list operations
   `);
 });
 
-Deno.test("removed function effect reflection builtin is rejected", async () => {
+Deno.test("unsupported function effect reflection builtin is absent", async () => {
   const registry = createCompilerPluginRegistry();
   assert(!registry.staticBuiltins.has("type_fn_effects"));
 });
@@ -2319,16 +2319,14 @@ Deno.test("checks type function result kinds", async () => {
   );
 });
 
-Deno.test("operator descriptors lower custom infix calls", async () => {
+Deno.test("operator declarations lower custom infix calls", async () => {
   const checked = await checkSource(`
-    type fn Plus(t: type) -> operator {
-      operator(#infixl, 60, "+", t::add)
-    }
     type fn Box() -> struct {
       let Box = {value: i32};
       struct(Box)
     }
-    fn Box::add(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+    fn box_add(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+    const (+) = @operator(#infixl, 60, box_add);
     pub fn main(a: Box, b: Box) -> Box { a + b }
   `);
   const main = checked.program.declarations.find((decl) =>
@@ -2337,28 +2335,22 @@ Deno.test("operator descriptors lower custom infix calls", async () => {
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "call");
   if (main.body.expr?.kind === "call" && main.body.expr.callee.kind === "var") {
-    assertEquals(main.body.expr.callee.name, "Box::add");
+    assertEquals(main.body.expr.callee.name, "box_add");
   }
 });
 
-Deno.test("operator descriptors lower custom comparison and append calls", async () => {
+Deno.test("operator declarations lower custom comparison and append calls", async () => {
   const checked = await checkSource(`
-    type fn EqOp(t: type) -> operator {
-      operator(#infix, 40, "==", t::eql)
-    }
-    type fn LtOp(t: type) -> operator {
-      operator(#infix, 50, "<", t::lt)
-    }
-    type fn AppendOp(t: type) -> operator {
-      operator(#infixr, 55, "<>", t::append)
-    }
     type fn Box() -> struct {
       let Box = {value: i32};
       struct(Box)
     }
-    fn Box::eql(a: Box, b: Box) -> bool { a.value == b.value }
-    fn Box::lt(a: Box, b: Box) -> bool { a.value < b.value }
-    fn Box::append(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+    fn box_eql(a: Box, b: Box) -> bool { a.value == b.value }
+    fn box_lt(a: Box, b: Box) -> bool { a.value < b.value }
+    fn box_append(a: Box, b: Box) -> Box { Box {value: a.value + b.value} }
+    const (==) = @operator(#infix, 40, box_eql);
+    const (<) = @operator(#infix, 50, box_lt);
+    const (<>) = @operator(#infixr, 55, box_append);
     pub fn Eq(a: Box, b: Box) -> bool { a == b }
     pub fn lt(a: Box, b: Box) -> bool { a < b }
     pub fn append(a: Box, b: Box) -> Box { a <> b }
@@ -2371,7 +2363,7 @@ Deno.test("operator descriptors lower custom comparison and append calls", async
         ? decl.body.expr.callee.name
         : ""
     );
-  assertEquals(callees, ["Box::eql", "Box::lt", "Box::append"]);
+  assertEquals(callees, ["box_eql", "box_lt", "box_append"]);
 });
 
 Deno.test("operator parser honors precedence for extended symbols", async () => {
@@ -2384,6 +2376,36 @@ Deno.test("operator parser honors precedence for extended symbols", async () => 
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "binary");
   if (main.body.expr?.kind === "binary") assertEquals(main.body.expr.op, "+");
+});
+
+Deno.test("ranges lower as syntax instead of operator chains", async () => {
+  const program = await parse(`
+    pub fn main() -> RangeI32 { 1 + 1 .. 4 }
+  `);
+  const main = findFn(program, "main");
+  assertEquals(main?.body.expr?.kind, "range");
+  if (main?.body.expr?.kind === "range") {
+    assertEquals(main.body.expr.start.kind, "operator_chain");
+    assertEquals(main.body.expr.end.kind, "literal");
+  }
+});
+
+Deno.test("range syntax is not an overloadable operator", async () => {
+  await assertThrowsCompile(
+    `
+      fn range(a: i32, b: i32) -> RangeI32 { a .. b }
+      const (..) = @operator(#infixr, 20, range);
+    `,
+    "parse.syntax",
+  );
+});
+
+Deno.test("zip is no longer an infix operator", async () => {
+  await assertThrowsCompile("pub fn main() -> i32 { 1 zip 2 }", "parse.syntax");
+});
+
+Deno.test("chained ranges require explicit structure", async () => {
+  await assertThrowsCompile("pub fn main() -> RangeI32 { 1 .. 2 .. 3 }", "parse.syntax");
 });
 
 Deno.test("parses type function examples", async () => {
@@ -2656,7 +2678,7 @@ world\`\`\`;
       ["symbol", "("],
       ["symbol", ")"],
       ["symbol", "->"],
-      ["identifier", "i32"],
+      ["i32", "i32"],
       ["symbol", "{"],
       ["let", "let"],
       ["identifier", "text"],
@@ -2668,7 +2690,7 @@ world\`\`\`;
       ["string", '"ok"'],
       ["char", "'x'"],
       ["bool", "true"],
-      ["zip", "zip"],
+      ["identifier", "zip"],
       ["symbol", ".."],
       ["symbol", "}"],
     ],
@@ -3553,7 +3575,7 @@ Deno.test("ordinary values allow reuse after calls", async () => {
   );
 });
 
-Deno.test("rejects removed ownership and explicit memory forms", async () => {
+Deno.test("rejects unsupported ownership and explicit memory forms", async () => {
   await assertThrowsCompile("pub fn main() -> i32 { fork(1) }", "function.unknown");
   await assertThrowsCompile("fn bad(x: &(i32)) -> i32 { 0 }", "parse.syntax");
   await assertThrowsCompile("pub fn main() -> i32 { let x = 1; &x }", "parse.syntax");
@@ -3779,7 +3801,7 @@ Deno.test("pipe bind syntax lowers through scoped bind bodies", async () => {
     fn inc(x: i32) -> i32 { x + 1 }
     pub fn main() -> i32 { 1 \\$ -> inc($) }
   `,
-    "syntax.placeholder_removed",
+    "parse.syntax",
   );
   await assertThrowsCompile(
     "pub fn main() -> i32 { \\x -> x + 1 }",
@@ -3900,7 +3922,7 @@ Deno.test("const function literals specialize const fn parameters", async () => 
     "const.const_fn_arity",
     "x + y",
   );
-  await assertFirstDiagnosticSpanIncludes(
+  await assertThrowsCompile(
     `
     type fn Lane4I32() { let Lane4I32 = {4*i32}; struct(Lane4I32) }
     fn map4_i32(const f: fn(x: i32) -> i32, xs: Lane4I32) -> Lane4I32 {
@@ -3908,8 +3930,7 @@ Deno.test("const function literals specialize const fn parameters", async () => 
     }
     pub fn main() -> Lane4I32 { map4_i32($ + 1, [1, 2, 3, 4]) }
   `,
-    "syntax.placeholder_removed",
-    "$",
+    "parse.syntax",
   );
 });
 
@@ -7094,11 +7115,20 @@ Deno.test("checks bounded inline array indexing", async () => {
 });
 
 Deno.test("checks refined i32 scalar domains", async () => {
+  const parsed = await parse(`type fn Small() -> type { i32(0..4 | 8) }`);
+  const small = parsed.declarations[0];
+  assert(small?.kind === "type");
+  assertEquals(small.body.expr?.kind, "type_scalar_domain");
+
   await checkSource(`fn lit() -> i32(1 | 2 | 3) { 2 }`);
   await checkSource(`fn range_lit() -> i32(1 | 2..10 | 14) { 9 }`);
+  await checkSource(`fn sparse(x: i32(0..4 | 8)) -> i32 { x }`);
   await checkSource(`fn widen(x: i32(0..4)) -> i32 { x }`);
   await checkSource(`fn subset(x: i32(0..4)) -> i32(0..10) { x }`);
   await checkSource(`fn const_bound(const n: count, x: i32(0..n)) -> i32 { x }`);
+  await checkSource(
+    `type fn Index(n: count) -> type { i32(0..n) } fn ok(const n: count, x: Index(n)) -> i32 { x }`,
+  );
   await assertThrowsCompile(
     `fn bad(x: i32, y: i32(0..x)) -> i32 { y }`,
     "type.scalar_domain_endpoint",
@@ -7122,8 +7152,14 @@ Deno.test("checks refined i32 scalar domains", async () => {
     `fn bad(const n: count) -> i32(n) { 0 }`,
     "type.scalar_domain_endpoint",
   );
+  await assertThrowsCompile(`fn bad() -> i32() { 0 }`, "type.scalar_domain_syntax");
   await assertThrowsCompile(`fn bad() -> i32("x") { 0 }`, "type.scalar_domain_endpoint");
   await assertThrowsCompile(`fn bad() -> i64(0..4) { 0 }`, "type.scalar_domain_carrier");
+  await assertThrowsCompile(`type fn Bad() -> type { 0..4 }`, "parse.syntax");
+  await assertThrowsCompile(
+    `type fn Vec(T: type) -> type { T } type fn Bad() -> type { Vec(0..4) }`,
+    "parse.syntax",
+  );
 });
 
 Deno.test("derives empty values for refined i32 domains containing zero", async () => {
@@ -7781,7 +7817,6 @@ function countExprCalls(expr: Expr, counts: Map<string, number>) {
       return;
     case "literal":
     case "var":
-    case "placeholder":
       return;
   }
 }
@@ -7797,6 +7832,9 @@ function countExprRefs(expr: Expr, name: string): number {
       return countExprRefs(expr.target, name) + countExprRefs(expr.index, name);
     case "binary":
       return countExprRefs(expr.left, name) + countExprRefs(expr.right, name);
+    case "operator_chain":
+      return countExprRefs(expr.first, name) +
+        expr.rest.reduce((sum, item) => sum + countExprRefs(item.value, name), 0);
     case "pipe_bind":
       return countExprRefs(expr.value, name) + countExprRefs(expr.body, name);
     case "match":
@@ -7845,7 +7883,6 @@ function countExprRefs(expr: Expr, name: string): number {
       return expr.args.reduce((sum, arg) => sum + countExprRefs(arg, name), 0) +
         countExprRefs(expr.body, name);
     case "literal":
-    case "placeholder":
       return 0;
   }
 }

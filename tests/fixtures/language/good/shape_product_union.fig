@@ -1,19 +1,23 @@
-type fn Point() -> struct {
-  let Point = {x: i32, y: i32};
-  struct(Point)
+type Point = struct {x: i32, y: i32}
+
+type Option(a) = union {
+  None, Some(value: a)
 }
 
-type fn Option(a: type) -> union {
-  let None = {};
-  let Some = {value: a};
-  union(None, Some)
+type Count = i32
+
+fn make_point(x: i32, y: i32) -> Point {
+  Point {x: x, y: y}
 }
 
-fn make_point(x: i32, y: i32) -> Point { Point {x: x, y: y} }
 fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
-  match value { Some(inner) => inner, None => fallback }
+  match value {
+    Some(inner) => inner,
+    None => fallback
+  }
 }
 
 pub fn main() -> i32 {
-  make_point(1, 2).x + unwrap_or(Some(3), 0)
+  let count: Count = 4;
+  make_point(1, 2).x + unwrap_or(Some(3), 0) + count
 }

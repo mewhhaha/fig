@@ -19,7 +19,7 @@ type fn Pair(a: type, b: type) -> struct {
 ```
 
 Type function bodies contain `let` or `const` bindings and type expressions. The final type
-expression is the result. Result kinds are `type`, `struct`, `union`, and `operator`.
+expression is the result. Result kinds are `type`, `struct`, and `union`.
 
 ## Parameters and Clauses
 
@@ -46,21 +46,26 @@ type fn Choose(_: type) -> type { i32 }
 ## Type Expressions
 
 Type-level expressions include primitive type names, qualified names, type calls, literals, shape
-expressions, tuple and repeat types, type matches, equality comparisons, builtins, and operator
-descriptors.
+expressions, tuple and repeat types, type matches, equality comparisons, and builtins.
 
 ```fig
 match a { i32 => bool, _ => a }
 [i32, bool]
 [i32; 4]
 @type_has_slot(t, #x)
-operator(#infixl, 60, "+", t::add)
 ```
 
 `struct(ShapeBinding)` creates a product type. `union(a, b, ...)` creates a sum type.
-`operator(fixity, precedence, symbol, target)` creates an operator descriptor. Current expression
-syntax resolves user-defined binary operators through visible descriptors, most commonly `#infix`,
-`#infixl`, and `#infixr`; the target is a function or attached member reference.
+Current expression syntax resolves user-defined binary operators through visible operator
+declarations:
+
+```fig
+fn append(a: Box, b: Box) -> Box { Box::append(a, b) }
+const (<>) = @operator(#infixr, 55, append);
+```
+
+Operator declarations are compile-time-only top-level constants. The operator target is a function
+reference, and the supported fixities are `#infix`, `#infixl`, and `#infixr`.
 
 ## Attached Members and Contracts
 
@@ -107,7 +112,8 @@ Use these patterns when choosing how to express static intent:
 
 | Intent                                         | Pattern                                                                                         |
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Define a runtime data layout                   | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
+| Define a fixed runtime data layout             | Use `type Name = struct ...`, `type Name(a) = union ...`, or `type Alias = ...`.                |
+| Compute a runtime data layout                  | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
 | Require behavior on a concrete type            | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`. |
 | Call required behavior carried by a value      | Annotate a value as `contract(t)` and call the attached member as `t::member(...)`.             |
 | Call required behavior without a runtime value | Pass `const _proof: contract(t)` as an explicit erased proof fallback.                          |

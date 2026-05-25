@@ -121,10 +121,7 @@ type fn Functor(t: type fn(a: type) -> type) -> type {
 A Fig type constructor satisfies it by attaching `map`:
 
 ```fig
-type fn Box(a: type) -> type {
-  let Box = {value: a};
-  struct(Box)
-}
+type Box(a) = struct {value: a}
 
 fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
@@ -316,8 +313,8 @@ stack.
 
 ## Operators
 
-Fig can define operator descriptors, but operators are explicit imports rather than global magic.
-The standard prelude exposes common descriptors:
+Fig defines operators with compile-time `const` declarations, but operators are explicit imports
+rather than global magic. The standard prelude exposes common declarations:
 
 ```fig
 const std = @import("prelude.std");
@@ -331,8 +328,8 @@ pub fn bound() -> Box(i32) {
 }
 ```
 
-Operator calls resolve through visible descriptors, usually from `prelude.operators` or
-`prelude.std`. If an operator has no visible descriptor or the target member is missing, checking
+Operator calls resolve through visible declarations, usually from `prelude.operators` or
+`prelude.std`. If an operator has no visible declaration or the target member is missing, checking
 fails.
 
 ## Rewrite Laws

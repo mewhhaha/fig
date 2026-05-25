@@ -110,8 +110,7 @@ export type CompilerSpecialFormKind =
   | "annotation"
   | "instrumentation"
   | "rewrite"
-  | "internal"
-  | "removed";
+  | "internal";
 
 export interface CompilerSpecialForm {
   name: string;
@@ -388,10 +387,8 @@ export function staticBuiltinName(name: string): string {
 }
 
 const exactCompilerSpecialForms = [
-  { name: "$", kind: "removed", sourceFacing: false },
   { name: "import", kind: "declaration", sourceFacing: true },
   { name: "external", kind: "declaration", sourceFacing: true },
-  { name: "capability", kind: "removed", sourceFacing: false },
   { name: "io", kind: "do_strategy", sourceFacing: true },
   { name: "monad", kind: "do_strategy", sourceFacing: true },
   { name: "applicative", kind: "do_strategy", sourceFacing: true },
@@ -428,7 +425,7 @@ const compilerSpecialFormsByName = new Map<string, CompilerSpecialForm>();
 for (const form of exactCompilerSpecialForms) {
   compilerSpecialFormsByName.set(form.name, {
     ...form,
-    spelling: form.name === "$" ? "$" : `@${form.name}`,
+    spelling: `@${form.name}`,
   });
 }
 

@@ -15,7 +15,6 @@ export type GeneratedTokenKind =
   | "match"
   | "pub"
   | "bool"
-  | "zip"
   | "identifier"
   | "number"
   | "string"

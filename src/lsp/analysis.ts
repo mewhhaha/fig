@@ -416,6 +416,7 @@ export class AnalysisCache {
       const selected = new Set(context.selectedNames);
       const items: CompletionItem[] = [];
       for (const decl of program.declarations) {
+        if (decl.kind === "operator") continue;
         const name = declarationCompletionName(decl);
         if (!name || selected.has(name)) continue;
         items.push({
@@ -869,7 +870,9 @@ function nestedCallPipelineEdit(result: AnalysisResult, expr: Expr): CodeAction 
   if (expr.kind !== "call" || !span) return undefined;
   const pipeline = callPipelineParts(result, expr);
   if (!pipeline || pipeline.steps.length === 0) return undefined;
-  const newText = [pipeline.base, ...pipeline.steps].join(" \\$ -> ");
+  const binder = freshPipelineBinder(result, span);
+  const steps = pipeline.steps.map((step) => `${step.prefix}${binder}${step.suffix}`);
+  const newText = [pipeline.base, ...steps].join(` \\${binder} -> `);
   if (newText === sourceForSpan(result, span)) return undefined;
   return {
     title: "Convert nested call to pipe-bind pipeline",
@@ -888,7 +891,7 @@ function nestedCallPipelineEdit(result: AnalysisResult, expr: Expr): CodeAction 
 function callPipelineParts(
   result: AnalysisResult,
   expr: Extract<Expr, { kind: "call" }>,
-): { base: string; steps: string[] } | undefined {
+): { base: string; steps: { prefix: string; suffix: string }[] } | undefined {
   const nested = expr.args.find((arg) => arg.kind === "call") as
     | Extract<Expr, { kind: "call" }>
     | undefined;
@@ -897,11 +900,37 @@ function callPipelineParts(
   if (!nested || !nestedSpan || !exprSpan) return undefined;
   const prefix = result.document.text.slice(exprSpan.start, nestedSpan.start);
   const suffix = result.document.text.slice(nestedSpan.end, exprSpan.end);
-  const step = `${prefix}$${suffix}`;
+  const step = { prefix, suffix };
   const prior = callPipelineParts(result, nested);
   return prior
     ? { base: prior.base, steps: [...prior.steps, step] }
     : { base: sourceForSpan(result, nestedSpan), steps: [step] };
+}
+
+function freshPipelineBinder(result: AnalysisResult, span: NonNullable<Expr["span"]>): string {
+  const used = new Set<string>();
+  for (const match of sourceForSpan(result, span).matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    used.add(match[0]);
+  }
+  const owner = result.symbols.find((symbol) =>
+    (symbol.kind === "fn" || symbol.kind === "contract") &&
+    rangeContainsSpan(result, symbol.range, span)
+  );
+  const container = owner?.name;
+  for (const symbol of result.symbols) {
+    if (
+      (symbol.kind === "local" || symbol.kind === "param") &&
+      (!container || symbol.container === container)
+    ) {
+      used.add(symbol.name);
+    }
+  }
+  if (!used.has("value")) return "value";
+  for (let index = 1; index < 1000; index++) {
+    const candidate = `value${index}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return "__pipeline_value";
 }
 
 function nestedMatchFlattenEdit(result: AnalysisResult, expr: Expr): CodeAction | undefined {
@@ -1122,9 +1151,10 @@ function symbolForDecl(
       ? rangeFromFound(findNameRange(symbolSource, decl.name, decl.kind), symbolMapper)
       : undefined) ??
     symbolMapper.range(0, 0);
+  const symbolKind: IndexedSymbol["kind"] = decl.kind === "operator" ? "const" : decl.kind;
   const base: IndexedSymbol = {
     name: decl.name,
-    kind: decl.kind,
+    kind: symbolKind,
     uri: symbolUri,
     range,
     selectionRange: range,
@@ -1330,6 +1360,13 @@ function symbolsForExpr(
         ...symbolsForExpr(uri, expr.left, source, mapper, container, program, localTypes),
         ...symbolsForExpr(uri, expr.right, source, mapper, container, program, localTypes),
       ];
+    case "operator_chain":
+      return [
+        ...symbolsForExpr(uri, expr.first, source, mapper, container, program, localTypes),
+        ...expr.rest.flatMap((item) =>
+          symbolsForExpr(uri, item.value, source, mapper, container, program, localTypes)
+        ),
+      ];
     case "shape":
     case "product_constructor":
       return expr.slots.flatMap((slot) =>
@@ -1348,7 +1385,6 @@ function symbolsForExpr(
         ...symbolsForExpr(uri, expr.end, source, mapper, container, program, localTypes),
       ];
     case "literal":
-    case "placeholder":
     case "var":
       return [];
   }
@@ -1805,6 +1841,9 @@ function detailForDecl(
     return `contract fn ${decl.name}(${
       decl.params.map((param) => `${param.name}: ${param.type}`).join(", ")
     }) -> ${decl.resultKind}`;
+  }
+  if (decl.kind === "operator") {
+    return `const (${decl.symbol}) = @operator(${decl.fixity}, ${decl.precedence}, ${decl.target})`;
   }
   const type = decl.type ?? expressionTypeFromProgram(decl.value, program, localTypes);
   return `${decl.kind} ${decl.name}${type ? `: ${type}` : ""}`;
@@ -2430,11 +2469,12 @@ function checkedAstHoverAt(
         visitTypeExpr(expr.left);
         visitTypeExpr(expr.right);
         break;
+      case "type_scalar_domain":
+        break;
       case "type_ref":
       case "type_hole":
       case "type_static_ref":
       case "type_fn":
-      case "type_operator":
       case "type_bool":
       case "type_number":
       case "type_char":
@@ -2560,7 +2600,6 @@ function checkedAstHoverAt(
         visitExpr(expr.end, localTypes);
         break;
       case "literal":
-      case "placeholder":
       case "var":
         break;
     }
@@ -2661,6 +2700,14 @@ function checkedAstHoverAt(
         visitTypeExpr(stmt.value);
       }
       visitTypeExpr(decl.body.expr);
+    } else if (decl.kind === "operator") {
+      add(
+        decl.nameSpan ?? decl.span,
+        decl.name,
+        detailForDecl(decl, result.program),
+        "const",
+        decl.doc,
+      );
     } else {
       add(
         decl.nameSpan ?? decl.span,
@@ -2728,6 +2775,8 @@ function childExprs(expr: Expr): Expr[] {
       return [expr.target, expr.index];
     case "binary":
       return [expr.left, expr.right];
+    case "operator_chain":
+      return [expr.first, ...expr.rest.map((item) => item.value)];
     case "shape":
     case "product_constructor":
       return expr.slots.map((slot) => slot.value);
@@ -2738,7 +2787,6 @@ function childExprs(expr: Expr): Expr[] {
     case "range":
       return [expr.start, expr.end];
     case "literal":
-    case "placeholder":
     case "var":
       return [];
   }
@@ -2796,6 +2844,8 @@ function expressionSyntaxInfo(
       return { name: "profile expression", kind: "local" };
     case "binary":
       return { name: `${expr.op} expression`, kind: "local", detail: "binary expression" };
+    case "operator_chain":
+      return { name: "operator chain", kind: "local" };
     case "index":
       return { name: "index expression", kind: "local" };
     case "match":
@@ -2804,8 +2854,6 @@ function expressionSyntaxInfo(
       return { name: "pipe-bind expression", kind: "local" };
     case "block":
       return { name: "block expression", kind: "local" };
-    case "placeholder":
-      return { name: "placeholder", kind: "local" };
     case "call":
       return { name: renderExprName(expr), kind: "local", detail: "call expression" };
     case "field":
@@ -3156,10 +3204,16 @@ function renderTypeExprHover(expr: TypeExpr): string {
           `${renderTypePatternHover(arm.pattern)} => ${renderTypeExprHover(arm.value)}`
         ).join(", ")
       } }`;
-    case "type_operator":
-      return `operator(${expr.descriptor.fixity}, ${expr.descriptor.precedence}, "${expr.descriptor.symbol}", ${expr.descriptor.target})`;
     case "type_binary":
       return `${renderTypeExprHover(expr.left)} ${expr.op} ${renderTypeExprHover(expr.right)}`;
+    case "type_scalar_domain":
+      return `${expr.carrier}(${
+        expr.members.map((member) => {
+          const start = member.start.source;
+          const end = member.end?.source;
+          return end ? `${start}..${end}` : start;
+        }).join(" | ")
+      })`;
     case "type_bool":
       return expr.value ? "true" : "false";
     case "type_number":
@@ -3189,10 +3243,10 @@ function typeExprKindHover(expr: TypeExpr): string {
       return "shape type";
     case "type_match":
       return "type match";
-    case "type_operator":
-      return "operator type";
     case "type_binary":
       return "type expression";
+    case "type_scalar_domain":
+      return "refined scalar domain";
     case "type_bool":
     case "type_number":
     case "type_char":
@@ -3394,6 +3448,15 @@ function semanticTokenType(kind: IndexedSymbol["kind"]): number {
 
 function rangesOverlap(left: Range, right: Range): boolean {
   return comparePosition(left.start, right.end) <= 0 && comparePosition(right.start, left.end) <= 0;
+}
+
+function rangeContainsSpan(
+  result: AnalysisResult,
+  range: Range,
+  span: NonNullable<CompileDiagnostic["span"]>,
+): boolean {
+  return result.mapper.offsetAt(range.start) <= span.start &&
+    span.end <= result.mapper.offsetAt(range.end);
 }
 
 function positionInRange(position: Position, range: Range): boolean {

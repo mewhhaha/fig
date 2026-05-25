@@ -40,7 +40,6 @@
 (Number) @number
 (Bool) @constant.builtin
 (Comment) @comment
-(Placeholder) @operator
 "do" @keyword
 "else" @keyword
 "if" @keyword
@@ -49,6 +48,7 @@
 "," @punctuation.delimiter
 "->" @operator
 "." @punctuation.delimiter
+".." @operator
 ".." @operator
 "..." @operator
 ":" @punctuation.delimiter
@@ -59,6 +59,7 @@
 "=>" @operator
 "@" @operator
 "@external" @operator
+"@operator" @operator
 "@profile" @operator
 "@trace" @operator
 "[" @punctuation.bracket

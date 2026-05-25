@@ -19,7 +19,7 @@ summarizes the current supported surface.
 - Use `docs/reference/expressions.md` for calls, constructors, tuples, collections, match,
   operators, named pipe-bind, local bindings, and destructuring.
 - Use `docs/reference/type-functions.md` for type blocks, result kinds, parameters, `struct`,
-  `union`, `operator`, and type matches.
+  `union`, operators, and type matches.
 - Use `docs/reference/builtins.md` for every `@...` compiler builtin and backend intrinsic.
 - Use `docs/reference/semantics.md` for Branch-Bit values, effects, const evaluation, reflection,
   and Wasm portability constraints.
@@ -233,19 +233,11 @@ functions also support ordered clauses and `match` over static values and types.
 
 ## Products, Sums, Shapes, and Arrays
 
-Define concrete product and sum layouts with type functions:
+Define concrete product and sum layouts with type declaration sugar:
 
 ```fig
-type fn Point() -> struct {
-  let Point = {x: i32, y: i32};
-  struct(Point)
-}
-
-type fn Option(a: type) -> union {
-  let None = {};
-  let Some = {value: a};
-  union(None, Some)
-}
+type Point = struct {x: i32, y: i32}
+type Option(a) = union {None, Some(value: a)}
 ```
 
 Shape slots may be labeled or anonymous. Counted inline arrays use repeat syntax:
@@ -265,7 +257,7 @@ Tuple types use brackets, such as `[i32, bool]` and `[i32; 4]`. Shape and produc
 
 ## Type Functions
 
-Type functions run at compile time and return `type`, `struct`, `union`, or `operator`:
+Type functions run at compile time and return `type`, `struct`, or `union`:
 
 ```fig
 type fn Id() -> type { i32 }
@@ -389,10 +381,7 @@ Use point-free helpers from `prelude.function` or `prelude.std` for small compos
 Define functor-like types by attaching a `map` member to a unary type constructor:
 
 ```fig
-type fn Box(a: type) -> type {
-  let Box = {value: a};
-  struct(Box)
-}
+type Box(a) = struct {value: a}
 
 fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
   Box {value: f(v.value)}
@@ -496,7 +485,7 @@ pub fn main() -> i32 {
 }
 ```
 
-Use operator syntax only after importing visible descriptors, usually through `prelude.std`.
+Use operator syntax only after importing visible declarations, usually through `prelude.std`.
 Functional operator forms lower to attached members:
 
 ```fig
@@ -514,24 +503,25 @@ default for typeclass-like APIs.
 
 ## Operators
 
-Built-in parser symbols include arithmetic, comparison, boolean, append, applicative, functor,
-monad, range, and `zip` symbols:
+Built-in parser symbols include arithmetic, comparison, boolean, append, applicative, functor, and
+monad symbols:
 
 ```fig
-+ - * / % == != < <= > >= && || ^^ <> <$> <*> >>= zip ..
++ - * / % == != < <= > >= && || ^^ <> <$> <*> >>=
 ```
 
-Runtime operator calls are resolved through visible operator descriptors. Define descriptors with a
-type function returning `operator`:
+Ranges use dedicated `start .. end` syntax. `..` is not an overloadable operator.
+
+Runtime operator calls are resolved through visible operator declarations. Define an operator as a
+compile-time `const` binding that points at a normal function:
 
 ```fig
-type fn OpAdd(t: type) -> operator {
-  operator(#infixl, 60, "+", t::add)
-}
+fn add_point(a: Point, b: Point) -> Point { Point::add(a, b) }
+const (+) = @operator(#infixl, 60, add_point);
 ```
 
-Current expression syntax resolves user-defined binary operators through visible descriptors,
-usually `#infix`, `#infixl`, or `#infixr`. The prelude exposes common operator descriptors in
+Current expression syntax resolves user-defined binary operators through visible declarations,
+usually `#infix`, `#infixl`, or `#infixr`. The prelude exposes common operator declarations in
 `prelude.operators` and through `prelude.std`.
 
 ## Branch-Bit Values and Local Bindings
@@ -628,7 +618,7 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
   iterators, compact arrays, and iterator map/filter/fold/collect.
 - `prelude.function`: `functor`, `applicative`, `monad`, `fmap`, `bind`, `pipe`, `flip`.
 - `prelude.monad`: `State(S, A)` and explicit `Reader(R, A)` helpers.
-- `prelude.operators`: common operator descriptors.
+- `prelude.operators`: common operator declarations.
 - `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, and `prelude.schedule`.
 - `prelude.geometry2d`: Fixed 2D vector, color, vertex, quad, and geometry helpers.
 

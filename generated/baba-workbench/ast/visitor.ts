@@ -66,7 +66,6 @@ import type {
   PipeBindAstNode,
   PipeBindAtomAstNode,
   PipeBindNameAstNode,
-  PlaceholderAstNode,
   PrimaryAstNode,
   ProductConstructorTailAstNode,
   ProfileExprAstNode,
@@ -74,6 +73,11 @@ import type {
   PunnedShapeValueSlotAstNode,
   RangeAstNode,
   ReturnSigAstNode,
+  ScalarCarrierAstNode,
+  ScalarDomainAstNode,
+  ScalarDomainEndpointAstNode,
+  ScalarDomainMemberAstNode,
+  ScalarDomainTypeAstNode,
   ShapeSlotAstNode,
   ShapeSlotBodyAstNode,
   ShapeSlotKeyAstNode,
@@ -146,6 +150,17 @@ import type {
   TypeShapeSlotAstNode,
   TypeShapeSlotBodyAstNode,
   TypeShapeTailAstNode,
+  TypeSugarBodyAstNode,
+  TypeSugarDeclAstNode,
+  TypeSugarParamAstNode,
+  TypeSugarParamListAstNode,
+  TypeSugarParamsAstNode,
+  TypeSugarStructAstNode,
+  TypeSugarUnionAstNode,
+  TypeSugarVariantAstNode,
+  TypeSugarVariantPayloadAstNode,
+  TypeSugarVariantPayloadBodyAstNode,
+  TypeSugarVariantsAstNode,
   TypeTupleAstNode,
   TypeTupleBodyAstNode,
   TypeTupleMoreAstNode,
@@ -159,6 +174,17 @@ export interface AstVisitor<R = void> {
   Program?: (node: ProgramAstNode) => R;
   FieldName?: (node: FieldNameAstNode) => R;
   Decl?: (node: DeclAstNode) => R;
+  TypeSugarDecl?: (node: TypeSugarDeclAstNode) => R;
+  TypeSugarParams?: (node: TypeSugarParamsAstNode) => R;
+  TypeSugarParamList?: (node: TypeSugarParamListAstNode) => R;
+  TypeSugarParam?: (node: TypeSugarParamAstNode) => R;
+  TypeSugarBody?: (node: TypeSugarBodyAstNode) => R;
+  TypeSugarStruct?: (node: TypeSugarStructAstNode) => R;
+  TypeSugarUnion?: (node: TypeSugarUnionAstNode) => R;
+  TypeSugarVariants?: (node: TypeSugarVariantsAstNode) => R;
+  TypeSugarVariant?: (node: TypeSugarVariantAstNode) => R;
+  TypeSugarVariantPayload?: (node: TypeSugarVariantPayloadAstNode) => R;
+  TypeSugarVariantPayloadBody?: (node: TypeSugarVariantPayloadBodyAstNode) => R;
   TypeFnDecl?: (node: TypeFnDeclAstNode) => R;
   TypeBlock?: (node: TypeBlockAstNode) => R;
   TypeBlockItem?: (node: TypeBlockItemAstNode) => R;
@@ -170,6 +196,11 @@ export interface AstVisitor<R = void> {
   TypeBinary?: (node: TypeBinaryAstNode) => R;
   TypeCall?: (node: TypeCallAstNode) => R;
   TypePrimary?: (node: TypePrimaryAstNode) => R;
+  ScalarDomainType?: (node: ScalarDomainTypeAstNode) => R;
+  ScalarCarrier?: (node: ScalarCarrierAstNode) => R;
+  ScalarDomain?: (node: ScalarDomainAstNode) => R;
+  ScalarDomainMember?: (node: ScalarDomainMemberAstNode) => R;
+  ScalarDomainEndpoint?: (node: ScalarDomainEndpointAstNode) => R;
   TypeHole?: (node: TypeHoleAstNode) => R;
   TypeOperatorDescriptor?: (node: TypeOperatorDescriptorAstNode) => R;
   TypeOperatorTarget?: (node: TypeOperatorTargetAstNode) => R;
@@ -225,7 +256,6 @@ export interface AstVisitor<R = void> {
   Call?: (node: CallAstNode) => R;
   Primary?: (node: PrimaryAstNode) => R;
   ProfileExpr?: (node: ProfileExprAstNode) => R;
-  Placeholder?: (node: PlaceholderAstNode) => R;
   ProductConstructorTail?: (node: ProductConstructorTailAstNode) => R;
   ParenExpr?: (node: ParenExprAstNode) => R;
   ShapeValue?: (node: ShapeValueAstNode) => R;
@@ -333,6 +363,83 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
         node,
         fields: {},
       };
+    case "TypeSugarDecl":
+      return {
+        kind: "TypeSugarDecl",
+        type: "TypeSugarDecl",
+        node,
+        fields: {},
+      };
+    case "TypeSugarParams":
+      return {
+        kind: "TypeSugarParams",
+        type: "TypeSugarParams",
+        node,
+        fields: {},
+      };
+    case "TypeSugarParamList":
+      return {
+        kind: "TypeSugarParamList",
+        type: "TypeSugarParamList",
+        node,
+        fields: {},
+      };
+    case "TypeSugarParam":
+      return {
+        kind: "TypeSugarParam",
+        type: "TypeSugarParam",
+        node,
+        fields: {},
+      };
+    case "TypeSugarBody":
+      return {
+        kind: "TypeSugarBody",
+        type: "TypeSugarBody",
+        node,
+        fields: {},
+      };
+    case "TypeSugarStruct":
+      return {
+        kind: "TypeSugarStruct",
+        type: "TypeSugarStruct",
+        node,
+        fields: {},
+      };
+    case "TypeSugarUnion":
+      return {
+        kind: "TypeSugarUnion",
+        type: "TypeSugarUnion",
+        node,
+        fields: {},
+      };
+    case "TypeSugarVariants":
+      return {
+        kind: "TypeSugarVariants",
+        type: "TypeSugarVariants",
+        node,
+        fields: {},
+      };
+    case "TypeSugarVariant":
+      return {
+        kind: "TypeSugarVariant",
+        type: "TypeSugarVariant",
+        node,
+        fields: {},
+      };
+    case "TypeSugarVariantPayload":
+      return {
+        kind: "TypeSugarVariantPayload",
+        type: "TypeSugarVariantPayload",
+        node,
+        fields: {},
+      };
+    case "TypeSugarVariantPayloadBody":
+      return {
+        kind: "TypeSugarVariantPayloadBody",
+        type: "TypeSugarVariantPayloadBody",
+        node,
+        fields: {},
+      };
     case "TypeFnDecl":
       return {
         kind: "TypeFnDecl",
@@ -407,6 +514,41 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
       return {
         kind: "TypePrimary",
         type: "TypePrimary",
+        node,
+        fields: {},
+      };
+    case "ScalarDomainType":
+      return {
+        kind: "ScalarDomainType",
+        type: "ScalarDomainType",
+        node,
+        fields: {},
+      };
+    case "ScalarCarrier":
+      return {
+        kind: "ScalarCarrier",
+        type: "ScalarCarrier",
+        node,
+        fields: {},
+      };
+    case "ScalarDomain":
+      return {
+        kind: "ScalarDomain",
+        type: "ScalarDomain",
+        node,
+        fields: {},
+      };
+    case "ScalarDomainMember":
+      return {
+        kind: "ScalarDomainMember",
+        type: "ScalarDomainMember",
+        node,
+        fields: {},
+      };
+    case "ScalarDomainEndpoint":
+      return {
+        kind: "ScalarDomainEndpoint",
+        type: "ScalarDomainEndpoint",
         node,
         fields: {},
       };
@@ -792,13 +934,6 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
       return {
         kind: "ProfileExpr",
         type: "ProfileExpr",
-        node,
-        fields: {},
-      };
-    case "Placeholder":
-      return {
-        kind: "Placeholder",
-        type: "Placeholder",
         node,
         fields: {},
       };

@@ -10,6 +10,17 @@ export type AstNode =
   | ProgramAstNode
   | FieldNameAstNode
   | DeclAstNode
+  | TypeSugarDeclAstNode
+  | TypeSugarParamsAstNode
+  | TypeSugarParamListAstNode
+  | TypeSugarParamAstNode
+  | TypeSugarBodyAstNode
+  | TypeSugarStructAstNode
+  | TypeSugarUnionAstNode
+  | TypeSugarVariantsAstNode
+  | TypeSugarVariantAstNode
+  | TypeSugarVariantPayloadAstNode
+  | TypeSugarVariantPayloadBodyAstNode
   | TypeFnDeclAstNode
   | TypeBlockAstNode
   | TypeBlockItemAstNode
@@ -21,6 +32,11 @@ export type AstNode =
   | TypeBinaryAstNode
   | TypeCallAstNode
   | TypePrimaryAstNode
+  | ScalarDomainTypeAstNode
+  | ScalarCarrierAstNode
+  | ScalarDomainAstNode
+  | ScalarDomainMemberAstNode
+  | ScalarDomainEndpointAstNode
   | TypeHoleAstNode
   | TypeOperatorDescriptorAstNode
   | TypeOperatorTargetAstNode
@@ -76,7 +92,6 @@ export type AstNode =
   | CallAstNode
   | PrimaryAstNode
   | ProfileExprAstNode
-  | PlaceholderAstNode
   | ProductConstructorTailAstNode
   | ParenExprAstNode
   | ShapeValueAstNode
@@ -180,6 +195,83 @@ export interface DeclAstNode {
   fields: Record<string, never>;
 }
 
+export interface TypeSugarDeclAstNode {
+  kind: "TypeSugarDecl";
+  type: "TypeSugarDecl";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarParamsAstNode {
+  kind: "TypeSugarParams";
+  type: "TypeSugarParams";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarParamListAstNode {
+  kind: "TypeSugarParamList";
+  type: "TypeSugarParamList";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarParamAstNode {
+  kind: "TypeSugarParam";
+  type: "TypeSugarParam";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarBodyAstNode {
+  kind: "TypeSugarBody";
+  type: "TypeSugarBody";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarStructAstNode {
+  kind: "TypeSugarStruct";
+  type: "TypeSugarStruct";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarUnionAstNode {
+  kind: "TypeSugarUnion";
+  type: "TypeSugarUnion";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarVariantsAstNode {
+  kind: "TypeSugarVariants";
+  type: "TypeSugarVariants";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarVariantAstNode {
+  kind: "TypeSugarVariant";
+  type: "TypeSugarVariant";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarVariantPayloadAstNode {
+  kind: "TypeSugarVariantPayload";
+  type: "TypeSugarVariantPayload";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface TypeSugarVariantPayloadBodyAstNode {
+  kind: "TypeSugarVariantPayloadBody";
+  type: "TypeSugarVariantPayloadBody";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface TypeFnDeclAstNode {
   kind: "TypeFnDecl";
   type: "TypeFnDecl";
@@ -253,6 +345,41 @@ export interface TypeCallAstNode {
 export interface TypePrimaryAstNode {
   kind: "TypePrimary";
   type: "TypePrimary";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ScalarDomainTypeAstNode {
+  kind: "ScalarDomainType";
+  type: "ScalarDomainType";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ScalarCarrierAstNode {
+  kind: "ScalarCarrier";
+  type: "ScalarCarrier";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ScalarDomainAstNode {
+  kind: "ScalarDomain";
+  type: "ScalarDomain";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ScalarDomainMemberAstNode {
+  kind: "ScalarDomainMember";
+  type: "ScalarDomainMember";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface ScalarDomainEndpointAstNode {
+  kind: "ScalarDomainEndpoint";
+  type: "ScalarDomainEndpoint";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -638,13 +765,6 @@ export interface PrimaryAstNode {
 export interface ProfileExprAstNode {
   kind: "ProfileExpr";
   type: "ProfileExpr";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface PlaceholderAstNode {
-  kind: "Placeholder";
-  type: "Placeholder";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }

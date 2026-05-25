@@ -64,6 +64,19 @@ pub fn main(host:io)->i32{clock(host)}`,
       "type fn Option(a: type) -> union {\n  let None = {};\n  let Some = {value: a};\n  union(None, Some);\n}\n",
   },
   {
+    name: "type declaration sugar",
+    input: "type Point=struct{x:i32,y:i32}\ntype Option(a)=union{None,Some(value:a)}",
+    expected:
+      "type Point = struct {x: i32, y: i32}\n\ntype Option(a) = union {\n  None, Some(value: a)\n}\n",
+  },
+  {
+    name: "type declaration sugar comments aliases and trailing commas",
+    input:
+      "/// count alias\ntype Count=i32\n/// row docs\ntype Row=struct{\n// field docs\nx:i32,\ny:Count,\n}\ntype Result(a)=union{Ok(value:a),Err(message:string)}",
+    expected:
+      "/// count alias\ntype Count = i32\n/// row docs\ntype Row = struct {\n  // field docs\n  x: i32,\n  y: Count,\n}\n\ntype Result(a) = union {\n  Ok(value: a), Err(message: string)\n}\n",
+  },
+  {
     name: "fields calls shapes matches and pipe bind",
     input: "fn main()->i32{let point={x:1,y:2};match Point.x{1=>2,// arm\n_=>3}\\value->value}",
     expected:
@@ -273,11 +286,11 @@ _=>2 // fallback
       "fn vertex_sum(geometry: Geometry) -> i32 {\n  Geometry.vertex_count\n    + Geometry.vertices[0].x\n    + Geometry.vertices[0].y\n    + Geometry.vertices[0].rgba\n}\n",
   },
   {
-    name: "operator descriptors",
+    name: "operator declarations",
     input:
-      'type fn OpAdd(t:type)->operator{operator(#infixl,60,"+",t::add)} type fn OpBind(t:type)->operator{operator(#infixl,10,">>=",t::bind)}',
+      "fn append(a:Box,b:Box)->Box{a} const (<>)=@operator(#infixr,55,append);",
     expected:
-      'type fn OpAdd(t: type) -> operator {\n  operator(#infixl, 60, "+", t::add)\n}\n\ntype fn OpBind(t: type) -> operator {\n  operator(#infixl, 10, ">>=", t::bind)\n}\n',
+      "fn append(a: Box, b: Box) -> Box {\n  a\n}\n\nconst (<>) = @operator(#infixr, 55, append);\n",
   },
   {
     name: "type reflection helper surface",
