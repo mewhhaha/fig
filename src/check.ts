@@ -110,6 +110,14 @@ export interface SpecializationTrace {
   cacheMisses: number;
 }
 
+export interface FunctionCheckCacheEntry {
+  fn: FnDecl;
+}
+
+export interface CheckCache {
+  functionChecks?: Map<string, FunctionCheckCacheEntry>;
+}
+
 interface CallCheckMemo {
   returnType?: string;
 }
@@ -124,6 +132,7 @@ interface CheckMemo {
 
 export interface CheckProgramOptions extends CompilerPluginOptions {
   trace?: boolean;
+  cache?: CheckCache;
 }
 
 function diagnosticAt(
@@ -528,6 +537,11 @@ function checkProgramInternal(
   const diagnostics: Diagnostic[] = [];
   const trace: CheckTrace | undefined = options.trace ? { phases: [] } : undefined;
   const memo = createCheckMemo();
+  const pendingFunctionCheckCacheWrites: {
+    cache: Map<string, FunctionCheckCacheEntry>;
+    key: string;
+    entry: FunctionCheckCacheEntry;
+  }[] = [];
   program.resolvedTypeHoles = [];
   const recordPhase = <T>(
     name: string,
@@ -552,6 +566,7 @@ function checkProgramInternal(
   };
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   diagnostics.push(...pluginRegistry.diagnostics);
+  const hasDoExpressions = programHasDoExpressions(program);
   const shaderManifest = new Map<number, ShaderManifestEntry>();
   const addShader = (source: string) => {
     const entry = shaderManifestEntry(source);
@@ -569,7 +584,11 @@ function checkProgramInternal(
   );
   recordPhase(
     "lowerDoExpressions",
-    () => lowerDoExpressions(program, diagnostics, true, program.resolvedTypeHoles),
+    () => {
+      if (hasDoExpressions) {
+        lowerDoExpressions(program, diagnostics, true, program.resolvedTypeHoles);
+      }
+    },
   );
   recordPhase(
     "checkBorrowTypeRestrictions",
@@ -622,16 +641,19 @@ function checkProgramInternal(
   const inferredStats1 = createSpecializationTrace();
   recordPhase(
     "specializeInferredTypeCalls #1",
-    () =>
-      specializeInferredTypeCalls(
-        program,
-        new Map(fnDecls.map((decl) => [decl.name, decl])),
-        constValues,
-        typeDecls,
-        diagnostics,
-        false,
-        inferredStats1,
-      ),
+    () => {
+      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, false)) {
+        specializeInferredTypeCalls(
+          program,
+          new Map(fnDecls.map((decl) => [decl.name, decl])),
+          constValues,
+          typeDecls,
+          diagnostics,
+          false,
+          inferredStats1,
+        );
+      }
+    },
     inferredStats1,
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
@@ -640,19 +662,28 @@ function checkProgramInternal(
     () => resolveAttachedMemberCalls(program, typeDecls),
   );
   const constStats1 = createSpecializationTrace();
+  const needsConstSpecialization1 = programNeedsConstSpecialization(
+    program,
+    fnDecls,
+    constValues,
+    typeDecls,
+  );
   recordPhase(
     "specializeConstParamCalls #1",
-    () =>
-      specializeConstParamCalls(
-        program,
-        new Map(fnDecls.map((decl) => [decl.name, decl])),
-        constValues,
-        typeDecls,
-        addShader,
-        diagnostics,
-        true,
-        constStats1,
-      ),
+    () => {
+      if (needsConstSpecialization1) {
+        specializeConstParamCalls(
+          program,
+          new Map(fnDecls.map((decl) => [decl.name, decl])),
+          constValues,
+          typeDecls,
+          addShader,
+          diagnostics,
+          true,
+          constStats1,
+        );
+      }
+    },
     constStats1,
   );
   recordPhase(
@@ -663,16 +694,19 @@ function checkProgramInternal(
   const inferredStats2 = createSpecializationTrace();
   recordPhase(
     "specializeInferredTypeCalls #2",
-    () =>
-      specializeInferredTypeCalls(
-        program,
-        new Map(fnDecls.map((decl) => [decl.name, decl])),
-        constValues,
-        typeDecls,
-        diagnostics,
-        true,
-        inferredStats2,
-      ),
+    () => {
+      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, true)) {
+        specializeInferredTypeCalls(
+          program,
+          new Map(fnDecls.map((decl) => [decl.name, decl])),
+          constValues,
+          typeDecls,
+          diagnostics,
+          true,
+          inferredStats2,
+        );
+      }
+    },
     inferredStats2,
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
@@ -681,19 +715,28 @@ function checkProgramInternal(
     () => resolveAttachedMemberCalls(program, typeDecls),
   );
   const constStats2 = createSpecializationTrace();
+  const needsConstSpecialization2 = programNeedsConstSpecialization(
+    program,
+    fnDecls,
+    constValues,
+    typeDecls,
+  );
   recordPhase(
     "specializeConstParamCalls #2",
-    () =>
-      specializeConstParamCalls(
-        program,
-        new Map(fnDecls.map((decl) => [decl.name, decl])),
-        constValues,
-        typeDecls,
-        addShader,
-        diagnostics,
-        false,
-        constStats2,
-      ),
+    () => {
+      if (needsConstSpecialization2) {
+        specializeConstParamCalls(
+          program,
+          new Map(fnDecls.map((decl) => [decl.name, decl])),
+          constValues,
+          typeDecls,
+          addShader,
+          diagnostics,
+          false,
+          constStats2,
+        );
+      }
+    },
     constStats2,
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
@@ -703,22 +746,29 @@ function checkProgramInternal(
   );
   recordPhase(
     "lowerDoExpressions #2",
-    () => lowerDoExpressions(program, diagnostics, false, program.resolvedTypeHoles),
+    () => {
+      if (hasDoExpressions) {
+        lowerDoExpressions(program, diagnostics, false, program.resolvedTypeHoles);
+      }
+    },
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
   const inferredStats3 = createSpecializationTrace();
   recordPhase(
     "specializeInferredTypeCalls #3",
-    () =>
-      specializeInferredTypeCalls(
-        program,
-        new Map(fnDecls.map((decl) => [decl.name, decl])),
-        constValues,
-        typeDecls,
-        diagnostics,
-        true,
-        inferredStats3,
-      ),
+    () => {
+      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, true)) {
+        specializeInferredTypeCalls(
+          program,
+          new Map(fnDecls.map((decl) => [decl.name, decl])),
+          constValues,
+          typeDecls,
+          diagnostics,
+          true,
+          inferredStats3,
+        );
+      }
+    },
     inferredStats3,
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
@@ -773,6 +823,10 @@ function checkProgramInternal(
     const allFnDecls = [...fnDecls, ...importFnDecls];
     const functionMap = new Map(allFnDecls.map((decl) => [decl.name, decl]));
     const typeConstructorMap = typeDeclIndex(typeDecls).productByConstructor;
+    const functionCheckCache = options.recoverTypes ? undefined : options.cache?.functionChecks;
+    const functionCheckEnvKey = functionCheckCache
+      ? functionCheckEnvironmentKey(typeDecls, allFnDecls, hostIoImports)
+      : undefined;
     for (const decl of program.declarations) {
       if (decl.kind === "fn") {
         if (decl.public && !decl.returnType) {
@@ -796,12 +850,28 @@ function checkProgramInternal(
           });
         }
         if (!decl.generated && !decl.primitiveId) {
+          const cacheKey = functionCheckEnvKey
+            ? functionCheckCacheKey(decl, functionCheckEnvKey)
+            : undefined;
+          const cached = cacheKey ? functionCheckCache?.get(cacheKey) : undefined;
+          if (cached) {
+            Object.assign(decl, cloneCachedFnDecl(cached.fn));
+            continue;
+          }
+          const diagnosticCount = diagnostics.length;
           checkFn(decl, hostIoImports, diagnostics, typeDecls, allFnDecls, {
             ...options,
             memo,
             functionMap,
             typeConstructorMap,
           });
+          if (cacheKey && diagnostics.length === diagnosticCount) {
+            pendingFunctionCheckCacheWrites.push({
+              cache: functionCheckCache!,
+              key: cacheKey,
+              entry: { fn: cloneCachedFnDecl(decl) },
+            });
+          }
         }
       }
     }
@@ -857,6 +927,11 @@ function checkProgramInternal(
       ) {
         diagnostics.splice(index, 1);
       }
+    }
+  }
+  if (diagnostics.length === 0) {
+    for (const write of pendingFunctionCheckCacheWrites) {
+      write.cache.set(write.key, write.entry);
     }
   }
   return {
@@ -1021,6 +1096,116 @@ function createCheckMemo(): CheckMemo {
     staticConstValue: new Map(),
     callCheck: new Map(),
   };
+}
+
+function functionCheckEnvironmentKey(
+  types: TypeDecl[],
+  functions: FnDecl[],
+  hostIoImports: Map<string, unknown>,
+): string {
+  return hashString(stableSemanticJson({
+    types,
+    functions: functions.map((decl) => ({
+      name: decl.name,
+      params: decl.params.map((param) => ({
+        name: param.name,
+        type: param.type,
+        const: param.const,
+        inferStaticType: param.inferStaticType,
+      })),
+      returnType: decl.returnType,
+      effects: decl.effects,
+      public: decl.public,
+      imported: decl.imported,
+      generated: decl.generated,
+    })),
+    imports: [...hostIoImports.entries()],
+  }));
+}
+
+function functionCheckCacheKey(decl: FnDecl, environmentKey: string): string {
+  const sourceId = decl.span?.sourceId ?? decl.nameSpan?.sourceId ?? "<unknown>";
+  return `fn_check\0${sourceId}\0${decl.name}\0${environmentKey}\0${
+    hashString(stableSemanticJson(decl))
+  }`;
+}
+
+function cloneCachedFnDecl(fn: FnDecl): FnDecl {
+  return structuredClone(fn) as FnDecl;
+}
+
+function stableSemanticJson(value: unknown): string {
+  return JSON.stringify(value, (key, item) => {
+    if (
+      key === "span" || key === "nameSpan" || key === "typeSpan" ||
+      key === "returnTypeSpan" || key === "typeHoles" || key === "returnTypeHoles"
+    ) {
+      return undefined;
+    }
+    return item;
+  }) ?? "";
+}
+
+function hashString(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function hasInferredTypeSpecializationTargets(
+  functions: FnDecl[],
+  consts: Map<string, ConstValue>,
+  includeGenerated: boolean,
+): boolean {
+  return functions.some((decl) =>
+    (includeGenerated || !decl.generated) && fnUsesInferredTypeVars(decl, consts)
+  );
+}
+
+function programNeedsConstSpecialization(
+  program: Program,
+  functions: FnDecl[],
+  consts: Map<string, ConstValue>,
+  types: TypeDecl[],
+): boolean {
+  if (
+    functions.some((decl) =>
+      decl.params.some((param) => param.const) || fnUsesInferredTypeVars(decl, consts)
+    )
+  ) {
+    return true;
+  }
+  return programHasConstFnExpressions(program) ||
+    programHasRuntimeFunctionValueTypes(program, types);
+}
+
+function programHasConstFnExpressions(program: Program): boolean {
+  return programHasExpr(program, (expr) => expr.kind === "const_fn");
+}
+
+function programHasRuntimeFunctionValueTypes(program: Program, types: TypeDecl[]): boolean {
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      if (typeIsRuntimeFunctionValue(decl.returnType, types)) return true;
+      if (
+        decl.params.some((param) => !param.const && typeIsRuntimeFunctionValue(param.type, types))
+      ) {
+        return true;
+      }
+    } else if (decl.kind === "contract") {
+      if (
+        decl.params.some((param) => !param.const && typeIsRuntimeFunctionValue(param.type, types))
+      ) {
+        return true;
+      }
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      if (typeIsRuntimeFunctionValue(explicitTypeAnnotation(decl.type), types)) return true;
+    }
+  }
+  return false;
 }
 
 function countProgramFunctions(program: Program, generatedOnly = false): number {
@@ -2418,6 +2603,7 @@ function lowerResolvedOperators(
     decl.kind === "operator"
   );
   checkOperatorDeclarationConflicts(operators, diagnostics);
+  if (!operators.length && !programHasOperatorChains(program)) return;
   const functions = new Map(fnDecls.map((fn) => [fn.name, fn]));
   const constructorTypes = new Map(
     typeDecls.flatMap((decl) =>
@@ -2442,6 +2628,7 @@ function lowerResolvedOperators(
       case "binary": {
         const left = lowerExpr(expr.left, env);
         const right = lowerExpr(expr.right, env);
+        if (!operators.length) return { ...expr, left, right };
         const leftType = inferRuntimeType(left, env, functions, constructorTypes, memo);
         const rightType = inferRuntimeType(right, env, functions, constructorTypes, memo);
         if (!leftType && !rightType) return { ...expr, left, right };
@@ -2564,6 +2751,76 @@ function lowerResolvedOperators(
       decl.value = lowerExpr(decl.value, new Map());
     }
   }
+}
+
+function programHasExpr(program: Program, predicate: (expr: Expr) => boolean): boolean {
+  const visitExpr = (expr: Expr | undefined): boolean => {
+    if (!expr) return false;
+    if (predicate(expr)) return true;
+    switch (expr.kind) {
+      case "call":
+        return visitExpr(expr.callee) || expr.args.some(visitExpr);
+      case "index":
+        return visitExpr(expr.target) || visitExpr(expr.index);
+      case "field":
+        return visitExpr(expr.value) || visitExpr(expr.key);
+      case "binary":
+        return visitExpr(expr.left) || visitExpr(expr.right);
+      case "operator_chain":
+        return visitExpr(expr.first) || expr.rest.some((item) => visitExpr(item.value));
+      case "pipe_bind":
+        return visitExpr(expr.value) || visitExpr(expr.body);
+      case "match":
+        return visitExpr(expr.value) || expr.arms.some((arm) => visitExpr(arm.value));
+      case "shape":
+      case "product_constructor":
+        return expr.slots.some((slot) => visitExpr(slot.index) || visitExpr(slot.value));
+      case "range":
+        return visitExpr(expr.start) || visitExpr(expr.end);
+      case "profile":
+        return expr.args.some(visitExpr) || visitExpr(expr.body);
+      case "static_for_slots":
+        return (expr.source.kind === "range"
+          ? visitExpr(expr.source.start) || visitExpr(expr.source.end)
+          : visitExpr(expr.source.shape)) || visitExpr(expr.value);
+      case "const_fn":
+        return visitExpr(expr.body);
+      case "do":
+        return expr.statements.some((stmt) => {
+          if (
+            stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+            stmt.kind === "destructure_let"
+          ) {
+            return visitExpr(stmt.value);
+          }
+          return stmt.kind === "debug_trace" && stmt.args.some(visitExpr);
+        }) || visitExpr(expr.expr);
+      case "block":
+        return expr.statements.some((stmt) => {
+          if (stmt.kind === "let" || stmt.kind === "destructure_let") return visitExpr(stmt.value);
+          return stmt.kind === "debug_trace" && stmt.args.some(visitExpr);
+        }) || visitExpr(expr.expr);
+      case "var":
+      case "literal":
+        return false;
+    }
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn" || decl.kind === "contract") {
+      if (visitExpr(decl.body)) return true;
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      if (visitExpr(decl.value)) return true;
+    }
+  }
+  return false;
+}
+
+function programHasOperatorChains(program: Program): boolean {
+  return programHasExpr(program, (expr) => expr.kind === "operator_chain");
+}
+
+function programHasDoExpressions(program: Program): boolean {
+  return programHasExpr(program, (expr) => expr.kind === "do");
 }
 
 function checkOperatorDeclarationConflicts(

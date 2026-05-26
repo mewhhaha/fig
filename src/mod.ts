@@ -5,8 +5,10 @@ import {
   checkProgramForAnalysis,
   type CheckResult,
   type CheckTrace,
+  type FunctionCheckCacheEntry,
 } from "./check.ts";
 import {
+  type BackendFunctionCacheEntry,
   type BackendOptions,
   emitWasm,
   emitWat,
@@ -96,6 +98,11 @@ export interface CompileCache {
   parsedModules: Map<string, Program>;
   resolvedModules: Map<string, Program>;
   prunedImports: Map<string, Program>;
+  linkedModules?: Map<string, LinkedModule>;
+  importClosures?: Map<string, ImportClosure>;
+  referenceSummaries?: Map<string, DeclarationReferenceSummary>;
+  functionChecks?: Map<string, FunctionCheckCacheEntry>;
+  backendFunctions?: Map<string, BackendFunctionCacheEntry>;
 }
 
 export function createCompileCache(): CompileCache {
@@ -103,7 +110,28 @@ export function createCompileCache(): CompileCache {
     parsedModules: new Map(),
     resolvedModules: new Map(),
     prunedImports: new Map(),
+    linkedModules: new Map(),
+    importClosures: new Map(),
+    referenceSummaries: new Map(),
+    functionChecks: new Map(),
+    backendFunctions: new Map(),
   };
+}
+
+export interface LinkedModule {
+  program: Program;
+  localNames: string[];
+  supportNames: string[];
+}
+
+export interface ImportClosure {
+  declarations: Declaration[];
+  supportNames: string[];
+  publicNames?: string[];
+}
+
+export interface DeclarationReferenceSummary {
+  names: string[];
 }
 
 export function createCompilerSession(options: CompilerSessionOptions): CompilerSession {
@@ -425,6 +453,7 @@ async function compileArtifactsFromSourceImpl(
   const loweredBackend = lowerProgramToBackendArtifact(checked.program, {
     ...options,
     compileTrace: trace,
+    backendCache: options.cache,
   });
   const backendMs = performance.now() - backendStart;
   const backend = loweredBackend.module;
@@ -579,7 +608,7 @@ async function resolveSourceImports(
     if (cachedParsed) {
       recordImportCacheHit(options.importTrace, "import.parse.module", moduleName, parsed);
     }
-    if (!cachedParsed) sharedCache?.parsedModules.set(parsedCacheKey, cloneProgram(parsed));
+    if (!cachedParsed) sharedCache?.parsedModules.set(parsedCacheKey, parsed);
     const resolvedCacheKey = resolvedModuleCacheKey(sourceKey, options.pruneImports === true);
     const cachedResolved = parsed.sourceImports?.length
       ? undefined
@@ -596,10 +625,10 @@ async function resolveSourceImports(
       options.importTrace,
       "import.merge.module",
       { moduleName, ...importProgramCounters(parsed) },
-      () => mergeImports(parsed),
+      () => mergeImports(parsed, sourceKey, moduleName),
     );
     if (!parsed.sourceImports?.length) {
-      sharedCache?.resolvedModules.set(resolvedCacheKey, cloneProgram(merged));
+      sharedCache?.resolvedModules.set(resolvedCacheKey, merged);
       pruneSourceKeys.set(merged, resolvedCacheKey);
     }
     resolved.set(sourceId, merged);
@@ -607,11 +636,16 @@ async function resolveSourceImports(
     return merged;
   }
 
-  async function mergeImports(program: Program): Promise<Program> {
+  async function mergeImports(
+    program: Program,
+    currentSourceKey?: string,
+    currentModuleName?: string,
+  ): Promise<Program> {
     const importedPrograms: Program[] = [];
     const aliasedImports: { alias: string; program: Program }[] = [];
     const destructuredImports: { alias: string; sourceImport: SourceImport; program: Program }[] =
       [];
+    const dependencyKeys: string[] = [];
     const aliases = new Set<string>();
     const reservedNames = new Set(program.declarations.map(declarationName));
     let hiddenImportIndex = 0;
@@ -645,6 +679,8 @@ async function resolveSourceImports(
       }
       const imported = await load(item.module, item, program);
       if (!imported) continue;
+      const dependencyKey = pruneSourceKeys.get(imported);
+      if (dependencyKey) dependencyKeys.push(dependencyKey);
       if (item.alias) aliasedImports.push({ alias: item.alias, program: imported });
       else if (item.bindings) {
         const alias = nextHiddenImportAlias(reservedNames, hiddenImportIndex++);
@@ -659,18 +695,54 @@ async function resolveSourceImports(
         });
       } else importedPrograms.push(imported);
     }
-    return mergePrograms(
+    const linkedCacheKey = currentSourceKey
+      ? linkedModuleCacheKey(currentSourceKey, options.pruneImports === true, dependencyKeys)
+      : undefined;
+    const cachedLinked = linkedCacheKey
+      ? sharedCache?.linkedModules?.get(linkedCacheKey)
+      : undefined;
+    if (cachedLinked) {
+      const cloned = cloneProgram(cachedLinked.program);
+      pruneSourceKeys.set(cloned, linkedCacheKey!);
+      recordImportCacheHit(
+        options.importTrace,
+        "import.link.module",
+        currentModuleName ?? program.moduleName ?? "",
+        cloned,
+      );
+      return cloned;
+    }
+    const diagnosticCount = diagnostics.length;
+    const merged = mergePrograms(
       importedPrograms,
       aliasedImports,
       destructuredImports,
       program,
       diagnostics,
-      { pruneImports: options.pruneImports === true, importTrace: options.importTrace },
+      {
+        pruneImports: options.pruneImports === true,
+        importTrace: options.importTrace,
+        enforceTransitiveSupportDiagnostics: program === root,
+      },
       {
         prunedImports: sharedCache?.prunedImports,
+        importClosures: sharedCache?.importClosures,
+        referenceSummaries: sharedCache?.referenceSummaries,
         sourceKey: (program) => pruneSourceKeys.get(program),
       },
     );
+    if (linkedCacheKey) {
+      pruneSourceKeys.set(merged, linkedCacheKey);
+      if (diagnostics.length === diagnosticCount) {
+        const { localDecls, transitiveDecls } = splitModuleLocalDeclarations(merged);
+        sharedCache?.linkedModules?.set(linkedCacheKey, {
+          program: merged,
+          localNames: localDecls.flatMap(collectDeclarationNames),
+          supportNames: transitiveDecls.flatMap(collectDeclarationNames),
+        });
+      }
+    }
+    return merged;
   }
 
   const merged = await mergeImports(root);
@@ -684,14 +756,20 @@ function mergePrograms(
   destructuredImports: { alias: string; sourceImport: SourceImport; program: Program }[],
   program: Program,
   diagnostics: Diagnostic[],
-  options: { pruneImports: boolean; importTrace?: ImportTraceState },
+  options: {
+    pruneImports: boolean;
+    importTrace?: ImportTraceState;
+    enforceTransitiveSupportDiagnostics: boolean;
+  },
   cache?: {
     prunedImports?: Map<string, Program>;
+    importClosures?: Map<string, ImportClosure>;
+    referenceSummaries?: Map<string, DeclarationReferenceSummary>;
     sourceKey(program: Program): string | undefined;
   },
 ): Program {
   const importedDecls = imports.flatMap((item) => item.declarations).map(markImportedDeclaration);
-  const aliasedDecls = traceImportPhaseSync(
+  const aliasedSurfaces = traceImportPhaseSync(
     options.importTrace,
     "import.qualify.imports",
     {
@@ -701,19 +779,46 @@ function mergePrograms(
       ),
     },
     () =>
-      aliasedImports.flatMap(({ alias, program: importedProgram }) => {
-        const prunedProgram = options.pruneImports
-          ? pruneAliasedImportedProgram(
-            importedProgram,
-            program.declarations,
-            alias,
+      aliasedImports.map(({ alias, program: importedProgram }) => {
+        const roots = options.pruneImports
+          ? traceImportPhaseSync(
             options.importTrace,
-            cache,
+            "import.prune.alias_roots",
+            {
+              moduleName: importedProgram.moduleName,
+              declarationCount: importedProgram.declarations.length,
+            },
+            () => aliasReferenceRoots(importedProgram.declarations, program.declarations, alias),
+            (result) => ({ referenceCount: result.size }),
           )
+          : new Set(importedProgram.declarations.flatMap(collectDeclarationNames));
+        const sourceKey = cache?.sourceKey(importedProgram);
+        const closureCacheKey = sourceKey
+          ? importClosureCacheKey(sourceKey, alias, roots, options.pruneImports)
+          : undefined;
+        const cached = closureCacheKey ? cache?.importClosures?.get(closureCacheKey) : undefined;
+        if (cached) {
+          recordImportPhase(options.importTrace, {
+            name: "import.closure.cache",
+            ms: 0,
+            cacheHit: true,
+            declarationCount: cached.declarations.length,
+            referenceCount: cached.supportNames.length,
+          });
+          return {
+            declarations: cloneDeclarations(cached.declarations),
+            supportNames: new Set(cached.supportNames),
+            publicNames: new Set(cached.publicNames ?? []),
+          };
+        }
+        const prunedProgram = options.pruneImports
+          ? pruneImportedProgram(importedProgram, roots, options.importTrace, cache)
           : importedProgram;
         const { localDecls, transitiveDecls } = splitModuleLocalDeclarations(prunedProgram);
         const localNames = new Set(localDecls.flatMap(collectDeclarationNames));
-        return [
+        const supportNames = new Set(transitiveDecls.flatMap(collectDeclarationNames));
+        const publicNames = new Set([...localNames].map((name) => qualifyName(name, alias)));
+        const declarations = [
           ...transitiveDecls.map(markImportedDeclaration),
           ...qualifyEffectImportsAsDeclarations(
             prunedProgram.imports,
@@ -722,9 +827,21 @@ function mergePrograms(
           ),
           ...qualifyImportedDeclarations(localDecls, alias, localNames),
         ];
+        if (closureCacheKey) {
+          cache?.importClosures?.set(closureCacheKey, {
+            declarations,
+            supportNames: [...supportNames],
+            publicNames: [...publicNames],
+          });
+        }
+        return { declarations, supportNames, publicNames };
       }),
-    (decls) => ({ keptDeclarationCount: decls.length }),
+    (surfaces) => ({
+      keptDeclarationCount: surfaces.reduce((sum, item) => sum + item.declarations.length, 0),
+      referenceCount: surfaces.reduce((sum, item) => sum + item.supportNames.size, 0),
+    }),
   );
+  const aliasedDecls = aliasedSurfaces.flatMap((item) => item.declarations);
   const destructuredDecls = traceImportPhaseSync(
     options.importTrace,
     "import.destructure.imports",
@@ -747,6 +864,17 @@ function mergePrograms(
         )
       ),
   );
+  const transitiveSupportNames = new Set(aliasedSurfaces.flatMap((item) => [...item.supportNames]));
+  for (const publicName of aliasedSurfaces.flatMap((item) => [...item.publicNames])) {
+    transitiveSupportNames.delete(publicName);
+  }
+  if (options.enforceTransitiveSupportDiagnostics) {
+    checkTransitiveSupportReferences(
+      program.declarations,
+      transitiveSupportNames,
+      diagnostics,
+    );
+  }
   const localNames = new Set(program.declarations.map(declarationName));
   const seenImported = new Map<string, Declaration>();
   const declarations: Declaration[] = [];
@@ -781,6 +909,8 @@ function mergePrograms(
       declarations,
       new Set(program.declarations.map(declarationName)),
       options.importTrace,
+      cache?.referenceSummaries,
+      cache?.sourceKey(program) ? `program_prune\0${cache.sourceKey(program)}` : undefined,
     )
     : declarations;
   return hideAstMetadata({
@@ -808,35 +938,13 @@ function mergePrograms(
   });
 }
 
-function pruneAliasedImportedProgram(
-  importedProgram: Program,
-  localDeclarations: Declaration[],
-  alias: string,
-  importTrace?: ImportTraceState,
-  cache?: {
-    prunedImports?: Map<string, Program>;
-    sourceKey(program: Program): string | undefined;
-  },
-): Program {
-  const roots = traceImportPhaseSync(
-    importTrace,
-    "import.prune.alias_roots",
-    {
-      moduleName: importedProgram.moduleName,
-      declarationCount: importedProgram.declarations.length,
-    },
-    () => aliasReferenceRoots(importedProgram.declarations, localDeclarations, alias),
-    (result) => ({ referenceCount: result.size }),
-  );
-  return pruneImportedProgram(importedProgram, roots, importTrace, cache);
-}
-
 function pruneImportedProgram(
   importedProgram: Program,
   roots: Set<string>,
   importTrace?: ImportTraceState,
   cache?: {
     prunedImports?: Map<string, Program>;
+    referenceSummaries?: Map<string, DeclarationReferenceSummary>;
     sourceKey(program: Program): string | undefined;
   },
 ): Program {
@@ -858,9 +966,11 @@ function pruneImportedProgram(
     importedProgram.declarations,
     roots,
     importTrace,
+    cache?.referenceSummaries,
+    cacheKey,
   );
   const pruned = { ...importedProgram, declarations };
-  if (cacheKey) cache?.prunedImports?.set(cacheKey, cloneProgram(pruned));
+  if (cacheKey) cache?.prunedImports?.set(cacheKey, pruned);
   traceImportPhaseSync(
     importTrace,
     "import.prune.finish",
@@ -922,10 +1032,34 @@ function aliasReferenceRoots(
   return roots;
 }
 
+function checkTransitiveSupportReferences(
+  localDeclarations: Declaration[],
+  supportNames: Set<string>,
+  diagnostics: Diagnostic[],
+) {
+  if (!supportNames.size) return;
+  const nameIndex = createDeclarationNameIndex(supportNames);
+  const reported = new Set<string>();
+  for (const decl of localDeclarations) {
+    for (const ref of referencedDeclarationNames(decl, nameIndex)) {
+      if (!supportNames.has(ref) || reported.has(ref)) continue;
+      reported.add(ref);
+      diagnostics.push({
+        code: "module.transitive_import",
+        message:
+          `declaration ${ref} belongs to an imported module's dependency; import that module directly`,
+        span: decl.nameSpan ?? decl.span,
+      });
+    }
+  }
+}
+
 function pruneUnusedImportedDeclarations(
   declarations: Declaration[],
   localNames: Set<string>,
   importTrace?: ImportTraceState,
+  referenceSummaries?: Map<string, DeclarationReferenceSummary>,
+  referenceSummaryKey?: string,
 ): Declaration[] {
   const { byName, ownerByName, nameIndex } = traceImportPhaseSync(
     importTrace,
@@ -959,7 +1093,12 @@ function pruneUnusedImportedDeclarations(
         const name = work.pop()!;
         for (const decl of byName.get(name) ?? []) {
           const referenceStart = performance.now();
-          const refs = referencedDeclarationNames(decl, nameIndex);
+          const refs = cachedReferencedDeclarationNames(
+            decl,
+            nameIndex,
+            referenceSummaries,
+            referenceSummaryKey,
+          );
           referenceMs += performance.now() - referenceStart;
           referenceCount += refs.size;
           for (const ref of refs) {
@@ -988,6 +1127,22 @@ function pruneUnusedImportedDeclarations(
     referenceCount,
   });
   return declarations.filter((decl) => localNames.has(decl.name) || keep.has(decl.name));
+}
+
+function cachedReferencedDeclarationNames(
+  decl: Declaration,
+  nameIndex: DeclarationNameIndex,
+  referenceSummaries?: Map<string, DeclarationReferenceSummary>,
+  referenceSummaryKey?: string,
+): Set<string> {
+  const cacheKey = referenceSummaryKey
+    ? declarationReferenceSummaryKey(referenceSummaryKey, decl)
+    : undefined;
+  const cached = cacheKey ? referenceSummaries?.get(cacheKey) : undefined;
+  if (cached) return new Set(cached.names);
+  const refs = referencedDeclarationNames(decl, nameIndex);
+  if (cacheKey) referenceSummaries?.set(cacheKey, { names: [...refs] });
+  return refs;
 }
 
 interface DeclarationNameIndex {
@@ -1295,8 +1450,10 @@ function destructureImportedDeclarations(
 ): Declaration[] {
   const bindings = sourceImport.bindings ?? [];
   const bindingNames = new Set(bindings.map((binding) => binding.name));
+  const { localDecls } = splitModuleLocalDeclarations(program);
+  const localDeclarationNames = new Set(localDecls.map(declarationName));
   for (const binding of bindings) {
-    if (!program.declarations.some((item) => declarationName(item) === binding.name)) {
+    if (!localDeclarationNames.has(binding.name)) {
       diagnostics.push({
         code: "module.missing_binding",
         message: `module ${sourceImport.module} has no declaration named ${binding.name}`,
@@ -1316,7 +1473,7 @@ function destructureImportedDeclarations(
   for (const binding of bindings) {
     if (seenBindings.has(binding.name)) continue;
     seenBindings.add(binding.name);
-    const decl = prunedProgram.declarations.find((item) => declarationName(item) === binding.name);
+    const decl = localDecls.find((item) => declarationName(item) === binding.name);
     if (!decl) continue;
     selected.push(
       unqualifiedSelectedDeclaration(qualifyDeclaration(decl, alias, names), binding.name),
@@ -1413,7 +1570,19 @@ function programSourceId(program: Program): string | undefined {
 function invalidateCompileCacheSource(cache: CompileCache, sourceId: string) {
   const markers = [`\0${sourceId}\0`, `${sourceId}\0`];
   const matches = (key: string) => markers.some((marker) => key.includes(marker));
-  for (const map of [cache.parsedModules, cache.resolvedModules, cache.prunedImports]) {
+  for (
+    const map of [
+      cache.parsedModules,
+      cache.resolvedModules,
+      cache.prunedImports,
+      cache.linkedModules,
+      cache.importClosures,
+      cache.referenceSummaries,
+      cache.functionChecks,
+      cache.backendFunctions,
+    ]
+  ) {
+    if (!map) continue;
     for (const key of map.keys()) {
       if (matches(key)) map.delete(key);
     }
@@ -1424,8 +1593,33 @@ function resolvedModuleCacheKey(sourceKey: string, pruneImports: boolean): strin
   return `${pruneImports ? "pruned" : "full"}\0${sourceKey}`;
 }
 
+function linkedModuleCacheKey(
+  sourceKey: string,
+  pruneImports: boolean,
+  dependencyKeys: string[],
+): string {
+  return `linked\0${pruneImports ? "pruned" : "full"}\0${sourceKey}\0${
+    [...dependencyKeys].sort().join("\0")
+  }`;
+}
+
 function prunedImportCacheKey(sourceKey: string, roots: Set<string>): string {
   return `pruned_import\0${sourceKey}\0${[...roots].sort().join("\0")}`;
+}
+
+function importClosureCacheKey(
+  sourceKey: string,
+  alias: string,
+  roots: Set<string>,
+  pruneImports: boolean,
+): string {
+  return `import_closure\0${pruneImports ? "pruned" : "full"}\0${sourceKey}\0${alias}\0${
+    [...roots].sort().join("\0")
+  }`;
+}
+
+function declarationReferenceSummaryKey(prefix: string, decl: Declaration): string {
+  return `decl_refs\0${prefix}\0${declarationName(decl)}`;
 }
 
 function hashString(text: string): string {
@@ -1441,6 +1635,10 @@ function cloneProgram(program: Program): Program {
   const clone = structuredClone(program) as Program;
   restoreAstMetadata(clone, program);
   return hideAstMetadata(clone);
+}
+
+function cloneDeclarations(declarations: Declaration[]): Declaration[] {
+  return cloneProgram({ imports: [], declarations }).declarations;
 }
 
 function restoreAstMetadata(target: unknown, source: unknown, seen = new WeakSet<object>()) {
@@ -2204,33 +2402,27 @@ function withMeta<t extends object>(source: unknown, target: t): t {
 }
 
 function qualifyTypeSource(source: string, alias: string, names: Set<string>): string {
-  let result = source;
-  for (const name of [...names].sort((a, b) => b.length - a.length)) {
-    result = result.replace(
-      new RegExp(
-        `(?<![A-Za-z0-9_.#])${escapeRegExp(name)}(?![A-Za-z0-9_])(?!\\s*:(?!:))`,
-        "g",
-      ),
-      qualifyName(name, alias),
-    );
-  }
-  return result;
+  return source.replace(
+    /[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z_][A-Za-z0-9_]*)*/g,
+    (token, offset: number) => {
+      const previous = offset > 0 ? source[offset - 1] : undefined;
+      if (previous === "@" || previous === "#") return token;
+      if (/^\s*:(?!:)/.test(source.slice(offset + token.length))) return token;
+      return qualifyReference(token, alias, names);
+    },
+  );
 }
 
 function qualifyReference(name: string, alias: string, names: Set<string>): string {
-  const match = [...names]
-    .filter((candidate) =>
-      name === candidate || name.startsWith(`${candidate}.`) || name.startsWith(`${candidate}::`)
-    )
-    .sort((a, b) => b.length - a.length)[0];
-  if (!match) return name;
-  return `${qualifyName(match, alias)}${name.slice(match.length)}`;
+  if (name.startsWith("@")) return name;
+  for (const candidate of qualifiedReferencePrefixes(name)) {
+    if (names.has(candidate)) {
+      return `${qualifyName(candidate, alias)}${name.slice(candidate.length)}`;
+    }
+  }
+  return name;
 }
 
 function qualifyName(name: string, alias: string): string {
   return `${alias}.${name}`;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

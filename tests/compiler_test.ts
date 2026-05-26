@@ -2947,6 +2947,8 @@ Deno.test("destructured source imports select exact declarations", async () => {
 Deno.test("destructured source imports diagnose invalid bindings and conflicts", async () => {
   const modules = new Map([
     ["prelude.array", "pub fn map4_i32(x: i32) -> i32 { x }"],
+    ["prelude.layout", "pub fn width() -> i32 { 4 }"],
+    ["prelude.std", 'const layout = @import("prelude.layout"); pub fn value() -> i32 { 1 }'],
   ]);
   const resolveModule = (specifier: string) => modules.get(specifier);
 
@@ -2969,9 +2971,14 @@ Deno.test("destructured source imports diagnose invalid bindings and conflicts",
     "const { map4_i32 } = 1; pub fn main() -> i32 { 1 }",
     "parse.lower",
   );
+  await assertThrowsCompile(
+    'const { width } = @import("prelude.std"); pub fn main() -> i32 { width() }',
+    "module.missing_binding",
+    { resolveModule },
+  );
 });
 
-Deno.test("namespace source imports do not requalify transitive namespaces", async () => {
+Deno.test("namespace source imports hide transitive namespaces from root source", async () => {
   const modules = new Map([
     [
       "prelude.layout",
@@ -2997,9 +3004,22 @@ Deno.test("namespace source imports do not requalify transitive namespaces", asy
   ]);
   const resolveModule = (specifier: string) => modules.get(specifier);
 
-  await checkSource(
+  await assertThrowsCompile(
     `
       const std = @import("prelude.std");
+      fn inc(x: i32) -> i32 { x + 1 }
+      pub fn main() -> layout.Lane4I32 {
+        array.map4_i32(inc, [1, 2, 3, 4])
+      }
+    `,
+    "module.transitive_import",
+    { resolveModule },
+  );
+
+  await checkSource(
+    `
+      const layout = @import("prelude.layout");
+      const array = @import("prelude.array");
       fn inc(x: i32) -> i32 { x + 1 }
       pub fn main() -> layout.Lane4I32 {
         array.map4_i32(inc, [1, 2, 3, 4])
@@ -7076,6 +7096,122 @@ Deno.test("compileArtifactsFromSource reuses cached pruned imports", async () =>
   assertEquals((instance.exports.main as () => number)(), 2);
 });
 
+Deno.test("compileArtifactsFromSource reuses cached import closures", async () => {
+  const cache = createCompileCache();
+  const source = `
+    const lib = @import("fixture.lib");
+    pub fn main() -> i32 { lib.used() }
+  `;
+  const moduleSource = `
+    fn helper() -> i32 { 1 }
+    fn used() -> i32 { helper() }
+    fn unused() -> i32 { 99 }
+  `;
+  await compileArtifactsFromSource(source, {
+    resolveModule: (moduleName) => moduleName === "fixture.lib" ? moduleSource : undefined,
+    pruneImports: true,
+    cache,
+    trace: true,
+  });
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule: (moduleName) => moduleName === "fixture.lib" ? moduleSource : undefined,
+    pruneImports: true,
+    cache,
+    trace: true,
+  });
+  assertEquals(cache.importClosures?.size, 1);
+  assert(
+    second.importTrace?.phases.some((phase) =>
+      phase.name === "import.closure.cache" && phase.cacheHit
+    ),
+  );
+});
+
+Deno.test("compileArtifactsFromSource reuses linked modules with nested imports", async () => {
+  const cache = createCompileCache();
+  const modules = new Map([
+    [
+      "/fixture/lib.fig",
+      `
+      const leaf = @import("./leaf.fig");
+      fn value() -> i32 { leaf.value() }
+    `,
+    ],
+    ["/fixture/leaf.fig", "fn value() -> i32 { 4 }"],
+  ]);
+  const resolveModule = (moduleName: string, context?: { fromSourceId?: string }) => {
+    if (moduleName === "./lib.fig") {
+      return { sourceId: "/fixture/lib.fig", text: modules.get("/fixture/lib.fig")! };
+    }
+    if (moduleName === "./leaf.fig" && context?.fromSourceId === "/fixture/lib.fig") {
+      return { sourceId: "/fixture/leaf.fig", text: modules.get("/fixture/leaf.fig")! };
+    }
+    return undefined;
+  };
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+  await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+    trace: true,
+  });
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+    trace: true,
+  });
+  assert((cache.linkedModules?.size ?? 0) > 0);
+  assert(
+    second.importTrace?.phases.some((phase) =>
+      phase.name === "import.link.module" && phase.cacheHit
+    ),
+  );
+});
+
+Deno.test("linked module cache key changes when a dependency changes", async () => {
+  const cache = createCompileCache();
+  let leafValue = 1;
+  const resolveModule = (moduleName: string, context?: { fromSourceId?: string }) => {
+    if (moduleName === "./lib.fig") {
+      return {
+        sourceId: "/fixture/lib.fig",
+        text: `
+          const leaf = @import("./leaf.fig");
+          fn value() -> i32 { leaf.value() }
+        `,
+      };
+    }
+    if (moduleName === "./leaf.fig" && context?.fromSourceId === "/fixture/lib.fig") {
+      return { sourceId: "/fixture/leaf.fig", text: `fn value() -> i32 { ${leafValue} }` };
+    }
+    return undefined;
+  };
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+  const first = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  let instance = new WebAssembly.Instance(new WebAssembly.Module(first.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+
+  leafValue = 2;
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+});
+
 Deno.test("compile cache invalidates parsed imports when module source changes", async () => {
   const cache = createCompileCache();
   let value = 1;
@@ -7201,6 +7337,78 @@ Deno.test("release_fast_compile profile compiles with fewer optimizer passes", a
   );
   const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
   assertEquals((instance.exports.main as (seed: number) => number)(40), 44);
+});
+
+Deno.test("checker skips inferred specialization scans without inferred targets", async () => {
+  const checked = await checkSource(
+    `
+      fn inc(x: i32) -> i32 { x + 1 }
+      pub fn main() -> i32 { inc(1) }
+    `,
+    { trace: true },
+  );
+  const inferredPhases =
+    checked.trace?.phases.filter((phase) => phase.name.startsWith("specializeInferredTypeCalls")) ??
+      [];
+  assert(inferredPhases.length > 0);
+  assertEquals(inferredPhases.map((phase) => phase.specialization?.visitedCalls ?? 0), [0, 0, 0]);
+  const constPhases =
+    checked.trace?.phases.filter((phase) => phase.name.startsWith("specializeConstParamCalls")) ??
+      [];
+  assertEquals(constPhases.map((phase) => phase.specialization?.visitedCalls ?? 0), [0, 0]);
+});
+
+Deno.test("checker caches successful function checks but not failing checks", async () => {
+  const cache = createCompileCache();
+  const source = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    pub fn main() -> i32 { inc(1) }
+  `;
+  await checkSource(source, { cache });
+  const cachedChecks = cache.functionChecks?.size ?? 0;
+  assert(cachedChecks > 0);
+  await checkSource(source, { cache });
+  assertEquals(cache.functionChecks?.size, cachedChecks);
+
+  const failingCache = createCompileCache();
+  try {
+    await checkSource(`pub fn main() -> i32 { fork(1) }`, { cache: failingCache });
+    throw new Error("expected checkSource to fail");
+  } catch (error) {
+    assert(error instanceof Error);
+  }
+  assertEquals(failingCache.functionChecks?.size ?? 0, 0);
+});
+
+Deno.test("backend function cache reuses side-effect-free lowered functions", async () => {
+  const cache = createCompileCache();
+  const source = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    pub fn main(seed: i32) -> i32 { inc(seed) }
+  `;
+  await compileArtifactsFromSource(source, { cache, trace: true, includeWat: false });
+  const compileTrace: CompileTraceEvent[] = [];
+  await compileArtifactsFromSource(source, { cache, compileTrace, includeWat: false });
+  const event = compileTrace.find((item) => item.name === "backend.lower.function_cache");
+  assert(event);
+  assert((event.counters?.cacheHits as number | undefined ?? 0) > 0);
+});
+
+Deno.test("backend function cache skips functions that emit debug trace sites", async () => {
+  const cache = createCompileCache();
+  const source = `
+    pub fn main() -> i32 {
+      @trace("main");
+      1
+    }
+  `;
+  await compileArtifactsFromSource(source, { cache, trace: true, includeWat: false });
+  const compileTrace: CompileTraceEvent[] = [];
+  await compileArtifactsFromSource(source, { cache, compileTrace, includeWat: false });
+  const event = compileTrace.find((item) => item.name === "backend.lower.function_cache");
+  assert(event);
+  assertEquals(event.counters?.cacheHits ?? 0, 0);
+  assert((event.counters?.skippedSideEffects as number | undefined ?? 0) > 0);
 });
 
 Deno.test("defaults unsuffixed integer literals in i32 contexts", async () => {

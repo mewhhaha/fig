@@ -34,7 +34,7 @@ import {
   type CompilerPluginRegistry,
   createCompilerPluginRegistry,
 } from "./plugins.ts";
-import type { CompileTraceSink } from "./trace.ts";
+import { type CompileTraceSink, traceInstant } from "./trace.ts";
 import {
   type I32Range,
   parseRefinedI32Type,
@@ -110,13 +110,21 @@ interface BackendImport {
   results: ValueType[];
 }
 
-interface BackendFunction {
+export interface BackendFunction {
   name: string;
   exportName?: string;
   params: BackendLocal[];
   results: ValueType[];
   locals: BackendLocal[];
   body: Instr[];
+}
+
+export interface BackendFunctionCacheEntry {
+  fn: BackendFunction;
+}
+
+export interface BackendCache {
+  backendFunctions?: Map<string, BackendFunctionCacheEntry>;
 }
 
 interface BackendLocal {
@@ -355,6 +363,7 @@ export interface BackendOptions extends CompilerPluginOptions {
   branchHints?: boolean;
   assumeRewrites?: boolean;
   compileTrace?: CompileTraceSink;
+  backendCache?: BackendCache;
 }
 
 const BRANCH_MEMORIES: BackendMemory[] = [
@@ -644,7 +653,16 @@ export function lowerProgramToBackendArtifact(
   const layoutMs = performance.now() - layoutStart;
 
   const lowerStart = performance.now();
-  const loweredFunctions = functions.map((fn) => lowerFunction(fn, ctx));
+  const backendCacheEnvKey = options.backendCache?.backendFunctions
+    ? backendFunctionEnvironmentKey(ctx)
+    : undefined;
+  const loweredFunctions = lowerFunctions(
+    functions,
+    ctx,
+    options.backendCache,
+    options.compileTrace,
+    backendCacheEnvKey,
+  );
   const closureDispatchers = lowerClosureDispatchers(ctx);
   const debugTraceSites = (optMode === "debug" ? ctx.debugTraceSites ?? [] : [])
     .toSorted((left, right) => left.id - right.id);
@@ -1517,6 +1535,114 @@ function exprParamGuardUpperBound(expr: Expr | undefined, param: string): number
   if (value.op === "<" && right > 0) return right;
   if (value.op === "<=" && right >= 0 && right < I32_MAX) return right + 1;
   return undefined;
+}
+
+function lowerFunctions(
+  functions: FnDecl[],
+  ctx: LowerContext,
+  cache: BackendCache | undefined,
+  trace: CompileTraceSink | undefined,
+  environmentKey: string | undefined,
+): BackendFunction[] {
+  const backendFunctions = cache?.backendFunctions;
+  if (!backendFunctions || !environmentKey) return functions.map((fn) => lowerFunction(fn, ctx));
+  let cacheHits = 0;
+  let cacheMisses = 0;
+  let stored = 0;
+  let skippedSideEffects = 0;
+  const lowered = functions.map((fn) => {
+    const key = backendFunctionCacheKey(fn, ctx, environmentKey);
+    const cached = backendFunctions.get(key);
+    if (cached) {
+      cacheHits += 1;
+      return cloneBackendFunction(cached.fn);
+    }
+    cacheMisses += 1;
+    const debugTraceCount = ctx.debugTraceSites?.length ?? 0;
+    const profileSiteCount = ctx.profileSites?.length ?? 0;
+    const closureDispatcherCount = ctx.closureDispatcherSignatures?.size ?? 0;
+    const lowered = lowerFunction(fn, ctx);
+    const hasSideEffects = (ctx.debugTraceSites?.length ?? 0) !== debugTraceCount ||
+      (ctx.profileSites?.length ?? 0) !== profileSiteCount ||
+      (ctx.closureDispatcherSignatures?.size ?? 0) !== closureDispatcherCount;
+    if (hasSideEffects) {
+      skippedSideEffects += 1;
+    } else {
+      backendFunctions.set(key, { fn: cloneBackendFunction(lowered) });
+      stored += 1;
+    }
+    return lowered;
+  });
+  traceInstant(trace, "backend.lower.function_cache", {
+    cacheHits,
+    cacheMisses,
+    stored,
+    skippedSideEffects,
+  });
+  return lowered;
+}
+
+function backendFunctionEnvironmentKey(ctx: LowerContext): string {
+  return hashString(stableBackendJson({
+    memoryModel: ctx.memoryModel,
+    optMode: ctx.optMode,
+    tailCallMode: ctx.tailCallMode,
+    returnProjectionPlans: ctx.returnProjectionPlans,
+    signatures: [...ctx.signatures.values()].map((decl) => ({
+      name: decl.name,
+      params: decl.params.map((param) => ({
+        name: param.name,
+        type: param.type,
+        const: param.const,
+      })),
+      returnType: decl.returnType,
+      effects: decl.effects,
+      public: decl.public,
+      imported: decl.imported,
+      generated: decl.generated,
+    })),
+    layouts: ctx.layouts,
+  }));
+}
+
+function backendFunctionCacheKey(fn: FnDecl, ctx: LowerContext, environmentKey: string): string {
+  const sourceId = fn.span?.sourceId ?? fn.nameSpan?.sourceId ?? "<unknown>";
+  return `backend_fn\0${sourceId}\0${fn.name}\0${
+    hashString(stableBackendJson({
+      fn,
+      environmentKey,
+      scratchPlans: ctx.scratchPlansByFunction?.get(fn.name),
+      packedPlans: ctx.packedPlansByFunction?.get(fn.name),
+      localSlotPlans: ctx.localSlotPlansByFunction?.get(fn.name),
+      scalarFacts: ctx.scalarParamFactsByFunction?.get(fn.name),
+    }))
+  }`;
+}
+
+function cloneBackendFunction(fn: BackendFunction): BackendFunction {
+  return structuredClone(fn) as BackendFunction;
+}
+
+function stableBackendJson(value: unknown): string {
+  return JSON.stringify(value, (key, item) => {
+    if (key === "span" || key === "nameSpan" || key === "typeSpan" || key === "returnTypeSpan") {
+      return undefined;
+    }
+    if (item instanceof Map) {
+      return [...item.entries()].sort(([left], [right]) => `${left}`.localeCompare(`${right}`));
+    }
+    if (item instanceof Set) return [...item.values()].sort();
+    return item;
+  }) ?? "";
+}
+
+function hashString(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
