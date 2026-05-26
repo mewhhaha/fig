@@ -770,6 +770,9 @@ function checkProgramInternal(
   );
 
   recordPhase("checkFn loop", () => {
+    const allFnDecls = [...fnDecls, ...importFnDecls];
+    const functionMap = new Map(allFnDecls.map((decl) => [decl.name, decl]));
+    const typeConstructorMap = typeDeclIndex(typeDecls).productByConstructor;
     for (const decl of program.declarations) {
       if (decl.kind === "fn") {
         if (decl.public && !decl.returnType) {
@@ -793,9 +796,11 @@ function checkProgramInternal(
           });
         }
         if (!decl.generated && !decl.primitiveId) {
-          checkFn(decl, hostIoImports, diagnostics, typeDecls, [...fnDecls, ...importFnDecls], {
+          checkFn(decl, hostIoImports, diagnostics, typeDecls, allFnDecls, {
             ...options,
             memo,
+            functionMap,
+            typeConstructorMap,
           });
         }
       }
@@ -1663,7 +1668,7 @@ function hasDoEffectMember(
 }
 
 function findTypeDeclByName(types: TypeDecl[], name: string): TypeDecl | undefined {
-  return types.find((item) => item.name === name || terminalName(item.name) === name);
+  return findTypeDecl(types, name);
 }
 
 function typeExprContainsHole(expr: TypeExpr): boolean {
@@ -3089,9 +3094,46 @@ function productSlotTypes(
   return slots.map((slot) => substituteSignatureTypeArgs(slot.type, bindings));
 }
 
+interface TypeDeclIndex {
+  byName: Map<string, TypeDecl>;
+  byTerminalName: Map<string, TypeDecl>;
+  productByConstructor: Map<string, TypeDecl>;
+}
+
+const TYPE_DECL_INDEX_CACHE = new WeakMap<TypeDecl[], TypeDeclIndex>();
+
+function typeDeclIndex(typeDecls: TypeDecl[]): TypeDeclIndex {
+  const cached = TYPE_DECL_INDEX_CACHE.get(typeDecls);
+  if (
+    cached &&
+    (cached.productByConstructor.size ||
+      !typeDecls.some((item) => item.normalized?.kind === "product"))
+  ) {
+    return cached;
+  }
+  const byName = new Map<string, TypeDecl>();
+  const byTerminalName = new Map<string, TypeDecl>();
+  const productByConstructor = new Map<string, TypeDecl>();
+  for (const item of typeDecls) {
+    byName.set(item.name, item);
+    byTerminalName.set(terminalName(item.name), item);
+    if (item.normalized?.kind === "product") {
+      productByConstructor.set(item.normalized.constructor, item);
+    }
+  }
+  const index = { byName, byTerminalName, productByConstructor };
+  TYPE_DECL_INDEX_CACHE.set(typeDecls, index);
+  return index;
+}
+
 function findTypeDecl(typeDecls: TypeDecl[], name: string): TypeDecl | undefined {
-  return typeDecls.find((item) => item.name === name) ??
-    typeDecls.find((item) => terminalName(item.name) === terminalName(name));
+  const index = typeDeclIndex(typeDecls);
+  return index.byName.get(name) ??
+    (isQualifiedTypeName(name) ? undefined : index.byTerminalName.get(terminalName(name)));
+}
+
+function isQualifiedTypeName(name: string): boolean {
+  return name.includes(".") || name.includes("::");
 }
 
 function substituteSignatureTypeArgs(
@@ -3256,9 +3298,7 @@ function operatorConstProofParamsSatisfied(
 
 function typeHasAttachedMember(type: string, member: string, typeDecls: TypeDecl[]): boolean {
   const name = typeNameOf(type);
-  const decl = typeDecls.find((item) =>
-    item.name === name || terminalName(item.name) === terminalName(name)
-  );
+  const decl = findTypeDecl(typeDecls, name);
   const normalized = decl?.normalized;
   if (normalized?.kind !== "product" && normalized?.kind !== "sum") return false;
   return (normalized.members ?? []).some((item) => item.name === member);
@@ -10392,6 +10432,11 @@ function checkTypeFunctionCasing(
   diagnostics: Diagnostic[],
 ) {
   const typeNames = new Set(types.map((decl) => decl.name));
+  const valueNames = new Set(
+    program.declarations.flatMap((decl) =>
+      decl.kind === "fn" || decl.kind === "let" || decl.kind === "const" ? [decl.name] : []
+    ),
+  );
   for (const decl of types) {
     if (!startsUppercase(terminalName(decl.name))) {
       diagnostics.push(diagnosticAt(
@@ -10414,15 +10459,17 @@ function checkTypeFunctionCasing(
   for (const decl of program.declarations) {
     if (decl.kind === "fn") {
       for (const param of decl.params) {
-        checkTypeAnnotationCasing(param.type, typeNames, diagnostics, param.span);
+        checkTypeAnnotationCasing(param.type, typeNames, valueNames, diagnostics, param.span);
       }
       if (decl.returnType) {
-        checkTypeAnnotationCasing(decl.returnType, typeNames, diagnostics, decl.span);
+        checkTypeAnnotationCasing(decl.returnType, typeNames, valueNames, diagnostics, decl.span);
       }
-      checkBlockTypeAnnotationCasing(decl.body, typeNames, diagnostics);
+      checkBlockTypeAnnotationCasing(decl.body, typeNames, valueNames, diagnostics);
     } else if (decl.kind === "let" || decl.kind === "const") {
       const explicit = explicitTypeAnnotation(decl.type);
-      if (explicit) checkTypeAnnotationCasing(explicit, typeNames, diagnostics, decl.span);
+      if (explicit) {
+        checkTypeAnnotationCasing(explicit, typeNames, valueNames, diagnostics, decl.span);
+      }
     }
   }
 }
@@ -10430,18 +10477,19 @@ function checkTypeFunctionCasing(
 function checkBlockTypeAnnotationCasing(
   block: Extract<Expr, { kind: "block" }>,
   typeNames: Set<string>,
+  valueNames: Set<string>,
   diagnostics: Diagnostic[],
 ) {
   for (const stmt of block.statements) {
     const explicit = stmt.kind === "let" ? explicitTypeAnnotation(stmt.type) : undefined;
     if (stmt.kind === "let" && explicit) {
-      checkTypeAnnotationCasing(explicit, typeNames, diagnostics, stmt.span);
+      checkTypeAnnotationCasing(explicit, typeNames, valueNames, diagnostics, stmt.span);
     }
     if (stmt.kind === "let") {
-      checkExprTypeAnnotationCasing(stmt.value, typeNames, diagnostics);
+      checkExprTypeAnnotationCasing(stmt.value, typeNames, valueNames, diagnostics);
     }
   }
-  if (block.expr) checkExprTypeAnnotationCasing(block.expr, typeNames, diagnostics);
+  if (block.expr) checkExprTypeAnnotationCasing(block.expr, typeNames, valueNames, diagnostics);
 }
 
 function explicitTypeAnnotation(type: string | undefined): string | undefined {
@@ -10802,14 +10850,15 @@ function dedupeResolvedTypeHoles(holes: ResolvedTypeHole[]): ResolvedTypeHole[] 
 function checkExprTypeAnnotationCasing(
   expr: Expr,
   typeNames: Set<string>,
+  valueNames: Set<string>,
   diagnostics: Diagnostic[],
 ) {
   if (expr.kind === "block") {
-    checkBlockTypeAnnotationCasing(expr, typeNames, diagnostics);
+    checkBlockTypeAnnotationCasing(expr, typeNames, valueNames, diagnostics);
   } else if (expr.kind === "match") {
-    checkExprTypeAnnotationCasing(expr.value, typeNames, diagnostics);
+    checkExprTypeAnnotationCasing(expr.value, typeNames, valueNames, diagnostics);
     for (const arm of expr.arms) {
-      checkExprTypeAnnotationCasing(arm.value, typeNames, diagnostics);
+      checkExprTypeAnnotationCasing(arm.value, typeNames, valueNames, diagnostics);
     }
   }
 }
@@ -10817,11 +10866,12 @@ function checkExprTypeAnnotationCasing(
 function checkTypeExprCasing(
   expr: TypeExpr | undefined,
   typeNames: Set<string>,
+  valueNames: Set<string>,
   diagnostics: Diagnostic[],
 ) {
   if (!expr) return;
   if (expr.kind === "type_ref") {
-    diagnoseTypeRefCasing(expr.name, false, typeNames, diagnostics, expr.span);
+    diagnoseTypeRefCasing(expr.name, false, typeNames, valueNames, diagnostics, expr.span);
   } else if (expr.kind === "type_hole") {
     diagnostics.push({
       code: "type.hole_context",
@@ -10832,32 +10882,40 @@ function checkTypeExprCasing(
     diagnoseScalarDomainTypeExpr(expr, diagnostics);
     if (expr.callee.kind === "type_ref") {
       if (expr.callee.name !== "struct" && expr.callee.name !== "union") {
-        diagnoseTypeRefCasing(expr.callee.name, true, typeNames, diagnostics, expr.callee.span);
+        diagnoseTypeRefCasing(
+          expr.callee.name,
+          true,
+          typeNames,
+          valueNames,
+          diagnostics,
+          expr.callee.span,
+        );
       }
     } else {
-      checkTypeExprCasing(expr.callee, typeNames, diagnostics);
+      checkTypeExprCasing(expr.callee, typeNames, valueNames, diagnostics);
     }
-    for (const arg of expr.args) checkTypeExprCasing(arg, typeNames, diagnostics);
+    for (const arg of expr.args) checkTypeExprCasing(arg, typeNames, valueNames, diagnostics);
   } else if (expr.kind === "type_shape") {
     for (const slot of expr.shape.slots) {
-      checkTypeExprCasing(slot.type, typeNames, diagnostics);
+      checkTypeExprCasing(slot.type, typeNames, valueNames, diagnostics);
     }
   } else if (expr.kind === "type_match") {
-    checkTypeExprCasing(expr.value, typeNames, diagnostics);
+    checkTypeExprCasing(expr.value, typeNames, valueNames, diagnostics);
     for (const arm of expr.arms) {
-      checkTypeExprCasing(arm.value, typeNames, diagnostics);
+      checkTypeExprCasing(arm.value, typeNames, valueNames, diagnostics);
     }
   } else if (expr.kind === "type_scalar_domain") {
     diagnoseScalarDomainTypeExpr(expr, diagnostics);
   } else if (expr.kind === "type_binary") {
-    checkTypeExprCasing(expr.left, typeNames, diagnostics);
-    checkTypeExprCasing(expr.right, typeNames, diagnostics);
+    checkTypeExprCasing(expr.left, typeNames, valueNames, diagnostics);
+    checkTypeExprCasing(expr.right, typeNames, valueNames, diagnostics);
   }
 }
 
 function checkTypeAnnotationCasing(
   annotation: string,
   typeNames: Set<string>,
+  valueNames: Set<string>,
   diagnostics: Diagnostic[],
   span?: Span,
 ) {
@@ -10871,7 +10929,7 @@ function checkTypeAnnotationCasing(
     }
   }
   const parsed = parseAnnotationType(annotation);
-  checkTypeExprCasing(parsed, typeNames, diagnostics);
+  checkTypeExprCasing(parsed, typeNames, valueNames, diagnostics);
 }
 
 function diagnoseScalarDomainTypeExpr(
@@ -10891,6 +10949,7 @@ function diagnoseTypeRefCasing(
   name: string,
   callee: boolean,
   typeNames: Set<string>,
+  valueNames: Set<string>,
   diagnostics: Diagnostic[],
   span?: Span,
 ) {
@@ -10911,6 +10970,14 @@ function diagnoseTypeRefCasing(
     return;
   }
   if (typeNames.has(name) || isBuiltinTypeName(name)) return;
+  if (isQualifiedTypeName(name) && !valueNames.has(name)) {
+    diagnostics.push({
+      code: "type.unknown_type",
+      message: `unknown type ${name}`,
+      span,
+    });
+    return;
+  }
   if (callee && isInferredTypeVarName(name) && name.length > 1) {
     diagnostics.push({
       code: "type.lowercase_type_constructor",
@@ -14696,6 +14763,8 @@ interface OwnershipBinding {
 interface RuntimeCheckOptions {
   recoverTypes: boolean;
   memo?: CheckMemo;
+  functionMap?: Map<string, FnDecl>;
+  typeConstructorMap?: Map<string, TypeDecl>;
   bindingTypeCache?: WeakMap<Expr, string | null>;
   i32FactsCache?: WeakMap<Expr, ReturnType<typeof scalarFactsFromI32Range> | null>;
 }
@@ -14765,7 +14834,7 @@ function checkFn(
   if (!fnUsesInferredTypeVars(fn)) {
     checkAmbiguousNullaryInferredCalls(
       fn.body,
-      new Map(functions.map((item) => [item.name, item])),
+      options.functionMap ?? new Map(functions.map((item) => [item.name, item])),
       diagnostics,
     );
   }
@@ -15043,7 +15112,7 @@ function destructureSlotTypes(expr: Expr, types: TypeDecl[], functions: FnDecl[]
 }
 
 function runtimeSlotTypes(type: string, types: TypeDecl[]): string[] {
-  const decl = types.find((item) => item.name === typeNameOf(type));
+  const decl = findTypeDecl(types, typeNameOf(type));
   if (decl?.normalized?.kind !== "product") return [type];
   const slots = decl.normalized.shape.slots.flatMap((slot) =>
     Array.from({ length: slot.repeat ? Number.parseInt(slot.repeat, 10) : 1 }, () => slot.type)
@@ -15113,7 +15182,7 @@ function normalizeExpectedType(
   const runtimeType = transparentContractRuntimeType(source, ctx.types) ?? source;
   const base = typeNameOf(source.trim());
   const recordsProof = typeCallArgsForBase(source.trim(), base) !== undefined &&
-    ctx.types.some((item) => item.name === base || terminalName(item.name) === terminalName(base));
+    findTypeDecl(ctx.types, base) !== undefined;
   return {
     runtimeType,
     proofFacts: recordsProof ? [proofFactFromTypeSource(source)] : [],
@@ -15125,9 +15194,7 @@ function transparentContractRuntimeType(source: string, types: TypeDecl[]): stri
   const base = typeNameOf(trimmed);
   const args = typeCallArgsForBase(trimmed, base);
   if (args === undefined) return undefined;
-  const decl = types.find((item) =>
-    item.name === base || terminalName(item.name) === terminalName(base)
-  );
+  const decl = findTypeDecl(types, base);
   if (!decl || !typeDeclContainsContractCheck(decl, types)) return undefined;
   const runtimeType = resolveAliasType(trimmed, types);
   return runtimeType && runtimeType !== trimmed ? runtimeType : undefined;
@@ -15602,7 +15669,9 @@ function checkExprImpl(
           ));
         }
       }
-      const fn = calleeName ? functions.find((fn) => fn.name === calleeName) : undefined;
+      const fn = calleeName
+        ? options.functionMap?.get(calleeName) ?? functions.find((fn) => fn.name === calleeName)
+        : undefined;
       const calleeSignature = !fn && calleeName
         ? parseFnSignature(projectedBindingType(calleeName, env, types) ?? "")
         : undefined;
@@ -16077,15 +16146,17 @@ function exprBindingTypeImpl(
       const callKey = memo ? callCheckMemoKey(expr, env) : undefined;
       const cachedCall = callKey ? memo!.callCheck.get(callKey) : undefined;
       if (cachedCall) return finish(cachedCall.returnType);
-      const returnType = functions.find((fn) => fn.name === callee.name)?.returnType;
+      const returnType =
+        (typeof options === "boolean" ? undefined : options.functionMap?.get(callee.name))
+          ?.returnType ?? functions.find((fn) => fn.name === callee.name)?.returnType;
       if (callKey) memo!.callCheck.set(callKey, { returnType });
       return finish(returnType);
     }
   }
   if (expr.kind === "product_constructor") {
-    const type = types.find((item) =>
-      item.normalized?.kind === "product" && item.normalized.constructor === expr.constructor
-    );
+    const type = (typeof options === "boolean" ? undefined : options.typeConstructorMap)?.get(
+      expr.constructor,
+    ) ?? typeDeclIndex(types).productByConstructor.get(expr.constructor);
     return finish(type?.name);
   }
   if (expr.kind === "shape") {
@@ -16093,11 +16164,8 @@ function exprBindingTypeImpl(
       expr,
       {
         functions: new Map(functions.map((fn) => [fn.name, fn])),
-        typeConstructors: new Map(
-          types.flatMap((decl): [string, TypeDecl][] =>
-            decl.normalized?.kind === "product" ? [[decl.normalized.constructor, decl]] : []
-          ),
-        ),
+        typeConstructors: (typeof options === "boolean" ? undefined : options.typeConstructorMap) ??
+          typeDeclIndex(types).productByConstructor,
         types,
       },
       new Map([...env].map(([name, binding]) => [name, binding.type ?? ""])),
@@ -17245,6 +17313,9 @@ function resolveAliasType(type: string | undefined, types: TypeDecl[]): string |
   let current = type?.trim();
   const byName = new Map(types.map((decl) => [decl.name, decl]));
   const byTerminal = new Map(types.map((decl) => [terminalName(decl.name), decl]));
+  const find = (name: string) =>
+    byName.get(name) ??
+      (isQualifiedTypeName(name) ? undefined : byTerminal.get(terminalName(name)));
   const seen = new Set<string>();
   while (current && !seen.has(current)) {
     seen.add(current);
@@ -17253,14 +17324,14 @@ function resolveAliasType(type: string | undefined, types: TypeDecl[]): string |
       current = staticResolved;
       continue;
     }
-    const decl = byName.get(current) ?? byTerminal.get(terminalName(current));
+    const decl = find(current);
     if (decl) {
       if (decl.normalized?.kind !== "alias") return current;
       current = decl.normalized.type;
       continue;
     }
     const callName = typeNameOf(current);
-    const callDecl = byName.get(callName) ?? byTerminal.get(terminalName(callName));
+    const callDecl = find(callName);
     const callArgs = typeCallArgsForBase(current, callName);
     if (callDecl?.normalized?.kind === "alias" && callArgs !== undefined) {
       current = substituteAliasTypeParams(

@@ -30,3 +30,21 @@
 
 - Fig does not support `|>` pipeline syntax. Continue value-flow segments with pipe-bind syntax such
   as `expr \x -> next_expr`, or `expr \$ -> use($)` when using the placeholder form.
+
+## Coding style in compiler
+
+- Replace ternaries with if statements.
+
+- Replace map/filter statements with for loops.
+
+- Use ?? as ??= and assign on the next row.
+
+- Set boolean values to variables before putting them in if-statements. Evaluate what is the most readable.
+
+- Always use function bodies in arrow functions.
+
+- Be memory efficient.
+
+- Colocate related logic.
+
+- Keep syntax simple.

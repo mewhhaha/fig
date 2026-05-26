@@ -9,6 +9,7 @@ import {
   compileWasmFromSource as compileWasmFromSourceRaw,
   createCompileCache,
   createCompilerPluginRegistry,
+  createCompilerSession,
   parse,
   tokenize,
   wasmFromSource as wasmFromSourceRaw,
@@ -1009,11 +1010,12 @@ Deno.test("field labels remain valid with tight and spaced colons", async () => 
 Deno.test("inline array tabulation functions compose through layout prelude", async () => {
   const source = `
     const layout = @import("prelude.layout");
-    fn make(i: layout.core.Index(4)) -> i32 { i + 1 }
-    fn make_with(i: layout.core.Index(4), offset: i32) -> i32 { i + offset }
+    const core = @import("prelude.core");
+    fn make(i: core.Index(4)) -> i32 { i + 1 }
+    fn make_with(i: core.Index(4), offset: i32) -> i32 { i + offset }
     fn inc(x: i32) -> i32 { x + 1 }
-    fn add_index(i: layout.core.Index(4), x: i32) -> i32 { x + i }
-    fn add_state(i: layout.core.Index(4), x: i32, offset: i32) -> i32 { x + i + offset }
+    fn add_index(i: core.Index(4), x: i32) -> i32 { x + i }
+    fn add_state(i: core.Index(4), x: i32, offset: i32) -> i32 { x + i + offset }
     pub fn main() -> i32 {
       let built = layout.InlineArray::tabulate(4, i32, make);
       let with_state = layout.InlineArray::tabulate_with(4, i32, i32, 10, make_with);
@@ -2818,7 +2820,7 @@ Deno.test("namespace source imports do not qualify type annotation field labels"
   assertEquals((instance.exports.main as CallableFunction)(), 7);
 });
 
-Deno.test("namespace source imports requalify nested declarations shadowed by parameter names", async () => {
+Deno.test("namespace source imports preserve transitive declarations shadowed by parameter names", async () => {
   const modules = new Map([
     [
       "asset.lib",
@@ -2863,9 +2865,9 @@ Deno.test("namespace source imports requalify nested declarations shadowed by pa
 
   const checked = await checkSource(source, { resolveModule });
   const textureDecl = checked.program.declarations.find((decl): decl is FnDecl =>
-    decl.kind === "fn" && decl.name === "game.canvas.texture"
+    decl.kind === "fn" && decl.name === "canvas.texture"
   );
-  assertEquals(textureDecl?.returnType, "game.canvas.asset.Handle(#texture)");
+  assertEquals(textureDecl?.returnType, "asset.Handle(#texture)");
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
@@ -2943,7 +2945,7 @@ Deno.test("destructured source imports diagnose invalid bindings and conflicts",
   );
 });
 
-Deno.test("namespace source imports support nested qualified references", async () => {
+Deno.test("namespace source imports do not requalify transitive namespaces", async () => {
   const modules = new Map([
     [
       "prelude.layout",
@@ -2973,10 +2975,22 @@ Deno.test("namespace source imports support nested qualified references", async 
     `
       const std = @import("prelude.std");
       fn inc(x: i32) -> i32 { x + 1 }
+      pub fn main() -> layout.Lane4I32 {
+        array.map4_i32(inc, [1, 2, 3, 4])
+      }
+    `,
+    { resolveModule },
+  );
+
+  await assertThrowsCompile(
+    `
+      const std = @import("prelude.std");
+      fn inc(x: i32) -> i32 { x + 1 }
       pub fn main() -> std.array.layout.Lane4I32 {
         std.array.map4_i32(inc, [1, 2, 3, 4])
       }
     `,
+    "type.unknown_type",
     { resolveModule },
   );
 });
@@ -7037,6 +7051,93 @@ Deno.test("compile cache invalidates parsed imports when module source changes",
   });
   instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
   assertEquals((instance.exports.main as () => number)(), 2);
+});
+
+Deno.test("compiler session tracks import dependencies and affected roots", async () => {
+  const modules = new Map([
+    ["/project/lib.fig", "fn value() -> i32 { 1 }"],
+  ]);
+  const session = createCompilerSession({
+    includeWat: false,
+    resolveModule: (moduleName, context) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      assertEquals(context?.fromSourceId, "/project/main.fig");
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+
+  const first = await session.compileRoot({
+    sourceId: "/project/main.fig",
+    text: `
+      const lib = @import("./lib.fig");
+      pub fn main() -> i32 { lib.value() }
+    `,
+  });
+  assertEquals(first.ok, true);
+  assertEquals(first.dependencies, [{
+    importerSourceId: "/project/main.fig",
+    moduleName: "./lib.fig",
+    sourceId: "/project/lib.fig",
+  }]);
+  assertEquals(session.affectedRoots("/project/lib.fig"), ["/project/main.fig"]);
+
+  modules.set("/project/lib.fig", "fn value() -> i32 { 2 }");
+  const update = session.update({
+    sourceId: "/project/lib.fig",
+    text: modules.get("/project/lib.fig")!,
+  });
+  assertEquals(update.affectedRoots, ["/project/main.fig"]);
+  const second = await session.compileRoot({
+    sourceId: "/project/main.fig",
+    text: `
+      const lib = @import("./lib.fig");
+      pub fn main() -> i32 { lib.value() }
+    `,
+  });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+});
+
+Deno.test("compiler session passes importer context to nested relative imports", async () => {
+  const seen: Array<[string, string | undefined]> = [];
+  const session = createCompilerSession({
+    includeWat: false,
+    resolveModule: (moduleName, context) => {
+      seen.push([moduleName, context?.fromSourceId]);
+      if (moduleName === "./lib.fig") {
+        return {
+          sourceId: "/project/lib.fig",
+          text: `
+            const leaf = @import("./leaf.fig");
+            fn value() -> i32 { leaf.value() }
+          `,
+        };
+      }
+      if (moduleName === "./leaf.fig" && context?.fromSourceId === "/project/lib.fig") {
+        return { sourceId: "/project/leaf.fig", text: "fn value() -> i32 { 3 }" };
+      }
+      return undefined;
+    },
+  });
+
+  const result = await session.compileRoot({
+    sourceId: "/project/main.fig",
+    text: `
+      const lib = @import("./lib.fig");
+      pub fn main() -> i32 { lib.value() }
+    `,
+  });
+  assertEquals(result.ok, true);
+  assert(
+    seen.some(([moduleName, from]) => moduleName === "./leaf.fig" && from === "/project/lib.fig"),
+  );
+  assertEquals(session.watchedSourceIds("/project/main.fig"), [
+    "/project/main.fig",
+    "/project/lib.fig",
+    "/project/leaf.fig",
+  ]);
 });
 
 Deno.test("release_fast_compile profile compiles with fewer optimizer passes", async () => {

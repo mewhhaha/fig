@@ -13,15 +13,17 @@ const resolveModule = async (moduleName: string) => {
   }
 };
 
-Deno.test("prelude fragments compose by concatenation", async () => {
-  await checkSource(`
-    ${await fragment("core")}
-    ${await fragment("layout")}
-    ${await fragment("array_static")}
+Deno.test("prelude array module checks through resolver imports", async () => {
+  await checkSource(
+    `
+    const array = @import("prelude.array_static");
+    const layout = @import("prelude.layout");
 
     fn inc(x: i32) -> i32 { x + 1 }
-    pub fn main() -> Lane4I32 { map4_i32(inc, #[1, 2, 3, 4]) }
-  `);
+    pub fn main() -> layout.Lane4I32 { array.map4_i32(inc, #[1, 2, 3, 4]) }
+  `,
+    { resolveModule },
+  );
 });
 
 Deno.test("module resolver loads prelude fig files", async () => {
@@ -237,6 +239,7 @@ Deno.test("prelude std imports common data layout function and schedule fragment
 Deno.test("prelude std exposes pure fixed collection helpers", async () => {
   const source = `
     const array = @import("prelude.array_static");
+    const layout = @import("prelude.layout");
 
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(a: i32, b: i32) -> i32 { a + b }
@@ -244,13 +247,13 @@ Deno.test("prelude std exposes pure fixed collection helpers", async () => {
     fn keep(x: i32) -> bool { x > 2 }
 
     pub fn main() -> i32 {
-      let xs: array.layout.Lane4I32 = #[1, 2, 3, 4];
+      let xs: layout.Lane4I32 = #[1, 2, 3, 4];
       let mapped = array.map4_i32(inc, xs);
       let zipped = array.zip_with4_i32(add, mapped, xs);
       let folded = array.fold4_i32(sum, 0, xs);
       let reduced = array.reduce4_i32(add, xs);
       let get_value: i32 = array.get(xs, 2);
-      let collected: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(xs), keep), inc));
+      let collected: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(layout.InlineArray::Iter(xs), keep), inc));
       let range_sum = array.RangeIter::fold(array.RangeI32::Iter(0 .. 4), 0, sum);
       let bounds_value = match array.in_bounds(xs, 3) { true => 1, false => 0 };
 
@@ -270,19 +273,20 @@ Deno.test("prelude std exposes pure fixed collection helpers", async () => {
 Deno.test("InlineArray::fold_indices uses index cursor loop", async () => {
   const source = `
     const layout = @import("prelude.layout");
+    const core = @import("prelude.core");
 
-    fn add_index(acc: i32, i: layout.core.Index(4)) -> i32 {
+    fn add_index(acc: i32, i: core.Index(4)) -> i32 {
       acc + i
     }
 
     pub fn main() -> i32 {
-      layout.InlineArray::fold_indices(4, i32, layout.core.IndexCursor::start(4), 0, add_index)
+      layout.InlineArray::fold_indices(4, i32, core.IndexCursor::start(4), 0, add_index)
     }
   `;
 
   const wat = await watFromSource(source, { resolveModule });
   assert(wat.includes("loop"));
-  assert(!wat.includes("call $layout.core.IndexCursor__next"));
+  assert(!wat.includes("call $core.IndexCursor__next"));
 
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
@@ -293,12 +297,13 @@ Deno.test("InlineArray::fold_indices uses index cursor loop", async () => {
 Deno.test("inline_array public helpers compose without runtime helper calls", async () => {
   const source = `
     const layout = @import("prelude.layout");
+    const core = @import("prelude.core");
 
-    fn make(i: layout.core.Index(4)) -> i32 { i + 1 }
-    fn make_with(i: layout.core.Index(4), offset: i32) -> i32 { i + offset }
+    fn make(i: core.Index(4)) -> i32 { i + 1 }
+    fn make_with(i: core.Index(4), offset: i32) -> i32 { i + offset }
     fn inc(x: i32) -> i32 { x + 1 }
-    fn add_index(i: layout.core.Index(4), x: i32) -> i32 { x + i }
-    fn add_state(i: layout.core.Index(4), x: i32, offset: i32) -> i32 { x + i + offset }
+    fn add_index(i: core.Index(4), x: i32) -> i32 { x + i }
+    fn add_state(i: core.Index(4), x: i32, offset: i32) -> i32 { x + i + offset }
 
     pub fn main() -> i32 {
       let built = layout.InlineArray::tabulate(4, i32, make);
@@ -316,7 +321,7 @@ Deno.test("inline_array public helpers compose without runtime helper calls", as
   const wat = await watFromSource(source, { resolveModule });
   for (
     const forbidden of [
-      "call $layout.core.IndexCursor::next",
+      "call $core.IndexCursor::next",
       "InlineArrayBuilder::start",
       "InlineArrayBuilder::push",
       "InlineArrayBuilder::finish",
@@ -340,8 +345,9 @@ Deno.test("inline_array public helpers compose without runtime helper calls", as
 Deno.test("inline_array tabulate and map lower to compact direct slots", async () => {
   const source = `
     const layout = @import("prelude.layout");
+    const core = @import("prelude.core");
 
-    fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
+    fn make(i: core.Index(16)) -> i32 { i + 1 }
     fn inc(x: i32) -> i32 { x + 1 }
 
     pub fn main() -> i32 {
@@ -368,13 +374,14 @@ Deno.test("inline_array tabulate and map lower to compact direct slots", async (
 Deno.test("inline_array builder preserves flattened product elements", async () => {
   const source = `
     const layout = @import("prelude.layout");
+    const core = @import("prelude.core");
 
     type fn PairI32() -> type {
       let PairI32 = {x: i32, y: i32};
       struct(PairI32)
     }
 
-    fn make(i: layout.core.Index(2)) -> PairI32 {
+    fn make(i: core.Index(2)) -> PairI32 {
       {x: i + 10, y: i + 20}
     }
 
@@ -393,13 +400,14 @@ Deno.test("inline_array builder preserves flattened product elements", async () 
 Deno.test("inline_array direct helper lowering preserves flattened product elements", async () => {
   const source = `
     const layout = @import("prelude.layout");
+    const core = @import("prelude.core");
 
     type fn PairI32() -> type {
       let PairI32 = {x: i32, y: i32};
       struct(PairI32)
     }
 
-    fn make(i: layout.core.Index(4)) -> PairI32 {
+    fn make(i: core.Index(4)) -> PairI32 {
       {x: i + 10, y: i + 20}
     }
     fn move(pair: PairI32) -> PairI32 {
@@ -532,10 +540,10 @@ Deno.test("prelude std exposes common operators for custom types", async () => {
         : ""
     );
   assertEquals(callees, [
-    "merge.operators.op_add",
-    "merge.operators.op_eql",
-    "merge.operators.op_lt",
-    "merge.operators.op_append",
+    "operators.op_add",
+    "operators.op_eql",
+    "operators.op_lt",
+    "operators.op_append",
   ]);
 });
 
@@ -601,7 +609,7 @@ Deno.test("prelude std exposes applicative apply operator", async () => {
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "call");
   if (main.body.expr?.kind === "call" && main.body.expr.callee.kind === "var") {
-    assertEquals(main.body.expr.callee.name, "merge.operators.op_apply");
+    assertEquals(main.body.expr.callee.name, "operators.op_apply");
   }
 });
 
@@ -652,12 +660,16 @@ Deno.test("prelude std exposes functor map and monad bind operators", async () =
         args: decl.body.expr.args.map((arg) => arg.kind),
       };
     });
-  assert(calls.some((call) =>
-    call?.callee === "merge.operators.op_map" && call.args.join(",") === "var,shape"
-  ));
-  assert(calls.some((call) =>
-    call?.callee === "merge.operators.op_bind" && call.args.join(",") === "shape,var"
-  ));
+  assert(
+    calls.some((call) =>
+      call?.callee === "operators.op_map" && call.args.join(",") === "var,shape"
+    ),
+  );
+  assert(
+    calls.some((call) =>
+      call?.callee === "operators.op_bind" && call.args.join(",") === "shape,var"
+    ),
+  );
 });
 
 Deno.test("prelude std rejects functional operators without matching members", async () => {
@@ -739,17 +751,18 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
   await checkSource(
     `
     const option = @import("prelude.option");
+    const core = @import("prelude.core");
 
     fn inc(x: i32) -> i32 { x + 1 }
-    fn bump_to_option(x: i32) -> option.core.Option(i32) { option.some(x + 1) }
-    fn fallback() -> option.core.Option(i32) { option.some(9) }
+    fn bump_to_option(x: i32) -> core.Option(i32) { option.some(x + 1) }
+    fn fallback() -> core.Option(i32) { option.some(9) }
 
     pub fn main() -> i32 {
-      let empty: option.core.Option(i32) = option.none();
-      let mapped = option.core.Option::map(inc, option.some(1));
-      let bound = option.core.Option::bind(mapped, bump_to_option);
-      let picked = option.core.Option::append(empty, bound);
-      option.core.Option::unwrap_or(picked, 0) + option.core.Option::unwrap_or(option.core.Option::or_else(empty, fallback), 0)
+      let empty: core.Option(i32) = option.none();
+      let mapped = core.Option::map(inc, option.some(1));
+      let bound = core.Option::bind(mapped, bump_to_option);
+      let picked = core.Option::append(empty, bound);
+      core.Option::unwrap_or(picked, 0) + core.Option::unwrap_or(core.Option::or_else(empty, fallback), 0)
     }
     `,
     { resolveModule },
@@ -760,15 +773,16 @@ Deno.test("prelude result methods construct map bind and unwrap", async () => {
   await checkSource(
     `
     const result = @import("prelude.result");
+    const core = @import("prelude.core");
 
     fn inc(x: i32) -> i32 { x + 1 }
     fn err_inc(x: i32) -> i32 { x + 10 }
-    fn next(x: i32) -> result.core.Result(i32, i32) { result.ok(x + 1) }
+    fn next(x: i32) -> core.Result(i32, i32) { result.ok(x + 1) }
 
     pub fn main() -> i32 {
-      let mapped = result.core.Result::map(inc, result.ok(1));
-      let mapped_err = result.core.Result::map_err(err_inc, mapped);
-      result.core.Result::unwrap_or(result.core.Result::bind(mapped_err, next), 0)
+      let mapped = core.Result::map(inc, result.ok(1));
+      let mapped_err = core.Result::map_err(err_inc, mapped);
+      core.Result::unwrap_or(core.Result::bind(mapped_err, next), 0)
     }
     `,
     { resolveModule },
@@ -779,14 +793,15 @@ Deno.test("prelude tuple methods extract swap and map", async () => {
   await checkSource(
     `
     const tuple = @import("prelude.tuple");
+    const core = @import("prelude.core");
 
     fn inc(x: i32) -> i32 { x + 1 }
 
     pub fn main() -> i32 {
-      let swapped = tuple.core.Pair::swap(Pair {first: 1, second: 2});
-      let mapped = tuple.core.Pair::bimap(inc, inc, Pair {first: 3, second: 4});
-      let triple: tuple.core.Tuple3(i32, i32, i32) = Tuple3 {first: 5, second: 6, third: 7};
-      swapped.first + tuple.core.Pair::first(mapped) + tuple.core.Tuple3::third(triple)
+      let swapped = core.Pair::swap(Pair {first: 1, second: 2});
+      let mapped = core.Pair::bimap(inc, inc, Pair {first: 3, second: 4});
+      let triple: core.Tuple3(i32, i32, i32) = Tuple3 {first: 5, second: 6, third: 7};
+      swapped.first + core.Pair::first(mapped) + core.Tuple3::third(triple)
     }
     `,
     { resolveModule },
@@ -798,11 +813,12 @@ Deno.test("prelude optic helpers view set over and optional focuses", async () =
     `
     const optic = @import("prelude.optic");
     const option = @import("prelude.option");
+    const core = @import("prelude.core");
 
     fn id_value(root: i32) -> i32 { root }
     fn replace_value(root: i32, value: i32) -> i32 { value }
     fn inc(value: i32) -> i32 { value + 1 }
-    fn positive(root: i32) -> option.core.Option(i32) {
+    fn positive(root: i32) -> core.Option(i32) {
       match root > 0 { true => option.some(root), false => option.none() }
     }
     type fn Point() -> type { let Point = {x: i32, y: i32}; struct(Point) }
@@ -1173,17 +1189,15 @@ Deno.test("prelude std accepts user applicative contracts", async () => {
 });
 
 Deno.test("geometry2d prelude emits 2d quad geometry as fixed vertex data", async () => {
-  const geometry = (await fragment("geometry2d")).replaceAll("layout.", "");
   const wat = await watFromSource(
     `
-    ${await fragment("core")}
-    ${await fragment("layout")}
-    ${geometry}
+    const geometry = @import("prelude.geometry2d");
 
-    pub fn main() -> Geometry2dI32 {
-      emit_rect2d(10, 20, 30, 40, 1, rgba8(255, 0, 0, 255))
+    pub fn main() -> geometry.Geometry2dI32 {
+      geometry.emit_rect2d(10, 20, 30, 40, 1, geometry.rgba8(255, 0, 0, 255))
     }
     `,
+    { resolveModule },
   );
 
   const main = wat.match(/\(func \$main[\s\S]*?\n  \)/)?.[0] ?? "";
@@ -1208,8 +1222,9 @@ Deno.test("map4 const function lowers to four direct scalar calls", async () => 
   const wat = await watFromSource(
     `
     const array = @import("prelude.array_static");
-    fn inc(x: array.layout.core.ScalarI32) -> array.layout.core.ScalarI32 { {value: x.value + 1} }
-    pub fn main() -> array.layout.core.ScalarI32 { array.map4_scalar_i32(inc, {value: 1}) }
+    const core = @import("prelude.core");
+    fn inc(x: core.ScalarI32) -> core.ScalarI32 { {value: x.value + 1} }
+    pub fn main() -> core.ScalarI32 { array.map4_scalar_i32(inc, {value: 1}) }
   `,
     { resolveModule },
   );
@@ -1223,7 +1238,8 @@ Deno.test("Lane4I32 lowers to four scalar Wasm results", async () => {
     `
     const array = @import("prelude.array_static");
     fn inc(x: i32) -> i32 { x + 1 }
-    pub fn main() -> array.layout.Lane4I32 { array.map4_i32(inc, #[1, 2, 3, 4]) }
+    const layout = @import("prelude.layout");
+    pub fn main() -> layout.Lane4I32 { array.map4_i32(inc, #[1, 2, 3, 4]) }
   `,
     { resolveModule, optMode: "release" },
   );
@@ -1237,8 +1253,9 @@ Deno.test("zip_with4 const function lowers without a runtime operation parameter
   const wat = await watFromSource(
     `
     const array = @import("prelude.array_static");
-    fn add(a: array.layout.core.ScalarI32, b: array.layout.core.ScalarI32) -> array.layout.core.ScalarI32 { {value: a.value + b.value} }
-    pub fn main() -> array.layout.core.ScalarI32 {
+    const core = @import("prelude.core");
+    fn add(a: core.ScalarI32, b: core.ScalarI32) -> core.ScalarI32 { {value: a.value + b.value} }
+    pub fn main() -> core.ScalarI32 {
       array.zip_with4_scalar_i32(add, {value: 1}, {value: 2}, {value: 3}, {value: 4}, {value: 5})
     }
   `,
@@ -1271,10 +1288,11 @@ Deno.test("lane arithmetic patterns emit scalar arithmetic without helper calls"
   const wat = await watFromSource(
     `
     const merge = @import("prelude.std");
+    const layout = @import("prelude.layout");
     pub fn main(seed: i32) -> i32 {
-      let xs: merge.array.layout.Lane4I32 = #[seed, 2, 3, 4];
-      let ys: merge.array.layout.Lane4I32 = #[5, 6, 7, 8];
-      let zs: merge.array.layout.Lane4I32 = [
+      let xs: layout.Lane4I32 = #[seed, 2, 3, 4];
+      let ys: layout.Lane4I32 = #[5, 6, 7, 8];
+      let zs: layout.Lane4I32 = [
         (xs[0] + ys[0]) * 1,
         (xs[1] + ys[1]) * 1,
         (xs[2] + ys[2]) * 1,
@@ -1288,10 +1306,11 @@ Deno.test("lane arithmetic patterns emit scalar arithmetic without helper calls"
   const wasm = await wasmFromSource(
     `
     const merge = @import("prelude.std");
+    const layout = @import("prelude.layout");
     pub fn main(seed: i32) -> i32 {
-      let xs: merge.array.layout.Lane4I32 = #[seed, 2, 3, 4];
-      let ys: merge.array.layout.Lane4I32 = #[5, 6, 7, 8];
-      let zs: merge.array.layout.Lane4I32 = [
+      let xs: layout.Lane4I32 = #[seed, 2, 3, 4];
+      let ys: layout.Lane4I32 = #[5, 6, 7, 8];
+      let zs: layout.Lane4I32 = [
         (xs[0] + ys[0]) * 1,
         (xs[1] + ys[1]) * 1,
         (xs[2] + ys[2]) * 1,
@@ -1474,11 +1493,12 @@ Deno.test("fluent inline array iterator chains preserve receivers and fuse", asy
 Deno.test("inline array iterator filter map fold fuses and runs", async () => {
   const source = `
     const array = @import("prelude.array_static");
+    const layout = @import("prelude.layout");
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      array.Iter::fold(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(#[1, 2, 3, 4]), keep), inc), 0, add)
+      array.Iter::fold(array.Iter::map(array.Iter::filter(layout.InlineArray::Iter(#[1, 2, 3, 4]), keep), inc), 0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
@@ -1498,11 +1518,12 @@ Deno.test("inline array iterator filter map fold fuses and runs", async () => {
 Deno.test("pipe-bound fluent iterator chains resolve receivers and fuse", async () => {
   const source = `
     const array = @import("prelude.array_static");
+    const layout = @import("prelude.layout");
     fn inc(x: i32) -> i32 { x + 1 }
     fn add(acc: i32, x: i32) -> i32 { acc + x }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      array.layout.InlineArray::Iter(#[1, 2, 3, 4]) \\iter -> array.Iter::fold(array.Iter::map(array.Iter::filter(iter, keep), inc), 0, add)
+      layout.InlineArray::Iter(#[1, 2, 3, 4]) \\iter -> array.Iter::fold(array.Iter::map(array.Iter::filter(iter, keep), inc), 0, add)
     }
   `;
   const wat = await watFromSource(source, { resolveModule });
@@ -1522,10 +1543,11 @@ Deno.test("pipe-bound fluent iterator chains resolve receivers and fuse", async 
 Deno.test("inline array iterator filter collect compacts valid prefix", async () => {
   const source = `
     const array = @import("prelude.array_static");
+    const layout = @import("prelude.layout");
     fn inc(x: i32) -> i32 { x + 1 }
     fn keep(x: i32) -> bool { x > 2 }
     pub fn main() -> i32 {
-      let out: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(array.layout.InlineArray::Iter(#[1, 2, 3, 4]), keep), inc));
+      let out: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(layout.InlineArray::Iter(#[1, 2, 3, 4]), keep), inc));
       out.len + out.items[0] + out.items[1] + out.items[2]
     }
   `;

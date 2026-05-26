@@ -1,4 +1,5 @@
 const option = @import("prelude.option");
+const core = @import("prelude.core");
 
 fn view(
   root: root,
@@ -26,17 +27,17 @@ fn over(
 
 fn preview(
   root: root,
-  const getter: fn(root: root) -> option.core.Option(value)
-) -> option.core.Option(value) {
+  const getter: fn(root: root) -> core.Option(value)
+) -> core.Option(value) {
   getter(root)
 }
 
 fn view_or(
   root: root,
   fallback: value,
-  const getter: fn(root: root) -> option.core.Option(value)
+  const getter: fn(root: root) -> core.Option(value)
 ) -> value {
-  option.core.Option::unwrap_or(
+  core.Option::unwrap_or(
     getter(root),
     fallback
   )
@@ -45,7 +46,7 @@ fn view_or(
 fn set_optional(
   root: root,
   value: value,
-  const getter: fn(root: root) -> option.core.Option(value),
+  const getter: fn(root: root) -> core.Option(value),
   const setter: fn(root: root, value: value) -> root
 ) -> root {
   match getter(root) {
@@ -56,7 +57,7 @@ fn set_optional(
 
 fn over_optional(
   root: root,
-  const getter: fn(root: root) -> option.core.Option(value),
+  const getter: fn(root: root) -> core.Option(value),
   const setter: fn(root: root, value: value) -> root,
   const step: fn(value: value) -> value
 ) -> root {

@@ -25,6 +25,7 @@
     "bench:range-fold": "DENO_DIR=.deno-cache deno run --allow-read scripts/bench_range_fold_compile.ts",
     "bench:monad-stack": "DENO_DIR=.deno-cache deno run --allow-read scripts/bench_monad_stack.ts",
     "bench:memory-model": "DENO_DIR=.deno-cache deno run --allow-read scripts/bench_memory_model.ts",
+    "bench:watch-compile": "DENO_DIR=.deno-cache deno run --allow-read scripts/bench_watch_compile.ts",
     "bench:ecs-compare": "DENO_DIR=.deno-cache deno run --allow-read --allow-write --allow-run scripts/bench_ecs_compare.ts",
     "entrypoint:check": "DENO_DIR=.deno-cache deno check src/mod.ts src/cli.ts src/lsp/main.ts && DENO_DIR=.deno-cache deno run --allow-read --allow-write src/cli.ts run examples/hello.fig",
     "release:binaries": "DENO_DIR=.deno-cache deno run --allow-read --allow-write --allow-run --allow-env=RELEASE_TAG scripts/build_release_binaries.ts",

@@ -115,8 +115,9 @@ const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");
 ```
 
 Destructured import entries are plain declaration names. Aliases, dotted names, annotations, and
-non-`@import` right-hand sides are rejected. Namespace imports can qualify nested imports, so a
-module imported as `std` can expose names such as `std.array.Layout.lane4_i32`.
+non-`@import` right-hand sides are rejected. Namespace imports qualify only the declarations owned by
+the imported module. Transitive dependency names keep their own namespace, so import `prelude.layout`
+directly when you want names such as `layout.Lane4I32`.
 
 Host imports are top-level consts whose value is `@external("name", fn(...))`. The function type
 takes the compiler primitive `io` executor as its first parameter and returns an `io(T)` action:

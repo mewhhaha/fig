@@ -1,4 +1,5 @@
 const layout = @import("prelude.layout");
+const core = @import("prelude.core");
 
 // Futhark-style SOAC names for fixed inline layouts. Work/span comments describe
 // intent only; the current backend proves parsing, checking, specialization, and
@@ -184,15 +185,15 @@ fn lane4_contains_i32_go(i: i32(0..4), xs: layout.Lane4I32, value: i32) -> bool 
   }
 }
 
-fn lane4_index_of_i32(xs: layout.Lane4I32, value: i32) -> layout.core.Option(i32) {
+fn lane4_index_of_i32(xs: layout.Lane4I32, value: i32) -> core.Option(i32) {
   lane4_index_of_i32_go(0, xs, value)
 }
 
-fn lane4_index_of_i32_go(i: i32(4), xs: layout.Lane4I32, value: i32) -> layout.core.Option(i32) {
+fn lane4_index_of_i32_go(i: i32(4), xs: layout.Lane4I32, value: i32) -> core.Option(i32) {
   0
 }
 
-fn lane4_index_of_i32_go(i: i32(0..4), xs: layout.Lane4I32, value: i32) -> layout.core.Option(i32) {
+fn lane4_index_of_i32_go(i: i32(0..4), xs: layout.Lane4I32, value: i32) -> core.Option(i32) {
   match xs[i] == value {
     true => i,
     false => lane4_index_of_i32_go(i + 1, xs, value),
@@ -473,15 +474,15 @@ fn in_bounds(xs: layout.Lane4I32, i: i32) -> bool {
   match 0 <= i { true => i < capacity(xs), false => false }
 }
 
-fn get(xs: layout.Lane4I32, i: i32) -> layout.core.Option(i32) {
+fn get(xs: layout.Lane4I32, i: i32) -> core.Option(i32) {
   get_go(0, xs, i)
 }
 
-fn get_go(lane: i32(4), xs: layout.Lane4I32, i: i32) -> layout.core.Option(i32) {
+fn get_go(lane: i32(4), xs: layout.Lane4I32, i: i32) -> core.Option(i32) {
   0
 }
 
-fn get_go(lane: i32(0..4), xs: layout.Lane4I32, i: i32) -> layout.core.Option(i32) {
+fn get_go(lane: i32(0..4), xs: layout.Lane4I32, i: i32) -> core.Option(i32) {
   match lane == i {
     true => xs[lane],
     false => get_go(lane + 1, xs, i),
@@ -846,7 +847,7 @@ fn CompactArray::is_full(const n: count, const a: type, xs: CompactArray(n, a)) 
   xs.len == n
 }
 
-fn CompactArray::get(const n: count, const a: type, xs: CompactArray(n, a), i: i32) -> layout.core.Option(a) {
+fn CompactArray::get(const n: count, const a: type, xs: CompactArray(n, a), i: i32) -> core.Option(a) {
   let xs_for_len = xs;
 let xs_for_items = xs;
   match 0 <= i {
@@ -879,14 +880,14 @@ fn CompactArray::map(
   xs: CompactArray(n, a),
   const f: fn(x: a) -> b
 ) -> CompactArray(n, b) {
-  CompactArray::map_loop(n, a, b, layout.core.IndexCursor::start(n), CompactArray::collect_start(n, b), xs, f)
+  CompactArray::map_loop(n, a, b, core.IndexCursor::start(n), CompactArray::collect_start(n, b), xs, f)
 }
 
 fn CompactArray::map_loop(
   const n: count,
   const a: type,
   const b: type,
-  cursor: layout.core.IndexCursor(n),
+  cursor: core.IndexCursor(n),
   builder: CompactArrayBuilder(n, b),
   xs: CompactArray(n, a),
   const f: fn(x: a) -> b
@@ -899,7 +900,7 @@ let builder_done = builder_finish;
 let xs_for_value = xs;
   let xs_item = xs_for_value;
 let xs_next = xs_for_value;
-  match layout.core.IndexCursor::next(n, cursor) {
+  match core.IndexCursor::next(n, cursor) {
     Yield(i, next) => match i < xs_for_len.len {
       true => CompactArray::map_loop(n, a, b, next, CompactArray::collect_push(n, b, builder_next, f(xs_item.items[i])), xs_next, f),
       false => CompactArray::collect_finish(n, b, builder_false),
@@ -916,14 +917,14 @@ fn CompactArray::fold(
   init: acc,
   const f: fn(acc: acc, x: a) -> acc
 ) -> acc {
-  CompactArray::fold_loop(n, a, acc, layout.core.IndexCursor::start(n), xs, init, f)
+  CompactArray::fold_loop(n, a, acc, core.IndexCursor::start(n), xs, init, f)
 }
 
 fn CompactArray::fold_loop(
   const n: count,
   const a: type,
   const acc: type,
-  cursor: layout.core.IndexCursor(n),
+  cursor: core.IndexCursor(n),
   xs: CompactArray(n, a),
   state: acc,
   const f: fn(acc: acc, x: a) -> acc
@@ -936,7 +937,7 @@ let xs_next = xs_for_value;
 let state_finish = state;
   let state_false = state_finish;
 let state_done = state_finish;
-  match layout.core.IndexCursor::next(n, cursor) {
+  match core.IndexCursor::next(n, cursor) {
     Yield(i, next) => match i < xs_for_len.len {
       true => CompactArray::fold_loop(n, a, acc, next, xs_next, f(state_next, xs_item.items[i]), f),
       false => state_false,
@@ -946,13 +947,13 @@ let state_done = state_finish;
 }
 
 fn CompactArray::count(const n: count, const a: type, xs: CompactArray(n, a), const pred: fn(x: a) -> bool) -> i32 {
-  CompactArray::count_loop(n, a, layout.core.IndexCursor::start(n), xs, pred, 0)
+  CompactArray::count_loop(n, a, core.IndexCursor::start(n), xs, pred, 0)
 }
 
 fn CompactArray::count_loop(
   const n: count,
   const a: type,
-  cursor: layout.core.IndexCursor(n),
+  cursor: core.IndexCursor(n),
   xs: CompactArray(n, a),
   const pred: fn(x: a) -> bool,
   total: i32
@@ -965,7 +966,7 @@ let xs_next = xs_for_value;
 let total_finish = total;
   let total_false = total_finish;
 let total_done = total_finish;
-  match layout.core.IndexCursor::next(n, cursor) {
+  match core.IndexCursor::next(n, cursor) {
     Yield(i, next) => match i < xs_for_len.len {
       true => CompactArray::count_loop(n, a, next, xs_next, pred, total_next + (match pred(xs_item.items[i]) { true => 1, false => 0 })),
       false => total_false,
@@ -1014,17 +1015,17 @@ fn range_product_step(acc: i32, x: i32) -> i32 {
   acc * x
 }
 
-fn map4_scalar_i32(const f: fn(x: layout.core.ScalarI32) -> layout.core.ScalarI32, x: layout.core.ScalarI32) -> layout.core.ScalarI32 {
+fn map4_scalar_i32(const f: fn(x: core.ScalarI32) -> core.ScalarI32, x: core.ScalarI32) -> core.ScalarI32 {
   f(f(f(f(x))))
 }
 
 fn zip_with4_scalar_i32(
-  const f: fn(a: layout.core.ScalarI32, b: layout.core.ScalarI32) -> layout.core.ScalarI32,
-  x: layout.core.ScalarI32,
-  y0: layout.core.ScalarI32,
-  y1: layout.core.ScalarI32,
-  y2: layout.core.ScalarI32,
-  y3: layout.core.ScalarI32
-) -> layout.core.ScalarI32 {
+  const f: fn(a: core.ScalarI32, b: core.ScalarI32) -> core.ScalarI32,
+  x: core.ScalarI32,
+  y0: core.ScalarI32,
+  y1: core.ScalarI32,
+  y2: core.ScalarI32,
+  y3: core.ScalarI32
+) -> core.ScalarI32 {
   f(f(f(f(x, y0), y1), y2), y3)
 }

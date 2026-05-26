@@ -1,4 +1,5 @@
 const layout = @import("prelude.layout");
+const core = @import("prelude.core");
 const array = @import("prelude.array_static");
 
 type fn Vec2I32() -> type {
@@ -228,7 +229,7 @@ fn append_geometry2d_batch(
 ) -> Geometry2dBatchI32(capacity) {
   append_geometry2d_batch_loop(
     capacity,
-    layout.core.IndexCursor::start(capacity),
+    core.IndexCursor::start(capacity),
     front,
     back
   )
@@ -236,7 +237,7 @@ fn append_geometry2d_batch(
 
 fn append_geometry2d_batch_loop(
   const capacity: count,
-  cursor: layout.core.IndexCursor(capacity),
+  cursor: core.IndexCursor(capacity),
   front: Geometry2dBatchI32(capacity),
   back: Geometry2dBatchI32(capacity)
 ) -> Geometry2dBatchI32(capacity) {
@@ -245,7 +246,7 @@ fn append_geometry2d_batch_loop(
   let back_for_len = back;
   let back_for_item = back;
   let back_next = back;
-  match layout.core.IndexCursor::next(capacity, cursor) {
+  match core.IndexCursor::next(capacity, cursor) {
     Yield(i, next) => match i < back_for_len.len {
       true => append_geometry2d_batch_loop(
         capacity,

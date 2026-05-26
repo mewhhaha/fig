@@ -2505,7 +2505,8 @@ Deno.test("public inline array update folds statically known index", async () =>
 Deno.test("projected fixed-array update only tabulates source indexes used later", async () => {
   const source = `
     const layout = @import("prelude.layout");
-    fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
+    const core = @import("prelude.core");
+    fn make(i: core.Index(16)) -> i32 { i + 1 }
     fn bump(x: i32) -> i32 { x + 3 }
     pub fn main(seed: i32) -> i32 {
       let xs = layout.InlineArray::tabulate(16, i32, make);
@@ -2550,7 +2551,8 @@ Deno.test("projected fixed-array spread update only materializes used source ind
 Deno.test("backend prunes lowered helpers unused after fixed update lowering", async () => {
   const source = `
     const layout = @import("prelude.layout");
-    fn make(i: layout.core.Index(16)) -> i32 { i + 1 }
+    const core = @import("prelude.core");
+    fn make(i: core.Index(16)) -> i32 { i + 1 }
     fn bump(x: i32) -> i32 { x + 3 }
     pub fn main(seed: i32) -> i32 {
       let xs = layout.InlineArray::tabulate(16, i32, make);

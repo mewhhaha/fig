@@ -107,9 +107,10 @@ const std = @import("prelude.std");
 const local = @import("./local_module.fig");
 ```
 
-Imported declarations are qualified through the alias, including nested imports such as
-`std.array.Layout.lane4_i32`. The alias is an ordinary namespace alias; it does not merge imported
-names into the current scope. Duplicate aliases are rejected.
+Imported declarations owned by the target module are qualified through the alias. Transitive
+dependency declarations keep their own namespace, so import that dependency directly when you need
+its names. The alias is an ordinary namespace alias; it does not merge imported names into the
+current scope. Duplicate aliases are rejected.
 
 Use destructured source imports only for exact top-level declarations:
 

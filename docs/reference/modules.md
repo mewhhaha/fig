@@ -18,8 +18,9 @@ const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");
 Destructured imports are top-level source imports only. Entries are plain declaration names;
 aliases, dotted names, type annotations, and non-`@import` right-hand sides are not supported.
 
-Namespace imports preserve nested imported namespaces, so a module that imports `prelude.layout` can
-expose it as `array.layout` through its own namespace import.
+Namespace imports qualify only declarations owned by the imported module. Transitive dependency
+names keep their original namespace; if code uses layout types, import `prelude.layout` directly
+instead of spelling them through another module such as `array.layout`.
 
 | Import                 | Role                                                                                                         |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------ |

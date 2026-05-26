@@ -1,4 +1,6 @@
 const merge = @import("prelude.std");
+const array = @import("prelude.array_static");
+const layout = @import("prelude.layout");
 
 fn add(a: i32, b: i32) -> i32 {
   a + b
@@ -9,6 +11,6 @@ fn inc(x: i32) -> i32 {
 }
 
 pub fn main() -> i32 {
-  let xs: merge.array.layout.Lane4I32 = #[1, 2, 3, 4];
-  merge.array.fold4_i32(add, 2 + 4 + 4, merge.array.map4_i32(inc, xs))
+  let xs: layout.Lane4I32 = #[1, 2, 3, 4];
+  array.fold4_i32(add, 2 + 4 + 4, array.map4_i32(inc, xs))
 }

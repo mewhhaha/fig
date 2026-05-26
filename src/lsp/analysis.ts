@@ -1,5 +1,10 @@
 import { TSDocParser } from "tsdoc";
-import { checkParsedSourceForAnalysis, type ModuleSource, parse } from "../mod.ts";
+import {
+  checkParsedSourceForAnalysis,
+  type ModuleResolveContext,
+  type ModuleSource,
+  parse,
+} from "../mod.ts";
 import { CompileError, type Diagnostic as CompileDiagnostic } from "../diagnostics.ts";
 import type {
   Declaration,
@@ -135,8 +140,15 @@ export class AnalysisCache {
     return undefined;
   }
 
-  async moduleText(entryUri: string, moduleName: string): Promise<ModuleSource | undefined> {
-    for (const path of candidateModulePaths(uriToPath(entryUri), moduleName)) {
+  async moduleText(
+    entryUri: string,
+    moduleName: string,
+    context?: ModuleResolveContext,
+  ): Promise<ModuleSource | undefined> {
+    const importerUri = context?.fromSourceId?.startsWith("file://")
+      ? context.fromSourceId
+      : entryUri;
+    for (const path of candidateModulePaths(uriToPath(importerUri), moduleName)) {
       const uri = pathToUri(path);
       const open = this.openDocuments.get(uri);
       if (open) return { text: open.text, sourceId: uri };
@@ -180,7 +192,7 @@ export class AnalysisCache {
       const parsedForCheck = await parse(document.text, { sourceId: document.uri });
       const checked = await checkParsedSourceForAnalysis(parsedForCheck, {
         sourceId: document.uri,
-        resolveModule: (moduleName) => this.moduleText(uri, moduleName),
+        resolveModule: (moduleName, context) => this.moduleText(uri, moduleName, context),
       });
       program = checked.program;
       for (const item of checked.diagnostics) {
@@ -356,7 +368,7 @@ export class AnalysisCache {
         const parsedForCheck = await parse(text, { sourceId: uri });
         const checked = await checkParsedSourceForAnalysis(parsedForCheck, {
           sourceId: uri,
-          resolveModule: (moduleName) => this.moduleText(uri, moduleName),
+          resolveModule: (moduleName, context) => this.moduleText(uri, moduleName, context),
         });
         program = checked.program;
       } catch {
@@ -446,7 +458,8 @@ export class AnalysisCache {
       const program = await parse(repairedText, { sourceId: result.document.uri });
       const checked = await checkParsedSourceForAnalysis(program, {
         sourceId: result.document.uri,
-        resolveModule: (moduleName) => this.moduleText(result.document.uri, moduleName),
+        resolveModule: (moduleName, context) =>
+          this.moduleText(result.document.uri, moduleName, context),
       });
       const repaired: AnalysisResult = {
         document: repairedDocument,

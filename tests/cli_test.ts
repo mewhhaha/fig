@@ -1,11 +1,20 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
-import { type CliIo, runCli } from "../src/cli_app.ts";
+import { type CliIo, type CliWatchEvent, runCli } from "../src/cli_app.ts";
 import { FIG_VERSION } from "../src/version.ts";
 
-function mockIo(files: Record<string, string> = {}, stdin = "") {
+interface MockWatchEvent extends CliWatchEvent {
+  before?: () => void;
+}
+
+function mockIo(
+  files: Record<string, string> = {},
+  stdin = "",
+  watchEvents: MockWatchEvent[] = [],
+) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const writes = new Map<string, string | Uint8Array>();
+  const watchCalls: string[][] = [];
   let lspRuns = 0;
   const io: CliIo = {
     async readTextFile(path) {
@@ -17,6 +26,22 @@ function mockIo(files: Record<string, string> = {}, stdin = "") {
     },
     async writeFile(path, data) {
       writes.set(path, data);
+    },
+    watch(paths) {
+      watchCalls.push(paths);
+      let closed = false;
+      return {
+        close() {
+          closed = true;
+        },
+        async *[Symbol.asyncIterator]() {
+          while (!closed && watchEvents.length) {
+            const event = watchEvents.shift()!;
+            event.before?.();
+            yield { paths: event.paths };
+          }
+        },
+      };
     },
     async stdinText() {
       return stdin;
@@ -31,7 +56,11 @@ function mockIo(files: Record<string, string> = {}, stdin = "") {
       lspRuns++;
     },
   };
-  return { io, stdout, stderr, writes, lspRuns: () => lspRuns };
+  return { io, stdout, stderr, writes, watchCalls, lspRuns: () => lspRuns };
+}
+
+function cwdPath(path: string): string {
+  return new URL(path, `file://${Deno.cwd()}/`).pathname;
 }
 
 Deno.test("CLI version prints central Fig version", async () => {
@@ -129,4 +158,53 @@ Deno.test("CLI build writes explicit output path", async () => {
   assertEquals(await runCli(["build", "main.fig", "--out", "out/main.wasm"], harness.io), 0);
   assert(harness.writes.get("out/main.wasm") instanceof Uint8Array);
   assertEquals(harness.stdout, ["out/main.wasm"]);
+});
+
+Deno.test("CLI watch rebuilds when an imported module changes", async () => {
+  const libPath = cwdPath("lib.fig");
+  const files = {
+    "main.fig": `
+      const lib = @import("./lib.fig");
+      pub fn main() -> i32 { lib.value() }
+    `,
+    [libPath]: "fn value() -> i32 { 1 }",
+  };
+  const harness = mockIo(files, "", [
+    {
+      paths: [libPath],
+      before: () => {
+        files[libPath] = "fn value() -> i32 { 2 }";
+      },
+    },
+  ]);
+
+  assertEquals(await runCli(["watch", "main.fig", "--out", "out/main.wasm"], harness.io), 0);
+  assert(harness.writes.get("out/main.wasm") instanceof Uint8Array);
+  assertEquals(harness.stdout, ["out/main.wasm", "out/main.wasm"]);
+  assert(harness.watchCalls.some((paths) => paths.includes(cwdPath("main.fig"))));
+  assert(harness.watchCalls.some((paths) => paths.includes(libPath)));
+});
+
+Deno.test("CLI watch keeps last-good wasm stale on rebuild failure", async () => {
+  const libPath = cwdPath("lib.fig");
+  const files = {
+    "main.fig": `
+      const lib = @import("./lib.fig");
+      pub fn main() -> i32 { lib.value() }
+    `,
+    [libPath]: "fn value() -> i32 { 1 }",
+  };
+  const harness = mockIo(files, "", [
+    {
+      paths: [libPath],
+      before: () => {
+        files[libPath] = "fn value( { 2 }";
+      },
+    },
+  ]);
+
+  assertEquals(await runCli(["watch", "main.fig", "--out", "out/main.wasm"], harness.io), 0);
+  assert(harness.writes.get("out/main.wasm") instanceof Uint8Array);
+  assertEquals(harness.stdout, ["out/main.wasm"]);
+  assertStringIncludes(harness.stderr.join("\n"), "keeping out/main.wasm stale");
 });

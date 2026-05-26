@@ -67,15 +67,23 @@ export interface ModuleSource {
   sourceId?: string;
 }
 
+export interface ModuleResolveContext {
+  fromSourceId?: string;
+  fromModuleName?: string;
+}
+
+export type ModuleResolver = (
+  moduleName: string,
+  context?: ModuleResolveContext,
+) => string | ModuleSource | undefined | Promise<string | ModuleSource | undefined>;
+
 export interface CheckSourceOptions extends CompilerPluginOptions {
   sourceId?: string;
   pruneImports?: boolean;
   trace?: boolean | CompileTraceSink;
   compileTrace?: CompileTraceSink;
   cache?: CompileCache;
-  resolveModule?: (
-    moduleName: string,
-  ) => string | ModuleSource | undefined | Promise<string | ModuleSource | undefined>;
+  resolveModule?: ModuleResolver;
 }
 
 export interface CompileSourceOptions extends CheckSourceOptions, BackendOptions {}
@@ -95,6 +103,98 @@ export function createCompileCache(): CompileCache {
     parsedModules: new Map(),
     resolvedModules: new Map(),
     prunedImports: new Map(),
+  };
+}
+
+export function createCompilerSession(options: CompilerSessionOptions): CompilerSession {
+  const cache = options.cache ?? createCompileCache();
+  const rootDependencies = new Map<string, Set<string>>();
+  const sources = new Map<string, ModuleSource>();
+
+  const affectedRoots = (sourceId: string): readonly string[] => {
+    const roots: string[] = [];
+    for (const [rootSourceId, dependencies] of rootDependencies) {
+      if (rootSourceId === sourceId || dependencies.has(sourceId)) roots.push(rootSourceId);
+    }
+    return roots;
+  };
+
+  const watchedSourceIds = (rootSourceId?: string): readonly string[] => {
+    if (rootSourceId) {
+      return [rootSourceId, ...rootDependencies.get(rootSourceId) ?? []];
+    }
+    const watched = new Set<string>();
+    for (const [root, dependencies] of rootDependencies) {
+      watched.add(root);
+      for (const dependency of dependencies) watched.add(dependency);
+    }
+    return [...watched];
+  };
+
+  const invalidate = (sourceId: string) => invalidateCompileCacheSource(cache, sourceId);
+
+  return {
+    update(source) {
+      const affected = affectedRoots(source.sourceId);
+      sources.set(source.sourceId, source);
+      invalidate(source.sourceId);
+      return { affectedRoots: affected };
+    },
+    remove(sourceId) {
+      const affected = affectedRoots(sourceId);
+      sources.delete(sourceId);
+      rootDependencies.delete(sourceId);
+      for (const dependencies of rootDependencies.values()) dependencies.delete(sourceId);
+      invalidate(sourceId);
+      return { affectedRoots: affected };
+    },
+    affectedRoots,
+    watchedSourceIds,
+    async compileRoot(source, overrides = {}) {
+      sources.set(source.sourceId, source);
+      const dependencies: ModuleDependency[] = [];
+      const moduleSources = new Map<string, ModuleSource>([[source.sourceId, source]]);
+      const graph: ModuleGraphCapture = {
+        rootSourceId: source.sourceId,
+        requireSourceId: true,
+        dependencies,
+        moduleSources,
+      };
+      const affected = affectedRoots(source.sourceId);
+      const compileOptions: CompileArtifactsOptionsInternal = {
+        ...options,
+        ...overrides,
+        sourceId: source.sourceId,
+        resolveModule: options.resolveModule,
+        cache,
+        moduleGraph: graph,
+      };
+      try {
+        const artifact = await compileArtifactsFromSourceImpl(source.text, compileOptions);
+        const dependencySet = new Set(dependencies.map((item) => item.sourceId));
+        rootDependencies.set(source.sourceId, dependencySet);
+        for (const [sourceId, moduleSource] of moduleSources) sources.set(sourceId, moduleSource);
+        return {
+          ok: true,
+          artifact,
+          dependencies,
+          watchedSourceIds: watchedSourceIds(source.sourceId),
+          affectedRoots: affected,
+        };
+      } catch (error) {
+        if (!(error instanceof CompileError)) throw error;
+        const dependencySet = new Set(dependencies.map((item) => item.sourceId));
+        if (dependencySet.size) rootDependencies.set(source.sourceId, dependencySet);
+        for (const [sourceId, moduleSource] of moduleSources) sources.set(sourceId, moduleSource);
+        return {
+          ok: false,
+          diagnostics: error.diagnostics,
+          dependencies,
+          watchedSourceIds: watchedSourceIds(source.sourceId),
+          affectedRoots: affected,
+        };
+      }
+    },
   };
 }
 
@@ -127,6 +227,54 @@ export interface CompileArtifactsResult {
 
 export interface CompileArtifactsWithWatResult extends CompileArtifactsResult {
   wat: string;
+}
+
+export interface ModuleDependency {
+  importerSourceId: string;
+  moduleName: string;
+  sourceId: string;
+}
+
+export type CompilerSessionCompileResult =
+  | {
+    ok: true;
+    artifact: CompileArtifactsResult;
+    dependencies: readonly ModuleDependency[];
+    watchedSourceIds: readonly string[];
+    affectedRoots: readonly string[];
+  }
+  | {
+    ok: false;
+    diagnostics: readonly Diagnostic[];
+    dependencies: readonly ModuleDependency[];
+    watchedSourceIds: readonly string[];
+    affectedRoots: readonly string[];
+  };
+
+export interface CompilerSessionOptions extends CompileArtifactsOptions {
+  resolveModule: ModuleResolver;
+}
+
+export interface CompilerSession {
+  update(source: ModuleSource & { sourceId: string }): { affectedRoots: readonly string[] };
+  remove(sourceId: string): { affectedRoots: readonly string[] };
+  affectedRoots(sourceId: string): readonly string[];
+  watchedSourceIds(rootSourceId?: string): readonly string[];
+  compileRoot(
+    source: ModuleSource & { sourceId: string },
+    options?: Omit<CompileArtifactsOptions, "sourceId" | "resolveModule" | "cache">,
+  ): Promise<CompilerSessionCompileResult>;
+}
+
+interface ModuleGraphCapture {
+  rootSourceId?: string;
+  requireSourceId?: boolean;
+  dependencies: ModuleDependency[];
+  moduleSources?: Map<string, ModuleSource>;
+}
+
+interface CompileArtifactsOptionsInternal extends CompileArtifactsOptions {
+  moduleGraph?: ModuleGraphCapture;
 }
 
 export interface ImportTrace {
@@ -166,6 +314,7 @@ export async function checkSource(
       resolveModule: options.resolveModule,
       pruneImports: options.pruneImports,
       cache: options.cache,
+      sourceId: options.sourceId,
       importTrace: trace ? { phases: [], compileTrace: trace } : undefined,
     }),
     checkOptions(options),
@@ -195,6 +344,7 @@ export async function checkParsedSourceForAnalysis(
       resolveModule: options.resolveModule,
       pruneImports: options.pruneImports,
       cache: options.cache,
+      sourceId: options.sourceId,
       importTrace: trace ? { phases: [], compileTrace: trace } : undefined,
     }),
     checkOptions(options),
@@ -239,7 +389,7 @@ export function compileArtifactsFromSource(
 
 async function compileArtifactsFromSourceImpl(
   source: string,
-  options: CompileArtifactsOptions = {},
+  options: CompileArtifactsOptionsInternal = {},
 ): Promise<CompileArtifactsResult> {
   const trace = compileTraceSink(options);
   const parseStart = performance.now();
@@ -260,7 +410,9 @@ async function compileArtifactsFromSourceImpl(
       resolveModule: options.resolveModule,
       pruneImports: options.pruneImports,
       cache: options.cache,
+      sourceId: options.sourceId,
       importTrace,
+      moduleGraph: options.moduleGraph,
     });
     importMs = performance.now() - importStart;
   }
@@ -357,35 +509,33 @@ async function resolveSourceImports(
     & Required<Pick<CheckSourceOptions, "resolveModule">>
     & Pick<
       CheckSourceOptions,
-      "cache" | "pruneImports"
+      "cache" | "pruneImports" | "sourceId"
     >
-    & { importTrace?: ImportTraceState },
+    & { importTrace?: ImportTraceState; moduleGraph?: ModuleGraphCapture },
 ): Promise<Program> {
   const diagnostics: Diagnostic[] = [];
   const visiting: string[] = [];
   const resolved = new Map<string, Program>();
   const sharedCache = options.cache;
   const pruneSourceKeys = new WeakMap<Program, string>();
+  const rootSourceId = options.moduleGraph?.rootSourceId ?? options.sourceId ??
+    programSourceId(root);
 
   async function load(
     moduleName: string,
     requestedAt?: SourceImport,
+    importer: Program = root,
   ): Promise<Program | undefined> {
-    if (resolved.has(moduleName)) return resolved.get(moduleName);
-    const cycleStart = visiting.indexOf(moduleName);
-    if (cycleStart >= 0) {
-      diagnostics.push({
-        code: "module.cycle",
-        message: `source import cycle: ${[...visiting.slice(cycleStart), moduleName].join(" -> ")}`,
-      });
-      return undefined;
-    }
-    visiting.push(moduleName);
+    const importerSourceId = programSourceId(importer) ?? rootSourceId ?? "<root>";
     const source = await traceImportPhase(
       options.importTrace,
       "import.resolve.root",
       { moduleName },
-      () => options.resolveModule(moduleName),
+      () =>
+        options.resolveModule(moduleName, {
+          fromSourceId: importerSourceId,
+          fromModuleName: importer.moduleName,
+        }),
     );
     if (source === undefined) {
       diagnostics.push({
@@ -393,9 +543,29 @@ async function resolveSourceImports(
         message: `cannot resolve module ${moduleName}`,
         span: requestedAt?.span,
       });
-      visiting.pop();
       return undefined;
     }
+    if (options.moduleGraph?.requireSourceId && !moduleSourceHasStableId(source)) {
+      diagnostics.push({
+        code: "module.source_id_required",
+        message: `compiler sessions require a stable sourceId for module ${moduleName}`,
+        span: requestedAt?.span,
+      });
+      return undefined;
+    }
+    const sourceId = moduleSourceId(moduleName, source);
+    options.moduleGraph?.dependencies.push({ importerSourceId, moduleName, sourceId });
+    options.moduleGraph?.moduleSources?.set(sourceId, normalizedModuleSource(moduleName, source));
+    if (resolved.has(sourceId)) return resolved.get(sourceId);
+    const cycleStart = visiting.indexOf(sourceId);
+    if (cycleStart >= 0) {
+      diagnostics.push({
+        code: "module.cycle",
+        message: `source import cycle: ${[...visiting.slice(cycleStart), sourceId].join(" -> ")}`,
+      });
+      return undefined;
+    }
+    visiting.push(sourceId);
     const sourceKey = moduleSourceCacheKey(moduleName, source);
     const parsedCacheKey = `parsed\0${sourceKey}`;
     const cachedParsed = sharedCache?.parsedModules.get(parsedCacheKey);
@@ -416,7 +586,7 @@ async function resolveSourceImports(
       : sharedCache?.resolvedModules.get(resolvedCacheKey);
     if (cachedResolved) {
       const cloned = cloneProgram(cachedResolved);
-      resolved.set(moduleName, cloned);
+      resolved.set(sourceId, cloned);
       pruneSourceKeys.set(cloned, resolvedCacheKey);
       visiting.pop();
       recordImportCacheHit(options.importTrace, "import.merge.module", moduleName, cloned);
@@ -432,7 +602,7 @@ async function resolveSourceImports(
       sharedCache?.resolvedModules.set(resolvedCacheKey, cloneProgram(merged));
       pruneSourceKeys.set(merged, resolvedCacheKey);
     }
-    resolved.set(moduleName, merged);
+    resolved.set(sourceId, merged);
     visiting.pop();
     return merged;
   }
@@ -473,7 +643,7 @@ async function resolveSourceImports(
           seenBindings.add(binding.name);
         }
       }
-      const imported = await load(item.module, item);
+      const imported = await load(item.module, item, program);
       if (!imported) continue;
       if (item.alias) aliasedImports.push({ alias: item.alias, program: imported });
       else if (item.bindings) {
@@ -541,13 +711,16 @@ function mergePrograms(
             cache,
           )
           : importedProgram;
+        const { localDecls, transitiveDecls } = splitModuleLocalDeclarations(prunedProgram);
+        const localNames = new Set(localDecls.flatMap(collectDeclarationNames));
         return [
+          ...transitiveDecls.map(markImportedDeclaration),
           ...qualifyEffectImportsAsDeclarations(
             prunedProgram.imports,
             alias,
-            new Set(prunedProgram.declarations.flatMap(collectDeclarationNames)),
+            localNames,
           ),
-          ...qualifyImportedDeclarations(prunedProgram.declarations, alias),
+          ...qualifyImportedDeclarations(localDecls, alias, localNames),
         ];
       }),
     (decls) => ({ keptDeclarationCount: decls.length }),
@@ -588,6 +761,9 @@ function mergePrograms(
       continue;
     }
     const previous = seenImported.get(name);
+    if (previous && sameImportedDeclarationIdentity(previous, decl)) {
+      continue;
+    }
     if (previous && !importedDeclarationsCanShareName(previous, decl)) {
       diagnostics.push({
         code: "module.duplicate_import",
@@ -696,6 +872,34 @@ function pruneImportedProgram(
     () => undefined,
   );
   return pruned;
+}
+
+function splitModuleLocalDeclarations(program: Program): {
+  localDecls: Declaration[];
+  transitiveDecls: Declaration[];
+} {
+  const moduleName = program.moduleName;
+  if (!moduleName) return { localDecls: program.declarations, transitiveDecls: [] };
+  const localDecls: Declaration[] = [];
+  const transitiveDecls: Declaration[] = [];
+  for (const decl of program.declarations) {
+    const sourceId = declarationSourceId(decl);
+    if (!sourceId || sourceId === moduleName) localDecls.push(decl);
+    else transitiveDecls.push(decl);
+  }
+  return { localDecls, transitiveDecls };
+}
+
+function declarationSourceId(decl: Declaration): string | undefined {
+  if (decl.span?.sourceId) return decl.span.sourceId;
+  if (decl.nameSpan?.sourceId) return decl.nameSpan.sourceId;
+  if (decl.kind === "type") {
+    for (const clause of decl.clauses ?? []) {
+      const sourceId = declarationSourceId(clause);
+      if (sourceId) return sourceId;
+    }
+  }
+  return undefined;
 }
 
 function aliasReferenceRoots(
@@ -1059,8 +1263,22 @@ function nameFirstSegment(name: string): string {
 }
 
 function importedDeclarationsCanShareName(left: Declaration, right: Declaration): boolean {
+  if (declarationSourceId(left) && declarationSourceId(left) === declarationSourceId(right)) {
+    return true;
+  }
   return (left.kind === "fn" && right.kind === "fn") ||
     (left.kind === "operator" && right.kind === "operator");
+}
+
+function sameImportedDeclarationIdentity(left: Declaration, right: Declaration): boolean {
+  if (left.kind !== right.kind) return false;
+  if (declarationName(left) !== declarationName(right)) return false;
+  const leftSpan = left.nameSpan ?? left.span;
+  const rightSpan = right.nameSpan ?? right.span;
+  if (!leftSpan || !rightSpan) return false;
+  return leftSpan.sourceId === rightSpan.sourceId &&
+    leftSpan.start === rightSpan.start &&
+    leftSpan.end === rightSpan.end;
 }
 
 function destructureImportedDeclarations(
@@ -1154,15 +1372,52 @@ async function parseModuleSource(
   source: string | ModuleSource,
   moduleName: string,
 ): Promise<Program> {
-  return typeof source === "string"
-    ? await parse(source, { sourceId: moduleName })
-    : await parse(source.text, { sourceId: source.sourceId ?? moduleName });
+  const sourceId = moduleSourceId(moduleName, source);
+  const parsed = typeof source === "string"
+    ? await parse(source, { sourceId })
+    : await parse(source.text, { sourceId });
+  return hideAstMetadata({ ...parsed, moduleName: sourceId }) as Program;
 }
 
 function moduleSourceCacheKey(moduleName: string, source: string | ModuleSource): string {
-  const sourceId = typeof source === "string" ? moduleName : source.sourceId ?? moduleName;
+  const sourceId = moduleSourceId(moduleName, source);
   const text = typeof source === "string" ? source : source.text;
   return `${sourceId}\0${text.length}\0${hashString(text)}`;
+}
+
+function moduleSourceId(moduleName: string, source: string | ModuleSource): string {
+  return typeof source === "string" ? moduleName : source.sourceId ?? moduleName;
+}
+
+function moduleSourceHasStableId(source: string | ModuleSource): boolean {
+  return typeof source !== "string" && !!source.sourceId;
+}
+
+function normalizedModuleSource(moduleName: string, source: string | ModuleSource): ModuleSource {
+  return typeof source === "string"
+    ? { text: source, sourceId: moduleName }
+    : { text: source.text, sourceId: source.sourceId ?? moduleName };
+}
+
+function programSourceId(program: Program): string | undefined {
+  if (program.moduleName) return program.moduleName;
+  for (const decl of program.declarations) {
+    if (decl.span?.sourceId) return decl.span.sourceId;
+  }
+  for (const sourceImport of program.sourceImports ?? []) {
+    if (sourceImport.span?.sourceId) return sourceImport.span.sourceId;
+  }
+  return undefined;
+}
+
+function invalidateCompileCacheSource(cache: CompileCache, sourceId: string) {
+  const markers = [`\0${sourceId}\0`, `${sourceId}\0`];
+  const matches = (key: string) => markers.some((marker) => key.includes(marker));
+  for (const map of [cache.parsedModules, cache.resolvedModules, cache.prunedImports]) {
+    for (const key of map.keys()) {
+      if (matches(key)) map.delete(key);
+    }
+  }
 }
 
 function resolvedModuleCacheKey(sourceKey: string, pruneImports: boolean): string {
@@ -1315,8 +1570,11 @@ function operatorDeclarationName(decl: OperatorDecl): string {
   return `operator:${decl.symbol}`;
 }
 
-function qualifyImportedDeclarations(declarations: Declaration[], alias: string): Declaration[] {
-  const names = new Set(declarations.flatMap(collectDeclarationNames));
+function qualifyImportedDeclarations(
+  declarations: Declaration[],
+  alias: string,
+  names = new Set(declarations.flatMap(collectDeclarationNames)),
+): Declaration[] {
   return declarations.map((decl) => qualifyDeclaration(decl, alias, names));
 }
 

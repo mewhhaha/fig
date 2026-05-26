@@ -2,8 +2,11 @@ import {
   checkSource,
   compileArtifactsFromSource,
   type CompileTraceEvent,
+  createCompilerSession,
   decodeFigValue,
   formatSource,
+  type ModuleResolveContext,
+  type ModuleSource,
   wasmFromSource,
   watFromSource,
 } from "./mod.ts";
@@ -17,14 +20,19 @@ export interface CliIo {
   readTextFile(path: string): Promise<string>;
   writeTextFile(path: string, data: string): Promise<void>;
   writeFile(path: string, data: Uint8Array): Promise<void>;
+  watch(paths: string[]): AsyncIterable<CliWatchEvent> & { close?(): void };
   stdinText(): Promise<string>;
   stdout(text: string): void;
   stderr(text: string): void;
   runLsp(): Promise<void>;
 }
 
+export interface CliWatchEvent {
+  paths: string[];
+}
+
 const USAGE =
-  "usage: fig <check|fmt|wat|build|run> <file> [--write|--check] [--memory branch-debug|branch] [--release|--release-fast-compile] [--profile name] [--runtime-profile|--compile-profile] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]\n       fig lsp\n       fig version";
+  "usage: fig <check|fmt|wat|build|watch|run> <file> [--write|--check] [--memory branch-debug|branch] [--release|--release-fast-compile] [--profile name] [--runtime-profile|--compile-profile] [--branch-hints|--no-branch-hints] [--out module.wasm] [--shader-manifest manifest.json]\n       fig lsp\n       fig version";
 
 class UsageError extends Error {}
 
@@ -33,6 +41,7 @@ export function createDenoCliIo(): CliIo {
     readTextFile: (path) => Deno.readTextFile(path),
     writeTextFile: (path, data) => Deno.writeTextFile(path, data),
     writeFile: (path, data) => Deno.writeFile(path, data),
+    watch: (paths) => Deno.watchFs(paths),
     stdinText: () => new Response(Deno.stdin.readable).text(),
     stdout: (text) => console.log(text),
     stderr: (text) => console.error(text),
@@ -157,6 +166,12 @@ async function runCliUnchecked(args: string[], io: CliIo): Promise<void> {
     return;
   }
 
+  if (cmd === "watch") {
+    if (file === "-") usage();
+    await runWatch(file, commandRest, io);
+    return;
+  }
+
   if (cmd === "run") {
     const source = await io.readTextFile(file);
     const compileTrace = parseCompileProfile(commandRest) ? [] : undefined;
@@ -218,6 +233,64 @@ function compileOptions(
     branchHints: parseBranchHints(args),
     ...(compileTrace ? { compileTrace } : {}),
   };
+}
+
+async function runWatch(file: string, args: string[], io: CliIo): Promise<void> {
+  const outFlag = args.indexOf("--out");
+  const manifestFlag = args.indexOf("--shader-manifest");
+  const out = outFlag >= 0 ? args[outFlag + 1] : file.replace(/\.fig$/, ".wasm");
+  const manifestOut = manifestFlag >= 0 ? args[manifestFlag + 1] : undefined;
+  if (!out) usage();
+  const compileTrace = parseCompileProfile(args) ? [] : undefined;
+  const session = createCompilerSession(compileOptions(file, args, io, compileTrace));
+  const rootSourceId = sourceIdForPath(file);
+  let watchedPaths = [rootSourceId];
+
+  async function buildOnce(reason: string): Promise<boolean> {
+    compileTrace?.splice(0, compileTrace.length);
+    const source = await io.readTextFile(file);
+    const result = await session.compileRoot(
+      { text: source, sourceId: rootSourceId },
+      { includeWat: false },
+    );
+    watchedPaths = result.watchedSourceIds.map(sourceIdToWatchPath);
+    if (!result.ok) {
+      for (const diagnostic of result.diagnostics) io.stderr(formatDiagnostic(diagnostic));
+      io.stderr(`[watch] build failed after ${reason}; keeping ${out} stale`);
+      return false;
+    }
+    await io.writeFile(out, result.artifact.wasm);
+    if (manifestOut) {
+      await io.writeTextFile(
+        manifestOut,
+        `${JSON.stringify(result.artifact.checked.shaderManifest, null, 2)}\n`,
+      );
+    }
+    printCompileProfile(io, compileTrace);
+    io.stderr(`[watch] built ${out} after ${reason}`);
+    io.stdout(out);
+    return true;
+  }
+
+  await buildOnce("startup");
+  while (true) {
+    const watcher = io.watch([...new Set(watchedPaths)]);
+    let shouldRewatch = false;
+    try {
+      for await (const event of watcher) {
+        await delay(100);
+        const previous = watchedPaths.join("\0");
+        await buildOnce(event.paths.length ? event.paths.join(", ") : "change");
+        if (watchedPaths.join("\0") !== previous) {
+          shouldRewatch = true;
+          break;
+        }
+      }
+    } finally {
+      watcher.close?.();
+    }
+    if (!shouldRewatch) return;
+  }
 }
 
 function usage(): never {
@@ -333,10 +406,16 @@ function runtimeProfileRecorder(
 }
 
 function moduleResolver(entryFile: string, io: CliIo) {
-  return async (moduleName: string): Promise<string | undefined> => {
-    for (const path of candidateModulePaths(entryFile, moduleName)) {
+  return async (
+    moduleName: string,
+    context?: ModuleResolveContext,
+  ): Promise<ModuleSource | undefined> => {
+    const importer = context?.fromSourceId && isPathLikeSourceId(context.fromSourceId)
+      ? context.fromSourceId
+      : entryFile;
+    for (const path of candidateModulePaths(importer, moduleName)) {
       try {
-        return await io.readTextFile(path);
+        return { text: await io.readTextFile(path), sourceId: sourceIdForPath(path) };
       } catch (error) {
         if (!(error instanceof Deno.errors.NotFound)) throw error;
       }
@@ -362,4 +441,21 @@ function candidateModulePaths(entryFile: string, moduleName: string): string[] {
   }
   candidates.push(new URL(`../${relative}`, import.meta.url).pathname);
   return candidates;
+}
+
+function sourceIdForPath(path: string): string {
+  return new URL(path, `file://${Deno.cwd()}/`).pathname;
+}
+
+function sourceIdToWatchPath(sourceId: string): string {
+  return sourceId.startsWith("file://") ? new URL(sourceId).pathname : sourceId;
+}
+
+function isPathLikeSourceId(sourceId: string): boolean {
+  return sourceId.startsWith("/") || sourceId.startsWith("./") || sourceId.startsWith("../") ||
+    sourceId.startsWith("file://");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

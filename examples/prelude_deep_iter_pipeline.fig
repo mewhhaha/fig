@@ -1,4 +1,5 @@
 const merge = @import("prelude.std");
+const layout = @import("prelude.layout");
 
 fn add(acc: i32, x: i32) -> i32 {
   acc + x
@@ -25,8 +26,8 @@ fn below_nine(x: i32) -> bool {
 }
 
 pub fn main() -> i32 {
-  let xs: merge.array.layout.Lane4I32 = #[1, 2, 3, 4];
-  let ys: merge.array.layout.Lane4I32 = #[1, 2, 3, 4];
+  let xs: layout.Lane4I32 = #[1, 2, 3, 4];
+  let ys: layout.Lane4I32 = #[1, 2, 3, 4];
   let folded = InlineArray::Iter(xs) \iter ->
     iter.map(double).filter(above_four).map(inc).reverse().filter(below_nine).map(square).fold(10, add);
 
