@@ -8111,6 +8111,10 @@ function specializeConstParamCallAttempt(
         staticArgNames,
         context,
       ) as Extract<Expr, { kind: "block" }>;
+      specialized.body = substituteStaticValueRefs(
+        specialized.body,
+        staticValues,
+      ) as Extract<Expr, { kind: "block" }>;
       specializeBlock(
         specialized.body,
         context,
@@ -9827,6 +9831,114 @@ function staticNumber(expr: Expr, staticValues: Map<string, ConstValue>): number
     if (expr.op === "-") return left - right;
   }
   return undefined;
+}
+
+function substituteStaticValueRefs(
+  expr: Expr,
+  staticValues: Map<string, ConstValue>,
+  shadowed = new Set<string>(),
+): Expr {
+  switch (expr.kind) {
+    case "var": {
+      if (shadowed.has(expr.name)) return expr;
+      const value = staticValues.get(expr.name);
+      return value ? constValueToExpr(value) ?? expr : expr;
+    }
+    case "call":
+      return {
+        ...expr,
+        callee: substituteStaticValueRefs(expr.callee, staticValues, shadowed),
+        args: expr.args.map((arg) => substituteStaticValueRefs(arg, staticValues, shadowed)),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: substituteStaticValueRefs(expr.left, staticValues, shadowed),
+        right: substituteStaticValueRefs(expr.right, staticValues, shadowed),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: substituteStaticValueRefs(expr.value, staticValues, shadowed),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          value: substituteStaticValueRefs(
+            arm.value,
+            staticValues,
+            shadowNames(shadowed, patternBindingNames(arm.pattern)),
+          ),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          index: slot.index
+            ? substituteStaticValueRefs(slot.index, staticValues, shadowed)
+            : undefined,
+          value: substituteStaticValueRefs(slot.value, staticValues, shadowed),
+        })),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: substituteStaticValueRefs(expr.value, staticValues, shadowed),
+        key: substituteStaticValueRefs(expr.key, staticValues, shadowed),
+      };
+    case "block": {
+      let scoped = new Set(shadowed);
+      const statements = expr.statements.map((stmt): Statement => {
+        if (stmt.kind === "proof_const") return stmt;
+        if (stmt.kind === "debug_trace") {
+          return {
+            ...stmt,
+            args: stmt.args.map((arg) => substituteStaticValueRefs(arg, staticValues, scoped)),
+          };
+        }
+        const value = substituteStaticValueRefs(stmt.value, staticValues, scoped);
+        if (stmt.kind === "let") {
+          scoped = shadowNames(scoped, [stmt.name]);
+          return { ...stmt, value };
+        }
+        scoped = shadowNames(scoped, stmt.names);
+        return { ...stmt, value };
+      });
+      return {
+        ...expr,
+        statements,
+        expr: expr.expr ? substituteStaticValueRefs(expr.expr, staticValues, scoped) : undefined,
+      };
+    }
+    case "const_fn":
+      return {
+        ...expr,
+        body: substituteStaticValueRefs(
+          expr.body,
+          staticValues,
+          shadowNames(shadowed, expr.params),
+        ),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: substituteStaticValueRefs(expr.value, staticValues, shadowed),
+        body: substituteStaticValueRefs(
+          expr.body,
+          staticValues,
+          shadowNames(shadowed, [expr.name]),
+        ),
+      };
+    case "literal":
+    case "do":
+    case "index":
+    case "operator_chain":
+    case "profile":
+    case "static_for_slots":
+    case "range":
+      return expr;
+  }
 }
 
 function staticLabelName(expr: Expr, staticValues: Map<string, ConstValue>): string | undefined {

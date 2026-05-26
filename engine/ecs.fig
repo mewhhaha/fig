@@ -31,7 +31,6 @@ fn batch_with_capacity(
 
 fn batch_fill(const capacity: count, value: component) -> Batch(component) {
   batch_fill_loop(
-    capacity,
     0,
     layout.HeapArray::new(component, capacity),
     value
@@ -39,14 +38,12 @@ fn batch_fill(const capacity: count, value: component) -> Batch(component) {
 }
 
 fn batch_fill_loop(
-  const capacity: count,
   index: i32,
   batch: Batch(component),
   value: component
 ) -> Batch(component) {
-  match index < capacity {
+  match index < batch.cap {
     true => batch_fill_loop(
-      capacity,
       index + 1,
       layout.HeapArray::push(component, batch, value),
       value

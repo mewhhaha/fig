@@ -1465,8 +1465,9 @@ function substituteTypeConstructorRefs(expr: Expr, typeParam: string, concrete: 
         right: substituteTypeConstructorRefs(expr.right, typeParam, concrete),
       };
     case "operator_chain":
-      return rewriteOperatorChain(expr, (item) =>
-        substituteTypeConstructorRefs(item, typeParam, concrete)
+      return rewriteOperatorChain(
+        expr,
+        (item) => substituteTypeConstructorRefs(item, typeParam, concrete),
       );
     case "pipe_bind":
       return {
@@ -3878,7 +3879,9 @@ function isSpeculablePureInlineValue(expr: Expr, functions: Map<string, FnDecl>)
         isSpeculablePureInlineValue(expr.left, functions) &&
         isSpeculablePureInlineValue(expr.right, functions);
     case "operator_chain":
-      return operatorChainValues(expr).every((item) => isSpeculablePureInlineValue(item, functions));
+      return operatorChainValues(expr).every((item) =>
+        isSpeculablePureInlineValue(item, functions)
+      );
     case "field":
       return isSpeculablePureInlineValue(expr.value, functions) &&
         isSpeculablePureInlineValue(expr.key, functions);
@@ -4056,8 +4059,9 @@ function rewriteStaticProjections(
         ),
       };
     case "operator_chain":
-      return rewriteOperatorChain(expr, (item) =>
-        rewriteStaticProjections(item, active, forwarding, inlineable, functions, config)
+      return rewriteOperatorChain(
+        expr,
+        (item) => rewriteStaticProjections(item, active, forwarding, inlineable, functions, config),
       );
     case "call":
       return {
@@ -4587,8 +4591,9 @@ function optimizeExpr(
         config,
       );
     case "operator_chain":
-      return rewriteOperatorChain(expr, (item) =>
-        optimizeExpr(item, forwarding, inlineable, functions, config)
+      return rewriteOperatorChain(
+        expr,
+        (item) => optimizeExpr(item, forwarding, inlineable, functions, config),
       );
     case "pipe_bind": {
       const value = optimizeExpr(expr.value, forwarding, inlineable, functions, config);
@@ -5064,7 +5069,8 @@ function localEqualityNodeCount(expr: Expr): number {
     case "binary":
       return 1 + localEqualityNodeCount(expr.left) + localEqualityNodeCount(expr.right);
     case "operator_chain":
-      return 1 + operatorChainValues(expr).reduce((sum, item) => sum + localEqualityNodeCount(item), 0);
+      return 1 +
+        operatorChainValues(expr).reduce((sum, item) => sum + localEqualityNodeCount(item), 0);
     case "literal":
     case "var":
       return 1;
@@ -6749,6 +6755,24 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
         (expr.name.startsWith(`${name}.`) || expr.name.startsWith(`${name}[`))
       ) {
         return { kind: "var", name: `${value.name}${expr.name.slice(name.length)}` };
+      }
+      if (
+        (value.kind === "shape" || value.kind === "product_constructor") &&
+        expr.name.startsWith(`${name}.`)
+      ) {
+        const [field, ...rest] = expr.name.slice(name.length + 1).split(".");
+        const replacement = field
+          ? value.slots.find((slot) => slot.label === field)?.value
+          : undefined;
+        if (replacement) {
+          return rest.length
+            ? substituteVar(
+              { ...expr, name: `${name}.${rest.join(".")}` },
+              name,
+              replacement,
+            )
+            : replacement;
+        }
       }
       return expr;
     case "call":

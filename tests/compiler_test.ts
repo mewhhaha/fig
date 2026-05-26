@@ -1891,6 +1891,32 @@ Deno.test("ecs fused fill iterator maps and folds without materialized batch", a
   assert([...artifact.wat.matchAll(/\bif\b/g)].length <= 4, artifact.wat);
 });
 
+Deno.test("ecs batch fill initializes heap batch values", async () => {
+  const source = `
+      const ecs = @import("engine.ecs");
+
+      type fn Velocity() -> type {
+        let Velocity = {dx: i32, dy: i32};
+        struct(Velocity)
+      }
+
+      pub fn main() -> i32 {
+        let batch = ecs.batch_fill(4, Velocity {dx: 2, dy: 3});
+        let first = ecs.batch_get(batch, 0);
+        first.dx + first.dy
+      }
+    `;
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(source, {
+        resolveModule: resolveProjectModule,
+        optMode: "release",
+      }),
+    ),
+  );
+  assertEquals((instance.exports.main as () => number)(), 5);
+});
+
 Deno.test("ecs query applicative map lowers to fused read input update", async () => {
   const source = `
       const ecs = @import("engine.ecs");
@@ -4648,6 +4674,30 @@ Deno.test("anonymous struct annotations support fields literals and returns", as
     ),
   );
   assertEquals((instance.exports.main as CallableFunction)(), 13);
+});
+
+Deno.test("const label replace_field preserves untouched product fields in release", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    type fn Pair() -> type {
+      let Pair = {x: i32, y: i32};
+      struct(Pair)
+    }
+    fn set_field(const field: const, pair: Pair, value: i32) -> Pair {
+      @replace_field(pair, field, value)
+    }
+    pub fn main() -> i32 {
+      let pair = set_field(#x, Pair {x: 1, y: 2}, 5);
+      pair.x + pair.y
+    }
+  `,
+        { optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 7);
 });
 
 Deno.test("anonymous struct annotations work with type reflection and empty", async () => {
