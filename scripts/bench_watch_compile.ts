@@ -15,7 +15,8 @@ type Mode =
   | "full_shared_cache"
   | "watch_session_same_source"
   | "watch_session_root_edit"
-  | "watch_session_import_edit";
+  | "watch_session_import_edit"
+  | "watch_session_import_semantic_edit";
 
 type Sample = {
   wallMs: number;
@@ -48,6 +49,7 @@ const samples = numberArg("--samples", 9);
 const warmup = numberArg("--warmup", 2);
 const optMode = Deno.args.includes("--release") ? "release" : "debug";
 const profile = stringArg("--profile") as OptimizeProfileName | undefined;
+const selectedMode = stringArg("--mode") as Mode | undefined;
 const rootSourceId = sourceIdForPath(file);
 const rootSource = await Deno.readTextFile(file);
 const overlay = new Map<string, string>();
@@ -59,13 +61,15 @@ const baseOptions: Omit<CompileSourceOptions, "resolveModule" | "cache"> = {
   ...(profile ? { profile } : {}),
 };
 
-const modes: Mode[] = [
+const allModes: Mode[] = [
   "full_uncached",
   "full_shared_cache",
   "watch_session_same_source",
   "watch_session_root_edit",
   "watch_session_import_edit",
+  "watch_session_import_semantic_edit",
 ];
+const modes = selectedMode ? selectedBenchmarkModes(selectedMode, allModes) : allModes;
 
 const rows: Row[] = [];
 let baselineMs = 0;
@@ -121,6 +125,7 @@ function sampleRunner(mode: Mode): (index: number, measured: boolean) => Promise
     includeWat: false,
   });
   let importEditSourceId: string | undefined;
+  let semanticImportEditSourceId: string | undefined;
   return async (index, measured) => {
     let source = rootSource;
     if (mode === "watch_session_root_edit") {
@@ -135,6 +140,15 @@ function sampleRunner(mode: Mode): (index: number, measured: boolean) => Promise
       overlay.set(importEditSourceId, edited);
       session.update({ sourceId: importEditSourceId, text: edited });
     }
+    if (mode === "watch_session_import_semantic_edit" && semanticImportEditSourceId) {
+      const original = await Deno.readTextFile(semanticImportEditSourceId);
+      const edited = semanticImportEdit(original, index + (measured ? warmup : 0));
+      if (!edited) {
+        throw new Error("could not find a stable semantic edit site in imported module");
+      }
+      overlay.set(semanticImportEditSourceId, edited);
+      session.update({ sourceId: semanticImportEditSourceId, text: edited });
+    }
     const start = performance.now();
     const result = await session.compileRoot({ text: source, sourceId: rootSourceId }, {
       includeWat: false,
@@ -144,6 +158,9 @@ function sampleRunner(mode: Mode): (index: number, measured: boolean) => Promise
       throw new Error(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"));
     }
     importEditSourceId ??= result.dependencies[0]?.sourceId;
+    semanticImportEditSourceId ??= await firstSemanticImportEditSourceId(
+      result.dependencies.map((dependency) => dependency.sourceId),
+    );
     return sampleFromArtifact(result.artifact, wallMs, result.dependencies.length);
   };
 }
@@ -179,6 +196,30 @@ function sampleFromArtifact(
     wasmBytes: artifact.wasm.byteLength,
     dependencies,
   };
+}
+
+async function firstSemanticImportEditSourceId(
+  sourceIds: readonly string[],
+): Promise<string | undefined> {
+  for (const sourceId of sourceIds) {
+    try {
+      if (semanticImportEdit(await Deno.readTextFile(sourceId), 1)) return sourceId;
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+  }
+  return undefined;
+}
+
+function semanticImportEdit(source: string, index: number): string | undefined {
+  const replacement = `+ ${index % 17}`;
+  if (source.includes("+ 0")) return source.replace("+ 0", replacement);
+  if (source.includes("- 0")) return source.replace("- 0", replacement);
+  const fnLine = source.match(/^fn [^{\n]+\{([^{}\n]+)\}$/m);
+  if (fnLine) {
+    return source.replace(fnLine[0], fnLine[0].replace("}", ` ${replacement} }`));
+  }
+  return undefined;
 }
 
 async function resolveModule(
@@ -231,6 +272,13 @@ function numberArg(name: string, fallback: number): number {
     throw new Error(`${name} must be a positive number`);
   }
   return Math.floor(value);
+}
+
+function selectedBenchmarkModes(mode: Mode, allModes: Mode[]): Mode[] {
+  if (!allModes.includes(mode)) {
+    throw new Error(`${mode} is not a benchmark mode`);
+  }
+  return [mode];
 }
 
 function median(values: number[]): number {

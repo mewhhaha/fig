@@ -11,17 +11,26 @@ export interface ContractCheckCallbacks {
   runtimeValueTypeAssignable(left: string, right: string): boolean;
 }
 
+export interface ContractCheckCache {
+  rewriteMisuseDeclarations?: WeakMap<object, Diagnostic[]>;
+}
+
 export function collectContracts(program: Program): ContractDecl[] {
-  return program.declarations.filter((decl): decl is ContractDecl => decl.kind === "contract");
+  const contracts: ContractDecl[] = [];
+  for (const decl of program.declarations) {
+    if (decl.kind === "contract") contracts.push(decl);
+  }
+  return contracts;
 }
 
 export function checkContracts(
   program: Program,
   diagnostics: Diagnostic[],
   callbacks: ContractCheckCallbacks,
+  cache?: ContractCheckCache,
 ) {
   checkRewriteDecls(program, collectContracts(program), diagnostics, callbacks);
-  checkRewriteTypeMisuse(program, diagnostics);
+  checkRewriteTypeMisuse(program, diagnostics, cache);
 }
 
 function diagnosticAt(
@@ -38,20 +47,17 @@ function checkRewriteDecls(
   diagnostics: Diagnostic[],
   callbacks: ContractCheckCallbacks,
 ) {
-  const knownNames = new Set(program.declarations.map((decl) => decl.name));
-  const functions = new Map(
-    program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn").map((decl) => [
-      decl.name,
-      decl,
-    ]),
-  );
-  const constructorTypes = new Map(
-    program.declarations.flatMap((decl) =>
-      decl.kind === "type" && decl.normalized?.kind === "product"
-        ? [[decl.normalized.constructor, decl] as const]
-        : []
-    ),
-  );
+  const knownNames = new Set<string>();
+  const functions = new Map<string, FnDecl>();
+  const constructorTypes = new Map<string, TypeDecl>();
+  for (const decl of program.declarations) {
+    knownNames.add(decl.name);
+    if (decl.kind === "fn") {
+      functions.set(decl.name, decl);
+    } else if (decl.kind === "type" && decl.normalized?.kind === "product") {
+      constructorTypes.set(decl.normalized.constructor, decl);
+    }
+  }
   for (const decl of contracts) {
     for (const param of decl.params) {
       if (!param.const) {
@@ -187,52 +193,69 @@ function rewriteTemplateFreeNames(expr: Expr, params: Set<string>): Set<string> 
   return names;
 }
 
-function checkRewriteTypeMisuse(program: Program, diagnostics: Diagnostic[]) {
+function checkRewriteTypeMisuse(
+  program: Program,
+  diagnostics: Diagnostic[],
+  cache?: ContractCheckCache,
+) {
   const checkTypeText = (
     type: string | undefined,
     spanLike: { span?: Span; nameSpan?: Span } | undefined,
+    target: Diagnostic[],
   ) => {
     if (!type) return;
     if (/\brewrite\b/.test(type)) {
-      diagnostics.push(diagnosticAt(
+      target.push(diagnosticAt(
         "rewrite.not_runtime_type",
         "rewrite is not a runtime type; use contract fn ... -> rewrite",
         spanLike,
       ));
     }
   };
-  const checkBlock = (block: BlockExpr) => {
+  const checkBlock = (block: BlockExpr, target: Diagnostic[]) => {
     for (const stmt of block.statements) {
-      if (stmt.kind === "let") checkTypeText(stmt.type, stmt);
-      if (stmt.kind === "let" || stmt.kind === "destructure_let") checkExpr(stmt.value);
+      if (stmt.kind === "let") checkTypeText(stmt.type, stmt, target);
+      if (stmt.kind === "let" || stmt.kind === "destructure_let") checkExpr(stmt.value, target);
     }
-    if (block.expr) checkExpr(block.expr);
+    if (block.expr) checkExpr(block.expr, target);
   };
-  const checkExpr = (expr: Expr) => {
+  const checkExpr = (expr: Expr, target: Diagnostic[]) => {
     if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "@assume") {
-      diagnostics.push(diagnosticAt(
+      target.push(diagnosticAt(
         "rewrite.assume_context",
         "@assume is only valid inside a contract fn ... -> rewrite body",
         expr,
       ));
     }
     if (expr.kind === "block") {
-      checkBlock(expr);
+      checkBlock(expr, target);
       return;
     }
-    for (const child of exprChildren(expr)) checkExpr(child);
+    for (const child of exprChildren(expr)) checkExpr(child, target);
   };
-  for (const decl of program.declarations) {
+  const checkDecl = (decl: Program["declarations"][number], target: Diagnostic[]) => {
     if (decl.kind === "fn") {
-      checkTypeText(decl.returnType, decl);
-      for (const param of decl.params) checkTypeText(param.type, param);
-      checkBlock(decl.body);
+      checkTypeText(decl.returnType, decl, target);
+      for (const param of decl.params) checkTypeText(param.type, param, target);
+      checkBlock(decl.body, target);
     } else if (decl.kind === "let" || decl.kind === "const") {
-      checkTypeText(decl.type, decl);
-      checkExpr(decl.value);
+      checkTypeText(decl.type, decl, target);
+      checkExpr(decl.value, target);
     } else if (decl.kind === "contract") {
-      for (const param of decl.params) checkTypeText(param.type, param);
+      for (const param of decl.params) checkTypeText(param.type, param, target);
     }
+  };
+  const cachedDeclarations = cache?.rewriteMisuseDeclarations;
+  for (const decl of program.declarations) {
+    const cached = cachedDeclarations?.get(decl);
+    if (cached) {
+      for (const diagnostic of cached) diagnostics.push(diagnostic);
+      continue;
+    }
+    const declarationDiagnostics: Diagnostic[] = [];
+    checkDecl(decl, declarationDiagnostics);
+    cachedDeclarations?.set(decl, declarationDiagnostics);
+    for (const diagnostic of declarationDiagnostics) diagnostics.push(diagnostic);
   }
 }
 

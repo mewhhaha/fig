@@ -482,10 +482,21 @@ export interface AbstractFunctionFacts {
 
 export function optimizeProgram(program: Program, options: OptimizeOptions = {}): Program {
   const config = optimizerConfig(options);
+  const debugFastPath = config.profile.name === "debug" &&
+    options.assumeRewrites !== true &&
+    (options.runtimeProfile === true || !programHasRuntimeProfileExpressions(program));
+  if (debugFastPath) {
+    traceInstant(
+      options.trace,
+      "opt.debug_fast_path",
+      optimizerTraceCounters(program, undefined, { changedFunctions: 0 }),
+    );
+    return program;
+  }
   const optimized = traceSync(
     options.trace,
     "opt.clone",
-    () => structuredClone(program) as Program,
+    () => cloneOptimizerValue(program),
     (
       result,
     ) => optimizerTraceCounters(result),
@@ -550,6 +561,112 @@ export function optimizeProgram(program: Program, options: OptimizeOptions = {})
     );
   }
   return optimized;
+}
+
+function programHasRuntimeProfileExpressions(program: Program): boolean {
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn" || decl.kind === "contract") {
+      if (blockHasRuntimeProfileExpressions(decl.body)) return true;
+      continue;
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      if (exprHasRuntimeProfileExpressions(decl.value)) return true;
+    }
+  }
+  return false;
+}
+
+function blockHasRuntimeProfileExpressions(block: BlockExpr): boolean {
+  for (const stmt of block.statements) {
+    if (stmt.kind === "proof_const" || stmt.kind === "debug_trace") continue;
+    if (exprHasRuntimeProfileExpressions(stmt.value)) return true;
+  }
+  return block.expr ? exprHasRuntimeProfileExpressions(block.expr) : false;
+}
+
+function exprHasRuntimeProfileExpressions(expr: Expr): boolean {
+  switch (expr.kind) {
+    case "profile":
+      return true;
+    case "block":
+      return blockHasRuntimeProfileExpressions(expr);
+    case "do": {
+      for (const stmt of expr.statements) {
+        if (stmt.kind === "proof_const" || stmt.kind === "debug_trace") continue;
+        if (exprHasRuntimeProfileExpressions(stmt.value)) return true;
+      }
+      return expr.expr ? exprHasRuntimeProfileExpressions(expr.expr) : false;
+    }
+    case "const_fn":
+      return exprHasRuntimeProfileExpressions(expr.body);
+    case "call":
+      if (exprHasRuntimeProfileExpressions(expr.callee)) return true;
+      for (const arg of expr.args) {
+        if (exprHasRuntimeProfileExpressions(arg)) return true;
+      }
+      return false;
+    case "index":
+      return exprHasRuntimeProfileExpressions(expr.target) ||
+        exprHasRuntimeProfileExpressions(expr.index);
+    case "binary":
+      return exprHasRuntimeProfileExpressions(expr.left) ||
+        exprHasRuntimeProfileExpressions(expr.right);
+    case "operator_chain":
+      if (exprHasRuntimeProfileExpressions(expr.first)) return true;
+      for (const item of expr.rest) {
+        if (exprHasRuntimeProfileExpressions(item.value)) return true;
+      }
+      return false;
+    case "pipe_bind":
+      return exprHasRuntimeProfileExpressions(expr.value) ||
+        exprHasRuntimeProfileExpressions(expr.body);
+    case "match":
+      if (exprHasRuntimeProfileExpressions(expr.value)) return true;
+      for (const arm of expr.arms) {
+        if (exprHasRuntimeProfileExpressions(arm.value)) return true;
+      }
+      return false;
+    case "shape":
+    case "product_constructor":
+      for (const slot of expr.slots) {
+        if (slot.index && exprHasRuntimeProfileExpressions(slot.index)) return true;
+        if (exprHasRuntimeProfileExpressions(slot.value)) return true;
+      }
+      return false;
+    case "static_for_slots":
+      if (expr.source.kind === "range") {
+        if (exprHasRuntimeProfileExpressions(expr.source.start)) return true;
+        if (exprHasRuntimeProfileExpressions(expr.source.end)) return true;
+      } else if (exprHasRuntimeProfileExpressions(expr.source.shape)) {
+        return true;
+      }
+      return exprHasRuntimeProfileExpressions(expr.value);
+    case "field":
+      return exprHasRuntimeProfileExpressions(expr.value) ||
+        exprHasRuntimeProfileExpressions(expr.key);
+    case "range":
+      return exprHasRuntimeProfileExpressions(expr.start) ||
+        exprHasRuntimeProfileExpressions(expr.end);
+    case "literal":
+    case "var":
+      return false;
+  }
+}
+
+function cloneOptimizerValue<T>(value: T): T {
+  return cloneOptimizerUnknown(value) as T;
+}
+
+function cloneOptimizerUnknown(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(cloneOptimizerUnknown);
+  const clone: Record<string, unknown> = {};
+  const source = value as Record<string, unknown>;
+  for (const key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    clone[key] = cloneOptimizerUnknown(source[key]);
+  }
+  return clone;
 }
 
 function inlinePureForwardingWrappers(
@@ -1715,7 +1832,7 @@ function matchRewriteTemplate(
 }
 
 function substituteRewriteTemplate(expr: Expr, bindings: Map<string, Expr>): Expr {
-  if (expr.kind === "var") return structuredClone(bindings.get(expr.name) ?? expr) as Expr;
+  if (expr.kind === "var") return cloneOptimizerValue(bindings.get(expr.name) ?? expr);
   switch (expr.kind) {
     case "const_fn":
       return { ...expr, body: substituteRewriteTemplate(expr.body, bindings) };
@@ -2831,7 +2948,7 @@ function inlineGeneratedClauseStaticForSource(
 
 function inlineGeneratedClauseBody(fn: FnDecl, args: Expr[]): Expr {
   const statements: Statement[] = [];
-  let body = alphaRenameInlineBlock(structuredClone(fn.body) as FnDecl["body"], fn.name);
+  let body = alphaRenameInlineBlock(cloneOptimizerValue(fn.body), fn.name);
   fn.params.forEach((param, index) => {
     const arg = args[index];
     if (!arg) return;
@@ -2894,7 +3011,7 @@ function inlineRecurrenceClause(
   measureValue: number,
 ): Expr {
   const statements: Statement[] = [];
-  let body = alphaRenameInlineBlock(structuredClone(fn.body) as FnDecl["body"], fn.name);
+  let body = alphaRenameInlineBlock(cloneOptimizerValue(fn.body), fn.name);
   fn.params.forEach((param, index) => {
     const arg = args[index];
     if (index === measureIndex) {
@@ -6204,7 +6321,7 @@ function inlineCall(
     return undefined;
   }
   const statements: Statement[] = [];
-  let body = alphaRenameInlineBlock(structuredClone(fn.body) as FnDecl["body"], fn.name);
+  let body = alphaRenameInlineBlock(cloneOptimizerValue(fn.body), fn.name);
   fn.params.forEach((param, index) => {
     const arg = args[index];
     if (arg?.kind === "var") {

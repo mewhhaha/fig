@@ -10,6 +10,7 @@ import {
   createCompileCache,
   createCompilerPluginRegistry,
   createCompilerSession,
+  moduleInterfaceKey,
   parse,
   tokenize,
   wasmFromSource as wasmFromSourceRaw,
@@ -118,6 +119,30 @@ Deno.test("AST span metadata is hidden and semantic-neutral", async () => {
 
   const wat = await watFromSource(source);
   assert(!wat.includes("span"));
+
+  const imported = await checkSource(
+    `
+      const lib = @import("./lib.fig");
+      pub fn main() -> i32 { lib.add_one(41) }
+    `,
+    {
+      sourceId: "/tmp/app.fig",
+      resolveModule(moduleName) {
+        if (moduleName !== "./lib.fig") return undefined;
+        return {
+          sourceId: "/tmp/lib.fig",
+          text: "fn add_one(x: i32) -> i32 { x + 1 }",
+        };
+      },
+      pruneImports: true,
+    },
+  );
+  const importedFn = imported.program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "lib.add_one"
+  );
+  assert(importedFn);
+  assert(importedFn.span);
+  assert(!Object.keys(importedFn).includes("span"));
 });
 
 Deno.test("branch hints parse on match arms and function clauses", async () => {
@@ -7096,6 +7121,31 @@ Deno.test("compileArtifactsFromSource reuses cached pruned imports", async () =>
   assertEquals((instance.exports.main as () => number)(), 2);
 });
 
+Deno.test("compileArtifactsFromSource resolves repeated imports once per importer", async () => {
+  let resolveCalls = 0;
+  const source = `
+    const left = @import("fixture.lib");
+    const right = @import("fixture.lib");
+    pub fn main() -> i32 { left.value() + right.value() }
+  `;
+  const artifact = await compileArtifactsFromSource(source, {
+    resolveModule: (moduleName) => {
+      resolveCalls++;
+      return moduleName === "fixture.lib" ? "fn value() -> i32 { 4 }" : undefined;
+    },
+    pruneImports: true,
+    trace: true,
+  });
+  assertEquals(resolveCalls, 1);
+  assert(
+    artifact.importTrace?.phases.some((phase) =>
+      phase.name === "import.resolve.root" && phase.cacheHit
+    ),
+  );
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 8);
+});
+
 Deno.test("compileArtifactsFromSource reuses cached import closures", async () => {
   const cache = createCompileCache();
   const source = `
@@ -7212,6 +7262,397 @@ Deno.test("linked module cache key changes when a dependency changes", async () 
   assertEquals((instance.exports.main as () => number)(), 2);
 });
 
+Deno.test("compile cache records body-stable linked module key candidates", async () => {
+  class CountingSet<T> extends Set<T> {
+    hits = 0;
+    misses = 0;
+
+    override has(value: T): boolean {
+      const found = super.has(value);
+      if (found) {
+        this.hits++;
+      } else {
+        this.misses++;
+      }
+      return found;
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  const cache = createCompileCache();
+  const stableLinkedModuleKeys = new CountingSet<string>();
+  cache.stableLinkedModuleKeys = stableLinkedModuleKeys;
+  let leafValue = 1;
+  const resolveModule = (moduleName: string, context?: { fromSourceId?: string }) => {
+    if (moduleName === "./lib.fig") {
+      return {
+        sourceId: "/fixture/lib.fig",
+        text: `
+          const leaf = @import("./leaf.fig");
+          fn value() -> i32 { leaf.value() }
+        `,
+      };
+    }
+    if (moduleName === "./leaf.fig" && context?.fromSourceId === "/fixture/lib.fig") {
+      return { sourceId: "/fixture/leaf.fig", text: `fn value() -> i32 { ${leafValue} }` };
+    }
+    return undefined;
+  };
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+
+  const first = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  let instance = new WebAssembly.Instance(new WebAssembly.Module(first.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+
+  stableLinkedModuleKeys.resetCounts();
+  leafValue = 2;
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+  assert(stableLinkedModuleKeys.hits > 0);
+});
+
+Deno.test("compile cache records body-stable import closure key candidates", async () => {
+  class CountingSet<T> extends Set<T> {
+    hits = 0;
+    misses = 0;
+
+    override has(value: T): boolean {
+      const found = super.has(value);
+      if (found) {
+        this.hits++;
+      } else {
+        this.misses++;
+      }
+      return found;
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  const cache = createCompileCache();
+  const stableImportClosureKeys = new CountingSet<string>();
+  cache.stableImportClosureKeys = stableImportClosureKeys;
+  let leafValue = 1;
+  const resolveModule = (moduleName: string, context?: { fromSourceId?: string }) => {
+    if (moduleName === "./lib.fig") {
+      return {
+        sourceId: "/fixture/lib.fig",
+        text: `
+          const leaf = @import("./leaf.fig");
+          fn value() -> i32 { leaf.value() }
+        `,
+      };
+    }
+    if (moduleName === "./leaf.fig" && context?.fromSourceId === "/fixture/lib.fig") {
+      return { sourceId: "/fixture/leaf.fig", text: `fn value() -> i32 { ${leafValue} }` };
+    }
+    return undefined;
+  };
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+
+  const first = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  let instance = new WebAssembly.Instance(new WebAssembly.Module(first.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+
+  stableImportClosureKeys.resetCounts();
+  leafValue = 2;
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+  assert(stableImportClosureKeys.hits > 0);
+  assertEquals(stableImportClosureKeys.misses, 0);
+});
+
+Deno.test("compile cache records body-stable checked program key candidates", async () => {
+  class CountingSet<T> extends Set<T> {
+    hits = 0;
+    misses = 0;
+
+    override has(value: T): boolean {
+      const found = super.has(value);
+      if (found) {
+        this.hits++;
+      } else {
+        this.misses++;
+      }
+      return found;
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  const cache = createCompileCache();
+  const checkedProgramKeys = new CountingSet<string>();
+  cache.checkedProgramKeys = checkedProgramKeys;
+  let leafValue = 1;
+  const resolveModule = (moduleName: string, context?: { fromSourceId?: string }) => {
+    if (moduleName === "./lib.fig") {
+      return {
+        sourceId: "/fixture/lib.fig",
+        text: `
+          const leaf = @import("./leaf.fig");
+          fn value() -> i32 { leaf.value() }
+        `,
+      };
+    }
+    if (moduleName === "./leaf.fig" && context?.fromSourceId === "/fixture/lib.fig") {
+      return { sourceId: "/fixture/leaf.fig", text: `fn value() -> i32 { ${leafValue} }` };
+    }
+    return undefined;
+  };
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+
+  const first = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  let instance = new WebAssembly.Instance(new WebAssembly.Module(first.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+
+  checkedProgramKeys.resetCounts();
+  leafValue = 2;
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+  assertEquals(checkedProgramKeys.hits, 1);
+  assertEquals(checkedProgramKeys.misses, 0);
+});
+
+Deno.test("module interface key ignores function bodies but tracks signatures", async () => {
+  const original = await parse(`
+    const dep = @import("./dep.fig");
+    type fn Box() -> type {
+      let Box = {value: i32};
+      struct(Box)
+    }
+    fn value(x: i32) -> i32 { x + 1 }
+    const exported: i32 = 1
+  `);
+  const bodyEdit = await parse(`
+    const dep = @import("./dep.fig");
+    type fn Box() -> type {
+      let Box = {value: i32};
+      struct(Box)
+    }
+    fn value(x: i32) -> i32 { x + 99 }
+    const exported: i32 = 2
+  `);
+  const signatureEdit = await parse(`
+    const dep = @import("./dep.fig");
+    type fn Box() -> type {
+      let Box = {value: i32};
+      struct(Box)
+    }
+    fn value(x: i64) -> i32 { 1 }
+    const exported: i32 = 1
+  `);
+  const typeEdit = await parse(`
+    const dep = @import("./dep.fig");
+    type fn Box() -> type {
+      let Box = {value: i64};
+      struct(Box)
+    }
+    fn value(x: i32) -> i32 { x + 1 }
+    const exported: i32 = 1
+  `);
+  assertEquals(moduleInterfaceKey(original), moduleInterfaceKey(bodyEdit));
+  assert(moduleInterfaceKey(original) !== moduleInterfaceKey(signatureEdit));
+  assert(moduleInterfaceKey(original) !== moduleInterfaceKey(typeEdit));
+});
+
+Deno.test("compile cache records stable module interface keys across body edits", async () => {
+  const cache = createCompileCache();
+  let value = 1;
+  const source = `
+    const lib = @import("fixture.lib");
+    pub fn main() -> i32 { lib.value() }
+  `;
+  const resolveModule = (moduleName: string) =>
+    moduleName === "fixture.lib" ? `fn value() -> i32 { ${value} }` : undefined;
+  await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
+  value = 2;
+  await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
+  assertEquals(new Set(cache.moduleInterfaceKeys?.values()).size, 1);
+  assertEquals(cache.moduleInterfaceKeysBySourceId?.size, 1);
+  assertEquals(cache.stableModuleInterfaces?.size, 1);
+});
+
+Deno.test("compile cache reuses module reference keys for unchanged imports", async () => {
+  class CountingMap<K, V> extends Map<K, V> {
+    hits = 0;
+    misses = 0;
+
+    override get(key: K): V | undefined {
+      if (this.has(key)) {
+        this.hits++;
+      } else {
+        this.misses++;
+      }
+      return super.get(key);
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  const cache = createCompileCache();
+  const moduleReferenceKeys = new CountingMap<string, string>();
+  cache.moduleReferenceKeys = moduleReferenceKeys;
+  const modules = new Map([
+    [
+      "/project/lib.fig",
+      `
+        const leaf = @import("./leaf.fig");
+        fn value() -> i32 { leaf.value() }
+      `,
+    ],
+    ["/project/leaf.fig", "fn value() -> i32 { 1 }"],
+  ]);
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+  const resolveModule = (moduleName: string, context?: { fromSourceId?: string }) => {
+    if (moduleName === "./lib.fig") {
+      return { sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! };
+    }
+    if (moduleName === "./leaf.fig" && context?.fromSourceId === "/project/lib.fig") {
+      return { sourceId: "/project/leaf.fig", text: modules.get("/project/leaf.fig")! };
+    }
+    return undefined;
+  };
+
+  await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
+  moduleReferenceKeys.resetCounts();
+  modules.set("/project/leaf.fig", "fn value() -> i32 { 2 }");
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+  });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+  assert(moduleReferenceKeys.hits > 0);
+  assert(moduleReferenceKeys.misses > 0);
+});
+
+Deno.test("compile cache rehydrates pruned import selections after body edits", async () => {
+  const cache = createCompileCache();
+  let value = 1;
+  const source = `
+    const lib = @import("fixture.selection");
+    pub fn main() -> i32 { lib.used() }
+  `;
+  const resolveModule = (moduleName: string) => {
+    if (moduleName !== "fixture.selection") return undefined;
+    return `
+        fn helper() -> i32 { ${value} }
+        fn used() -> i32 { helper() }
+        fn unused() -> i32 { 99 }
+      `;
+  };
+
+  await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
+  value = 2;
+  const compileTrace: CompileTraceEvent[] = [];
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+    compileTrace,
+  });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+
+  let selectionCacheHits = 0;
+  for (const event of compileTrace) {
+    const matchesSelectionCache = event.name === "import.prune.selection_cache";
+    const matchesModule = event.counters?.moduleName === "fixture.selection";
+    if (matchesSelectionCache && matchesModule) selectionCacheHits++;
+  }
+  assertEquals(selectionCacheHits, 1);
+});
+
+Deno.test("compile cache misses pruned import selections when body references change", async () => {
+  const cache = createCompileCache();
+  let useFallback = false;
+  const source = `
+    const lib = @import("fixture.reference_change");
+    pub fn main() -> i32 { lib.used() }
+  `;
+  const resolveModule = (moduleName: string) => {
+    if (moduleName !== "fixture.reference_change") return undefined;
+    const helperBody = useFallback ? "fallback()" : "1";
+    return `
+        fn fallback() -> i32 { 7 }
+        fn helper() -> i32 { ${helperBody} }
+        fn used() -> i32 { helper() }
+        fn unused() -> i32 { 99 }
+      `;
+  };
+
+  await compileArtifactsFromSource(source, { resolveModule, pruneImports: true, cache });
+  useFallback = true;
+  const compileTrace: CompileTraceEvent[] = [];
+  const second = await compileArtifactsFromSource(source, {
+    resolveModule,
+    pruneImports: true,
+    cache,
+    compileTrace,
+  });
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.wasm));
+  assertEquals((instance.exports.main as () => number)(), 7);
+
+  for (const event of compileTrace) {
+    const matchesSelectionCache = event.name === "import.prune.selection_cache";
+    const matchesModule = event.counters?.moduleName === "fixture.reference_change";
+    assert(!(matchesSelectionCache && matchesModule));
+  }
+});
+
 Deno.test("compile cache invalidates parsed imports when module source changes", async () => {
   const cache = createCompileCache();
   let value = 1;
@@ -7284,6 +7725,625 @@ Deno.test("compiler session tracks import dependencies and affected roots", asyn
   if (!second.ok) return;
   const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
   assertEquals((instance.exports.main as () => number)(), 2);
+});
+
+Deno.test("compiler session reuses artifact for semantic no-op root edits", async () => {
+  const session = createCompilerSession({
+    includeWat: false,
+    resolveModule: () => undefined,
+  });
+  const source = "pub fn main() -> i32 { 1 }";
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+  const second = await session.compileRoot({
+    sourceId: "/project/main.fig",
+    text: `${source}\n// trailing edit`,
+  });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  assertEquals(second.artifact.timings.importMs, 0);
+  assertEquals(second.artifact.timings.checkMs, 0);
+  assertEquals(second.artifact.timings.backendMs, 0);
+  assertEquals(second.artifact.timings.wasmEncodeMs, 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("compiler session reuses parsed root for trailing trivia replacements", async () => {
+  const session = createCompilerSession({
+    includeWat: false,
+    resolveModule: () => undefined,
+  });
+  const source = "pub fn main() -> i32 { 1 }";
+  const first = await session.compileRoot({
+    sourceId: "/project/main.fig",
+    text: `${source}\n// first trailing edit`,
+  });
+  assertEquals(first.ok, true);
+  const second = await session.compileRoot({
+    sourceId: "/project/main.fig",
+    text: `${source}\n// second trailing edit`,
+  });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  assertEquals(second.artifact.timings.parseMs, 0);
+  assertEquals(second.artifact.timings.importMs, 0);
+  assertEquals(second.artifact.timings.checkMs, 0);
+  assertEquals(second.artifact.timings.backendMs, 0);
+  assertEquals(second.artifact.timings.wasmEncodeMs, 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("compiler session reuses artifact for semantic no-op import edits", async () => {
+  const modules = new Map([
+    ["/project/lib.fig", "fn value() -> i32 { 1 }"],
+  ]);
+  const session = createCompilerSession({
+    includeWat: false,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+
+  modules.set("/project/lib.fig", "fn value() -> i32 { 1 }\n// trailing edit");
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  assertEquals(second.artifact.timings.parseMs, 0);
+  assertEquals(second.artifact.timings.importMs, 0);
+  assertEquals(second.artifact.timings.checkMs, 0);
+  assertEquals(second.artifact.timings.backendMs, 0);
+  assertEquals(second.artifact.timings.wasmEncodeMs, 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("compiler session reuses artifact for import trailing trivia replacements", async () => {
+  const modules = new Map([
+    ["/project/lib.fig", "fn value() -> i32 { 1 }\n// first trailing edit"],
+  ]);
+  const session = createCompilerSession({
+    includeWat: false,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+
+  modules.set("/project/lib.fig", "fn value() -> i32 { 1 }\n// second trailing edit");
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  assertEquals(second.artifact.timings.parseMs, 0);
+  assertEquals(second.artifact.timings.importMs, 0);
+  assertEquals(second.artifact.timings.checkMs, 0);
+  assertEquals(second.artifact.timings.backendMs, 0);
+  assertEquals(second.artifact.timings.wasmEncodeMs, 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("compiler session keeps function caches across semantic import edits", async () => {
+  class CountingMap<K, V> extends Map<K, V> {
+    hits = 0;
+    misses = 0;
+
+    override get(key: K): V | undefined {
+      if (this.has(key)) this.hits++;
+      else this.misses++;
+      return super.get(key);
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  class CountingWeakMap<K extends object, V> extends WeakMap<K, V> {
+    hits = 0;
+    misses = 0;
+
+    override get(key: K): V | undefined {
+      const value = super.get(key);
+      if (value === undefined) this.misses++;
+      else this.hits++;
+      return value;
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  const cache = createCompileCache();
+  const functionChecks = new CountingMap<string, unknown>();
+  const backendFunctions = new CountingMap<string, unknown>();
+  const backendDirectCalls = new CountingWeakMap<object, Extract<Expr, { kind: "call" }>[]>();
+  cache.functionChecks = functionChecks as typeof cache.functionChecks;
+  cache.backendFunctions = backendFunctions as typeof cache.backendFunctions;
+  cache.backendDirectCalls = backendDirectCalls as typeof cache.backendDirectCalls;
+  const modules = new Map([
+    [
+      "/project/lib.fig",
+      `
+        fn stable(x: i32) -> i32 { x * 2 }
+        fn changed(x: i32) -> i32 { x + 1 }
+        fn entry(x: i32) -> i32 { stable(x) + changed(x) }
+      `,
+    ],
+  ]);
+  const session = createCompilerSession({
+    cache,
+    includeWat: false,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main(x: i32) -> i32 { lib.entry(x) }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+  functionChecks.resetCounts();
+  backendFunctions.resetCounts();
+  backendDirectCalls.resetCounts();
+
+  modules.set(
+    "/project/lib.fig",
+    `
+      fn stable(x: i32) -> i32 { x * 2 }
+      fn changed(x: i32) -> i32 { x + 2 }
+      fn entry(x: i32) -> i32 { stable(x) + changed(x) }
+    `,
+  );
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as (x: number) => number)(3), 11);
+  assert(functionChecks.hits > 0);
+  assert(functionChecks.misses <= 1);
+  assert(backendFunctions.hits > 0);
+  assert(backendFunctions.misses <= 1);
+  assert(backendDirectCalls.hits + backendDirectCalls.misses > 0);
+});
+
+Deno.test("checker declaration transform caches survive semantic import edits", async () => {
+  class CountingWeakSet<T extends object> extends WeakSet<T> {
+    hits = 0;
+
+    override has(value: T): boolean {
+      const hit = super.has(value);
+      if (hit) this.hits++;
+      return hit;
+    }
+  }
+
+  class CountingWeakMap<K extends object, V> extends WeakMap<K, V> {
+    hits = 0;
+
+    override get(key: K): V | undefined {
+      const value = super.get(key);
+      if (value !== undefined) this.hits++;
+      return value;
+    }
+  }
+
+  class CountingSet<T> extends Set<T> {
+    hits = 0;
+
+    override has(value: T): boolean {
+      const hit = super.has(value);
+      if (hit) this.hits++;
+      return hit;
+    }
+  }
+
+  const cache = createCompileCache();
+  const builtinOperatorLoweredDeclarations = new CountingWeakSet<object>();
+  const branchHintCheckedDeclarations = new CountingWeakSet<object>();
+  const balancedBinaryDeclarations = new CountingWeakSet<object>();
+  const collectorLoweredDeclarations = new CountingWeakMap<object, string>();
+  const typeContractChecks = new CountingSet<string>();
+  cache.builtinOperatorLoweredDeclarations = builtinOperatorLoweredDeclarations;
+  cache.branchHintCheckedDeclarations = branchHintCheckedDeclarations;
+  cache.balancedBinaryDeclarations = balancedBinaryDeclarations;
+  cache.collectorLoweredDeclarations = collectorLoweredDeclarations;
+  cache.typeContractChecks = typeContractChecks;
+  const modules = new Map([
+    [
+      "/project/lib.fig",
+      `
+        type fn Lane4I32() -> type {
+          let Lane4I32 = {4*i32};
+          struct(Lane4I32)
+        }
+        fn stable(seed: i32) -> i32 {
+          let row: Lane4I32 = #[1, 2, 3, 4];
+          seed + row[0] + row[1] + row[2] + row[3]
+        }
+        fn changed(seed: i32) -> i32 { seed + 1 }
+        fn entry(seed: i32) -> i32 { stable(seed) + changed(seed) }
+      `,
+    ],
+  ]);
+  const session = createCompilerSession({
+    cache,
+    includeWat: false,
+    pruneImports: true,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main(seed: i32) -> i32 { lib.entry(seed) }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+
+  modules.set(
+    "/project/lib.fig",
+    `
+      type fn Lane4I32() -> type {
+        let Lane4I32 = {4*i32};
+        struct(Lane4I32)
+      }
+      fn stable(seed: i32) -> i32 {
+        let row: Lane4I32 = #[1, 2, 3, 4];
+        seed + row[0] + row[1] + row[2] + row[3]
+      }
+      fn changed(seed: i32) -> i32 { seed + 2 }
+      fn entry(seed: i32) -> i32 { stable(seed) + changed(seed) }
+    `,
+  );
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  assert(builtinOperatorLoweredDeclarations.hits > 0);
+  assert(branchHintCheckedDeclarations.hits > 0);
+  assert(balancedBinaryDeclarations.hits > 0);
+  assert(collectorLoweredDeclarations.hits > 0);
+  assert(typeContractChecks.hits > 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as (seed: number) => number)(10), 32);
+});
+
+Deno.test("alias root cache survives imported body-only edits", async () => {
+  class CountingMap<K, V> extends Map<K, V> {
+    hits = 0;
+    misses = 0;
+
+    override get(key: K): V | undefined {
+      if (this.has(key)) this.hits++;
+      else this.misses++;
+      return super.get(key);
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  const cache = createCompileCache();
+  const aliasReferenceRoots = new CountingMap<string, Set<string>>();
+  cache.aliasReferenceRoots = aliasReferenceRoots;
+  const modules = new Map([
+    ["/project/lib.fig", "fn value() -> i32 { 1 }"],
+  ]);
+  const session = createCompilerSession({
+    cache,
+    includeWat: false,
+    pruneImports: true,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+  aliasReferenceRoots.resetCounts();
+
+  modules.set("/project/lib.fig", "fn value() -> i32 { 2 }");
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  assert(aliasReferenceRoots.hits > 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 2);
+});
+
+Deno.test("qualified declaration cache survives imported body-only edits", async () => {
+  class CountingMap<K, V> extends Map<K, V> {
+    hits = 0;
+    misses = 0;
+
+    override get(key: K): V | undefined {
+      if (this.has(key)) this.hits++;
+      else this.misses++;
+      return super.get(key);
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  const cache = createCompileCache();
+  const qualifiedDeclarations = new CountingMap<string, unknown>();
+  cache.qualifiedDeclarations = qualifiedDeclarations as typeof cache.qualifiedDeclarations;
+  const modules = new Map([
+    [
+      "/project/lib.fig",
+      `
+        fn stable(x: i32) -> i32 { x * 2 }
+        fn changed(x: i32) -> i32 { x + 1 }
+        fn entry(x: i32) -> i32 { stable(x) + changed(x) }
+      `,
+    ],
+  ]);
+  const session = createCompilerSession({
+    cache,
+    includeWat: false,
+    pruneImports: true,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main(x: i32) -> i32 { lib.entry(x) }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+  qualifiedDeclarations.resetCounts();
+
+  modules.set(
+    "/project/lib.fig",
+    `
+        fn stable(x: i32) -> i32 { x * 2 }
+        fn changed(x: i32) -> i32 { x + 2 }
+        fn entry(x: i32) -> i32 { stable(x) + changed(x) }
+      `,
+  );
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  assert(qualifiedDeclarations.hits > 0);
+  assert(qualifiedDeclarations.misses > 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as (x: number) => number)(3), 11);
+});
+
+Deno.test("declaration reference summary cache survives imported body-only edits", async () => {
+  class CountingMap<K, V> extends Map<K, V> {
+    hits = 0;
+    misses = 0;
+
+    override get(key: K): V | undefined {
+      if (this.has(key)) this.hits++;
+      else this.misses++;
+      return super.get(key);
+    }
+
+    resetCounts() {
+      this.hits = 0;
+      this.misses = 0;
+    }
+  }
+
+  const cache = createCompileCache();
+  const referenceSummaries = new CountingMap<string, unknown>();
+  cache.referenceSummaries = referenceSummaries as typeof cache.referenceSummaries;
+  cache.prunedImportSelections = undefined;
+  const modules = new Map([
+    [
+      "/project/lib.fig",
+      `
+        fn stable(x: i32) -> i32 { x * 2 }
+        fn changed(x: i32) -> i32 { x + 1 }
+        fn entry(x: i32) -> i32 { stable(x) + changed(x) }
+      `,
+    ],
+  ]);
+  const session = createCompilerSession({
+    cache,
+    includeWat: false,
+    pruneImports: true,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main(x: i32) -> i32 { lib.entry(x) }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+  referenceSummaries.resetCounts();
+
+  modules.set(
+    "/project/lib.fig",
+    `
+        fn stable(x: i32) -> i32 { x * 2 }
+        fn changed(x: i32) -> i32 { x + 2 }
+        fn entry(x: i32) -> i32 { stable(x) + changed(x) }
+      `,
+  );
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  assert(referenceSummaries.hits > 0);
+  assert(referenceSummaries.misses > 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as (x: number) => number)(3), 11);
+});
+
+Deno.test("compiler session patches parsed imports for body-only function edits", async () => {
+  const modules = new Map([
+    [
+      "/project/lib.fig",
+      `
+        fn changed(x: i32) -> i32 { x + 1 }
+        fn stable(x: i32) -> i32 { x * 2 }
+        fn entry(x: i32) -> i32 { stable(x) + changed(x) }
+      `,
+    ],
+  ]);
+  const session = createCompilerSession({
+    includeWat: false,
+    pruneImports: true,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main(x: i32) -> i32 { lib.entry(x) }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+
+  modules.set(
+    "/project/lib.fig",
+    `
+        fn changed(x: i32) -> i32 { x + 1000 }
+        fn stable(x: i32) -> i32 { x * 2 }
+        fn entry(x: i32) -> i32 { stable(x) + changed(x) }
+      `,
+  );
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+  if (!second.ok) return;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(second.artifact.wasm));
+  assertEquals((instance.exports.main as (x: number) => number)(3), 1009);
+});
+
+Deno.test("compiler session patches later functions after length-changing body edits", async () => {
+  const modules = new Map([
+    [
+      "/project/lib.fig",
+      `
+        fn first(x: i32) -> i32 { x + 1 }
+        fn later(x: i32) -> i32 { x * 2 }
+        fn entry(x: i32) -> i32 { first(x) + later(x) }
+      `,
+    ],
+  ]);
+  const session = createCompilerSession({
+    includeWat: false,
+    pruneImports: true,
+    resolveModule: (moduleName) => {
+      if (moduleName !== "./lib.fig") return undefined;
+      return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+    },
+  });
+  const source = `
+    const lib = @import("./lib.fig");
+    pub fn main(x: i32) -> i32 { lib.entry(x) }
+  `;
+  const first = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(first.ok, true);
+
+  modules.set(
+    "/project/lib.fig",
+    `
+        fn first(x: i32) -> i32 { x + 1000 }
+        fn later(x: i32) -> i32 { x * 2 }
+        fn entry(x: i32) -> i32 { first(x) + later(x) }
+      `,
+  );
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const second = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(second.ok, true);
+
+  modules.set(
+    "/project/lib.fig",
+    `
+        fn first(x: i32) -> i32 { x + 1000 }
+        fn later(x: i32) -> i32 { x * 3 }
+        fn entry(x: i32) -> i32 { first(x) + later(x) }
+      `,
+  );
+  session.update({ sourceId: "/project/lib.fig", text: modules.get("/project/lib.fig")! });
+  const third = await session.compileRoot({ sourceId: "/project/main.fig", text: source });
+  assertEquals(third.ok, true);
+  if (!third.ok) return;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(third.artifact.wasm));
+  assertEquals((instance.exports.main as (x: number) => number)(3), 1012);
+});
+
+Deno.test("shared parsed import cache is reusable across import shapes", async () => {
+  const cache = createCompileCache();
+  const modules = new Map([
+    ["/project/lib.fig", "fn value() -> i32 { 7 }"],
+  ]);
+  const resolveModule = (moduleName: string) => {
+    if (moduleName !== "./lib.fig") return undefined;
+    return { text: modules.get("/project/lib.fig")!, sourceId: "/project/lib.fig" };
+  };
+  const aliased = `
+    const lib = @import("./lib.fig");
+    pub fn main() -> i32 { lib.value() }
+  `;
+  const destructured = `
+    const { value } = @import("./lib.fig");
+    pub fn main() -> i32 { value() }
+  `;
+
+  for (
+    const [sourceId, source] of [
+      ["/project/aliased.fig", aliased],
+      ["/project/destructured.fig", destructured],
+      ["/project/aliased-again.fig", aliased],
+    ] as const
+  ) {
+    const artifact = await compileArtifactsFromSource(source, {
+      cache,
+      includeWat: false,
+      pruneImports: true,
+      resolveModule,
+      sourceId,
+    });
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+    assertEquals((instance.exports.main as () => number)(), 7);
+  }
 });
 
 Deno.test("compiler session passes importer context to nested relative imports", async () => {
@@ -7392,6 +8452,108 @@ Deno.test("backend function cache reuses side-effect-free lowered functions", as
   const event = compileTrace.find((item) => item.name === "backend.lower.function_cache");
   assert(event);
   assert((event.counters?.cacheHits as number | undefined ?? 0) > 0);
+});
+
+Deno.test("wasm encoder cache reuses unchanged function bodies without stale edits", async () => {
+  const cache = createCompileCache();
+  const first = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn pass(x: i32) -> i32 { x }
+    pub fn main(seed: i32) -> i32 { pass(inc(seed)) }
+  `;
+  const second = `
+    fn inc(x: i32) -> i32 { x + 2 }
+    fn pass(x: i32) -> i32 { x }
+    pub fn main(seed: i32) -> i32 { pass(inc(seed)) }
+  `;
+  await compileArtifactsFromSource(first, { cache, includeWat: false });
+  await compileArtifactsFromSource(first, { cache, includeWat: false });
+  const compileTrace: CompileTraceEvent[] = [];
+  const artifact = await compileArtifactsFromSource(second, {
+    cache,
+    compileTrace,
+    includeWat: false,
+  });
+  const event = compileTrace.find((item) => item.name === "wasm.encode.function_cache");
+  assert(event);
+  assert((event.counters?.cacheHits as number | undefined ?? 0) > 0);
+  assert((event.counters?.cacheMisses as number | undefined ?? 0) > 0);
+  const nameEvent = compileTrace.find((item) => item.name === "wasm.encode.name_section_cache");
+  assert(nameEvent);
+  assert((nameEvent.counters?.cacheHits as number | undefined ?? 0) > 0);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as (seed: number) => number)(10), 12);
+});
+
+Deno.test("backend planning cache reuses literal-only edits without stale output", async () => {
+  const cache = createCompileCache();
+  const first = `
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn pass(x: i32) -> i32 { x }
+    pub fn main(seed: i32) -> i32 { pass(inc(seed)) }
+  `;
+  const second = `
+    fn inc(x: i32) -> i32 { x + 2 }
+    fn pass(x: i32) -> i32 { x }
+    pub fn main(seed: i32) -> i32 { pass(inc(seed)) }
+  `;
+  const structural = `
+    fn inc(x: i32) -> i32 { pass(x + 2) }
+    fn pass(x: i32) -> i32 { x }
+    pub fn main(seed: i32) -> i32 { pass(inc(seed)) }
+  `;
+  await compileArtifactsFromSource(first, { cache, includeWat: false });
+  const literalTrace: CompileTraceEvent[] = [];
+  const literalArtifact = await compileArtifactsFromSource(second, {
+    cache,
+    compileTrace: literalTrace,
+    includeWat: false,
+  });
+  const literalEvent = literalTrace.find((item) => item.name === "backend.layout.plan_cache");
+  assert(literalEvent);
+  assertEquals(literalEvent.counters?.cacheHit, true);
+  const literalInstance = new WebAssembly.Instance(new WebAssembly.Module(literalArtifact.wasm));
+  assertEquals((literalInstance.exports.main as (seed: number) => number)(10), 12);
+
+  const structuralTrace: CompileTraceEvent[] = [];
+  const structuralArtifact = await compileArtifactsFromSource(structural, {
+    cache,
+    compileTrace: structuralTrace,
+    includeWat: false,
+  });
+  const structuralEvent = structuralTrace.find((item) => item.name === "backend.layout.plan_cache");
+  assert(structuralEvent);
+  assertEquals(structuralEvent.counters?.cacheHit, false);
+  const structuralInstance = new WebAssembly.Instance(
+    new WebAssembly.Module(structuralArtifact.wasm),
+  );
+  assertEquals((structuralInstance.exports.main as (seed: number) => number)(10), 12);
+});
+
+Deno.test("debug optimizer fast path skips clone when no profile expressions need erasing", async () => {
+  const compileTrace: CompileTraceEvent[] = [];
+  const artifact = await compileArtifactsFromSource(
+    `pub fn main() -> i32 { 1 }`,
+    { compileTrace, includeWat: false },
+  );
+  const fastPath = compileTrace.find((item) => item.name === "opt.debug_fast_path");
+  assert(fastPath);
+  assertEquals(compileTrace.some((item) => item.name === "opt.clone"), false);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("debug optimizer keeps profile erasure path when profiling is disabled", async () => {
+  const compileTrace: CompileTraceEvent[] = [];
+  const artifact = await compileArtifactsFromSource(
+    `pub fn main() -> i32 { @profile("work") { 1 } }`,
+    { compileTrace, includeWat: false },
+  );
+  assert(compileTrace.some((item) => item.name === "opt.clone"));
+  assertEquals(compileTrace.some((item) => item.name === "opt.debug_fast_path"), false);
+  assertEquals(artifact.profileSites, []);
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as () => number)(), 1);
 });
 
 Deno.test("backend function cache skips functions that emit debug trace sites", async () => {
@@ -7792,6 +8954,10 @@ Deno.test("contract fn rewrite validates context and rewrite-only type spelling"
   );
   await assertThrowsCompile(
     `let x: rewrite = 0;`,
+    "parse.syntax",
+  );
+  await assertThrowsCompile(
+    `fn bad() -> i32 { let x: rewrite = 0; x }`,
     "parse.syntax",
   );
   await assertThrowsCompile(

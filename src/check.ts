@@ -3,6 +3,7 @@ import type {
   BranchHint,
   ConstDecl,
   ContractDecl,
+  DebugTraceStmt,
   Declaration,
   DoStatement,
   Expr,
@@ -42,6 +43,7 @@ import {
   staticBuiltinName,
   staticBuiltinParamKind,
 } from "./plugins.ts";
+import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
 import { checkContracts } from "./contracts/check.ts";
 import {
   canonicalDomainKey,
@@ -114,8 +116,27 @@ export interface FunctionCheckCacheEntry {
   fn: FnDecl;
 }
 
+interface InferredTypeVarCacheEntry {
+  key: string;
+  vars: Set<string>;
+}
+
+const PARSED_ANNOTATION_TYPE_CACHE_LIMIT = 4096;
+const parsedAnnotationTypeCache = new Map<string, TypeExpr | false>();
+
 export interface CheckCache {
   functionChecks?: Map<string, FunctionCheckCacheEntry>;
+  semanticHashes?: WeakMap<object, string>;
+  signatureHashes?: WeakMap<object, string>;
+  annotationWork?: WeakMap<object, boolean>;
+  doExpressionWork?: WeakMap<object, boolean>;
+  contractRewriteMisuseDeclarations?: WeakMap<object, Diagnostic[]>;
+  builtinOperatorLoweredDeclarations?: WeakSet<object>;
+  branchHintCheckedDeclarations?: WeakSet<object>;
+  balancedBinaryDeclarations?: WeakSet<object>;
+  collectorLoweredDeclarations?: WeakMap<object, string>;
+  inferredTypeVars?: WeakMap<object, InferredTypeVarCacheEntry>;
+  typeContractChecks?: Set<string>;
 }
 
 interface CallCheckMemo {
@@ -128,10 +149,13 @@ interface CheckMemo {
   exprBindingType: Map<string, string | undefined>;
   staticConstValue: Map<string, ConstValue | undefined>;
   callCheck: Map<string, CallCheckMemo>;
+  typeVarsByFunction: WeakMap<FnDecl, Set<string>>;
+  cachedTypeVarsByFunction?: WeakMap<object, InferredTypeVarCacheEntry>;
 }
 
 export interface CheckProgramOptions extends CompilerPluginOptions {
   trace?: boolean;
+  compileTrace?: CompileTraceSink;
   cache?: CheckCache;
 }
 
@@ -498,6 +522,222 @@ function checkDebugTraceStatements(program: Program, diagnostics: Diagnostic[]) 
   }
 }
 
+function checkPreflightSyntax(program: Program, diagnostics: Diagnostic[]) {
+  const checkName = (name: string | undefined, spanLike?: { span?: Span; nameSpan?: Span }) => {
+    if (!name) return;
+    if (!RESERVED_COMPILER_VALUE_NAMES.has(name)) return;
+    diagnostics.push(diagnosticAt(
+      "name.reserved",
+      `${name} is reserved for a compiler builtin`,
+      spanLike,
+    ));
+  };
+  const checkPattern = (pattern: ParamPattern | undefined) => {
+    if (pattern?.kind === "binding") checkName(pattern.name, pattern);
+    if (pattern?.kind === "tuple") {
+      for (const item of pattern.items) checkPattern(item);
+    }
+    if (pattern?.kind === "constructor") {
+      for (const item of pattern.args) checkPattern(item);
+    }
+  };
+  const checkTypeExpr = (expr: TypeExpr | undefined) => {
+    if (!expr) return;
+    if (expr.kind === "type_static_ref" && isCompilerSpecialForm(expr.name, "declaration")) {
+      const form = compilerSpecialForm(expr.name);
+      diagnostics.push(diagnosticAt(
+        "syntax.declaration_builtin",
+        `${form?.spelling ?? `@${expr.name}`} is only valid as a top-level const declaration value`,
+        expr,
+      ));
+    }
+    for (const child of typeExprChildren(expr)) checkTypeExpr(child);
+  };
+  const checkTraceStatement = (stmt: DebugTraceStmt, allowProfile: boolean) => {
+    if (stmt.builtin !== "trace") {
+      diagnostics.push(diagnosticAt(
+        "debug.trace_builtin",
+        `unknown debug statement @${stmt.builtin}; use @trace("message")`,
+        stmt,
+      ));
+    }
+    if (stmt.args.length !== 1) {
+      diagnostics.push(diagnosticAt(
+        "debug.trace_arity",
+        "@trace expects exactly one string literal argument",
+        stmt,
+      ));
+    } else {
+      const message = stmt.args[0];
+      if (message?.kind !== "literal" || message.literalKind !== "string") {
+        diagnostics.push(diagnosticAt(
+          "debug.trace_message",
+          "@trace expects a string literal message",
+          message ?? stmt,
+        ));
+      }
+    }
+    for (const arg of stmt.args) checkExpr(arg, allowProfile);
+  };
+  const checkStatement = (stmt: Statement, allowProfile: boolean) => {
+    if (stmt.kind === "let" || stmt.kind === "proof_const") checkName(stmt.name, stmt);
+    if (stmt.kind === "destructure_let") {
+      for (const name of stmt.names) checkName(name, { span: stmt.nameSpans?.[name] ?? stmt.span });
+    }
+    if (stmt.kind === "let" || stmt.kind === "destructure_let") {
+      checkExpr(stmt.value, allowProfile);
+      return;
+    }
+    if (stmt.kind === "proof_const") {
+      checkTypeExpr(stmt.value);
+      return;
+    }
+    checkTraceStatement(stmt, allowProfile);
+  };
+  const checkDoStatement = (stmt: DoStatement, allowProfile: boolean) => {
+    if (stmt.kind === "do_bind") {
+      checkName(stmt.name, stmt);
+      checkExpr(stmt.value, allowProfile);
+      return;
+    }
+    if (stmt.kind === "do_expr") {
+      checkExpr(stmt.value, allowProfile);
+      return;
+    }
+    checkStatement(stmt, allowProfile);
+  };
+  const checkBlock = (block: BlockExpr, allowProfile: boolean) => {
+    for (const stmt of block.statements) checkStatement(stmt, allowProfile);
+    if (block.expr) checkExpr(block.expr, allowProfile);
+  };
+  const checkExpr = (expr: Expr | undefined, allowProfile: boolean) => {
+    if (!expr) return;
+    switch (expr.kind) {
+      case "var":
+        if (expr.name.startsWith("@") && isCompilerSpecialForm(expr.name, "declaration")) {
+          const form = compilerSpecialForm(expr.name);
+          diagnostics.push(diagnosticAt(
+            "syntax.declaration_builtin",
+            `${form?.spelling ?? expr.name} is only valid as a top-level const declaration value`,
+            expr,
+          ));
+        }
+        return;
+      case "call":
+        if (expr.callee.kind === "var" && expr.callee.name === "@trace") {
+          diagnostics.push(diagnosticAt(
+            "debug.trace_context",
+            '@trace is only valid as a statement, for example @trace("message");',
+            expr,
+          ));
+        }
+        if (expr.callee.kind === "var" && expr.callee.name === "@profile") {
+          diagnostics.push(diagnosticAt(
+            "profile.context",
+            '@profile is only valid as a scoped expression, for example @profile("label") { value }',
+            expr,
+          ));
+        }
+        checkExpr(expr.callee, allowProfile);
+        for (const arg of expr.args) checkExpr(arg, allowProfile);
+        return;
+      case "const_fn":
+        for (const param of expr.params) checkName(param, expr);
+        checkExpr(expr.body, allowProfile);
+        return;
+      case "pipe_bind":
+        checkName(expr.name, expr);
+        checkExpr(expr.value, allowProfile);
+        checkExpr(expr.body, allowProfile);
+        return;
+      case "profile":
+        if (!allowProfile) {
+          diagnostics.push(diagnosticAt(
+            "profile.context",
+            "@profile is only valid inside runtime function bodies",
+            expr,
+          ));
+        }
+        if (expr.args.length !== 1) {
+          diagnostics.push(diagnosticAt(
+            "profile.arity",
+            "@profile expects exactly one string literal label",
+            expr,
+          ));
+        } else {
+          const label = expr.args[0];
+          if (label?.kind !== "literal" || label.literalKind !== "string") {
+            diagnostics.push(diagnosticAt(
+              "profile.label",
+              "@profile expects a string literal label",
+              label ?? expr,
+            ));
+          }
+        }
+        for (const arg of expr.args) checkExpr(arg, allowProfile);
+        checkExpr(expr.body, allowProfile);
+        return;
+      case "match":
+        checkExpr(expr.value, allowProfile);
+        for (const arm of expr.arms) {
+          checkPattern(arm.pattern);
+          checkExpr(arm.value, allowProfile);
+        }
+        return;
+      case "shape":
+      case "product_constructor":
+        for (const slot of expr.slots) {
+          if (slot.index) checkExpr(slot.index, allowProfile);
+          checkExpr(slot.value, allowProfile);
+        }
+        return;
+      case "static_for_slots":
+        if (expr.source.kind === "range") {
+          checkExpr(expr.source.start, allowProfile);
+          checkExpr(expr.source.end, allowProfile);
+        } else {
+          checkExpr(expr.source.shape, allowProfile);
+        }
+        checkExpr(expr.value, allowProfile);
+        return;
+      case "block":
+        checkBlock(expr, allowProfile);
+        return;
+      case "do":
+        checkTypeExpr(expr.strategy.effect);
+        for (const stmt of expr.statements) checkDoStatement(stmt, allowProfile);
+        checkExpr(expr.expr, allowProfile);
+        return;
+      default:
+        for (const child of exprChildren(expr)) checkExpr(child, allowProfile);
+        return;
+    }
+  };
+  for (const item of program.imports) checkName(item.name, item);
+  for (const decl of program.declarations) {
+    if (
+      decl.kind === "fn" || decl.kind === "const" || decl.kind === "let" || decl.kind === "contract"
+    ) {
+      checkName(decl.name, decl);
+    }
+    if (decl.kind === "fn") {
+      for (const param of decl.params) checkName(param.name, param);
+      checkBlock(decl.body, true);
+    } else if (decl.kind === "contract") {
+      for (const param of decl.params) checkName(param.name, param);
+      checkBlock(decl.body, false);
+    } else if (decl.kind === "const" || decl.kind === "let") {
+      checkExpr(decl.value, false);
+    } else if (decl.kind === "type") {
+      for (const stmt of decl.body.statements) {
+        checkName(stmt.name, stmt);
+        checkTypeExpr(stmt.value);
+      }
+      checkTypeExpr(decl.body.expr);
+    }
+  }
+}
+
 function typeExprChildren(expr: TypeExpr): TypeExpr[] {
   switch (expr.kind) {
     case "type_call":
@@ -536,37 +776,40 @@ function checkProgramInternal(
 ): AnalysisCheckResult {
   const diagnostics: Diagnostic[] = [];
   const trace: CheckTrace | undefined = options.trace ? { phases: [] } : undefined;
-  const memo = createCheckMemo();
+  const memo = createCheckMemo(options.cache?.inferredTypeVars);
   const pendingFunctionCheckCacheWrites: {
     cache: Map<string, FunctionCheckCacheEntry>;
     key: string;
     entry: FunctionCheckCacheEntry;
   }[] = [];
   program.resolvedTypeHoles = [];
+  const compileTrace = options.compileTrace;
   const recordPhase = <T>(
     name: string,
     run: () => T,
     specialization?: SpecializationTrace,
   ): T => {
-    if (!trace) return run();
-    const start = performance.now();
-    try {
-      return run();
-    } finally {
-      trace.phases.push({
-        name,
-        ms: performance.now() - start,
-        functionCount: countProgramFunctions(program),
-        generatedFunctionCount: countProgramFunctions(program, true),
-        callExpressionCount: countProgramCallExpressions(program),
-        diagnosticCount: diagnostics.length,
-        specialization,
-      });
-    }
+    if (!trace) return traceSync(compileTrace, `check.${name}`, run);
+    return traceSync(compileTrace, `check.${name}`, () => {
+      const start = performance.now();
+      try {
+        return run();
+      } finally {
+        trace.phases.push({
+          name,
+          ms: performance.now() - start,
+          functionCount: countProgramFunctions(program),
+          generatedFunctionCount: countProgramFunctions(program, true),
+          callExpressionCount: countProgramCallExpressions(program),
+          diagnosticCount: diagnostics.length,
+          specialization,
+        });
+      }
+    });
   };
   const pluginRegistry = createCompilerPluginRegistry(options.plugins);
   diagnostics.push(...pluginRegistry.diagnostics);
-  const hasDoExpressions = programHasDoExpressions(program);
+  const hasDoExpressions = programHasDoExpressions(program, options.cache?.doExpressionWork);
   const shaderManifest = new Map<number, ShaderManifestEntry>();
   const addShader = (source: string) => {
     const entry = shaderManifestEntry(source);
@@ -575,12 +818,27 @@ function checkProgramInternal(
   };
   const hostIoImports = new Map(program.imports.map((item) => [item.name, item.effects]));
   checkExternalImportsUseExplicitIo(program, diagnostics);
-  recordPhase("checkReservedCompilerNames", () => checkReservedCompilerNames(program, diagnostics));
-  recordPhase("checkRemovedSyntax", () => checkRemovedSyntax(program, diagnostics));
-  recordPhase("checkDebugTraceStatements", () => checkDebugTraceStatements(program, diagnostics));
+  if (trace) {
+    recordPhase(
+      "checkReservedCompilerNames",
+      () => checkReservedCompilerNames(program, diagnostics),
+    );
+    recordPhase("checkRemovedSyntax", () => checkRemovedSyntax(program, diagnostics));
+    recordPhase("checkDebugTraceStatements", () => checkDebugTraceStatements(program, diagnostics));
+  } else {
+    checkPreflightSyntax(program, diagnostics);
+  }
+  const hasInferredTypeAnnotationWork = programHasInferredTypeAnnotationWork(
+    program,
+    options.cache?.annotationWork,
+  );
   recordPhase(
     "prepareInferredTypeAnnotations",
-    () => prepareInferredTypeAnnotations(program, diagnostics),
+    () => {
+      if (hasInferredTypeAnnotationWork) {
+        prepareInferredTypeAnnotations(program, diagnostics);
+      }
+    },
   );
   recordPhase(
     "lowerDoExpressions",
@@ -590,12 +848,14 @@ function checkProgramInternal(
       }
     },
   );
-  recordPhase(
-    "checkBorrowTypeRestrictions",
-    () => checkBorrowTypeRestrictions(program, diagnostics),
-  );
   recordPhase("groupFunctionClauses", () => groupFunctionClauses(program, diagnostics));
-  recordPhase("checkBranchHints", () => checkBranchHints(program, diagnostics, pluginRegistry));
+  recordPhase("checkBranchHints", () =>
+    checkBranchHints(
+      program,
+      diagnostics,
+      pluginRegistry,
+      options.plugins?.length ? undefined : options.cache?.branchHintCheckedDeclarations,
+    ));
   const typeDecls = recordPhase(
     "mergeTypeFragments",
     () => mergeTypeFragments(program, diagnostics),
@@ -609,7 +869,14 @@ function checkProgramInternal(
   let functions = new Set([...fnDecls, ...importFnDecls].map((decl) => decl.name));
   recordPhase(
     "checkContracts",
-    () => checkContracts(program, diagnostics, { inferRuntimeType, runtimeValueTypeAssignable }),
+    () => {
+      checkContracts(
+        program,
+        diagnostics,
+        { inferRuntimeType, runtimeValueTypeAssignable },
+        { rewriteMisuseDeclarations: options.cache?.contractRewriteMisuseDeclarations },
+      );
+    },
   );
   recordPhase(
     "checkPrimitiveDecls",
@@ -642,7 +909,7 @@ function checkProgramInternal(
   recordPhase(
     "specializeInferredTypeCalls #1",
     () => {
-      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, false)) {
+      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, false, memo)) {
         specializeInferredTypeCalls(
           program,
           new Map(fnDecls.map((decl) => [decl.name, decl])),
@@ -667,6 +934,7 @@ function checkProgramInternal(
     fnDecls,
     constValues,
     typeDecls,
+    memo,
   );
   recordPhase(
     "specializeConstParamCalls #1",
@@ -695,7 +963,7 @@ function checkProgramInternal(
   recordPhase(
     "specializeInferredTypeCalls #2",
     () => {
-      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, true)) {
+      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, true, memo)) {
         specializeInferredTypeCalls(
           program,
           new Map(fnDecls.map((decl) => [decl.name, decl])),
@@ -720,6 +988,7 @@ function checkProgramInternal(
     fnDecls,
     constValues,
     typeDecls,
+    memo,
   );
   recordPhase(
     "specializeConstParamCalls #2",
@@ -757,7 +1026,7 @@ function checkProgramInternal(
   recordPhase(
     "specializeInferredTypeCalls #3",
     () => {
-      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, true)) {
+      if (hasInferredTypeSpecializationTargets(fnDecls, constValues, true, memo)) {
         specializeInferredTypeCalls(
           program,
           new Map(fnDecls.map((decl) => [decl.name, decl])),
@@ -801,18 +1070,19 @@ function checkProgramInternal(
       constValues,
       diagnostics,
       pluginRegistry,
+      options.cache,
     ));
   recordPhase(
     "lowerResolvedOperators",
-    () => lowerResolvedOperators(program, typeDecls, fnDecls, diagnostics, memo),
+    () => lowerResolvedOperators(program, typeDecls, fnDecls, diagnostics, memo, options.cache),
   );
   recordPhase(
     "balanceAssociativeBinaryChains",
-    () => balanceAssociativeBinaryChains(program, typeDecls),
+    () => balanceAssociativeBinaryChains(program, options.cache?.balancedBinaryDeclarations),
   );
   recordPhase(
     "lowerCollectorLiterals",
-    () => lowerCollectorLiterals(program, typeDecls, fnDecls, diagnostics),
+    () => lowerCollectorLiterals(program, typeDecls, fnDecls, diagnostics, options.cache),
   );
   recordPhase(
     "lowerProductConstructors",
@@ -825,8 +1095,20 @@ function checkProgramInternal(
     const typeConstructorMap = typeDeclIndex(typeDecls).productByConstructor;
     const functionCheckCache = options.recoverTypes ? undefined : options.cache?.functionChecks;
     const functionCheckEnvKey = functionCheckCache
-      ? functionCheckEnvironmentKey(typeDecls, allFnDecls, hostIoImports)
+      ? traceSync(
+        compileTrace,
+        "check.checkFn.environment_key",
+        () =>
+          functionCheckEnvironmentKey(
+            typeDecls,
+            allFnDecls,
+            hostIoImports,
+            options.cache?.signatureHashes,
+          ),
+      )
       : undefined;
+    let functionCheckCacheHits = 0;
+    let functionCheckCacheMisses = 0;
     for (const decl of program.declarations) {
       if (decl.kind === "fn") {
         if (decl.public && !decl.returnType) {
@@ -851,12 +1133,16 @@ function checkProgramInternal(
         }
         if (!decl.generated && !decl.primitiveId) {
           const cacheKey = functionCheckEnvKey
-            ? functionCheckCacheKey(decl, functionCheckEnvKey)
+            ? functionCheckCacheKey(decl, functionCheckEnvKey, options.cache?.semanticHashes)
             : undefined;
           const cached = cacheKey ? functionCheckCache?.get(cacheKey) : undefined;
           if (cached) {
+            functionCheckCacheHits++;
             Object.assign(decl, cloneCachedFnDecl(cached.fn));
             continue;
+          }
+          if (cacheKey) {
+            functionCheckCacheMisses++;
           }
           const diagnosticCount = diagnostics.length;
           checkFn(decl, hostIoImports, diagnostics, typeDecls, allFnDecls, {
@@ -869,24 +1155,31 @@ function checkProgramInternal(
             pendingFunctionCheckCacheWrites.push({
               cache: functionCheckCache!,
               key: cacheKey,
-              entry: { fn: cloneCachedFnDecl(decl) },
+              entry: { fn: cloneFnForCheckCacheWrite(decl) },
             });
           }
         }
       }
     }
+    traceInstant(compileTrace, "check.checkFn.cache", {
+      cacheHits: functionCheckCacheHits,
+      cacheMisses: functionCheckCacheMisses,
+    });
   });
   recordPhase(
     "resolveInferredTypeAnnotations",
-    () =>
-      resolveInferredTypeAnnotations(
-        program,
-        typeDecls,
-        [...fnDecls, ...importFnDecls],
-        constValues,
-        diagnostics,
-        memo,
-      ),
+    () => {
+      if (hasInferredTypeAnnotationWork) {
+        resolveInferredTypeAnnotations(
+          program,
+          typeDecls,
+          [...fnDecls, ...importFnDecls],
+          constValues,
+          diagnostics,
+          memo,
+        );
+      }
+    },
   );
   for (let index = diagnostics.length - 1; index >= 0; index--) {
     const diagnostic = diagnostics[index];
@@ -944,83 +1237,127 @@ function checkProgramInternal(
   };
 }
 
-function balanceAssociativeBinaryChains(program: Program, typeDecls: TypeDecl[]) {
+function balanceAssociativeBinaryChains(program: Program, balanced?: WeakSet<object>) {
   const balanceableOps = new Set(["+", "*", "&&", "||"]);
   if (!balanceableOps.size) return;
 
+  const mapExprArray = (items: Expr[]): Expr[] => {
+    let changed = false;
+    const mapped = items.map((item) => {
+      const next = lowerExpr(item);
+      if (next !== item) changed = true;
+      return next;
+    });
+    return changed ? mapped : items;
+  };
+
   const lowerExpr = (expr: Expr): Expr => {
     switch (expr.kind) {
-      case "const_fn":
-        return { ...expr, body: lowerExpr(expr.body) };
-      case "call":
-        return { ...expr, callee: lowerExpr(expr.callee), args: expr.args.map(lowerExpr) };
-      case "index":
-        return { ...expr, target: lowerExpr(expr.target), index: lowerExpr(expr.index) };
+      case "const_fn": {
+        const body = lowerExpr(expr.body);
+        return body === expr.body ? expr : { ...expr, body };
+      }
+      case "call": {
+        const callee = lowerExpr(expr.callee);
+        const args = mapExprArray(expr.args);
+        return callee === expr.callee && args === expr.args ? expr : { ...expr, callee, args };
+      }
+      case "index": {
+        const target = lowerExpr(expr.target);
+        const index = lowerExpr(expr.index);
+        return target === expr.target && index === expr.index ? expr : { ...expr, target, index };
+      }
       case "binary": {
         if (balanceableOps.has(expr.op)) {
           const leaves = collectBinaryChainLeaves(expr, expr.op, lowerExpr);
-          return leaves.length > 8
+          const balanced = leaves.length > 8
             ? buildBalancedBinaryChain(expr.op, leaves)
             : buildLeftBinaryChain(expr.op, leaves, expr);
+          return balanced === expr ? expr : balanced;
         }
-        return { ...expr, left: lowerExpr(expr.left), right: lowerExpr(expr.right) };
+        const left = lowerExpr(expr.left);
+        const right = lowerExpr(expr.right);
+        return left === expr.left && right === expr.right ? expr : { ...expr, left, right };
       }
-      case "operator_chain":
-        return {
-          ...expr,
-          first: lowerExpr(expr.first),
-          rest: expr.rest.map((item) => ({ ...item, value: lowerExpr(item.value) })),
-        };
-      case "pipe_bind":
-        return { ...expr, value: lowerExpr(expr.value), body: lowerExpr(expr.body) };
-      case "profile":
-        return {
-          ...expr,
-          args: expr.args.map(lowerExpr),
-          body: lowerExpr(expr.body),
-        };
-      case "match":
-        return {
-          ...expr,
-          value: lowerExpr(expr.value),
-          arms: expr.arms.map((arm) => ({ ...arm, value: lowerExpr(arm.value) })),
-        };
+      case "operator_chain": {
+        const first = lowerExpr(expr.first);
+        let restChanged = false;
+        const rest = expr.rest.map((item) => {
+          const value = lowerExpr(item.value);
+          if (value !== item.value) restChanged = true;
+          return value === item.value ? item : { ...item, value };
+        });
+        return first === expr.first && !restChanged ? expr : { ...expr, first, rest };
+      }
+      case "pipe_bind": {
+        const value = lowerExpr(expr.value);
+        const body = lowerExpr(expr.body);
+        return value === expr.value && body === expr.body ? expr : { ...expr, value, body };
+      }
+      case "profile": {
+        const args = mapExprArray(expr.args);
+        const body = lowerExpr(expr.body);
+        return args === expr.args && body === expr.body ? expr : { ...expr, args, body };
+      }
+      case "match": {
+        const value = lowerExpr(expr.value);
+        let armsChanged = false;
+        const arms = expr.arms.map((arm) => {
+          const armValue = lowerExpr(arm.value);
+          if (armValue !== arm.value) armsChanged = true;
+          return armValue === arm.value ? arm : { ...arm, value: armValue };
+        });
+        return value === expr.value && !armsChanged ? expr : { ...expr, value, arms };
+      }
       case "shape":
-      case "product_constructor":
-        return {
-          ...expr,
-          slots: expr.slots.map((slot) => ({
-            ...slot,
-            index: slot.index ? lowerExpr(slot.index) : undefined,
-            value: lowerExpr(slot.value),
-          })),
-        };
-      case "static_for_slots":
-        return {
-          ...expr,
-          source: expr.source.kind === "range"
-            ? {
-              kind: "range",
-              start: lowerExpr(expr.source.start),
-              end: lowerExpr(expr.source.end),
-            }
-            : { kind: "shape", shape: lowerExpr(expr.source.shape) },
-          value: lowerExpr(expr.value),
-        };
-      case "field":
-        return { ...expr, value: lowerExpr(expr.value), key: lowerExpr(expr.key) };
-      case "range":
-        return { ...expr, start: lowerExpr(expr.start), end: lowerExpr(expr.end) };
-      case "block":
-        return {
-          ...expr,
-          statements: expr.statements.map((stmt) =>
-            stmt.kind === "let" || stmt.kind === "destructure_let"
-              ? { ...stmt, value: lowerExpr(stmt.value) } as Statement
-              : stmt
-          ),
-          expr: expr.expr ? lowerExpr(expr.expr) : undefined,
-        };
+      case "product_constructor": {
+        let slotsChanged = false;
+        const slots = expr.slots.map((slot) => {
+          const index = slot.index ? lowerExpr(slot.index) : undefined;
+          const value = lowerExpr(slot.value);
+          if (index !== slot.index || value !== slot.value) slotsChanged = true;
+          return index === slot.index && value === slot.value ? slot : { ...slot, index, value };
+        });
+        return slotsChanged ? { ...expr, slots } : expr;
+      }
+      case "static_for_slots": {
+        let source = expr.source;
+        if (expr.source.kind === "range") {
+          const start = lowerExpr(expr.source.start);
+          const end = lowerExpr(expr.source.end);
+          if (start !== expr.source.start || end !== expr.source.end) {
+            source = { kind: "range", start, end };
+          }
+        } else {
+          const shape = lowerExpr(expr.source.shape);
+          if (shape !== expr.source.shape) source = { kind: "shape", shape };
+        }
+        const value = lowerExpr(expr.value);
+        return source === expr.source && value === expr.value ? expr : { ...expr, source, value };
+      }
+      case "field": {
+        const value = lowerExpr(expr.value);
+        const key = lowerExpr(expr.key);
+        return value === expr.value && key === expr.key ? expr : { ...expr, value, key };
+      }
+      case "range": {
+        const start = lowerExpr(expr.start);
+        const end = lowerExpr(expr.end);
+        return start === expr.start && end === expr.end ? expr : { ...expr, start, end };
+      }
+      case "block": {
+        let statementsChanged = false;
+        const statements = expr.statements.map((stmt) => {
+          if (stmt.kind !== "let" && stmt.kind !== "destructure_let") return stmt;
+          const value = lowerExpr(stmt.value);
+          if (value !== stmt.value) statementsChanged = true;
+          return value === stmt.value ? stmt : { ...stmt, value } as Statement;
+        });
+        const blockExpr = expr.expr ? lowerExpr(expr.expr) : undefined;
+        return !statementsChanged && blockExpr === expr.expr
+          ? expr
+          : { ...expr, statements, expr: blockExpr };
+      }
       case "do":
       case "literal":
       case "var":
@@ -1029,9 +1366,11 @@ function balanceAssociativeBinaryChains(program: Program, typeDecls: TypeDecl[])
   };
 
   for (const decl of program.declarations) {
+    if (balanced?.has(decl)) continue;
     if (decl.kind === "fn") decl.body = lowerExpr(decl.body) as BlockExpr;
     else if (decl.kind === "contract") decl.body = lowerExpr(decl.body) as BlockExpr;
     else if (decl.kind === "let" || decl.kind === "const") decl.value = lowerExpr(decl.value);
+    balanced?.add(decl);
   }
 }
 
@@ -1088,13 +1427,17 @@ function createSpecializationTrace(): SpecializationTrace {
   return { visitedCalls: 0, generatedSpecializations: 0, cacheHits: 0, cacheMisses: 0 };
 }
 
-function createCheckMemo(): CheckMemo {
+function createCheckMemo(
+  cachedTypeVarsByFunction?: WeakMap<object, InferredTypeVarCacheEntry>,
+): CheckMemo {
   return {
     typeMatches: new Map(),
     runtimeType: new Map(),
     exprBindingType: new Map(),
     staticConstValue: new Map(),
     callCheck: new Map(),
+    typeVarsByFunction: new WeakMap(),
+    cachedTypeVarsByFunction,
   };
 }
 
@@ -1102,66 +1445,215 @@ function functionCheckEnvironmentKey(
   types: TypeDecl[],
   functions: FnDecl[],
   hostIoImports: Map<string, unknown>,
+  signatureHashes?: WeakMap<object, string>,
 ): string {
-  return hashString(stableSemanticJson({
-    types,
-    functions: functions.map((decl) => ({
-      name: decl.name,
-      params: decl.params.map((param) => ({
-        name: param.name,
-        type: param.type,
-        const: param.const,
-        inferStaticType: param.inferStaticType,
-      })),
-      returnType: decl.returnType,
-      effects: decl.effects,
-      public: decl.public,
-      imported: decl.imported,
-      generated: decl.generated,
-    })),
-    imports: [...hostIoImports.entries()],
-  }));
+  let hash = 0x811c9dc5;
+  hash = hashUpdateString(hash, "types:");
+  for (const decl of types) {
+    hash = hashUpdateString(
+      hashUpdateString(hash, ","),
+      cachedSignatureHash(decl, signatureHashes),
+    );
+  }
+  hash = hashUpdateString(hash, ";functions:[");
+  for (const decl of functions) {
+    hash = hashUpdateString(
+      hashUpdateString(hash, ","),
+      cachedFunctionSignatureHash(decl, signatureHashes),
+    );
+  }
+  hash = hashUpdateString(hash, "];imports:");
+  hash = hashSemanticValue(hash, [...hostIoImports.entries()]);
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-function functionCheckCacheKey(decl: FnDecl, environmentKey: string): string {
+function typeContractEnvironmentKey(
+  types: TypeDecl[],
+  functions: FnDecl[],
+  hostIoImports: Map<string, unknown>,
+  consts: Map<string, ConstValue>,
+  signatureHashes?: WeakMap<object, string>,
+): string {
+  let hash = 0x811c9dc5;
+  hash = hashUpdateString(
+    hash,
+    functionCheckEnvironmentKey(types, functions, hostIoImports, signatureHashes),
+  );
+  hash = hashUpdateString(hash, ";consts:");
+  hash = hashSemanticValue(hash, [...consts.entries()]);
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function typeContractDeclarationCacheKey(
+  decl: Declaration,
+  environmentKey: string,
+  semanticHashes?: WeakMap<object, string>,
+): string {
+  const sourceId = decl.span?.sourceId ?? decl.nameSpan?.sourceId ?? "<unknown>";
+  const name = "name" in decl ? decl.name : "<anonymous>";
+  return `type_contract\0${sourceId}\0${decl.kind}\0${name}\0${environmentKey}\0${
+    stableSemanticHash(decl, semanticHashes)
+  }`;
+}
+
+function cachedSignatureHash(decl: TypeDecl, cache?: WeakMap<object, string>): string {
+  const cached = cache?.get(decl);
+  if (cached) return cached;
+  const hash = stableSemanticHash(decl);
+  cache?.set(decl, hash);
+  return hash;
+}
+
+function cachedFunctionSignatureHash(decl: FnDecl, cache?: WeakMap<object, string>): string {
+  const cached = cache?.get(decl);
+  if (cached) return cached;
+  const hash = functionSignatureHash(decl);
+  cache?.set(decl, hash);
+  return hash;
+}
+
+function functionSignatureHash(decl: FnDecl): string {
+  let hash = 0x811c9dc5;
+  hash = hashUpdateString(hash, "{name:");
+  hash = hashUpdateString(hash, decl.name);
+  hash = hashUpdateString(hash, ";params:[");
+  for (const param of decl.params) {
+    hash = hashUpdateString(hash, "{name:");
+    hash = hashUpdateString(hash, param.name);
+    hash = hashUpdateString(hash, ";type:");
+    hash = hashUpdateString(hash, param.type);
+    hash = hashUpdateString(hash, ";const:");
+    hash = hashUpdateString(hash, param.const ? "1" : "0");
+    hash = hashUpdateString(hash, ";infer:");
+    hash = hashUpdateString(hash, param.inferStaticType ? "1" : "0");
+    hash = hashUpdateString(hash, "}");
+  }
+  hash = hashUpdateString(hash, "];return:");
+  hash = hashUpdateString(hash, decl.returnType ?? "");
+  hash = hashUpdateString(hash, ";effects:");
+  hash = hashSemanticValue(hash, decl.effects ?? []);
+  hash = hashUpdateString(hash, ";public:");
+  hash = hashUpdateString(hash, decl.public ? "1" : "0");
+  hash = hashUpdateString(hash, ";imported:");
+  hash = hashUpdateString(hash, decl.imported ? "1" : "0");
+  hash = hashUpdateString(hash, ";generated:");
+  hash = hashUpdateString(hash, decl.generated ? "1" : "0");
+  hash = hashUpdateString(hash, "}");
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function functionCheckCacheKey(
+  decl: FnDecl,
+  environmentKey: string,
+  semanticHashes?: WeakMap<object, string>,
+): string {
   const sourceId = decl.span?.sourceId ?? decl.nameSpan?.sourceId ?? "<unknown>";
   return `fn_check\0${sourceId}\0${decl.name}\0${environmentKey}\0${
-    hashString(stableSemanticJson(decl))
+    stableSemanticHash(decl, semanticHashes)
   }`;
 }
 
 function cloneCachedFnDecl(fn: FnDecl): FnDecl {
-  return structuredClone(fn) as FnDecl;
+  return {
+    ...fn,
+    memberOf: fn.memberOf ? { ...fn.memberOf } : undefined,
+    params: clonePlainValue(fn.params) as FnDecl["params"],
+    locals: fn.locals ? clonePlainValue(fn.locals) as FnDecl["locals"] : undefined,
+    effects: [...fn.effects],
+    returnTypeHoles: fn.returnTypeHoles
+      ? clonePlainValue(fn.returnTypeHoles) as FnDecl["returnTypeHoles"]
+      : undefined,
+    body: fn.body,
+  };
 }
 
-function stableSemanticJson(value: unknown): string {
-  return JSON.stringify(value, (key, item) => {
-    if (
-      key === "span" || key === "nameSpan" || key === "typeSpan" ||
-      key === "returnTypeSpan" || key === "typeHoles" || key === "returnTypeHoles"
-    ) {
-      return undefined;
+function cloneFnForCheckCacheWrite(fn: FnDecl): FnDecl {
+  return clonePlainValue(fn) as FnDecl;
+}
+
+function clonePlainValue(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(clonePlainValue);
+  const clone: Record<string, unknown> = {};
+  const source = value as Record<string, unknown>;
+  for (const key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    clone[key] = clonePlainValue(source[key]);
+  }
+  return clone;
+}
+
+function stableSemanticHash(value: unknown, cache?: WeakMap<object, string>): string {
+  if (value && typeof value === "object") {
+    const cached = cache?.get(value);
+    if (cached) return cached;
+  }
+  const hash = (hashSemanticValue(0x811c9dc5, value) >>> 0).toString(16).padStart(8, "0");
+  if (value && typeof value === "object") {
+    cache?.set(value, hash);
+  }
+  return hash;
+}
+
+function hashSemanticValue(hash: number, value: unknown): number {
+  if (value === undefined) return hashUpdateString(hash, "u");
+  if (value === null) return hashUpdateString(hash, "n");
+  switch (typeof value) {
+    case "string":
+      return hashUpdateString(hashUpdateString(hash, "s"), value);
+    case "number":
+      return hashUpdateString(hashUpdateString(hash, "d"), `${value}`);
+    case "boolean":
+      return hashUpdateString(hash, value ? "t" : "f");
+    case "bigint":
+      return hashUpdateString(hashUpdateString(hash, "b"), value.toString());
+    case "object":
+      break;
+    default:
+      return hashUpdateString(hashUpdateString(hash, typeof value), `${value}`);
+  }
+  if (Array.isArray(value)) {
+    hash = hashUpdateString(hash, "[");
+    for (const item of value) {
+      hash = hashSemanticValue(hashUpdateString(hash, ","), item);
     }
-    return item;
-  }) ?? "";
+    return hashUpdateString(hash, "]");
+  }
+  hash = hashUpdateString(hash, "{");
+  const object = value as Record<string, unknown>;
+  for (const key in object) {
+    if (!Object.prototype.hasOwnProperty.call(object, key)) continue;
+    const child = object[key];
+    if (isSemanticMetadataKey(key) || child === undefined) continue;
+    hash = hashUpdateString(hashUpdateString(hash, key), ":");
+    hash = hashSemanticValue(hash, child);
+    hash = hashUpdateString(hash, ";");
+  }
+  return hashUpdateString(hash, "}");
 }
 
-function hashString(text: string): string {
-  let hash = 0x811c9dc5;
+function isSemanticMetadataKey(key: string): boolean {
+  return key === "span" || key === "nameSpan" || key === "typeSpan" ||
+    key === "returnTypeSpan" || key === "typeHoles" || key === "returnTypeHoles" ||
+    key === "inferredType" || key === "slotTypes";
+}
+
+function hashUpdateString(hash: number, text: string): number {
   for (let index = 0; index < text.length; index++) {
     hash ^= text.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193);
   }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return hash;
 }
 
 function hasInferredTypeSpecializationTargets(
   functions: FnDecl[],
   consts: Map<string, ConstValue>,
   includeGenerated: boolean,
+  memo?: CheckMemo,
 ): boolean {
   return functions.some((decl) =>
-    (includeGenerated || !decl.generated) && fnUsesInferredTypeVars(decl, consts)
+    (includeGenerated || !decl.generated) && fnUsesInferredTypeVars(decl, consts, memo)
   );
 }
 
@@ -1170,10 +1662,11 @@ function programNeedsConstSpecialization(
   functions: FnDecl[],
   consts: Map<string, ConstValue>,
   types: TypeDecl[],
+  memo?: CheckMemo,
 ): boolean {
   if (
     functions.some((decl) =>
-      decl.params.some((param) => param.const) || fnUsesInferredTypeVars(decl, consts)
+      decl.params.some((param) => param.const) || fnUsesInferredTypeVars(decl, consts, memo)
     )
   ) {
     return true;
@@ -1226,50 +1719,6 @@ function countProgramCallExpressions(program: Program): number {
     else if (decl.kind === "const" || decl.kind === "let") visit(decl.value);
   }
   return total;
-}
-
-function checkBorrowTypeRestrictions(program: Program, diagnostics: Diagnostic[]) {
-  const checkType = (
-    type: string | undefined,
-    context: "param" | "owned",
-    spanLike?: { span?: Span; nameSpan?: Span },
-  ) => {
-    if (!type) return;
-    const trimmed = type.trim();
-    const fn = parseFnSignature(trimmed);
-    if (fn) {
-      for (const param of fn.params) checkType(param, "param", spanLike);
-      checkType(fn.returnType, "owned", spanLike);
-    }
-  };
-  const checkExpr = (expr: Expr | undefined) => {
-    if (!expr) return;
-    if (expr.kind === "block") {
-      for (const stmt of expr.statements) {
-        if (stmt.kind === "let") checkType(stmt.type, "owned", stmt);
-        if (stmt.kind === "let" || stmt.kind === "destructure_let") checkExpr(stmt.value);
-      }
-      checkExpr(expr.expr);
-      return;
-    }
-    for (const child of exprChildValues(expr)) checkExpr(child);
-  };
-  for (const decl of program.declarations) {
-    if (decl.kind === "fn") {
-      for (const param of decl.params) checkType(param.type, "param", param);
-      checkType(decl.returnType, "owned", decl);
-      checkExpr(decl.body);
-    } else if (decl.kind === "let" || decl.kind === "const") {
-      checkType(decl.type, "owned", decl);
-      checkExpr(decl.value);
-    } else if (decl.kind === "contract") {
-      for (const param of decl.params) checkType(param.type, "param", param);
-      checkExpr(decl.body);
-    } else if (decl.kind === "type") {
-      for (const stmt of decl.body.statements) checkType(renderTypeExpr(stmt.value), "owned", stmt);
-      if (decl.body.expr) checkType(renderTypeExpr(decl.body.expr), "owned", decl);
-    }
-  }
 }
 
 function lowerDoExpressions(
@@ -2598,12 +3047,18 @@ function lowerResolvedOperators(
   fnDecls: FnDecl[],
   diagnostics: Diagnostic[],
   memo?: CheckMemo,
+  cache?: CheckCache,
 ) {
   const operators = program.declarations.filter((decl): decl is OperatorDecl =>
     decl.kind === "operator"
   );
   checkOperatorDeclarationConflicts(operators, diagnostics);
-  if (!operators.length && !programHasOperatorChains(program)) return;
+  if (!operators.length) {
+    if (!cache?.builtinOperatorLoweredDeclarations && !programHasOperatorChains(program)) return;
+    lowerBuiltinOperatorChains(program, diagnostics, cache?.builtinOperatorLoweredDeclarations);
+    return;
+  }
+  const operatorBySymbol = new Map(operators.map((decl) => [decl.symbol, decl]));
   const functions = new Map(fnDecls.map((fn) => [fn.name, fn]));
   const constructorTypes = new Map(
     typeDecls.flatMap((decl) =>
@@ -2623,15 +3078,20 @@ function lowerResolvedOperators(
           lowerExpr(item, env)
         );
         const ops = expr.rest.map((item) => item.op);
-        return lowerExpr(buildOperatorTree(values, ops, operators, diagnostics, expr), env);
+        return lowerExpr(buildOperatorTree(values, ops, operatorBySymbol, diagnostics, expr), env);
       }
       case "binary": {
         const left = lowerExpr(expr.left, env);
         const right = lowerExpr(expr.right, env);
-        if (!operators.length) return { ...expr, left, right };
+        if (!operators.length) {
+          return left === expr.left && right === expr.right ? expr : { ...expr, left, right };
+        }
         const leftType = inferRuntimeType(left, env, functions, constructorTypes, memo);
         const rightType = inferRuntimeType(right, env, functions, constructorTypes, memo);
-        if (!leftType && !rightType) return { ...expr, left, right };
+        const unresolved = left === expr.left && right === expr.right
+          ? expr
+          : { ...expr, left, right };
+        if (!leftType && !rightType) return unresolved;
         const resolved = resolveInfixOperator(
           expr.op,
           left,
@@ -2645,85 +3105,108 @@ function lowerResolvedOperators(
         );
         if (!resolved) {
           if (isPrimitiveBinaryOperator(expr.op, leftType, rightType, typeDecls)) {
-            return { ...expr, left, right };
+            return unresolved;
           }
-          if (!leftType || !rightType) return { ...expr, left, right };
+          if (!leftType || !rightType) return unresolved;
           diagnostics.push({
             code: "operator.missing",
             message: `no visible operator declaration matches ${expr.op}` +
               ` for ${leftType ?? "unknown"} and ${rightType ?? "unknown"}`,
           });
-          return { ...expr, left, right };
+          return unresolved;
         }
         if (resolved === "ambiguous") {
           diagnostics.push({
             code: "operator.ambiguous",
             message: `multiple visible operator declarations match ${expr.op}`,
           });
-          return { ...expr, left, right };
+          return unresolved;
         }
         return { kind: "call", callee: { kind: "var", name: resolved }, args: [left, right] };
       }
-      case "call":
-        return {
-          ...expr,
-          callee: lowerExpr(expr.callee, env),
-          args: expr.args.map((arg) => lowerExpr(arg, env)),
-        };
-      case "index":
-        return { ...expr, target: lowerExpr(expr.target, env), index: lowerExpr(expr.index, env) };
-      case "field":
-        return { ...expr, value: lowerExpr(expr.value, env), key: lowerExpr(expr.key, env) };
-      case "pipe_bind":
-        return { ...expr, value: lowerExpr(expr.value, env), body: lowerExpr(expr.body, env) };
-      case "match":
-        return {
-          ...expr,
-          value: lowerExpr(expr.value, env),
-          arms: expr.arms.map((arm) => ({ ...arm, value: lowerExpr(arm.value, env) })),
-        };
+      case "call": {
+        const callee = lowerExpr(expr.callee, env);
+        let argsChanged = false;
+        const args = expr.args.map((arg) => {
+          const next = lowerExpr(arg, env);
+          if (next !== arg) argsChanged = true;
+          return next;
+        });
+        return callee === expr.callee && !argsChanged ? expr : { ...expr, callee, args };
+      }
+      case "index": {
+        const target = lowerExpr(expr.target, env);
+        const index = lowerExpr(expr.index, env);
+        return target === expr.target && index === expr.index ? expr : { ...expr, target, index };
+      }
+      case "field": {
+        const value = lowerExpr(expr.value, env);
+        const key = lowerExpr(expr.key, env);
+        return value === expr.value && key === expr.key ? expr : { ...expr, value, key };
+      }
+      case "pipe_bind": {
+        const value = lowerExpr(expr.value, env);
+        const body = lowerExpr(expr.body, env);
+        return value === expr.value && body === expr.body ? expr : { ...expr, value, body };
+      }
+      case "match": {
+        const value = lowerExpr(expr.value, env);
+        let armsChanged = false;
+        const arms = expr.arms.map((arm) => {
+          const armValue = lowerExpr(arm.value, env);
+          if (armValue !== arm.value) armsChanged = true;
+          return armValue === arm.value ? arm : { ...arm, value: armValue };
+        });
+        return value === expr.value && !armsChanged ? expr : { ...expr, value, arms };
+      }
       case "shape":
-        return {
-          ...expr,
-          slots: expr.slots.map((slot) => ({
-            ...slot,
-            index: slot.index ? lowerExpr(slot.index, env) : undefined,
-            value: lowerExpr(slot.value, env),
-          })),
-        };
-      case "product_constructor":
-        return {
-          ...expr,
-          slots: expr.slots.map((slot) => ({
-            ...slot,
-            index: slot.index ? lowerExpr(slot.index, env) : undefined,
-            value: lowerExpr(slot.value, env),
-          })),
-        };
-      case "range":
-        return { ...expr, start: lowerExpr(expr.start, env), end: lowerExpr(expr.end, env) };
-      case "profile":
-        return {
-          ...expr,
-          args: expr.args.map((arg) => lowerExpr(arg, env)),
-          body: lowerExpr(expr.body, env),
-        };
-      case "static_for_slots":
-        return {
-          ...expr,
-          source: expr.source.kind === "range"
-            ? {
-              kind: "range",
-              start: lowerExpr(expr.source.start, env),
-              end: lowerExpr(expr.source.end, env),
-            }
-            : { kind: "shape", shape: lowerExpr(expr.source.shape, env) },
-          value: lowerExpr(expr.value, env),
-        };
-      case "const_fn":
-        return { ...expr, body: lowerExpr(expr.body, env) };
+      case "product_constructor": {
+        let slotsChanged = false;
+        const slots = expr.slots.map((slot) => {
+          const index = slot.index ? lowerExpr(slot.index, env) : undefined;
+          const value = lowerExpr(slot.value, env);
+          if (index !== slot.index || value !== slot.value) slotsChanged = true;
+          return index === slot.index && value === slot.value ? slot : { ...slot, index, value };
+        });
+        return slotsChanged ? { ...expr, slots } : expr;
+      }
+      case "range": {
+        const start = lowerExpr(expr.start, env);
+        const end = lowerExpr(expr.end, env);
+        return start === expr.start && end === expr.end ? expr : { ...expr, start, end };
+      }
+      case "profile": {
+        let argsChanged = false;
+        const args = expr.args.map((arg) => {
+          const next = lowerExpr(arg, env);
+          if (next !== arg) argsChanged = true;
+          return next;
+        });
+        const body = lowerExpr(expr.body, env);
+        return !argsChanged && body === expr.body ? expr : { ...expr, args, body };
+      }
+      case "static_for_slots": {
+        let source = expr.source;
+        if (expr.source.kind === "range") {
+          const start = lowerExpr(expr.source.start, env);
+          const end = lowerExpr(expr.source.end, env);
+          if (start !== expr.source.start || end !== expr.source.end) {
+            source = { kind: "range", start, end };
+          }
+        } else {
+          const shape = lowerExpr(expr.source.shape, env);
+          if (shape !== expr.source.shape) source = { kind: "shape", shape };
+        }
+        const value = lowerExpr(expr.value, env);
+        return source === expr.source && value === expr.value ? expr : { ...expr, source, value };
+      }
+      case "const_fn": {
+        const body = lowerExpr(expr.body, env);
+        return body === expr.body ? expr : { ...expr, body };
+      }
       case "block": {
         const scoped = new Map(env);
+        let statementsChanged = false;
         const statements = expr.statements.map((stmt) => {
           if (stmt.kind !== "let" && stmt.kind !== "destructure_let") return stmt;
           const value = lowerExpr(stmt.value, scoped);
@@ -2734,9 +3217,13 @@ function lowerResolvedOperators(
             const inferred = inferRuntimeType(value, scoped, functions, undefined, memo);
             if (inferred) scoped.set(stmt.name, inferred);
           }
-          return { ...stmt, value } as typeof stmt;
+          if (value !== stmt.value) statementsChanged = true;
+          return value === stmt.value ? stmt : { ...stmt, value } as typeof stmt;
         });
-        return { ...expr, statements, expr: expr.expr ? lowerExpr(expr.expr, scoped) : undefined };
+        const blockExpr = expr.expr ? lowerExpr(expr.expr, scoped) : undefined;
+        return !statementsChanged && blockExpr === expr.expr
+          ? expr
+          : { ...expr, statements, expr: blockExpr };
       }
       default:
         return expr;
@@ -2753,40 +3240,197 @@ function lowerResolvedOperators(
   }
 }
 
-function programHasExpr(program: Program, predicate: (expr: Expr) => boolean): boolean {
+function lowerBuiltinOperatorChains(
+  program: Program,
+  diagnostics: Diagnostic[],
+  loweredDeclarations?: WeakSet<object>,
+) {
+  const mapExprArray = (items: Expr[]): Expr[] => {
+    let changed = false;
+    const mapped = items.map((item) => {
+      const next = lowerExpr(item);
+      if (next !== item) changed = true;
+      return next;
+    });
+    return changed ? mapped : items;
+  };
+
+  const lowerExpr = (expr: Expr): Expr => {
+    switch (expr.kind) {
+      case "operator_chain": {
+        const first = lowerExpr(expr.first);
+        const restValues = expr.rest.map((item) => lowerExpr(item.value));
+        return buildOperatorTree(
+          [first, ...restValues],
+          expr.rest.map((item) => item.op),
+          EMPTY_OPERATOR_MAP,
+          diagnostics,
+          expr,
+        );
+      }
+      case "binary": {
+        const left = lowerExpr(expr.left);
+        const right = lowerExpr(expr.right);
+        return left === expr.left && right === expr.right ? expr : { ...expr, left, right };
+      }
+      case "call": {
+        const callee = lowerExpr(expr.callee);
+        const args = mapExprArray(expr.args);
+        return callee === expr.callee && args === expr.args ? expr : { ...expr, callee, args };
+      }
+      case "index": {
+        const target = lowerExpr(expr.target);
+        const index = lowerExpr(expr.index);
+        return target === expr.target && index === expr.index ? expr : { ...expr, target, index };
+      }
+      case "field": {
+        const value = lowerExpr(expr.value);
+        const key = lowerExpr(expr.key);
+        return value === expr.value && key === expr.key ? expr : { ...expr, value, key };
+      }
+      case "pipe_bind": {
+        const value = lowerExpr(expr.value);
+        const body = lowerExpr(expr.body);
+        return value === expr.value && body === expr.body ? expr : { ...expr, value, body };
+      }
+      case "match": {
+        const value = lowerExpr(expr.value);
+        let armsChanged = false;
+        const arms = expr.arms.map((arm) => {
+          const armValue = lowerExpr(arm.value);
+          if (armValue !== arm.value) armsChanged = true;
+          return armValue === arm.value ? arm : { ...arm, value: armValue };
+        });
+        return value === expr.value && !armsChanged ? expr : { ...expr, value, arms };
+      }
+      case "shape":
+      case "product_constructor": {
+        let slotsChanged = false;
+        const slots = expr.slots.map((slot) => {
+          const index = slot.index ? lowerExpr(slot.index) : undefined;
+          const value = lowerExpr(slot.value);
+          if (index !== slot.index || value !== slot.value) slotsChanged = true;
+          return index === slot.index && value === slot.value ? slot : { ...slot, index, value };
+        });
+        return slotsChanged ? { ...expr, slots } : expr;
+      }
+      case "range": {
+        const start = lowerExpr(expr.start);
+        const end = lowerExpr(expr.end);
+        return start === expr.start && end === expr.end ? expr : { ...expr, start, end };
+      }
+      case "profile": {
+        const args = mapExprArray(expr.args);
+        const body = lowerExpr(expr.body);
+        return args === expr.args && body === expr.body ? expr : { ...expr, args, body };
+      }
+      case "static_for_slots": {
+        let source = expr.source;
+        if (expr.source.kind === "range") {
+          const start = lowerExpr(expr.source.start);
+          const end = lowerExpr(expr.source.end);
+          if (start !== expr.source.start || end !== expr.source.end) {
+            source = { kind: "range", start, end };
+          }
+        } else {
+          const shape = lowerExpr(expr.source.shape);
+          if (shape !== expr.source.shape) source = { kind: "shape", shape };
+        }
+        const value = lowerExpr(expr.value);
+        return source === expr.source && value === expr.value ? expr : { ...expr, source, value };
+      }
+      case "const_fn": {
+        const body = lowerExpr(expr.body);
+        return body === expr.body ? expr : { ...expr, body };
+      }
+      case "block": {
+        let statementsChanged = false;
+        const statements = expr.statements.map((stmt) => {
+          if (stmt.kind !== "let" && stmt.kind !== "destructure_let") return stmt;
+          const value = lowerExpr(stmt.value);
+          if (value !== stmt.value) statementsChanged = true;
+          return value === stmt.value ? stmt : { ...stmt, value } as Statement;
+        });
+        const blockExpr = expr.expr ? lowerExpr(expr.expr) : undefined;
+        return !statementsChanged && blockExpr === expr.expr
+          ? expr
+          : { ...expr, statements, expr: blockExpr };
+      }
+      case "do":
+      case "literal":
+      case "var":
+        return expr;
+    }
+  };
+
+  for (const decl of program.declarations) {
+    if (loweredDeclarations?.has(decl)) continue;
+    if (decl.kind === "fn") {
+      decl.body = lowerExpr(decl.body) as Extract<Expr, { kind: "block" }>;
+      loweredDeclarations?.add(decl);
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      decl.value = lowerExpr(decl.value);
+      loweredDeclarations?.add(decl);
+    }
+  }
+}
+
+function programHasExpr(
+  program: Program,
+  predicate: (expr: Expr) => boolean,
+  cache?: WeakMap<object, boolean>,
+): boolean {
   const visitExpr = (expr: Expr | undefined): boolean => {
     if (!expr) return false;
-    if (predicate(expr)) return true;
+    const cached = cache?.get(expr);
+    if (cached !== undefined) return cached;
+    let result = false;
+    if (predicate(expr)) {
+      cache?.set(expr, true);
+      return true;
+    }
     switch (expr.kind) {
       case "call":
-        return visitExpr(expr.callee) || expr.args.some(visitExpr);
+        result = visitExpr(expr.callee) || expr.args.some(visitExpr);
+        break;
       case "index":
-        return visitExpr(expr.target) || visitExpr(expr.index);
+        result = visitExpr(expr.target) || visitExpr(expr.index);
+        break;
       case "field":
-        return visitExpr(expr.value) || visitExpr(expr.key);
+        result = visitExpr(expr.value) || visitExpr(expr.key);
+        break;
       case "binary":
-        return visitExpr(expr.left) || visitExpr(expr.right);
+        result = visitExpr(expr.left) || visitExpr(expr.right);
+        break;
       case "operator_chain":
-        return visitExpr(expr.first) || expr.rest.some((item) => visitExpr(item.value));
+        result = visitExpr(expr.first) || expr.rest.some((item) => visitExpr(item.value));
+        break;
       case "pipe_bind":
-        return visitExpr(expr.value) || visitExpr(expr.body);
+        result = visitExpr(expr.value) || visitExpr(expr.body);
+        break;
       case "match":
-        return visitExpr(expr.value) || expr.arms.some((arm) => visitExpr(arm.value));
+        result = visitExpr(expr.value) || expr.arms.some((arm) => visitExpr(arm.value));
+        break;
       case "shape":
       case "product_constructor":
-        return expr.slots.some((slot) => visitExpr(slot.index) || visitExpr(slot.value));
+        result = expr.slots.some((slot) => visitExpr(slot.index) || visitExpr(slot.value));
+        break;
       case "range":
-        return visitExpr(expr.start) || visitExpr(expr.end);
+        result = visitExpr(expr.start) || visitExpr(expr.end);
+        break;
       case "profile":
-        return expr.args.some(visitExpr) || visitExpr(expr.body);
+        result = expr.args.some(visitExpr) || visitExpr(expr.body);
+        break;
       case "static_for_slots":
-        return (expr.source.kind === "range"
+        result = (expr.source.kind === "range"
           ? visitExpr(expr.source.start) || visitExpr(expr.source.end)
           : visitExpr(expr.source.shape)) || visitExpr(expr.value);
+        break;
       case "const_fn":
-        return visitExpr(expr.body);
+        result = visitExpr(expr.body);
+        break;
       case "do":
-        return expr.statements.some((stmt) => {
+        result = expr.statements.some((stmt) => {
           if (
             stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
             stmt.kind === "destructure_let"
@@ -2795,22 +3439,35 @@ function programHasExpr(program: Program, predicate: (expr: Expr) => boolean): b
           }
           return stmt.kind === "debug_trace" && stmt.args.some(visitExpr);
         }) || visitExpr(expr.expr);
+        break;
       case "block":
-        return expr.statements.some((stmt) => {
+        result = expr.statements.some((stmt) => {
           if (stmt.kind === "let" || stmt.kind === "destructure_let") return visitExpr(stmt.value);
           return stmt.kind === "debug_trace" && stmt.args.some(visitExpr);
         }) || visitExpr(expr.expr);
+        break;
       case "var":
       case "literal":
-        return false;
+        result = false;
+        break;
     }
+    cache?.set(expr, result);
+    return result;
   };
   for (const decl of program.declarations) {
-    if (decl.kind === "fn" || decl.kind === "contract") {
-      if (visitExpr(decl.body)) return true;
-    } else if (decl.kind === "let" || decl.kind === "const") {
-      if (visitExpr(decl.value)) return true;
+    const cached = cache?.get(decl);
+    if (cached !== undefined) {
+      if (cached) return true;
+      continue;
     }
+    let result = false;
+    if (decl.kind === "fn" || decl.kind === "contract") {
+      result = visitExpr(decl.body);
+    } else if (decl.kind === "let" || decl.kind === "const") {
+      result = visitExpr(decl.value);
+    }
+    cache?.set(decl, result);
+    if (result) return true;
   }
   return false;
 }
@@ -2819,8 +3476,8 @@ function programHasOperatorChains(program: Program): boolean {
   return programHasExpr(program, (expr) => expr.kind === "operator_chain");
 }
 
-function programHasDoExpressions(program: Program): boolean {
-  return programHasExpr(program, (expr) => expr.kind === "do");
+function programHasDoExpressions(program: Program, cache?: WeakMap<object, boolean>): boolean {
+  return programHasExpr(program, (expr) => expr.kind === "do", cache);
 }
 
 function checkOperatorDeclarationConflicts(
@@ -2860,10 +3517,12 @@ function checkOperatorDeclarationConflicts(
   }
 }
 
+const EMPTY_OPERATOR_MAP = new Map<string, OperatorDecl>();
+
 function buildOperatorTree(
   values: Expr[],
   ops: string[],
-  operators: OperatorDecl[],
+  operators: Map<string, OperatorDecl>,
   diagnostics: Diagnostic[],
   source: Expr,
 ): Expr {
@@ -2909,9 +3568,9 @@ function buildOperatorTree(
 
 function operatorMetadata(
   symbol: string,
-  operators: OperatorDecl[],
+  operators: Map<string, OperatorDecl>,
 ): Pick<OperatorDecl, "fixity" | "precedence"> {
-  const declared = operators.find((decl) => decl.symbol === symbol);
+  const declared = operators.get(symbol);
   if (declared) return declared;
   return builtinOperatorMetadata(symbol);
 }
@@ -3005,8 +3664,12 @@ function lowerCollectorLiterals(
   typeDecls: TypeDecl[],
   fnDecls: FnDecl[],
   diagnostics: Diagnostic[],
+  cache?: CheckCache,
 ) {
   const functions = new Map(fnDecls.map((fn) => [fn.name, fn]));
+  const collectorEnvKey = cache?.collectorLoweredDeclarations
+    ? functionCheckEnvironmentKey(typeDecls, fnDecls, new Map(), cache.signatureHashes)
+    : undefined;
   const lowerExpr = (expr: Expr, expectedType: string | undefined): Expr => {
     switch (expr.kind) {
       case "do":
@@ -3217,6 +3880,8 @@ function lowerCollectorLiterals(
   };
 
   for (const decl of program.declarations) {
+    const cachedEnvKey = cache?.collectorLoweredDeclarations?.get(decl);
+    if (collectorEnvKey && cachedEnvKey === collectorEnvKey) continue;
     if (decl.kind === "fn") {
       decl.body = lowerExpr(decl.body, decl.returnType) as Extract<Expr, { kind: "block" }>;
     } else if (decl.kind === "let" || decl.kind === "const") {
@@ -3224,6 +3889,7 @@ function lowerCollectorLiterals(
     } else if (decl.kind === "contract") {
       decl.body = lowerExpr(decl.body, undefined) as Extract<Expr, { kind: "block" }>;
     }
+    if (collectorEnvKey) cache?.collectorLoweredDeclarations?.set(decl, collectorEnvKey);
   }
 }
 
@@ -4076,6 +4742,7 @@ function checkBranchHints(
   program: Program,
   diagnostics: Diagnostic[],
   pluginRegistry: CompilerPluginRegistry,
+  checkedDeclarations?: WeakSet<object>,
 ) {
   const likely = annotationBranchHint("likely", pluginRegistry);
   const unlikely = annotationBranchHint("unlikely", pluginRegistry);
@@ -4087,6 +4754,8 @@ function checkBranchHints(
   }
   for (const decl of program.declarations) {
     if (decl.kind !== "fn") continue;
+    if (checkedDeclarations?.has(decl)) continue;
+    const diagnosticCount = diagnostics.length;
     if (decl.branchHint) {
       decl.branchHint = normalizeBranchHintAnnotation(
         decl.branchHint,
@@ -4103,6 +4772,9 @@ function checkBranchHints(
       });
     }
     checkBranchHintsInBlock(decl.body, diagnostics, pluginRegistry);
+    if (diagnostics.length === diagnosticCount) {
+      checkedDeclarations?.add(decl);
+    }
   }
 }
 
@@ -4643,6 +5315,7 @@ function resolveAttachedMemberCalls(program: Program, types: TypeDecl[]) {
       members.set(`${type.name}::${member.name}`, member.target);
     }
   }
+  if (!members.size) return;
   for (const decl of program.declarations) {
     if (decl.kind === "fn") decl.body = rewriteAttachedMembersInBlock(decl.body, members);
     else if (decl.kind === "let" || decl.kind === "const") {
@@ -5216,7 +5889,7 @@ class ConstEvaluator {
           buildOperatorTree(
             [expr.first, ...expr.rest.map((item) => item.value)],
             expr.rest.map((item) => item.op),
-            [],
+            EMPTY_OPERATOR_MAP,
             this.diagnostics,
             expr,
           ),
@@ -6310,7 +6983,7 @@ function specializeInferredTypeCalls(
   const queued = new Set(queue.map((decl) => decl.name));
   for (let index = 0; index < queue.length; index++) {
     const decl = queue[index]!;
-    const reportAmbiguous = !decl.generated && !fnUsesInferredTypeVars(decl, consts);
+    const reportAmbiguous = !decl.generated && !fnUsesInferredTypeVars(decl, consts, context.memo);
     decl.body = specializeInferredBlock(
       decl.body,
       context,
@@ -6351,45 +7024,68 @@ function specializeInferredBlock(
   reportAmbiguous = true,
 ): Extract<Expr, { kind: "block" }> {
   const scoped = new Map(env);
-  return {
-    ...block,
-    statements: block.statements.map((stmt) => {
-      if (stmt.kind === "let") {
-        const value = specializeInferredExpr(
-          stmt.value,
-          context,
-          scoped,
-          explicitTypeAnnotation(stmt.type),
-          reportAmbiguous,
-        );
-        const type = explicitTypeAnnotation(stmt.type) ?? inferExprType(value, context, scoped);
-        if (type) scoped.set(stmt.name, type);
-        return { ...stmt, value };
+  let statements = block.statements;
+  let changed = false;
+  const nextStatements: Statement[] = [];
+  for (const stmt of block.statements) {
+    if (stmt.kind === "let") {
+      const explicit = explicitTypeAnnotation(stmt.type);
+      const value = specializeInferredExpr(
+        stmt.value,
+        context,
+        scoped,
+        explicit,
+        reportAmbiguous,
+      );
+      let type = explicit;
+      type ??= inferExprType(value, context, scoped);
+      if (type) scoped.set(stmt.name, type);
+      if (value === stmt.value) {
+        nextStatements.push(stmt);
+      } else {
+        changed = true;
+        nextStatements.push({ ...stmt, value });
       }
-      if (stmt.kind === "destructure_let") {
-        const value = specializeInferredExpr(
-          stmt.value,
-          context,
-          scoped,
-          undefined,
-          reportAmbiguous,
-        );
-        const type = inferExprType(value, context, scoped);
-        const slotTypes = stmt.slotTypes ?? (type ? stmt.names.map(() => type) : undefined);
-        if (slotTypes) {
-          stmt.names.forEach((name, index) => {
-            const slotType = slotTypes[index] ?? type;
-            if (slotType) scoped.set(name, slotType);
-          });
+      continue;
+    }
+    if (stmt.kind === "destructure_let") {
+      const value = specializeInferredExpr(
+        stmt.value,
+        context,
+        scoped,
+        undefined,
+        reportAmbiguous,
+      );
+      const type = inferExprType(value, context, scoped);
+      let slotTypes = stmt.slotTypes;
+      if (!slotTypes && type) {
+        slotTypes = [];
+        for (let index = 0; index < stmt.names.length; index++) slotTypes.push(type);
+      }
+      if (slotTypes) {
+        for (let index = 0; index < stmt.names.length; index++) {
+          let slotType: string | undefined = slotTypes[index];
+          if (!slotType) slotType = type;
+          if (slotType) scoped.set(stmt.names[index]!, slotType);
         }
-        return { ...stmt, value, slotTypes };
       }
-      return stmt;
-    }),
-    expr: block.expr
-      ? specializeInferredExpr(block.expr, context, scoped, expectedType, reportAmbiguous)
-      : undefined,
-  };
+      if (value === stmt.value && slotTypes === stmt.slotTypes) {
+        nextStatements.push(stmt);
+      } else {
+        changed = true;
+        nextStatements.push({ ...stmt, value, slotTypes });
+      }
+      continue;
+    }
+    nextStatements.push(stmt);
+  }
+  if (changed) statements = nextStatements;
+  let expr: Expr | undefined;
+  if (block.expr) {
+    expr = specializeInferredExpr(block.expr, context, scoped, expectedType, reportAmbiguous);
+  }
+  if (statements === block.statements && expr === block.expr) return block;
+  return { ...block, statements, expr };
 }
 
 function specializeInferredExpr(
@@ -6416,23 +7112,28 @@ function specializeInferredExpr(
         context.diagnostics,
         (child) => specializeInferredExpr(child, context, env),
       );
-    case "const_fn":
-      return { ...expr, span: expr.span, body: specializeInferredExpr(expr.body, context, env) };
-    case "profile":
-      return {
-        ...expr,
-        args: expr.args.map((arg) => specializeInferredExpr(arg, context, env)),
-        body: specializeInferredExpr(expr.body, context, env, expectedType, reportAmbiguous),
-      };
+    case "const_fn": {
+      const body = specializeInferredExpr(expr.body, context, env);
+      if (body === expr.body) return expr;
+      return { ...expr, body };
+    }
+    case "profile": {
+      const args = specializeInferredExprArray(expr.args, context, env);
+      const body = specializeInferredExpr(expr.body, context, env, expectedType, reportAmbiguous);
+      if (args === expr.args && body === expr.body) return expr;
+      return { ...expr, args, body };
+    }
     case "call": {
       context.stats && (context.stats.visitedCalls += 1);
       const callee = specializeInferredExpr(expr.callee, context, env);
-      const fn = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
-      const args = expr.args.map((arg) =>
-        specializeInferredExpr(arg, context, env, undefined, false)
-      );
-      if (!fn || !fnUsesInferredTypeVars(fn, context.consts)) return { ...expr, callee, args };
-      return specializeInferredCall(
+      let fn: FnDecl | undefined;
+      if (callee.kind === "var") fn = context.functions.get(callee.name);
+      const args = specializeInferredExprArray(expr.args, context, env, undefined, false);
+      if (!fn || !fnUsesInferredTypeVars(fn, context.consts, context.memo)) {
+        if (callee === expr.callee && args === expr.args) return expr;
+        return { ...expr, callee, args };
+      }
+      const specialized = specializeInferredCall(
         fn,
         args,
         context,
@@ -6440,92 +7141,144 @@ function specializeInferredExpr(
         callSiteSpan(expr),
         expectedType,
         reportAmbiguous,
-      ) ??
-        { ...expr, callee, args };
+      );
+      if (specialized) return specialized;
+      if (callee === expr.callee && args === expr.args) return expr;
+      return { ...expr, callee, args };
     }
-    case "index":
-      return {
-        ...expr,
-        target: specializeInferredExpr(expr.target, context, env),
-        index: specializeInferredExpr(expr.index, context, env),
-      };
-    case "binary":
-      return {
-        ...expr,
-        left: specializeInferredExpr(expr.left, context, env),
-        right: specializeInferredExpr(expr.right, context, env),
-      };
-    case "operator_chain":
-      return {
-        ...expr,
-        first: specializeInferredExpr(expr.first, context, env),
-        rest: expr.rest.map((item) => ({
-          ...item,
-          value: specializeInferredExpr(item.value, context, env),
-        })),
-      };
+    case "index": {
+      const target = specializeInferredExpr(expr.target, context, env);
+      const index = specializeInferredExpr(expr.index, context, env);
+      if (target === expr.target && index === expr.index) return expr;
+      return { ...expr, target, index };
+    }
+    case "binary": {
+      const left = specializeInferredExpr(expr.left, context, env);
+      const right = specializeInferredExpr(expr.right, context, env);
+      if (left === expr.left && right === expr.right) return expr;
+      return { ...expr, left, right };
+    }
+    case "operator_chain": {
+      const first = specializeInferredExpr(expr.first, context, env);
+      let rest = expr.rest;
+      let changed = first !== expr.first;
+      const nextRest: typeof expr.rest = [];
+      for (const item of expr.rest) {
+        const value = specializeInferredExpr(item.value, context, env);
+        if (value === item.value) {
+          nextRest.push(item);
+        } else {
+          changed = true;
+          nextRest.push({ ...item, value });
+        }
+      }
+      if (changed) rest = nextRest;
+      if (!changed) return expr;
+      return { ...expr, first, rest };
+    }
     case "pipe_bind": {
       const value = specializeInferredExpr(expr.value, context, env);
       const valueType = inferExprType(value, context, env);
-      const scoped = valueType && !hasUnresolvedStaticTypeName(valueType, context)
-        ? new Map(env).set(expr.name, valueType)
-        : env;
-      return {
-        ...expr,
-        value,
-        body: specializeInferredExpr(expr.body, context, scoped, expectedType),
-      };
+      let scoped = env;
+      if (valueType && !hasUnresolvedStaticTypeName(valueType, context)) {
+        scoped = new Map(env);
+        scoped.set(expr.name, valueType);
+      }
+      const body = specializeInferredExpr(expr.body, context, scoped, expectedType);
+      if (value === expr.value && body === expr.body) return expr;
+      return { ...expr, value, body };
     }
-    case "match":
-      return {
-        ...expr,
-        value: specializeInferredExpr(expr.value, context, env),
-        arms: expr.arms.map((arm) => ({
-          ...arm,
-          value: specializeInferredExpr(arm.value, context, env, expectedType),
-        })),
-      };
-    case "shape":
-      return {
-        ...expr,
-        slots: expr.slots.map((slot) => ({
-          ...slot,
-          index: slot.index ? specializeInferredExpr(slot.index, context, env) : undefined,
-          value: specializeInferredExpr(slot.value, context, env),
-        })),
-      };
-    case "product_constructor":
-      return {
-        ...expr,
-        slots: expr.slots.map((slot) => ({
-          ...slot,
-          index: slot.index ? specializeInferredExpr(slot.index, context, env) : undefined,
-          value: specializeInferredExpr(slot.value, context, env),
-        })),
-      };
-    case "range":
-      return {
-        ...expr,
-        start: specializeInferredExpr(expr.start, context, env),
-        end: specializeInferredExpr(expr.end, context, env),
-      };
-    case "static_for_slots":
-      return {
-        ...expr,
-        value: specializeInferredExpr(expr.value, context, env),
-      };
-    case "field":
-      return {
-        ...expr,
-        value: specializeInferredExpr(expr.value, context, env),
-        key: specializeInferredExpr(expr.key, context, env),
-      };
+    case "match": {
+      const value = specializeInferredExpr(expr.value, context, env);
+      let arms = expr.arms;
+      let changed = value !== expr.value;
+      const nextArms: typeof expr.arms = [];
+      for (const arm of expr.arms) {
+        const armValue = specializeInferredExpr(arm.value, context, env, expectedType);
+        if (armValue === arm.value) {
+          nextArms.push(arm);
+        } else {
+          changed = true;
+          nextArms.push({ ...arm, value: armValue });
+        }
+      }
+      if (changed) arms = nextArms;
+      if (!changed) return expr;
+      return { ...expr, value, arms };
+    }
+    case "shape": {
+      const slots = specializeInferredSlots(expr.slots, context, env);
+      if (slots === expr.slots) return expr;
+      return { ...expr, slots };
+    }
+    case "product_constructor": {
+      const slots = specializeInferredSlots(expr.slots, context, env);
+      if (slots === expr.slots) return expr;
+      return { ...expr, slots };
+    }
+    case "range": {
+      const start = specializeInferredExpr(expr.start, context, env);
+      const end = specializeInferredExpr(expr.end, context, env);
+      if (start === expr.start && end === expr.end) return expr;
+      return { ...expr, start, end };
+    }
+    case "static_for_slots": {
+      const value = specializeInferredExpr(expr.value, context, env);
+      if (value === expr.value) return expr;
+      return { ...expr, value };
+    }
+    case "field": {
+      const value = specializeInferredExpr(expr.value, context, env);
+      const key = specializeInferredExpr(expr.key, context, env);
+      if (value === expr.value && key === expr.key) return expr;
+      return { ...expr, value, key };
+    }
     case "block":
       return specializeInferredBlock(expr, context, env, expectedType, reportAmbiguous);
     case "literal":
     case "var":
       return expr;
   }
+}
+
+function specializeInferredExprArray(
+  items: Expr[],
+  context: Parameters<typeof specializeInferredExpr>[1],
+  env: Map<string, string>,
+  expectedType?: string,
+  reportAmbiguous = true,
+): Expr[] {
+  let changed = false;
+  const result: Expr[] = [];
+  for (const item of items) {
+    const next = specializeInferredExpr(item, context, env, expectedType, reportAmbiguous);
+    if (next !== item) changed = true;
+    result.push(next);
+  }
+  if (changed) return result;
+  return items;
+}
+
+function specializeInferredSlots<T extends { index?: Expr; value: Expr }>(
+  slots: T[],
+  context: Parameters<typeof specializeInferredExpr>[1],
+  env: Map<string, string>,
+): T[] {
+  let changed = false;
+  const result: T[] = [];
+  for (const slot of slots) {
+    let index: Expr | undefined;
+    if (slot.index) index = specializeInferredExpr(slot.index, context, env);
+    const value = specializeInferredExpr(slot.value, context, env);
+    if (index === slot.index && value === slot.value) {
+      result.push(slot);
+    } else {
+      changed = true;
+      result.push({ ...slot, index, value });
+    }
+  }
+  if (changed) return result;
+  return slots;
 }
 
 function hasUnresolvedStaticTypeName(
@@ -6546,8 +7299,17 @@ function hasUnresolvedStaticTypeName(
   return false;
 }
 
-function fnUsesInferredTypeVars(fn: FnDecl, consts?: Map<string, ConstValue>): boolean {
-  return collectTypeVars(fn, consts).size > 0;
+function fnUsesInferredTypeVars(
+  fn: FnDecl,
+  consts?: Map<string, ConstValue>,
+  memo?: CheckMemo,
+): boolean {
+  const vars = collectRawTypeVars(fn, memo);
+  if (!consts) return vars.size > 0;
+  for (const name of vars) {
+    if (!consts.has(name)) return true;
+  }
+  return false;
 }
 
 function specializeInferredCall(
@@ -6647,7 +7409,7 @@ function specializeInferredCall(
     fn.params.forEach((param, index) => {
       inferFromValuePattern(param.type, argsByParam[index], types, context, env);
     });
-    const missingTypeVars = [...collectTypeVars(fn, context.consts)].filter((name) =>
+    const missingTypeVars = [...collectTypeVars(fn, context.consts, context.memo)].filter((name) =>
       !types.has(name)
     );
     if (missingTypeVars.length) {
@@ -7214,13 +7976,45 @@ function genericBindings(type: string, decl: TypeDecl): Map<string, string> {
   );
 }
 
-function collectTypeVars(fn: FnDecl, consts?: Map<string, ConstValue>): Set<string> {
+function collectRawTypeVars(fn: FnDecl, memo?: CheckMemo): Set<string> {
+  const cached = memo?.typeVarsByFunction.get(fn);
+  if (cached) return cached;
+  const key = functionTypeVarCacheKey(fn);
+  const persistent = memo?.cachedTypeVarsByFunction?.get(fn);
+  if (persistent?.key === key) {
+    memo?.typeVarsByFunction.set(fn, persistent.vars);
+    return persistent.vars;
+  }
   const vars = new Set<string>();
   const staticParams = new Set(
     fn.params.filter((param) => param.const).map((param) => param.name),
   );
   for (const text of [...fn.params.map((param) => param.type), fn.returnType ?? ""]) {
-    collectFreeTypeVars(text, vars, staticParams, consts);
+    collectFreeTypeVars(text, vars, staticParams);
+  }
+  memo?.typeVarsByFunction.set(fn, vars);
+  memo?.cachedTypeVarsByFunction?.set(fn, { key, vars });
+  return vars;
+}
+
+function functionTypeVarCacheKey(fn: FnDecl): string {
+  let key = fn.returnType ?? "";
+  for (const param of fn.params) {
+    key += `\0${param.const ? "const" : "runtime"}\0${param.name}\0${param.type}`;
+  }
+  return key;
+}
+
+function collectTypeVars(
+  fn: FnDecl,
+  consts?: Map<string, ConstValue>,
+  memo?: CheckMemo,
+): Set<string> {
+  const raw = collectRawTypeVars(fn, memo);
+  if (!consts) return new Set(raw);
+  const vars = new Set<string>();
+  for (const name of raw) {
+    if (!consts.has(name)) vars.add(name);
   }
   return vars;
 }
@@ -7825,7 +8619,7 @@ function specializeConstParamCalls(
   for (const decl of program.declarations) {
     if (
       decl.kind === "fn" && !decl.params.some((param) => param.const) &&
-      !fnUsesInferredTypeVars(decl, consts)
+      !fnUsesInferredTypeVars(decl, consts, context.memo)
     ) {
       specializeBlock(
         decl.body,
@@ -7942,7 +8736,7 @@ function specializeExpr(
           return specializeExpr(arg, context, env, expected);
         });
         if (!direct?.params.some((param) => param.const)) {
-          if (direct && fnUsesInferredTypeVars(direct, context.consts)) {
+          if (direct && fnUsesInferredTypeVars(direct, context.consts, context.memo)) {
             return specializeInferredCall(
               direct,
               args,
@@ -9943,7 +10737,11 @@ function clonePlainExpr<t>(value: t, seen = new WeakMap<object, unknown>()): t {
   }
   const out: Record<string, unknown> = {};
   seen.set(value as object, out);
-  for (const [key, child] of Object.entries(value)) out[key] = clonePlainExpr(child, seen);
+  const source = value as Record<string, unknown>;
+  for (const key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    out[key] = clonePlainExpr(source[key], seen);
+  }
   return out as t;
 }
 
@@ -10476,7 +11274,7 @@ function staticConstExprValue(
       buildOperatorTree(
         [expr.first, ...expr.rest.map((item) => item.value)],
         expr.rest.map((item) => item.op),
-        [],
+        EMPTY_OPERATOR_MAP,
         context?.diagnostics ?? [],
         expr,
       ),
@@ -10863,6 +11661,189 @@ function checkBlockTypeAnnotationCasing(
 
 function explicitTypeAnnotation(type: string | undefined): string | undefined {
   return type?.trim() === "_" ? undefined : type;
+}
+
+function programHasInferredTypeAnnotationWork(
+  program: Program,
+  cache?: WeakMap<object, boolean>,
+): boolean {
+  for (const item of program.imports) {
+    if (annotationTextContainsHole(item.type)) return true;
+  }
+  for (const decl of program.declarations) {
+    if (declHasInferredTypeAnnotationWork(decl, cache)) return true;
+  }
+  return false;
+}
+
+function declHasInferredTypeAnnotationWork(
+  decl: Declaration,
+  cache?: WeakMap<object, boolean>,
+): boolean {
+  const cached = cache?.get(decl);
+  if (cached !== undefined) return cached;
+  let result = false;
+  if (decl.kind === "fn" || decl.kind === "contract") {
+    for (const param of decl.params) {
+      if (param.typeHoles?.length) {
+        result = true;
+        break;
+      }
+    }
+    if (!result && decl.kind === "fn" && decl.returnTypeHoles?.length) result = true;
+    if (!result) result = blockHasInferredTypeAnnotationWork(decl.body, cache);
+    cache?.set(decl, result);
+    return result;
+  }
+  if (decl.kind === "let" || decl.kind === "const") {
+    result = decl.typeHoles?.length ? true : exprHasInferredTypeAnnotationWork(decl.value, cache);
+    cache?.set(decl, result);
+    return result;
+  }
+  if (decl.kind === "type") {
+    for (const clause of decl.clauses ?? []) {
+      if (declHasInferredTypeAnnotationWork(clause, cache)) {
+        result = true;
+        break;
+      }
+    }
+  }
+  cache?.set(decl, result);
+  return result;
+}
+
+function blockHasInferredTypeAnnotationWork(
+  block: BlockExpr,
+  cache?: WeakMap<object, boolean>,
+): boolean {
+  for (const stmt of block.statements) {
+    if (stmt.kind === "let") {
+      if (stmt.typeHoles?.length) return true;
+      if (exprHasInferredTypeAnnotationWork(stmt.value, cache)) return true;
+    } else if (stmt.kind === "destructure_let") {
+      if (exprHasInferredTypeAnnotationWork(stmt.value, cache)) return true;
+    }
+  }
+  return block.expr ? exprHasInferredTypeAnnotationWork(block.expr, cache) : false;
+}
+
+function exprHasInferredTypeAnnotationWork(expr: Expr, cache?: WeakMap<object, boolean>): boolean {
+  const cached = cache?.get(expr);
+  if (cached !== undefined) return cached;
+  let result = false;
+  switch (expr.kind) {
+    case "block":
+      result = blockHasInferredTypeAnnotationWork(expr, cache);
+      break;
+    case "do":
+      for (const stmt of expr.statements) {
+        if (
+          stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+          stmt.kind === "destructure_let"
+        ) {
+          if (stmt.kind === "let" && stmt.typeHoles?.length) {
+            result = true;
+            break;
+          }
+          if (exprHasInferredTypeAnnotationWork(stmt.value, cache)) {
+            result = true;
+            break;
+          }
+        }
+      }
+      if (!result && expr.expr) result = exprHasInferredTypeAnnotationWork(expr.expr, cache);
+      break;
+    case "const_fn":
+      result = exprHasInferredTypeAnnotationWork(expr.body, cache);
+      break;
+    case "call":
+      if (exprHasInferredTypeAnnotationWork(expr.callee, cache)) {
+        result = true;
+        break;
+      }
+      for (const arg of expr.args) {
+        if (exprHasInferredTypeAnnotationWork(arg, cache)) {
+          result = true;
+          break;
+        }
+      }
+      break;
+    case "index":
+      result = exprHasInferredTypeAnnotationWork(expr.target, cache) ||
+        exprHasInferredTypeAnnotationWork(expr.index, cache);
+      break;
+    case "binary":
+      result = exprHasInferredTypeAnnotationWork(expr.left, cache) ||
+        exprHasInferredTypeAnnotationWork(expr.right, cache);
+      break;
+    case "operator_chain":
+      if (exprHasInferredTypeAnnotationWork(expr.first, cache)) {
+        result = true;
+        break;
+      }
+      for (const item of expr.rest) {
+        if (exprHasInferredTypeAnnotationWork(item.value, cache)) {
+          result = true;
+          break;
+        }
+      }
+      break;
+    case "pipe_bind":
+      result = exprHasInferredTypeAnnotationWork(expr.value, cache) ||
+        exprHasInferredTypeAnnotationWork(expr.body, cache);
+      break;
+    case "profile":
+      for (const arg of expr.args) {
+        if (exprHasInferredTypeAnnotationWork(arg, cache)) {
+          result = true;
+          break;
+        }
+      }
+      if (!result) result = exprHasInferredTypeAnnotationWork(expr.body, cache);
+      break;
+    case "match":
+      if (exprHasInferredTypeAnnotationWork(expr.value, cache)) {
+        result = true;
+        break;
+      }
+      for (const arm of expr.arms) {
+        if (exprHasInferredTypeAnnotationWork(arm.value, cache)) {
+          result = true;
+          break;
+        }
+      }
+      break;
+    case "shape":
+    case "product_constructor":
+      for (const slot of expr.slots) {
+        if (exprHasInferredTypeAnnotationWork(slot.value, cache)) {
+          result = true;
+          break;
+        }
+      }
+      break;
+    case "static_for_slots":
+      if (expr.source.kind === "range") {
+        if (exprHasInferredTypeAnnotationWork(expr.source.start, cache)) result = true;
+        if (!result && exprHasInferredTypeAnnotationWork(expr.source.end, cache)) result = true;
+      } else if (exprHasInferredTypeAnnotationWork(expr.source.shape, cache)) result = true;
+      if (!result) result = exprHasInferredTypeAnnotationWork(expr.value, cache);
+      break;
+    case "field":
+      result = exprHasInferredTypeAnnotationWork(expr.value, cache) ||
+        exprHasInferredTypeAnnotationWork(expr.key, cache);
+      break;
+    case "range":
+      result = exprHasInferredTypeAnnotationWork(expr.start, cache) ||
+        exprHasInferredTypeAnnotationWork(expr.end, cache);
+      break;
+    case "literal":
+    case "var":
+      result = false;
+      break;
+  }
+  cache?.set(expr, result);
+  return result;
 }
 
 function prepareInferredTypeAnnotations(program: Program, diagnostics: Diagnostic[]) {
@@ -11984,10 +12965,26 @@ function checkTypeContracts(
   consts: Map<string, ConstValue>,
   diagnostics: Diagnostic[],
   pluginRegistry: CompilerPluginRegistry,
+  cache?: CheckCache,
 ) {
   const byName = new Map(types.map((decl) => [decl.name, decl]));
   const byFn = new Map(functions.map((decl) => [decl.name, decl]));
+  const environmentKey = cache?.typeContractChecks
+    ? typeContractEnvironmentKey(
+      types,
+      functions,
+      hostIoImports,
+      consts,
+      cache.signatureHashes,
+    )
+    : undefined;
   for (const decl of program.declarations) {
+    const cacheKey = environmentKey && (decl.kind === "const" || decl.kind === "let" ||
+        decl.kind === "fn")
+      ? typeContractDeclarationCacheKey(decl, environmentKey, cache?.semanticHashes)
+      : undefined;
+    if (cacheKey && cache?.typeContractChecks?.has(cacheKey)) continue;
+    const diagnosticStart = diagnostics.length;
     if (decl.kind === "const" || decl.kind === "let") {
       if (decl.type) {
         instantiateNestedAnnotations(
@@ -12048,6 +13045,9 @@ function checkTypeContracts(
         constTypeParams,
         pluginRegistry,
       );
+    }
+    if (cacheKey && diagnostics.length === diagnosticStart) {
+      cache?.typeContractChecks?.add(cacheKey);
     }
   }
 }
@@ -12175,18 +13175,43 @@ function lowerProductConstructors(
       productsByTerminal.set(terminal, existing);
     }
   }
-  const lowerExpr = (expr: Expr): Expr => {
+  const lowerExprArray = (items: Expr[]): Expr[] => {
+    let changed = false;
+    const lowered: Expr[] = [];
+    for (const item of items) {
+      const next = lowerExpr(item);
+      if (next !== item) changed = true;
+      lowered.push(next);
+    }
+    return changed ? lowered : items;
+  };
+  const lowerSlots = <T extends { value: Expr }>(slots: T[]): T[] => {
+    let changed = false;
+    const lowered: T[] = [];
+    for (const slot of slots) {
+      const value = lowerExpr(slot.value);
+      if (value !== slot.value) {
+        changed = true;
+        lowered.push({ ...slot, value });
+      } else {
+        lowered.push(slot);
+      }
+    }
+    return changed ? lowered : slots;
+  };
+  function lowerExpr(expr: Expr): Expr {
     switch (expr.kind) {
       case "do":
         return lowerDoExpression(expr, diagnostics, lowerExpr);
-      case "const_fn":
-        return { ...expr, span: expr.span, body: lowerExpr(expr.body) };
-      case "profile":
-        return {
-          ...expr,
-          args: expr.args.map(lowerExpr),
-          body: lowerExpr(expr.body),
-        };
+      case "const_fn": {
+        const body = lowerExpr(expr.body);
+        return body === expr.body ? expr : { ...expr, body };
+      }
+      case "profile": {
+        const args = lowerExprArray(expr.args);
+        const body = lowerExpr(expr.body);
+        return args === expr.args && body === expr.body ? expr : { ...expr, args, body };
+      }
       case "product_constructor": {
         const product = resolveProductConstructor(expr.constructor, products, productsByTerminal);
         const anonymousShape = product ? undefined : constShapeValueFromTypeArg(expr.constructor);
@@ -12216,66 +13241,85 @@ function lowerProductConstructors(
           slots: expr.slots.map((slot) => ({ ...slot, value: lowerExpr(slot.value) })),
         };
       }
-      case "call":
-        return {
-          ...expr,
-          callee: lowerExpr(expr.callee),
-          args: expr.args.map(lowerExpr),
-        };
-      case "index":
-        return {
-          ...expr,
-          target: lowerExpr(expr.target),
-          index: lowerExpr(expr.index),
-        };
-      case "binary":
-        return { ...expr, left: lowerExpr(expr.left), right: lowerExpr(expr.right) };
-      case "operator_chain":
-        return {
-          ...expr,
-          first: lowerExpr(expr.first),
-          rest: expr.rest.map((item) => ({ ...item, value: lowerExpr(item.value) })),
-        };
-      case "pipe_bind":
-        return { ...expr, value: lowerExpr(expr.value), body: lowerExpr(expr.body) };
-      case "match":
-        return {
-          ...expr,
-          value: lowerExpr(expr.value),
-          arms: expr.arms.map((arm) => ({ ...arm, value: lowerExpr(arm.value) })),
-        };
-      case "shape":
-        return {
-          ...expr,
-          slots: expr.slots.map((slot) => ({ ...slot, value: lowerExpr(slot.value) })),
-        };
-      case "static_for_slots":
-        return {
-          ...expr,
-          source: lowerStaticForSourceExpr(expr.source, lowerExpr),
-          value: lowerExpr(expr.value),
-        };
-      case "range":
-        return { ...expr, start: lowerExpr(expr.start), end: lowerExpr(expr.end) };
-      case "static_for_slots":
-        return { ...expr, value: lowerExpr(expr.value) };
-      case "field":
-        return { ...expr, value: lowerExpr(expr.value), key: lowerExpr(expr.key) };
-      case "block":
-        return {
-          ...expr,
-          statements: expr.statements.map((stmt) =>
-            stmt.kind === "let" || stmt.kind === "destructure_let"
-              ? { ...stmt, value: lowerExpr(stmt.value) }
-              : stmt
-          ),
-          expr: expr.expr ? lowerExpr(expr.expr) : undefined,
-        };
+      case "call": {
+        const callee = lowerExpr(expr.callee);
+        const args = lowerExprArray(expr.args);
+        return callee === expr.callee && args === expr.args ? expr : { ...expr, callee, args };
+      }
+      case "index": {
+        const target = lowerExpr(expr.target);
+        const index = lowerExpr(expr.index);
+        return target === expr.target && index === expr.index ? expr : { ...expr, target, index };
+      }
+      case "binary": {
+        const left = lowerExpr(expr.left);
+        const right = lowerExpr(expr.right);
+        return left === expr.left && right === expr.right ? expr : { ...expr, left, right };
+      }
+      case "operator_chain": {
+        const first = lowerExpr(expr.first);
+        let changed = first !== expr.first;
+        const rest = expr.rest.map((item) => {
+          const value = lowerExpr(item.value);
+          if (value === item.value) return item;
+          changed = true;
+          return { ...item, value };
+        });
+        return changed ? { ...expr, first, rest } : expr;
+      }
+      case "pipe_bind": {
+        const value = lowerExpr(expr.value);
+        const body = lowerExpr(expr.body);
+        return value === expr.value && body === expr.body ? expr : { ...expr, value, body };
+      }
+      case "match": {
+        const value = lowerExpr(expr.value);
+        let changed = value !== expr.value;
+        const arms = expr.arms.map((arm) => {
+          const armValue = lowerExpr(arm.value);
+          if (armValue === arm.value) return arm;
+          changed = true;
+          return { ...arm, value: armValue };
+        });
+        return changed ? { ...expr, value, arms } : expr;
+      }
+      case "shape": {
+        const slots = lowerSlots(expr.slots);
+        return slots === expr.slots ? expr : { ...expr, slots };
+      }
+      case "static_for_slots": {
+        const source = lowerStaticForSourceExpr(expr.source, lowerExpr);
+        const value = lowerExpr(expr.value);
+        return source === expr.source && value === expr.value ? expr : { ...expr, source, value };
+      }
+      case "range": {
+        const start = lowerExpr(expr.start);
+        const end = lowerExpr(expr.end);
+        return start === expr.start && end === expr.end ? expr : { ...expr, start, end };
+      }
+      case "field": {
+        const value = lowerExpr(expr.value);
+        const key = lowerExpr(expr.key);
+        return value === expr.value && key === expr.key ? expr : { ...expr, value, key };
+      }
+      case "block": {
+        let changed = false;
+        const statements = expr.statements.map((stmt) => {
+          if (stmt.kind !== "let" && stmt.kind !== "destructure_let") return stmt;
+          const value = lowerExpr(stmt.value);
+          if (value === stmt.value) return stmt;
+          changed = true;
+          return { ...stmt, value };
+        });
+        const body = expr.expr ? lowerExpr(expr.expr) : undefined;
+        if (body !== expr.expr) changed = true;
+        return changed ? { ...expr, statements, expr: body } : expr;
+      }
       case "literal":
       case "var":
         return expr;
     }
-  };
+  }
   for (const decl of program.declarations) {
     if (decl.kind === "fn") decl.body = lowerExpr(decl.body) as Extract<Expr, { kind: "block" }>;
     else if (decl.kind === "let" || decl.kind === "const") decl.value = lowerExpr(decl.value);
@@ -13135,7 +14179,7 @@ class TypeEvaluator {
           buildOperatorTree(
             [expr.first, ...expr.rest.map((item) => item.value)],
             expr.rest.map((item) => item.op),
-            [],
+            EMPTY_OPERATOR_MAP,
             this.diagnostics,
             expr,
           ),
@@ -14789,8 +15833,18 @@ function collectTypeCalls(expr: TypeExpr): TypeExpr[] {
 }
 
 function parseAnnotationType(source: string): TypeExpr | undefined {
+  const cached = parsedAnnotationTypeCache.get(source);
+  if (cached !== undefined) {
+    if (cached === false) return undefined;
+    return cached;
+  }
   const parser = new AnnotationTypeParser(source);
-  return parser.parse();
+  const parsed = parser.parse();
+  if (parsedAnnotationTypeCache.size >= PARSED_ANNOTATION_TYPE_CACHE_LIMIT) {
+    parsedAnnotationTypeCache.clear();
+  }
+  parsedAnnotationTypeCache.set(source, parsed ?? false);
+  return parsed;
 }
 
 class AnnotationTypeParser {

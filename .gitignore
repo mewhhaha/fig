@@ -1,5 +1,10 @@
 helix/runtime/grammars/*.so
-tmp/
+tmp/*
+!tmp/large_compile_bench/
+tmp/large_compile_bench/*
+!tmp/large_compile_bench/README.md
+!tmp/large_compile_bench/generate.ts
+!tmp/large_compile_bench/run.ts
 .deno-cache/
 examples/*.wasm
 generated/baba-workbench/src/

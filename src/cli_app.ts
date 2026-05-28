@@ -279,6 +279,15 @@ async function runWatch(file: string, args: string[], io: CliIo): Promise<void> 
     try {
       for await (const event of watcher) {
         await delay(100);
+        for (const path of event.paths) {
+          const sourceId = sourceIdForPath(path);
+          try {
+            session.update({ sourceId, text: await io.readTextFile(path) });
+          } catch (error) {
+            if (!(error instanceof Deno.errors.NotFound)) throw error;
+            session.remove(sourceId);
+          }
+        }
         const previous = watchedPaths.join("\0");
         await buildOnce(event.paths.length ? event.paths.join(", ") : "change");
         if (watchedPaths.join("\0") !== previous) {

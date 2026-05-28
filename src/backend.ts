@@ -34,7 +34,7 @@ import {
   type CompilerPluginRegistry,
   createCompilerPluginRegistry,
 } from "./plugins.ts";
-import { type CompileTraceSink, traceInstant } from "./trace.ts";
+import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
 import {
   type I32Range,
   parseRefinedI32Type,
@@ -123,8 +123,36 @@ export interface BackendFunctionCacheEntry {
   fn: BackendFunction;
 }
 
+export interface WasmFunctionCacheEntry {
+  environmentKey: string;
+  bytes: number[];
+  hints: BranchHintEntry[];
+}
+
+export interface BackendLayoutCacheEntry {
+  layouts: LayoutEnv;
+}
+
+export interface BackendPlanningCacheEntry {
+  returnProjectionPlans: Map<string, ReturnProjectionPlan>;
+  closureDescriptors: ClosureDescriptor[];
+  fixedArrayPlans?: ReturnType<typeof analyzeFixedArrayPlans>;
+}
+
 export interface BackendCache {
+  backendLayouts?: Map<string, BackendLayoutCacheEntry>;
+  backendLayoutPlans?: Map<string, BackendPlanningCacheEntry>;
+  backendBodyCalls?: WeakMap<object, Set<string>>;
+  backendDirectCalls?: WeakMap<object, Extract<Expr, { kind: "call" }>[]>;
+  backendTailCalls?: WeakMap<object, TailCallAnalysis>;
+  backendCallCounts?: WeakMap<object, Map<string, number>>;
+  backendNameUses?: WeakMap<object, Map<string, number>>;
+  backendInlineCosts?: WeakMap<object, number>;
+  backendFunctionHashes?: WeakMap<object, string>;
+  backendPlanningHashes?: WeakMap<object, string>;
   backendFunctions?: Map<string, BackendFunctionCacheEntry>;
+  wasmFunctions?: WeakMap<BackendFunction, WasmFunctionCacheEntry>;
+  wasmNameSections?: Map<string, number[]>;
 }
 
 interface BackendLocal {
@@ -295,6 +323,7 @@ interface LowerContext {
   debugTraceSites?: FigDebugTraceSite[];
   runtimeProfile?: boolean;
   profileSites?: FigProfileSite[];
+  backendCache?: BackendCache;
 }
 
 interface ClosureDescriptor {
@@ -341,7 +370,7 @@ interface ReturnProjectionPlan {
   suffixes: string[];
 }
 
-interface LayoutEnv {
+export interface LayoutEnv {
   types: Map<string, TypeDecl>;
   constShapes: Map<string, Extract<Expr, { kind: "shape" }>>;
   constRuntimeValues: Map<string, Expr>;
@@ -389,6 +418,8 @@ export function emitWasm(
 ): Uint8Array<ArrayBuffer> {
   return wasmFromBackendModule(lowerProgramToBackendModule(program, options), {
     debugNames: (options.optMode ?? "debug") === "debug",
+    cache: options.backendCache,
+    trace: options.compileTrace,
   });
 }
 
@@ -522,7 +553,7 @@ function backendFixedArrayPlanning(
     ...baseCtx,
     functions: new Map([...imports, ...sourceFns, ...functions].map((fn) => [fn.name, fn])),
     signatures,
-    scalarParamFactsByFunction: inferTailParamScalarFacts(functions),
+    scalarParamFactsByFunction: inferTailParamScalarFacts(functions, options.backendCache),
     closureDescriptors,
     closureIds,
     closureDispatcherSignatures: new Map(),
@@ -558,7 +589,7 @@ export function compileBackendModule(
 
 export function lowerProgramToBackendArtifact(
   program: Program,
-  options: BackendOptions = {},
+  options: BackendOptions & { reuseCachedBackendFunctions?: boolean } = {},
 ): LoweredBackendArtifact {
   const memoryModel = options.memoryModel ?? "branch";
   if (!isMemoryModel(memoryModel)) {
@@ -582,23 +613,86 @@ export function lowerProgramToBackendArtifact(
   const optimizeMs = performance.now() - optimizeStart;
 
   const layoutStart = performance.now();
-  const runtimeProgram = runtimeProgramFromProgram(optimized);
-  const layouts = createLayoutEnv(runtimeProgram);
-  const imports = runtimeProgram.imports.map((item) => importAsFn(item));
-  const runtimeFns = runtimeProgram.declarations.filter((decl): decl is FnDecl =>
-    decl.kind === "fn" && !decl.primitiveId && !isIntrinsicWrapper(decl, pluginRegistry) &&
-    !decl.params.some((param) => param.const) &&
-    Boolean(decl.returnType)
+  const runtimeProgram = traceSync(
+    options.compileTrace,
+    "backend.layout.runtime_program",
+    () => runtimeProgramFromProgram(optimized),
   );
-  const sourceFns = runtimeProgram.declarations.filter((decl): decl is FnDecl =>
-    decl.kind === "fn" && Boolean(decl.returnType)
+  const layouts = traceSync(
+    options.compileTrace,
+    "backend.layout.layouts",
+    () => cachedLayoutEnv(runtimeProgram, options.backendCache),
   );
-  const returnProjectionPlans = privateReturnProjectionPlans(runtimeFns, layouts);
-  const projectedRuntimeFns = runtimeFns.map((fn) => {
-    const plan = returnProjectionPlans.get(fn.name);
-    return plan ? { ...fn, returnType: plan.type } : fn;
+  const imports = traceSync(
+    options.compileTrace,
+    "backend.layout.imports",
+    () => runtimeProgram.imports.map((item) => importAsFn(item)),
+  );
+  const runtimeFns = traceSync(
+    options.compileTrace,
+    "backend.layout.runtime_functions",
+    () =>
+      runtimeProgram.declarations.filter((decl): decl is FnDecl =>
+        decl.kind === "fn" && !decl.primitiveId && !isIntrinsicWrapper(decl, pluginRegistry) &&
+        !decl.params.some((param) => param.const) &&
+        Boolean(decl.returnType)
+      ),
+  );
+  const sourceFns = traceSync(
+    options.compileTrace,
+    "backend.layout.source_functions",
+    () =>
+      runtimeProgram.declarations.filter((decl): decl is FnDecl =>
+        decl.kind === "fn" && Boolean(decl.returnType)
+      ),
+  );
+  const backendPlanningKey = traceSync(
+    options.compileTrace,
+    "backend.layout.plan_key",
+    () =>
+      options.backendCache?.backendLayoutPlans
+        ? backendLayoutPlanningCacheKey(
+          sourceFns,
+          runtimeFns,
+          layouts,
+          memoryModel,
+          optMode,
+          options.tailCallMode,
+          options.backendCache?.backendPlanningHashes,
+        )
+        : undefined,
+  );
+  const cachedBackendPlanning = backendPlanningKey
+    ? options.backendCache?.backendLayoutPlans?.get(backendPlanningKey)
+    : undefined;
+  const returnProjectionPlans = traceSync(
+    options.compileTrace,
+    "backend.layout.return_projection_plans",
+    () => cachedBackendPlanning?.returnProjectionPlans ?? privateReturnProjectionPlans(
+      runtimeFns,
+      layouts,
+    ),
+  );
+  const projectedRuntimeFns = traceSync(
+    options.compileTrace,
+    "backend.layout.project_returns",
+    () => {
+      return runtimeFns.map((fn) => {
+        const plan = returnProjectionPlans.get(fn.name);
+        if (!plan) return fn;
+        return { ...fn, returnType: plan.type };
+      });
+    },
+  );
+  const closureDescriptors = traceSync(
+    options.compileTrace,
+    "backend.layout.closure_descriptors",
+    () => cachedBackendPlanning?.closureDescriptors ??
+      collectClosureDescriptors(sourceFns, projectedRuntimeFns),
+  );
+  traceInstant(options.compileTrace, "backend.layout.plan_cache", {
+    cacheHit: Boolean(cachedBackendPlanning),
   });
-  const closureDescriptors = collectClosureDescriptors(sourceFns, projectedRuntimeFns);
   const closureIds = new Map(closureDescriptors.map((item) => [item.target, item.id]));
   const baseCtx: LowerContext = {
     layouts,
@@ -624,44 +718,78 @@ export function lowerProgramToBackendArtifact(
     debugTraceSites: [],
     runtimeProfile: options.runtimeProfile ?? false,
     profileSites: [],
+    backendCache: options.backendCache,
   };
-  const reachableProjectedFns = removeUnreachablePrivateFunctions(
-    projectedRuntimeFns,
-    new Set([
-      ...layouts.constFunctionFields.values(),
-      ...closureDescriptors.map((item) => item.target),
-    ]),
+  const reachableProjectedFns = traceSync(
+    options.compileTrace,
+    "backend.layout.reachable_functions",
+    () =>
+      removeUnreachablePrivateFunctions(
+        projectedRuntimeFns,
+        new Set([
+          ...layouts.constFunctionFields.values(),
+          ...closureDescriptors.map((item) => item.target),
+        ]),
+        options.backendCache,
+      ),
   );
-  const functions = addOptimizedExportClones(
-    reachableProjectedFns,
-    (fn) => scratchWorthyFixedArrayTargets(fn.body, baseCtx).size > 0,
+  const functions = traceSync(
+    options.compileTrace,
+    "backend.layout.optimized_export_clones",
+    () =>
+      addOptimizedExportClones(
+        reachableProjectedFns,
+        (fn) => {
+          return scratchWorthyFixedArrayTargets(fn.body, baseCtx).size > 0;
+        },
+      ),
   );
   const signatures = new Map([...imports, ...functions].map((fn) => [fn.name, fn]));
   const ctx: LowerContext = {
     ...baseCtx,
     functions: new Map([...imports, ...sourceFns, ...functions].map((fn) => [fn.name, fn])),
     signatures,
-    scalarParamFactsByFunction: inferTailParamScalarFacts(functions),
+    scalarParamFactsByFunction: inferTailParamScalarFacts(functions, options.backendCache),
     closureDescriptors,
     closureIds,
     closureDispatcherSignatures: new Map(),
+    backendCache: options.backendCache,
   };
-  const fixedArrayPlans = analyzeFixedArrayPlans(functions, ctx);
+  const fixedArrayPlans = traceSync(
+    options.compileTrace,
+    "backend.layout.fixed_array_plans",
+    () => cachedBackendPlanning?.fixedArrayPlans ?? analyzeFixedArrayPlans(functions, ctx),
+  );
+  if (backendPlanningKey && !cachedBackendPlanning) {
+    options.backendCache?.backendLayoutPlans?.set(backendPlanningKey, {
+      returnProjectionPlans,
+      closureDescriptors,
+      fixedArrayPlans,
+    });
+  } else if (cachedBackendPlanning && !cachedBackendPlanning.fixedArrayPlans) {
+    cachedBackendPlanning.fixedArrayPlans = fixedArrayPlans;
+  }
   ctx.scratchPlansByFunction = fixedArrayPlans.scratch;
   ctx.packedPlansByFunction = fixedArrayPlans.packed;
   ctx.localSlotPlansByFunction = fixedArrayPlans.localSlots;
   const layoutMs = performance.now() - layoutStart;
 
   const lowerStart = performance.now();
-  const backendCacheEnvKey = options.backendCache?.backendFunctions
-    ? backendFunctionEnvironmentKey(ctx)
-    : undefined;
+  const backendCacheEnvKey = traceSync(
+    options.compileTrace,
+    "backend.lower.environment_key",
+    () => {
+      if (!options.backendCache?.backendFunctions) return undefined;
+      return backendFunctionEnvironmentKey(ctx);
+    },
+  );
   const loweredFunctions = lowerFunctions(
     functions,
     ctx,
     options.backendCache,
     options.compileTrace,
     backendCacheEnvKey,
+    options.reuseCachedBackendFunctions === true,
   );
   const closureDispatchers = lowerClosureDispatchers(ctx);
   const debugTraceSites = (optMode === "debug" ? ctx.debugTraceSites ?? [] : [])
@@ -695,59 +823,113 @@ export function lowerProgramToBackendArtifact(
   if (optMode === "release") {
     backendFunctions = inlineTrivialConstBackendFunctions(backendFunctions);
   }
-  const needsScratchMemory = [...ctx.scratchPlansByFunction.values()].some((plans) =>
-    plans.size > 0
+  const needsScratchMemory = traceSync(
+    options.compileTrace,
+    "backend.cleanup.needs_scratch_memory",
+    () => {
+      const scratchPlans = ctx.scratchPlansByFunction;
+      if (!scratchPlans) return false;
+      return [...scratchPlans.values()].some((plans) => plans.size > 0);
+    },
   );
-  const needsBranchMemory = functions.some((fn) => usesBranchIntrinsic(fn.body, ctx.functions));
-  const needsHeapMemory = closureDescriptors.length > 0 ||
-    functions.some((fn) => usesHeapArrayIntrinsic(fn.body, ctx.functions));
-  const needsAbiMemory =
-    functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, ctx.layouts)) ||
-    imports.some((fn) => functionNeedsMemoryAbi(fn, ctx.layouts));
-  const rawMemories = needsAbiMemory
-    ? ensureAbiMemories(backendMemories(
-      needsBranchMemory,
-      needsScratchMemory,
-      true,
-    ))
-    : backendMemories(
-      needsBranchMemory,
-      needsScratchMemory,
-      needsHeapMemory,
-    );
-  const abiManifest = createFigAbiManifest(
-    rawMemories,
-    functions,
-    imports,
-    ctx.layouts,
+  const needsBranchMemory = traceSync(
+    options.compileTrace,
+    "backend.cleanup.needs_branch_memory",
+    () =>
+      functions.some((fn) =>
+        functionCallsBranchIntrinsic(fn, ctx.functions, options.backendCache)
+      ),
   );
-  const abiFunctions = memoryAbiRuntimeFunctions(ctx.layouts, functions, imports);
-  const module = {
-    imports: [
-      ...debugTraceImports,
-      ...profileImports,
-      ...imports.map((fn) => {
-        const wrappedImport = functionNeedsMemoryAbi(fn, layouts);
-        return {
-          name: wrappedImport ? abiImportRawName(fn.name) : fn.name,
-          importName: fn.externalName,
-          params: wrappedImport
-            ? fn.params.flatMap((param) => abiParamWat(param.type, layouts))
-            : fn.params.flatMap((param) =>
-              flattenType(param.type, layouts).map((slot) => slot.wat)
-            ),
-          results: wrappedImport
-            ? abiResultWat(fn.returnType, layouts)
-            : flattenType(fn.returnType, layouts).map((slot) => slot.wat),
-        };
-      }),
-    ],
-    functions: memoryAbiWrappedFunctions(
-      removeUnreachableBackendFunctions(backendFunctions),
+  const needsHeapMemory = traceSync(
+    options.compileTrace,
+    "backend.cleanup.needs_heap_memory",
+    () =>
+      closureDescriptors.length > 0 ||
+      functions.some((fn) =>
+        functionCallsHeapArrayIntrinsic(fn, ctx.functions, options.backendCache)
+      ),
+  );
+  const needsAbiMemory = traceSync(
+    options.compileTrace,
+    "backend.cleanup.needs_abi_memory",
+    () =>
+      functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, ctx.layouts)) ||
+      imports.some((fn) => functionNeedsMemoryAbi(fn, ctx.layouts)),
+  );
+  const rawMemories = traceSync(
+    options.compileTrace,
+    "backend.cleanup.memories",
+    () =>
+      needsAbiMemory
+        ? ensureAbiMemories(backendMemories(
+          needsBranchMemory,
+          needsScratchMemory,
+          true,
+        ))
+        : backendMemories(
+          needsBranchMemory,
+          needsScratchMemory,
+          needsHeapMemory,
+        ),
+  );
+  const abiManifest = traceSync(
+    options.compileTrace,
+    "backend.cleanup.abi_manifest",
+    () => createFigAbiManifest(
+      rawMemories,
       functions,
       imports,
-      ctx,
+      ctx.layouts,
     ),
+  );
+  const abiFunctions = traceSync(
+    options.compileTrace,
+    "backend.cleanup.abi_runtime_functions",
+    () => memoryAbiRuntimeFunctions(ctx.layouts, functions, imports),
+  );
+  const backendImports = traceSync(
+    options.compileTrace,
+    "backend.cleanup.imports",
+    () =>
+      [
+        ...debugTraceImports,
+        ...profileImports,
+        ...imports.map((fn) => {
+          const wrappedImport = functionNeedsMemoryAbi(fn, layouts);
+          return {
+            name: wrappedImport ? abiImportRawName(fn.name) : fn.name,
+            importName: fn.externalName,
+            params: wrappedImport
+              ? fn.params.flatMap((param) => abiParamWat(param.type, layouts))
+              : fn.params.flatMap((param) =>
+                flattenType(param.type, layouts).map((slot) => slot.wat)
+              ),
+            results: wrappedImport
+              ? abiResultWat(fn.returnType, layouts)
+              : flattenType(fn.returnType, layouts).map((slot) => slot.wat),
+          };
+        }),
+      ],
+  );
+  const reachableBackendFunctions = traceSync(
+    options.compileTrace,
+    "backend.cleanup.remove_unreachable",
+    () => removeUnreachableBackendFunctions(backendFunctions),
+  );
+  const wrappedBackendFunctions = traceSync(
+    options.compileTrace,
+    "backend.cleanup.memory_abi_wrappers",
+    () =>
+      memoryAbiWrappedFunctions(
+        reachableBackendFunctions,
+        functions,
+        imports,
+        ctx,
+      ),
+  );
+  const module = {
+    imports: backendImports,
+    functions: wrappedBackendFunctions,
     memories: rawMemories,
     data: [],
     customSections: [
@@ -1407,14 +1589,17 @@ function figProfileCustomSection(sites: FigProfileSite[]): BackendCustomSection 
   };
 }
 
-function inferTailParamScalarFacts(functions: FnDecl[]): Map<string, Map<string, ScalarFacts>> {
+function inferTailParamScalarFacts(
+  functions: FnDecl[],
+  cache?: BackendCache,
+): Map<string, Map<string, ScalarFacts>> {
   const byName = new Map(functions.map((fn) => [fn.name, fn]));
   const callsByTarget = new Map<
     string,
     { caller: string; call: Extract<Expr, { kind: "call" }> }[]
   >();
   for (const fn of functions) {
-    for (const call of directCallExprs(fn.body)) {
+    for (const call of cachedDirectCallExprs(fn.body, cache)) {
       if (call.callee.kind !== "var") continue;
       const calls = callsByTarget.get(call.callee.name) ?? [];
       calls.push({ caller: fn.name, call });
@@ -1424,7 +1609,7 @@ function inferTailParamScalarFacts(functions: FnDecl[]): Map<string, Map<string,
 
   const inferred = new Map<string, Map<string, ScalarFacts>>();
   for (const fn of functions) {
-    if (!analyzeTailCalls(fn).hasOnlyTailDirectSelfCalls) continue;
+    if (!cachedAnalyzeTailCalls(fn, cache).hasOnlyTailDirectSelfCalls) continue;
     const externalCalls = (callsByTarget.get(fn.name) ?? []).filter((item) =>
       item.caller !== fn.name
     );
@@ -1475,6 +1660,19 @@ function directCallExprs(expr: Expr | BlockExpr): Extract<Expr, { kind: "call" }
     for (const child of exprChildren(item as Expr)) visit(child);
   };
   visit(expr);
+  return calls;
+}
+
+function cachedDirectCallExprs(
+  expr: Expr | BlockExpr,
+  cache?: BackendCache,
+): Extract<Expr, { kind: "call" }>[] {
+  const directCalls = cache?.backendDirectCalls;
+  if (!directCalls) return directCallExprs(expr);
+  const cached = directCalls.get(expr);
+  if (cached) return cached;
+  const calls = directCallExprs(expr);
+  directCalls.set(expr, calls);
   return calls;
 }
 
@@ -1543,6 +1741,7 @@ function lowerFunctions(
   cache: BackendCache | undefined,
   trace: CompileTraceSink | undefined,
   environmentKey: string | undefined,
+  reuseCachedFunctions: boolean,
 ): BackendFunction[] {
   const backendFunctions = cache?.backendFunctions;
   if (!backendFunctions || !environmentKey) return functions.map((fn) => lowerFunction(fn, ctx));
@@ -1551,11 +1750,11 @@ function lowerFunctions(
   let stored = 0;
   let skippedSideEffects = 0;
   const lowered = functions.map((fn) => {
-    const key = backendFunctionCacheKey(fn, ctx, environmentKey);
+    const key = backendFunctionCacheKey(fn, ctx, environmentKey, cache?.backendFunctionHashes);
     const cached = backendFunctions.get(key);
     if (cached) {
       cacheHits += 1;
-      return cloneBackendFunction(cached.fn);
+      return reuseCachedFunctions ? cached.fn : cloneBackendFunction(cached.fn);
     }
     cacheMisses += 1;
     const debugTraceCount = ctx.debugTraceSites?.length ?? 0;
@@ -1583,7 +1782,7 @@ function lowerFunctions(
 }
 
 function backendFunctionEnvironmentKey(ctx: LowerContext): string {
-  return hashString(stableBackendJson({
+  return stableBackendHash({
     memoryModel: ctx.memoryModel,
     optMode: ctx.optMode,
     tailCallMode: ctx.tailCallMode,
@@ -1602,47 +1801,245 @@ function backendFunctionEnvironmentKey(ctx: LowerContext): string {
       generated: decl.generated,
     })),
     layouts: ctx.layouts,
-  }));
+  });
 }
 
-function backendFunctionCacheKey(fn: FnDecl, ctx: LowerContext, environmentKey: string): string {
+function backendFunctionCacheKey(
+  fn: FnDecl,
+  ctx: LowerContext,
+  environmentKey: string,
+  functionHashes?: WeakMap<object, string>,
+): string {
   const sourceId = fn.span?.sourceId ?? fn.nameSpan?.sourceId ?? "<unknown>";
+  const fnHash = cachedBackendHash(fn, functionHashes);
   return `backend_fn\0${sourceId}\0${fn.name}\0${
-    hashString(stableBackendJson({
-      fn,
+    stableBackendHash({
+      fnHash,
       environmentKey,
       scratchPlans: ctx.scratchPlansByFunction?.get(fn.name),
       packedPlans: ctx.packedPlansByFunction?.get(fn.name),
       localSlotPlans: ctx.localSlotPlansByFunction?.get(fn.name),
       scalarFacts: ctx.scalarParamFactsByFunction?.get(fn.name),
-    }))
+    })
   }`;
 }
 
-function cloneBackendFunction(fn: BackendFunction): BackendFunction {
-  return structuredClone(fn) as BackendFunction;
+function cachedBackendHash(value: object, cache: WeakMap<object, string> | undefined): string {
+  const cached = cache?.get(value);
+  if (cached) return cached;
+  const hash = stableBackendHash(value);
+  cache?.set(value, hash);
+  return hash;
 }
 
-function stableBackendJson(value: unknown): string {
-  return JSON.stringify(value, (key, item) => {
-    if (key === "span" || key === "nameSpan" || key === "typeSpan" || key === "returnTypeSpan") {
-      return undefined;
-    }
-    if (item instanceof Map) {
-      return [...item.entries()].sort(([left], [right]) => `${left}`.localeCompare(`${right}`));
-    }
-    if (item instanceof Set) return [...item.values()].sort();
-    return item;
-  }) ?? "";
-}
-
-function hashString(text: string): string {
+function backendLayoutPlanningCacheKey(
+  sourceFns: FnDecl[],
+  runtimeFns: FnDecl[],
+  layouts: LayoutEnv,
+  memoryModel: MemoryModel,
+  optMode: BackendOptions["optMode"] | undefined,
+  tailCallMode: TailCallMode | undefined,
+  planningHashes?: WeakMap<object, string>,
+): string {
   let hash = 0x811c9dc5;
+  hash = hashUpdateString(hash, "backend_layout_plans");
+  hash = hashUpdateString(hash, memoryModel);
+  hash = hashUpdateString(hash, optMode ?? "debug");
+  hash = hashUpdateString(hash, tailCallMode ?? "");
+  hash = hashUpdateString(hash, stableBackendHash(layouts));
+  hash = hashUpdateString(hash, "runtime");
+  for (const fn of runtimeFns) {
+    hash = hashUpdateString(hash, cachedBackendPlanningFunctionHash(fn, planningHashes));
+  }
+  hash = hashUpdateString(hash, "source");
+  for (const fn of sourceFns) {
+    hash = hashUpdateString(hash, cachedBackendPlanningFunctionHash(fn, planningHashes));
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function cachedBackendPlanningFunctionHash(
+  fn: FnDecl,
+  cache: WeakMap<object, string> | undefined,
+): string {
+  const cached = cache?.get(fn);
+  if (cached) return cached;
+  let hash = 0x811c9dc5;
+  hash = hashUpdateString(hash, fn.name);
+  hash = hashUpdateString(hash, fn.public ? "pub" : "priv");
+  hash = hashUpdateString(hash, fn.imported ? "imported" : "local");
+  hash = hashUpdateString(hash, fn.generated ? "generated" : "source");
+  hash = hashUpdateString(hash, fn.primitiveId ?? "");
+  hash = hashUpdateString(hash, fn.returnType ?? "");
+  for (const param of fn.params) {
+    hash = hashUpdateString(hash, param.name);
+    hash = hashUpdateString(hash, param.type);
+    hash = hashUpdateString(hash, param.const ? "const" : "runtime");
+  }
+  hash = hashBackendPlanningValue(hash, fn.body);
+  const result = (hash >>> 0).toString(16).padStart(8, "0");
+  cache?.set(fn, result);
+  return result;
+}
+
+function hashBackendPlanningValue(hash: number, value: unknown): number {
+  if (value === undefined) return hashUpdateString(hash, "u");
+  if (value === null) return hashUpdateString(hash, "n");
+  switch (typeof value) {
+    case "string":
+      return hashUpdateString(hashUpdateString(hash, "s"), value);
+    case "number":
+      return hashUpdateString(hash, "d");
+    case "boolean":
+      return hashUpdateString(hash, value ? "t" : "f");
+    case "bigint":
+      return hashUpdateString(hash, "b");
+    case "object":
+      break;
+    default:
+      return hashUpdateString(hashUpdateString(hash, typeof value), `${value}`);
+  }
+  if (Array.isArray(value)) {
+    hash = hashUpdateString(hash, "[");
+    for (const item of value) {
+      hash = hashBackendPlanningValue(hashUpdateString(hash, ","), item);
+    }
+    return hashUpdateString(hash, "]");
+  }
+  hash = hashUpdateString(hash, "{");
+  const object = value as Record<string, unknown>;
+  const isLiteral = object.kind === "literal";
+  for (const key in object) {
+    if (!Object.prototype.hasOwnProperty.call(object, key)) continue;
+    if (isBackendMetadataKey(key)) continue;
+    if (isLiteral && key === "value") continue;
+    const child = object[key];
+    if (child === undefined) continue;
+    hash = hashUpdateString(hashUpdateString(hash, key), ":");
+    hash = hashBackendPlanningValue(hash, child);
+    hash = hashUpdateString(hash, ";");
+  }
+  return hashUpdateString(hash, "}");
+}
+
+function cloneBackendFunction(fn: BackendFunction): BackendFunction {
+  return {
+    name: fn.name,
+    ...(fn.exportName ? { exportName: fn.exportName } : {}),
+    params: fn.params.map((local) => ({ ...local })),
+    results: [...fn.results],
+    locals: fn.locals.map((local) => ({ ...local })),
+    body: cloneInstrs(fn.body),
+  };
+}
+
+function cloneInstrs(instrs: Instr[]): Instr[] {
+  return instrs.map(cloneInstr);
+}
+
+function cloneInstr(instr: Instr): Instr {
+  switch (instr.op) {
+    case "if":
+      return {
+        op: "if",
+        results: [...instr.results],
+        thenBody: cloneInstrs(instr.thenBody),
+        elseBody: cloneInstrs(instr.elseBody),
+        ...(instr.branchHint ? { branchHint: instr.branchHint } : {}),
+      };
+    case "block":
+      return {
+        op: "block",
+        body: cloneInstrs(instr.body),
+        ...(instr.results ? { results: [...instr.results] } : {}),
+      };
+    case "loop":
+      return {
+        op: "loop",
+        body: cloneInstrs(instr.body),
+        ...(instr.results ? { results: [...instr.results] } : {}),
+      };
+    case "simd":
+      return {
+        ...instr,
+        ...(instr.lanes ? { lanes: [...instr.lanes] } : {}),
+      };
+    default:
+      return { ...instr };
+  }
+}
+
+function stableBackendHash(value: unknown): string {
+  return (hashBackendValue(0x811c9dc5, value) >>> 0).toString(16).padStart(8, "0");
+}
+
+function hashBackendValue(hash: number, value: unknown): number {
+  if (value === undefined) return hashUpdateString(hash, "u");
+  if (value === null) return hashUpdateString(hash, "n");
+  switch (typeof value) {
+    case "string":
+      return hashUpdateString(hashUpdateString(hash, "s"), value);
+    case "number":
+      return hashUpdateString(hashUpdateString(hash, "d"), `${value}`);
+    case "boolean":
+      return hashUpdateString(hash, value ? "t" : "f");
+    case "bigint":
+      return hashUpdateString(hashUpdateString(hash, "b"), value.toString());
+    case "object":
+      break;
+    default:
+      return hashUpdateString(hashUpdateString(hash, typeof value), `${value}`);
+  }
+  if (Array.isArray(value)) {
+    hash = hashUpdateString(hash, "[");
+    for (const item of value) {
+      hash = hashBackendValue(hashUpdateString(hash, ","), item);
+    }
+    return hashUpdateString(hash, "]");
+  }
+  if (value instanceof Map) {
+    hash = hashUpdateString(hash, "m{");
+    for (
+      const [key, child] of [...value.entries()].sort(([left], [right]) =>
+        `${left}`.localeCompare(`${right}`)
+      )
+    ) {
+      hash = hashBackendValue(hashUpdateString(hash, "k"), key);
+      hash = hashBackendValue(hashUpdateString(hash, ":"), child);
+      hash = hashUpdateString(hash, ";");
+    }
+    return hashUpdateString(hash, "}");
+  }
+  if (value instanceof Set) {
+    hash = hashUpdateString(hash, "s[");
+    for (const item of [...value.values()].sort()) {
+      hash = hashBackendValue(hashUpdateString(hash, ","), item);
+    }
+    return hashUpdateString(hash, "]");
+  }
+  hash = hashUpdateString(hash, "{");
+  const object = value as Record<string, unknown>;
+  for (const key in object) {
+    if (!Object.prototype.hasOwnProperty.call(object, key)) continue;
+    const child = object[key];
+    if (isBackendMetadataKey(key) || child === undefined) continue;
+    hash = hashUpdateString(hashUpdateString(hash, key), ":");
+    hash = hashBackendValue(hash, child);
+    hash = hashUpdateString(hash, ";");
+  }
+  return hashUpdateString(hash, "}");
+}
+
+function isBackendMetadataKey(key: string): boolean {
+  return key === "span" || key === "nameSpan" || key === "typeSpan" || key === "returnTypeSpan";
+}
+
+function hashUpdateString(hash: number, text: string): number {
   for (let index = 0; index < text.length; index++) {
     hash ^= text.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193);
   }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return hash;
 }
 
 function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
@@ -1681,7 +2078,7 @@ function lowerFunction(fn: FnDecl, ctx: LowerContext): BackendFunction {
     fnCtx.tempLocals.push({ name, type: "v128" });
     localNames.add(name);
   }
-  const tailCalls = analyzeTailCalls(fn);
+  const tailCalls = cachedAnalyzeTailCalls(fn, ctx.backendCache);
   if (
     ctx.tailCallMode === "opcode" && tailCalls.hasDirectSelfCall &&
     !tailCalls.hasOnlyTailDirectSelfCalls
@@ -2102,7 +2499,7 @@ function tailTransformedFixedArrayTargets(
   packedByFunction: Map<string, Map<string, PackedArrayPlan>>,
   localSlotByFunction: Map<string, Map<string, LocalSlotArrayPlan>>,
 ): Param[] {
-  if (!analyzeTailCalls(fn).hasOnlyTailDirectSelfCalls) return [];
+  if (!cachedAnalyzeTailCalls(fn, ctx.backendCache).hasOnlyTailDirectSelfCalls) return [];
   const found: Param[] = [];
   const visit = (expr: Expr | undefined) => {
     if (!expr) return;
@@ -2177,7 +2574,7 @@ function fixedArrayTransformerCall(
   if (callee.params.some((param) => param.const)) return undefined;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
   if (
-    !analyzeTailCalls(callee).hasOnlyTailDirectSelfCalls &&
+    !cachedAnalyzeTailCalls(callee, ctx.backendCache).hasOnlyTailDirectSelfCalls &&
     !fixedArrayTransformerForwardingExpr(callee.body, callee.params[0], ctx)
   ) {
     return undefined;
@@ -4796,7 +5193,7 @@ function privateFixedArrayTransformerExpr(
   if (callee.params.some((param) => param.const)) return false;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return false;
   if (
-    !analyzeTailCalls(callee).hasOnlyTailDirectSelfCalls &&
+    !cachedAnalyzeTailCalls(callee, ctx.backendCache).hasOnlyTailDirectSelfCalls &&
     !fixedArrayTransformerForwardingExpr(callee.body, callee.params[0], ctx)
   ) return false;
   return sameInlineArrayType(expectedType, callee.returnType, ctx.layouts) &&
@@ -7811,7 +8208,7 @@ function lowerPrivateProductCallInline(
   const argOffset = Math.max(0, expr.args.length - callee.params.length);
   const runtimeArgs = expr.args.slice(argOffset);
   if (runtimeArgs.length !== callee.params.length) return undefined;
-  const calleeTailCalls = analyzeTailCalls(callee);
+  const calleeTailCalls = cachedAnalyzeTailCalls(callee, ctx.backendCache);
   // Array-free product loops are cheaper as calls from private wrappers; inlining them creates
   // nested loop bodies without unlocking a backed fixed-array representation.
   if (
@@ -7823,7 +8220,7 @@ function lowerPrivateProductCallInline(
   if (
     isCurrentModulePublic(ctx.currentFn) && calleeTailCalls.hasDirectSelfCall &&
     (nonSelfCallSiteCount(callee.name, ctx) !== 1 ||
-      hasNonSelfCalls(callee) ||
+      hasNonSelfCalls(callee, ctx.backendCache) ||
       functionHasAnyFixedArrayPlan(callee.name, ctx))
   ) {
     return undefined;
@@ -7838,7 +8235,7 @@ function lowerPrivateProductCallInline(
       if (!arg || arg.kind === "var") continue;
       if (flattenType(param.type, ctx.layouts).length !== 1) continue;
       if (hasRuntimeEffect(arg, ctx.functions)) continue;
-      if (countNameUses(callee.body, param.name) > 1) continue;
+      if (cachedCountNameUses(callee.body, param.name, ctx.backendCache) > 1) continue;
       scalarArgSubstitutions.set(param.name, arg);
     }
   }
@@ -7968,7 +8365,7 @@ function lowerPrivateProductCallInline(
     locals.add(local.name);
     ctx.tempLocals.push(local);
   }
-  const tailCalls = analyzeTailCalls(renamed);
+  const tailCalls = cachedAnalyzeTailCalls(renamed, ctx.backendCache);
   const body = tailCalls.hasOnlyTailDirectSelfCalls
     ? lowerTailLoopBlock(renamed.body, renamed, inlineCtx, locals)
     : lowerBlock(renamed.body, inlineCtx, locals, renamed.returnType);
@@ -8116,8 +8513,8 @@ function contextDeadProductArgIndexes(
 }
 
 function canAliasReadOnlyProductParams(callee: FnDecl, ctx: LowerContext): boolean {
-  if (hasSelfCall(callee.body, callee.name)) return false;
-  for (const name of calledFunctions(callee.body)) {
+  if (cachedAnalyzeTailCalls(callee, ctx.backendCache).hasDirectSelfCall) return false;
+  for (const name of cachedCalledFunctions(callee.body, ctx.backendCache)) {
     const fn = ctx.functions.get(name);
     if (fn?.returnType && flattenType(fn.returnType, ctx.layouts).length > 1) return false;
   }
@@ -8165,13 +8562,18 @@ function lowerPrivateScalarTailLoopCallInline(
   }
   if (flattenType(callee.returnType, ctx.layouts).length !== 1) return undefined;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
-  const tailCalls = analyzeTailCalls(callee);
+  const tailCalls = cachedAnalyzeTailCalls(callee, ctx.backendCache);
   if (!tailCalls.hasOnlyTailDirectSelfCalls) return undefined;
-  if (backendInlineBlockCost(callee.body) > SCALAR_TAIL_LOOP_BACKEND_INLINE_COST_BUDGET) {
+  if (
+    cachedBackendInlineBlockCost(callee.body, ctx.backendCache) >
+      SCALAR_TAIL_LOOP_BACKEND_INLINE_COST_BUDGET
+  ) {
     return undefined;
   }
   if (isCurrentModulePublic(ctx.currentFn)) {
-    if (nonSelfCallSiteCount(callee.name, ctx) !== 1 || hasNonSelfCalls(callee)) return undefined;
+    if (nonSelfCallSiteCount(callee.name, ctx) !== 1 || hasNonSelfCalls(callee, ctx.backendCache)) {
+      return undefined;
+    }
     if (callee.params.some((param) => typeContainsInlineArray(param.type, ctx))) return undefined;
   } else if (privateNonSelfCallSiteCount(callee.name, ctx) !== 1) return undefined;
   const argOffset = Math.max(0, expr.args.length - callee.params.length);
@@ -8198,7 +8600,7 @@ function lowerPrivateScalarTailLoopCallInline(
       ) {
         continue;
       }
-      if (countNameUses(callee.body, param.name) > 1) continue;
+      if (cachedCountNameUses(callee.body, param.name, ctx.backendCache) > 1) continue;
       scalarArgSubstitutions.set(param.name, arg);
       continue;
     }
@@ -8361,7 +8763,7 @@ function privateNonSelfCallSiteCount(name: string, ctx: LowerContext): number {
   let count = 0;
   for (const fn of ctx.signatures.values()) {
     if (isCurrentModulePublic(fn) || fn.name === name) continue;
-    count += callCountInExpr(fn.body, name);
+    count += cachedCallCountInExpr(fn.body, name, ctx.backendCache);
   }
   return count;
 }
@@ -8370,13 +8772,16 @@ function nonSelfCallSiteCount(name: string, ctx: LowerContext): number {
   let count = 0;
   for (const fn of ctx.signatures.values()) {
     if (fn.name === name) continue;
-    count += callCountInExpr(fn.body, name);
+    count += cachedCallCountInExpr(fn.body, name, ctx.backendCache);
   }
   return count;
 }
 
-function hasNonSelfCalls(fn: FnDecl): boolean {
-  return [...calledFunctions(fn.body)].some((name) => name !== fn.name);
+function hasNonSelfCalls(fn: FnDecl, cache?: BackendCache): boolean {
+  for (const name of cachedCalledFunctions(fn.body, cache)) {
+    if (name !== fn.name) return true;
+  }
+  return false;
 }
 
 function functionHasAnyFixedArrayPlan(name: string, ctx: LowerContext): boolean {
@@ -8412,11 +8817,11 @@ function lowerPrivateScalarCallInline(
   }
   if (flattenType(callee.returnType, ctx.layouts).length !== 1) return undefined;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
-  if (hasSelfCall(callee.body, callee.name)) return undefined;
-  const cost = backendInlineBlockCost(callee.body);
+  if (cachedAnalyzeTailCalls(callee, ctx.backendCache).hasDirectSelfCall) return undefined;
+  const cost = cachedBackendInlineBlockCost(callee.body, ctx.backendCache);
   const canInlineTailLoopPredicate = callee.returnType === "bool" &&
     !callee.generated &&
-    analyzeTailCalls(ctx.currentFn).hasOnlyTailDirectSelfCalls &&
+    cachedAnalyzeTailCalls(ctx.currentFn, ctx.backendCache).hasOnlyTailDirectSelfCalls &&
     cost <= 32;
   if (cost > SCALAR_BACKEND_INLINE_COST_BUDGET && !canInlineTailLoopPredicate) return undefined;
   const argOffset = Math.max(0, expr.args.length - callee.params.length);
@@ -8433,7 +8838,7 @@ function lowerPrivateScalarCallInline(
     if (!arg) continue;
     if (flattenType(param.type, ctx.layouts).length === 1) {
       if (arg.kind === "var") continue;
-      if (countNameUses(callee.body, param.name) > 1) continue;
+      if (cachedCountNameUses(callee.body, param.name, ctx.backendCache) > 1) continue;
       scalarArgSubstitutions.set(param.name, arg);
       continue;
     }
@@ -8593,6 +8998,16 @@ function countFieldAccessUses(expr: Expr | BlockExpr, base: string, field: strin
 function backendInlineBlockCost(block: BlockExpr): number {
   return block.statements.reduce((sum, stmt) => sum + backendInlineStatementCost(stmt), 0) +
     (block.expr ? backendInlineExprCost(block.expr) : 0);
+}
+
+function cachedBackendInlineBlockCost(block: BlockExpr, cache?: BackendCache): number {
+  const inlineCosts = cache?.backendInlineCosts;
+  if (!inlineCosts) return backendInlineBlockCost(block);
+  const cached = inlineCosts.get(block);
+  if (cached !== undefined) return cached;
+  const cost = backendInlineBlockCost(block);
+  inlineCosts.set(block, cost);
+  return cost;
 }
 
 function backendInlineStatementCost(stmt: Statement): number {
@@ -12817,6 +13232,7 @@ function lowerPatternTest(
 function removeUnreachablePrivateFunctions(
   functions: FnDecl[],
   extraRoots = new Set<string>(),
+  cache?: BackendCache,
 ): FnDecl[] {
   const byName = new Map(functions.map((fn) => [fn.name, fn]));
   const reachable = new Set<string>();
@@ -12825,7 +13241,7 @@ function removeUnreachablePrivateFunctions(
     const fn = byName.get(name);
     if (!fn) return;
     reachable.add(name);
-    for (const called of calledFunctions(fn.body)) visit(called);
+    for (const called of cachedCalledFunctions(fn.body, cache)) visit(called);
   };
   for (const fn of functions) if (isCurrentModulePublic(fn)) visit(fn.name);
   for (const name of extraRoots) visit(name);
@@ -13047,6 +13463,25 @@ function callCountInExpr(expr: Expr | BlockExpr, name: string): number {
   return count;
 }
 
+function cachedCallCountInExpr(
+  expr: Expr | BlockExpr,
+  name: string,
+  cache?: BackendCache,
+): number {
+  const callCounts = cache?.backendCallCounts;
+  if (!callCounts) return callCountInExpr(expr, name);
+  let counts = callCounts.get(expr);
+  if (!counts) {
+    counts = new Map();
+    callCounts.set(expr, counts);
+  }
+  const cached = counts.get(name);
+  if (cached !== undefined) return cached;
+  const count = callCountInExpr(expr, name);
+  counts.set(name, count);
+  return count;
+}
+
 function removeUnreachableBackendFunctions(functions: BackendFunction[]): BackendFunction[] {
   const byName = new Map(functions.map((fn) => [fn.name, fn]));
   const reachable = new Set<string>();
@@ -13055,7 +13490,7 @@ function removeUnreachableBackendFunctions(functions: BackendFunction[]): Backen
     const fn = byName.get(name);
     if (!fn) return;
     reachable.add(name);
-    for (const callee of calledBackendFunctions(fn.body)) visit(callee);
+    visitCalledBackendFunctions(fn.body, visit);
   };
   for (const fn of functions) {
     if (fn.exportName) visit(fn.name);
@@ -13063,22 +13498,22 @@ function removeUnreachableBackendFunctions(functions: BackendFunction[]): Backen
   return functions.filter((fn) => reachable.has(fn.name));
 }
 
-function calledBackendFunctions(instrs: Instr[]): string[] {
-  const names: string[] = [];
+function visitCalledBackendFunctions(instrs: Instr[], visitName: (name: string) => void) {
   const visit = (instr: Instr) => {
     if (instr.op === "call" || instr.op === "return_call") {
-      names.push(instr.name);
+      visitName(instr.name);
       return;
     }
     if (instr.op === "if") {
-      instr.thenBody.forEach(visit);
-      instr.elseBody.forEach(visit);
+      for (const child of instr.thenBody) visit(child);
+      for (const child of instr.elseBody) visit(child);
       return;
     }
-    if (instr.op === "block" || instr.op === "loop") instr.body.forEach(visit);
+    if (instr.op === "block" || instr.op === "loop") {
+      for (const child of instr.body) visit(child);
+    }
   };
-  instrs.forEach(visit);
-  return names;
+  for (const instr of instrs) visit(instr);
 }
 
 interface TailCallAnalysis {
@@ -13093,6 +13528,16 @@ function analyzeTailCalls(fn: FnDecl): TailCallAnalysis {
     hasOnlyTailDirectSelfCalls: hasDirectSelfCall &&
       blockHasOnlyTailSelfCalls(fn.body, fn.name),
   };
+}
+
+function cachedAnalyzeTailCalls(fn: FnDecl, cache?: BackendCache): TailCallAnalysis {
+  const tailCalls = cache?.backendTailCalls;
+  if (!tailCalls) return analyzeTailCalls(fn);
+  const cached = tailCalls.get(fn);
+  if (cached) return cached;
+  const analysis = analyzeTailCalls(fn);
+  tailCalls.set(fn, analysis);
+  return analysis;
 }
 
 function blockHasOnlyTailSelfCalls(block: BlockExpr, name: string): boolean {
@@ -13263,6 +13708,16 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
     }
   };
   visit(expr);
+  return calls;
+}
+
+function cachedCalledFunctions(expr: Expr | BlockExpr, cache?: BackendCache): Set<string> {
+  const bodyCalls = cache?.backendBodyCalls;
+  if (!bodyCalls) return calledFunctions(expr);
+  const cached = bodyCalls.get(expr);
+  if (cached) return cached;
+  const calls = calledFunctions(expr);
+  bodyCalls.set(expr, calls);
   return calls;
 }
 
@@ -13480,7 +13935,7 @@ function watMemidx(memory: string | undefined): string {
 
 export function backendModuleToWasm(
   module: BackendModule,
-  options: { debugNames?: boolean } = {},
+  options: { debugNames?: boolean; cache?: BackendCache; trace?: CompileTraceSink } = {},
 ): Uint8Array<ArrayBuffer> {
   const allFns = [...module.imports, ...module.functions];
   const functionTypes = allFns.map((fn) => ({
@@ -13552,18 +14007,36 @@ export function backendModuleToWasm(
   if (exports.length) section(bytes, 7, vecItems(exports));
   if (module.functions.length) {
     const memoryIndex = new Map(module.memories.map((memory, index) => [memory.name, index]));
-    const encodedFunctions = module.functions.map((fn, index) =>
-      encodeFunction(fn, module.imports.length + index, funcIndex, typeKeys, memoryIndex)
+    const encodeEnvironmentKey = wasmFunctionEncodeEnvironmentKey(
+      module,
+      typeKeys,
+      memoryIndex,
     );
+    let wasmFunctionCacheHits = 0;
+    let wasmFunctionCacheMisses = 0;
+    const encodedFunctions = module.functions.map((fn, index) => {
+      const encoded = cachedEncodeFunction(
+        fn,
+        module.imports.length + index,
+        funcIndex,
+        typeKeys,
+        memoryIndex,
+        encodeEnvironmentKey,
+        options.cache,
+      );
+      if (encoded.cacheHit) wasmFunctionCacheHits++;
+      else wasmFunctionCacheMisses++;
+      return encoded;
+    });
+    traceInstant(options.trace, "wasm.encode.function_cache", {
+      cacheHits: wasmFunctionCacheHits,
+      cacheMisses: wasmFunctionCacheMisses,
+    });
     if (module.branchHints) {
       const branchHintSection = wasmBranchHintSection(encodedFunctions);
       if (branchHintSection) section(bytes, 0, branchHintSection);
     }
-    section(
-      bytes,
-      10,
-      vecItems(encodedFunctions.map((fn) => fn.bytes)),
-    );
+    sectionVecItems(bytes, 10, encodedFunctions.map((fn) => fn.bytes));
   }
   if (module.data.length) {
     section(
@@ -13579,14 +14052,25 @@ export function backendModuleToWasm(
     );
   }
   if (options.debugNames) {
-    section(bytes, 0, wasmNameSection(module, allFns));
+    const cachedNameSection = cachedWasmNameSection(module, allFns, options.cache);
+    let nameSectionCacheHits = 0;
+    let nameSectionCacheMisses = 1;
+    if (cachedNameSection.cacheHit) {
+      nameSectionCacheHits = 1;
+      nameSectionCacheMisses = 0;
+    }
+    traceInstant(options.trace, "wasm.encode.name_section_cache", {
+      cacheHits: nameSectionCacheHits,
+      cacheMisses: nameSectionCacheMisses,
+    });
+    section(bytes, 0, cachedNameSection.bytes);
   }
   return new Uint8Array(bytes) as Uint8Array<ArrayBuffer>;
 }
 
 export function wasmFromBackendModule(
   module: BackendModule,
-  options: { debugNames?: boolean } = {},
+  options: { debugNames?: boolean; cache?: BackendCache; trace?: CompileTraceSink } = {},
 ): Uint8Array<ArrayBuffer> {
   return backendModuleToWasm(module, options);
 }
@@ -13596,26 +14080,82 @@ function wasmNameSection(
   allFns: (BackendImport | BackendFunction)[],
 ): number[] {
   const subsections: number[] = [];
-  const functionNames = allFns.map((fn, index) => [...uleb(index), ...nameBytes(fn.name)]);
-  nameSubsection(subsections, 1, vecItems(functionNames));
+  const functionNames: number[] = [];
+  functionNames.push(...uleb(allFns.length));
+  for (let index = 0; index < allFns.length; index++) {
+    const fn = allFns[index]!;
+    functionNames.push(...uleb(index));
+    appendNameBytes(functionNames, fn.name);
+  }
+  nameSubsection(subsections, 1, functionNames);
 
-  const localNameEntries = module.functions
-    .map((fn, functionIndex) => {
-      const locals = [...fn.params, ...fn.locals].map((local, localIndex) => [
-        ...uleb(localIndex),
-        ...nameBytes(local.name),
-      ]);
-      return locals.length
-        ? [
-          ...uleb(module.imports.length + functionIndex),
-          ...vecItems(locals),
-        ]
-        : undefined;
-    })
-    .filter((item): item is number[] => Boolean(item));
-  if (localNameEntries.length) nameSubsection(subsections, 2, vecItems(localNameEntries));
+  const localNameEntries: number[] = [];
+  let localNameEntryCount = 0;
+  for (let functionIndex = 0; functionIndex < module.functions.length; functionIndex++) {
+    const fn = module.functions[functionIndex]!;
+    const localCount = fn.params.length + fn.locals.length;
+    if (!localCount) continue;
+    localNameEntryCount++;
+    localNameEntries.push(...uleb(module.imports.length + functionIndex));
+    localNameEntries.push(...uleb(localCount));
+    let localIndex = 0;
+    for (const local of fn.params) {
+      localNameEntries.push(...uleb(localIndex));
+      appendNameBytes(localNameEntries, local.name);
+      localIndex++;
+    }
+    for (const local of fn.locals) {
+      localNameEntries.push(...uleb(localIndex));
+      appendNameBytes(localNameEntries, local.name);
+      localIndex++;
+    }
+  }
+  if (localNameEntryCount) {
+    nameSubsection(subsections, 2, [...uleb(localNameEntryCount), ...localNameEntries]);
+  }
 
-  return [...nameBytes("name"), ...subsections];
+  const bytes: number[] = [];
+  appendNameBytes(bytes, "name");
+  for (const byte of subsections) bytes.push(byte);
+  return bytes;
+}
+
+function cachedWasmNameSection(
+  module: BackendModule,
+  allFns: (BackendImport | BackendFunction)[],
+  cache: BackendCache | undefined,
+): { bytes: number[]; cacheHit: boolean } {
+  const sections = cache?.wasmNameSections;
+  if (!sections) return { bytes: wasmNameSection(module, allFns), cacheHit: false };
+  const key = wasmNameSectionCacheKey(module, allFns);
+  const cached = sections.get(key);
+  if (cached) return { bytes: cached, cacheHit: true };
+  const bytes = wasmNameSection(module, allFns);
+  sections.set(key, bytes);
+  return { bytes, cacheHit: false };
+}
+
+function wasmNameSectionCacheKey(
+  module: BackendModule,
+  allFns: (BackendImport | BackendFunction)[],
+): string {
+  const parts: string[] = [];
+  for (const fn of allFns) {
+    parts.push("fn", fn.name);
+    for (const param of fn.params) {
+      if (typeof param === "string") {
+        parts.push(param);
+      } else {
+        parts.push(param.name, param.type);
+      }
+    }
+    for (const result of fn.results) parts.push(result);
+  }
+  for (const fn of module.functions) {
+    parts.push("locals", fn.name);
+    for (const local of fn.locals) parts.push(local.name, local.type);
+  }
+  return wasmCacheHashString(parts.join("\0"));
 }
 
 function nameSubsection(bytes: number[], id: number, payload: number[]) {
@@ -13672,7 +14212,15 @@ function encodeFunction(
   memoryIndex: Map<string, number>,
 ): { bytes: number[]; branchHints: FunctionBranchHints } {
   const localIndex = new Map<string, number>();
-  [...fn.params, ...fn.locals].forEach((slot, index) => localIndex.set(slot.name, index));
+  let localSlotIndex = 0;
+  for (const slot of fn.params) {
+    localIndex.set(slot.name, localSlotIndex);
+    localSlotIndex++;
+  }
+  for (const slot of fn.locals) {
+    localIndex.set(slot.name, localSlotIndex);
+    localSlotIndex++;
+  }
   const locals = localDecls(fn.locals);
   let encoded: { bytes: number[]; hints: BranchHintEntry[] };
   try {
@@ -13702,12 +14250,73 @@ function encodeFunction(
   };
 }
 
+function cachedEncodeFunction(
+  fn: BackendFunction,
+  functionIndex: number,
+  funcIndex: Map<string, number>,
+  typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
+  environmentKey: string,
+  cache: BackendCache | undefined,
+): { bytes: number[]; branchHints: FunctionBranchHints; cacheHit: boolean } {
+  const wasmFunctions = cache?.wasmFunctions;
+  const cached = wasmFunctions?.get(fn);
+  if (cached?.environmentKey === environmentKey) {
+    return {
+      bytes: cached.bytes,
+      branchHints: { functionIndex, hints: cached.hints },
+      cacheHit: true,
+    };
+  }
+  const encoded = encodeFunction(fn, functionIndex, funcIndex, typeKeys, memoryIndex);
+  wasmFunctions?.set(fn, {
+    environmentKey,
+    bytes: encoded.bytes,
+    hints: encoded.branchHints.hints,
+  });
+  return { ...encoded, cacheHit: false };
+}
+
+function wasmFunctionEncodeEnvironmentKey(
+  module: BackendModule,
+  typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
+): string {
+  const parts: string[] = [];
+  parts.push("imports");
+  for (const item of module.imports) {
+    parts.push(item.name, item.importName ?? "", item.params.join(","), item.results.join(","));
+  }
+  parts.push("functions");
+  for (const item of module.functions) {
+    parts.push(item.name, item.params.map((param) => param.type).join(","), item.results.join(","));
+  }
+  parts.push("types");
+  for (const [key, index] of typeKeys) {
+    parts.push(`${index}:${key}`);
+  }
+  parts.push("memories");
+  for (const [name, index] of memoryIndex) {
+    parts.push(`${index}:${name}`);
+  }
+  return wasmCacheHashString(parts.join("\0"));
+}
+
+function wasmCacheHashString(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 interface FunctionBranchHints {
   functionIndex: number;
   hints: BranchHintEntry[];
 }
 
-interface BranchHintEntry {
+export interface BranchHintEntry {
   offset: number;
   hint: BranchHint;
 }
@@ -13798,7 +14407,9 @@ function encodeInstrs(
   typeKeys: Map<string, number>,
   memoryIndex: Map<string, number>,
 ): number[] {
-  return instrs.flatMap((instr) => encodeInstr(instr, locals, funcIndex, typeKeys, memoryIndex));
+  const bytes: number[] = [];
+  appendEncodedInstrs(bytes, instrs, locals, funcIndex, typeKeys, memoryIndex);
+  return bytes;
 }
 
 function encodeInstr(
@@ -13808,91 +14419,138 @@ function encodeInstr(
   typeKeys: Map<string, number>,
   memoryIndex: Map<string, number>,
 ): number[] {
+  const bytes: number[] = [];
+  appendEncodedInstr(bytes, instr, locals, funcIndex, typeKeys, memoryIndex);
+  return bytes;
+}
+
+function appendEncodedInstrs(
+  bytes: number[],
+  instrs: Instr[],
+  locals: Map<string, number>,
+  funcIndex: Map<string, number>,
+  typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
+) {
+  for (const instr of instrs) {
+    appendEncodedInstr(bytes, instr, locals, funcIndex, typeKeys, memoryIndex);
+  }
+}
+
+function appendEncodedInstr(
+  bytes: number[],
+  instr: Instr,
+  locals: Map<string, number>,
+  funcIndex: Map<string, number>,
+  typeKeys: Map<string, number>,
+  memoryIndex: Map<string, number>,
+) {
   switch (instr.op) {
     case "const":
-      return instr.type === "i64" ? [0x42, ...sleb(instr.value)] : [0x41, ...sleb(instr.value)];
+      if (instr.type === "i64") bytes.push(0x42);
+      else bytes.push(0x41);
+      bytes.push(...sleb(instr.value));
+      return;
     case "local.get": {
       const index = locals.get(instr.name);
-      return index === undefined ? [0x41, 0] : [0x20, ...uleb(index)];
+      if (index === undefined) {
+        bytes.push(0x41, 0);
+        return;
+      }
+      bytes.push(0x20, ...uleb(index));
+      return;
     }
     case "local.set": {
       const index = locals.get(instr.name);
-      return index === undefined ? [0x1a] : [0x21, ...uleb(index)];
+      if (index === undefined) {
+        bytes.push(0x1a);
+        return;
+      }
+      bytes.push(0x21, ...uleb(index));
+      return;
     }
     case "local.tee": {
       const index = locals.get(instr.name);
-      return index === undefined ? [0x1a] : [0x22, ...uleb(index)];
+      if (index === undefined) {
+        bytes.push(0x1a);
+        return;
+      }
+      bytes.push(0x22, ...uleb(index));
+      return;
     }
     case "call": {
       const index = funcIndex.get(instr.name);
       if (index === undefined) throw new Error(`backend missing lowered callable: ${instr.name}`);
-      return [0x10, ...uleb(index)];
+      bytes.push(0x10, ...uleb(index));
+      return;
     }
     case "return_call": {
       const index = funcIndex.get(instr.name);
       if (index === undefined) throw new Error(`backend missing lowered callable: ${instr.name}`);
-      return [0x12, ...uleb(index)];
+      bytes.push(0x12, ...uleb(index));
+      return;
     }
     case "select":
-      return [0x1b];
+      bytes.push(0x1b);
+      return;
     case "binary":
-      return [wasmBinaryOp(instr.wasm)];
+      bytes.push(wasmBinaryOp(instr.wasm));
+      return;
     case "unary":
-      return [wasmUnaryOp(instr.wasm)];
+      bytes.push(wasmUnaryOp(instr.wasm));
+      return;
     case "simd":
-      return simdImmediate(instr.wasm, instr.lane, instr.lanes);
+      bytes.push(...simdImmediate(instr.wasm, instr.lane, instr.lanes));
+      return;
     case "load":
-      return [
-        ...wasmLoadOp(instr.type),
-        ...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex)),
-      ];
+      bytes.push(...wasmLoadOp(instr.type));
+      bytes.push(...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex)));
+      return;
     case "store":
-      return [
-        ...wasmStoreOp(instr.type),
-        ...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex)),
-      ];
+      bytes.push(...wasmStoreOp(instr.type));
+      bytes.push(...memarg(instr.align, instr.offset, memoryIndexFor(instr.memory, memoryIndex)));
+      return;
     case "memory.size":
-      return [0x3f, ...uleb(memoryIndexFor(instr.memory, memoryIndex))];
+      bytes.push(0x3f, ...uleb(memoryIndexFor(instr.memory, memoryIndex)));
+      return;
     case "memory.grow":
-      return [0x40, ...uleb(memoryIndexFor(instr.memory, memoryIndex))];
+      bytes.push(0x40, ...uleb(memoryIndexFor(instr.memory, memoryIndex)));
+      return;
     case "memory.copy":
-      return [
-        0xfc,
-        ...uleb(0x0a),
-        ...uleb(memoryIndexFor(instr.memory, memoryIndex)),
-        ...uleb(memoryIndexFor(instr.memory, memoryIndex)),
-      ];
+      bytes.push(0xfc);
+      bytes.push(...uleb(0x0a));
+      bytes.push(...uleb(memoryIndexFor(instr.memory, memoryIndex)));
+      bytes.push(...uleb(memoryIndexFor(instr.memory, memoryIndex)));
+      return;
     case "drop":
-      return [0x1a];
+      bytes.push(0x1a);
+      return;
     case "unreachable":
-      return [0x00];
+      bytes.push(0x00);
+      return;
     case "if":
-      return [
-        0x04,
-        ...blockType(instr.results, typeKeys),
-        ...encodeInstrs(instr.thenBody, locals, funcIndex, typeKeys, memoryIndex),
-        0x05,
-        ...encodeInstrs(instr.elseBody, locals, funcIndex, typeKeys, memoryIndex),
-        0x0b,
-      ];
+      bytes.push(0x04, ...blockType(instr.results, typeKeys));
+      appendEncodedInstrs(bytes, instr.thenBody, locals, funcIndex, typeKeys, memoryIndex);
+      bytes.push(0x05);
+      appendEncodedInstrs(bytes, instr.elseBody, locals, funcIndex, typeKeys, memoryIndex);
+      bytes.push(0x0b);
+      return;
     case "block":
-      return [
-        0x02,
-        ...blockType(instr.results, typeKeys),
-        ...encodeInstrs(instr.body, locals, funcIndex, typeKeys, memoryIndex),
-        0x0b,
-      ];
+      bytes.push(0x02, ...blockType(instr.results, typeKeys));
+      appendEncodedInstrs(bytes, instr.body, locals, funcIndex, typeKeys, memoryIndex);
+      bytes.push(0x0b);
+      return;
     case "loop":
-      return [
-        0x03,
-        ...blockType(instr.results, typeKeys),
-        ...encodeInstrs(instr.body, locals, funcIndex, typeKeys, memoryIndex),
-        0x0b,
-      ];
+      bytes.push(0x03, ...blockType(instr.results, typeKeys));
+      appendEncodedInstrs(bytes, instr.body, locals, funcIndex, typeKeys, memoryIndex);
+      bytes.push(0x0b);
+      return;
     case "br":
-      return [0x0c, ...uleb(instr.depth)];
+      bytes.push(0x0c, ...uleb(instr.depth));
+      return;
     case "br_if":
-      return [0x0d, ...uleb(instr.depth)];
+      bytes.push(0x0d, ...uleb(instr.depth));
+      return;
   }
 }
 
@@ -15226,27 +15884,46 @@ interface PackedField {
 }
 
 function createLayoutEnv(program: Program): LayoutEnv {
-  const functionNames = new Set(
-    program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn").map((decl) =>
-      decl.name
-    ),
-  );
-  const constShapes = new Map(
-    program.declarations.filter((
-      decl,
-    ): decl is ConstDecl & { value: Extract<Expr, { kind: "shape" }> } =>
-      decl.kind === "const" && decl.value.kind === "shape" && !decl.value.inferredType
-    )
-      .map((decl) => [decl.name, decl.value as Extract<Expr, { kind: "shape" }>]),
-  );
-  const runtimeConstDecls = program.declarations.filter((
-    decl,
-  ): decl is ConstDecl =>
-    decl.kind === "const" &&
-    (decl.value.kind === "literal" ||
-      decl.value.kind === "product_constructor" ||
-      (decl.value.kind === "shape" && !!decl.value.inferredType))
-  );
+  const functionNames = new Set<string>();
+  const constShapes = new Map<string, Extract<Expr, { kind: "shape" }>>();
+  const constRuntimeValues = new Map<string, Expr>();
+  const constRuntimeTypes = new Map<string, string | undefined>();
+  const topLevelValues = new Set<string>();
+  const constNumbers = new Map<string, number>();
+  const types = new Map<string, TypeDecl>();
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      functionNames.add(decl.name);
+      continue;
+    }
+    if (decl.kind === "type") {
+      types.set(decl.name, decl);
+      continue;
+    }
+    if (decl.kind === "let") {
+      topLevelValues.add(decl.name);
+      continue;
+    }
+    if (decl.kind !== "const") continue;
+    topLevelValues.add(decl.name);
+    const value = decl.value;
+    if (value.kind === "shape" && !value.inferredType) {
+      constShapes.set(decl.name, value);
+    }
+    const isRuntimeConst = value.kind === "literal" ||
+      value.kind === "product_constructor" ||
+      (value.kind === "shape" && !!value.inferredType);
+    if (isRuntimeConst) {
+      constRuntimeValues.set(decl.name, value);
+      constRuntimeTypes.set(
+        decl.name,
+        decl.type ?? (value.kind === "shape" ? value.inferredType : undefined),
+      );
+    }
+    if (value.kind === "literal" && value.literalKind === "number") {
+      constNumbers.set(decl.name, Number.parseInt(value.value, 10));
+    }
+  }
   const constFunctionFields = new Map<string, string>();
   for (const [name, shape] of constShapes) {
     for (const slot of shape.slots) {
@@ -15256,33 +15933,50 @@ function createLayoutEnv(program: Program): LayoutEnv {
     }
   }
   return {
-    types: new Map(
-      program.declarations.filter((decl): decl is TypeDecl => decl.kind === "type").map((decl) => [
-        decl.name,
-        decl,
-      ]),
-    ),
+    types,
     constShapes,
-    constRuntimeValues: new Map(runtimeConstDecls.map((decl) => [decl.name, decl.value])),
-    constRuntimeTypes: new Map(runtimeConstDecls.map((decl) => [
-      decl.name,
-      decl.type ?? (decl.value.kind === "shape" ? decl.value.inferredType : undefined),
-    ])),
+    constRuntimeValues,
+    constRuntimeTypes,
     constFunctionFields,
-    topLevelValues: new Set(
-      program.declarations.filter((decl) => decl.kind === "let" || decl.kind === "const")
-        .map((decl) => decl.name),
-    ),
-    constNumbers: new Map(
-      program.declarations.filter((
-        decl,
-      ): decl is ConstDecl & { value: Extract<Expr, { kind: "literal" }> } =>
-        decl.kind === "const" && decl.value.kind === "literal" &&
-        decl.value.literalKind === "number"
-      )
-        .map((decl) => [decl.name, Number.parseInt(decl.value.value, 10)]),
-    ),
+    topLevelValues,
+    constNumbers,
   };
+}
+
+function cachedLayoutEnv(program: Program, cache: BackendCache | undefined): LayoutEnv {
+  const backendLayouts = cache?.backendLayouts;
+  if (!backendLayouts) return createLayoutEnv(program);
+  const key = backendLayoutEnvCacheKey(program);
+  const cached = backendLayouts.get(key);
+  if (cached) return cached.layouts;
+  const layouts = createLayoutEnv(program);
+  backendLayouts.set(key, { layouts });
+  return layouts;
+}
+
+function backendLayoutEnvCacheKey(program: Program): string {
+  let hash = 0x811c9dc5;
+  hash = hashUpdateString(hash, "layout_env");
+  for (const item of program.imports) {
+    hash = hashUpdateString(hash, "import");
+    hash = hashUpdateString(hash, item.name);
+    hash = hashUpdateString(hash, item.type);
+    hash = hashUpdateString(hash, item.effects.join(","));
+  }
+  for (const decl of program.declarations) {
+    hash = hashUpdateString(hash, decl.kind);
+    if (decl.kind === "fn") {
+      hash = hashUpdateString(hash, decl.name);
+      continue;
+    }
+    if (decl.kind === "let") {
+      hash = hashUpdateString(hash, decl.name);
+      hash = hashUpdateString(hash, decl.type ?? "");
+      continue;
+    }
+    hash = hashUpdateString(hash, stableBackendHash(decl));
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function flattenBinding(name: string, type: string | undefined, layouts: LayoutEnv): FlatSlot[] {
@@ -16207,6 +16901,26 @@ function countNameUses(expr: Expr | BlockExpr, name: string): number {
   return count;
 }
 
+function cachedCountNameUses(
+  expr: Expr | BlockExpr,
+  name: string,
+  cache?: BackendCache,
+): number {
+  const nameUses = cache?.backendNameUses;
+  if (!nameUses) return countNameUses(expr, name);
+  const target = baseName(name);
+  let uses = nameUses.get(expr);
+  if (!uses) {
+    uses = new Map();
+    nameUses.set(expr, uses);
+  }
+  const cached = uses.get(target);
+  if (cached !== undefined) return cached;
+  const count = countNameUses(expr, target);
+  uses.set(target, count);
+  return count;
+}
+
 function exprMentionsName(expr: Expr, name: string): boolean {
   const target = baseName(name);
   let found = false;
@@ -16387,6 +17101,17 @@ function usesBranchIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
   return visit(expr);
 }
 
+function functionCallsBranchIntrinsic(
+  fn: FnDecl,
+  functions: Map<string, FnDecl>,
+  cache?: BackendCache,
+): boolean {
+  for (const callee of cachedCalledFunctions(fn.body, cache)) {
+    if (isBranchIntrinsic(callee, functions)) return true;
+  }
+  return false;
+}
+
 function usesHeapArrayIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDecl>): boolean {
   const visit = (item: Expr | Statement | undefined): boolean => {
     if (!item) return false;
@@ -16436,6 +17161,17 @@ function usesHeapArrayIntrinsic(expr: Expr | BlockExpr, functions: Map<string, F
   return visit(expr);
 }
 
+function functionCallsHeapArrayIntrinsic(
+  fn: FnDecl,
+  functions: Map<string, FnDecl>,
+  cache?: BackendCache,
+): boolean {
+  for (const callee of cachedCalledFunctions(fn.body, cache)) {
+    if (isHeapArrayIntrinsic(callee, functions)) return true;
+  }
+  return false;
+}
+
 function isBranchIntrinsic(name: string, functions: Map<string, FnDecl>): boolean {
   if (
     name === "@branch_handle" || name === "@branch_handle_ptr" ||
@@ -16469,7 +17205,13 @@ function localDecls(locals: BackendLocal[]): number[] {
     if (previous?.type === local.type) previous.count++;
     else groups.push({ type: local.type, count: 1 });
   }
-  return vecItems(groups.map((group) => [...uleb(group.count), wasmType(group.type)]));
+  const bytes: number[] = [];
+  bytes.push(...uleb(groups.length));
+  for (const group of groups) {
+    bytes.push(...uleb(group.count));
+    bytes.push(wasmType(group.type));
+  }
+  return bytes;
 }
 
 function wasmBinaryOp(op: string): number {
@@ -16590,6 +17332,19 @@ function section(bytes: number[], id: number, payload: number[]) {
   for (const byte of payload) bytes.push(byte);
 }
 
+function sectionVecItems(bytes: number[], id: number, items: number[][]) {
+  let payloadLength = uleb(items.length).length;
+  for (const item of items) {
+    payloadLength += item.length;
+  }
+  bytes.push(id);
+  bytes.push(...uleb(payloadLength));
+  bytes.push(...uleb(items.length));
+  for (const item of items) {
+    for (const byte of item) bytes.push(byte);
+  }
+}
+
 function vecItems(items: number[][]): number[] {
   return [...uleb(items.length), ...items.flat()];
 }
@@ -16599,8 +17354,17 @@ function vecRaw(items: number[]): number[] {
 }
 
 function nameBytes(name: string): number[] {
-  const bytes = Array.from(new TextEncoder().encode(name));
-  return [...uleb(bytes.length), ...bytes];
+  const bytes: number[] = [];
+  appendNameBytes(bytes, name);
+  return bytes;
+}
+
+const wasmTextEncoder = new TextEncoder();
+
+function appendNameBytes(target: number[], name: string) {
+  const bytes = wasmTextEncoder.encode(name);
+  target.push(...uleb(bytes.length));
+  for (const byte of bytes) target.push(byte);
 }
 
 function uleb(value: number): number[] {

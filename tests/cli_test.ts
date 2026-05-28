@@ -139,6 +139,11 @@ Deno.test("CLI compile profile reports compiler phase timings", async () => {
   assertEquals(harness.stdout, ["ok"]);
   assertStringIncludes(harness.stderr.join("\n"), "[compile-profile] phase ms");
   assertStringIncludes(harness.stderr.join("\n"), "parse.syntax");
+  assertStringIncludes(harness.stderr.join("\n"), "check.checkFn loop");
+
+  const wat = mockIo({ "main.fig": "pub fn main() -> i32 { 42 }" });
+  assertEquals(await runCli(["wat", "main.fig", "--compile-profile"], wat.io), 0);
+  assertStringIncludes(wat.stderr.join("\n"), "backend.layout.fixed_array_plans");
 });
 
 Deno.test("CLI rejects unsupported ABI mode flag", async () => {

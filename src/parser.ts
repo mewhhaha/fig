@@ -11,7 +11,25 @@ export interface ParseOptions {
 }
 
 export async function parse(source: string, options: ParseOptions = {}): Promise<Program> {
-  const lines = new SourceLineMap(source);
+  return parseWithOffset(source, source, 0, options);
+}
+
+export async function parseFragment(
+  source: string,
+  fullSource: string,
+  spanOffset: number,
+  options: ParseOptions = {},
+): Promise<Program> {
+  return parseWithOffset(source, fullSource, spanOffset, options);
+}
+
+async function parseWithOffset(
+  source: string,
+  fullSource: string,
+  spanOffset: number,
+  options: ParseOptions,
+): Promise<Program> {
+  const lines = new SourceLineMap(fullSource);
   const result = traceSync(
     options.trace,
     "parse.syntax",
@@ -24,7 +42,11 @@ export async function parse(source: string, options: ParseOptions = {}): Promise
       "parse.syntax",
       diagnostic?.message ?? "syntax error",
       diagnostic?.span
-        ? lines.span(diagnostic.span.start, diagnostic.span.end, options.sourceId)
+        ? lines.span(
+          diagnostic.span.start + spanOffset,
+          diagnostic.span.end + spanOffset,
+          options.sourceId,
+        )
         : undefined,
     );
   }
@@ -32,14 +54,14 @@ export async function parse(source: string, options: ParseOptions = {}): Promise
   const adapted = traceSync(
     options.trace,
     "parse.adapt",
-    () => adaptNode(source, tree, lines),
+    () => adaptNode(fullSource, tree, lines, spanOffset),
     () => ({ sourceBytes: source.length }),
   );
   const docs = traceSync(
     options.trace,
     "parse.docs",
-    () => source.includes("///") ? docResolver(source) : () => undefined,
-    () => ({ hasDocs: source.includes("///") }),
+    () => fullSource.includes("///") ? docResolver(fullSource) : () => undefined,
+    () => ({ hasDocs: fullSource.includes("///") }),
   );
   return traceSync(
     options.trace,
@@ -49,25 +71,38 @@ export async function parse(source: string, options: ParseOptions = {}): Promise
   );
 }
 
-function adaptNode(source: string, node: ParseNode, lines: SourceLineMap): SyntaxNodeLike {
+function adaptNode(
+  source: string,
+  node: ParseNode,
+  lines: SourceLineMap,
+  spanOffset: number,
+): SyntaxNodeLike {
+  const start = node.span.start + spanOffset;
+  const end = node.span.end + spanOffset;
   if (node.kind === "rule") {
+    const namedChildren = [];
+    for (const child of node.children) {
+      const childName = child.kind === "rule" || child.kind === "token" ? child.name : child.value;
+      if (childName === "Whitespace" || childName === "Comment") continue;
+      namedChildren.push(adaptNode(source, child, lines, spanOffset));
+    }
     return {
       type: node.name,
       get text() {
-        return source.slice(node.span.start, node.span.end);
+        return source.slice(start, end);
       },
-      startIndex: node.span.start,
-      endIndex: node.span.end,
-      startPosition: lines.position(node.span.start),
-      namedChildren: node.children.map((child) => adaptNode(source, child, lines)),
+      startIndex: start,
+      endIndex: end,
+      startPosition: lines.position(start),
+      namedChildren,
     } as SyntaxNodeLike;
   }
   return {
     type: node.kind === "token" ? node.name : node.value,
-    text: node.text,
-    startIndex: node.span.start,
-    endIndex: node.span.end,
-    startPosition: lines.position(node.span.start),
+    text: source.slice(start, end),
+    startIndex: start,
+    endIndex: end,
+    startPosition: lines.position(start),
     namedChildren: [],
   } as SyntaxNodeLike;
 }
@@ -105,6 +140,7 @@ function docResolver(source: string): (start: number | undefined) => string | un
 
 class SourceLineMap {
   readonly lineStarts: number[] = [0];
+  private lastRow = 0;
 
   constructor(readonly source: string) {
     for (let index = 0; index < source.length; index++) {
@@ -125,14 +161,13 @@ class SourceLineMap {
 
   position(offset: number): { row: number; column: number } {
     const safeOffset = Math.max(0, Math.min(offset, this.source.length));
-    let low = 0;
-    let high = this.lineStarts.length - 1;
-    while (low <= high) {
-      const mid = Math.floor((low + high) / 2);
-      if (this.lineStarts[mid]! <= safeOffset) low = mid + 1;
-      else high = mid - 1;
+    let row = Math.min(this.lastRow, this.lineStarts.length - 1);
+    if (this.lineStarts[row]! <= safeOffset) {
+      while (row + 1 < this.lineStarts.length && this.lineStarts[row + 1]! <= safeOffset) row++;
+    } else {
+      while (row > 0 && this.lineStarts[row]! > safeOffset) row--;
     }
-    const row = Math.max(0, low - 1);
+    this.lastRow = row;
     return { row, column: safeOffset - this.lineStarts[row]! };
   }
 }

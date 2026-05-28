@@ -1938,9 +1938,7 @@ function unwrap(node: Node): Node {
 }
 
 function named(node: Node): readonly Node[] {
-  return ((node.namedChildren ?? []) as readonly Node[]).filter((child) =>
-    child.type !== "Whitespace" && child.type !== "Comment"
-  );
+  return (node.namedChildren ?? []) as readonly Node[];
 }
 
 function descendantLowerIdents(node: Node): Node[] {

@@ -885,6 +885,28 @@ Deno.test("backend removes private functions unreachable from exports", async ()
   assert(!wat.includes("call $used"));
 });
 
+Deno.test("backend reachability preserves private calls nested in lowered branches", async () => {
+  const source = `
+    fn unused() -> i32 { 1 }
+    fn nested_branch(seed: i32) -> i32 { seed + 10 }
+    fn dispatch(seed: i32) -> i32 {
+      match seed > 0 {
+        true => nested_branch(seed),
+        false => 0,
+      }
+    }
+    pub fn main(seed: i32) -> i32 { dispatch(seed) }
+  `;
+  const wat = await watFromSource(source);
+  assertStringIncludes(wat, "call $dispatch");
+  assertStringIncludes(wat, "call $nested_branch");
+  assert(!wat.includes("(func $unused"));
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(5), 15);
+  assertEquals((instance.exports.main as CallableFunction)(0), 0);
+});
+
 Deno.test("public exports inline private scalar product helpers", async () => {
   const source = `
     type fn Vec2() -> type {
