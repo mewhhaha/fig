@@ -12,8 +12,8 @@ import {
   type BackendFunction,
   type BackendFunctionCacheEntry,
   type BackendLayoutCacheEntry,
-  type BackendPlanningCacheEntry,
   type BackendOptions,
+  type BackendPlanningCacheEntry,
   emitWasm,
   emitWat,
   type FigAbiManifest,
@@ -211,6 +211,7 @@ export interface LinkedModule {
   localNames: string[];
   supportNames: string[];
   names?: Set<string>;
+  namesKey?: string;
   imports: Program["imports"];
 }
 
@@ -1286,6 +1287,8 @@ function mergePrograms(
     () =>
       aliasedImports.map(({ alias, program: importedProgram }) => {
         const importedNames = importedDeclarationNames(importedProgram, cache);
+        const surface = cache?.linkedSurface?.(importedProgram);
+        const importedNamesKey = surface ? linkedModuleNamesKey(surface) : undefined;
         const sourceKey = cache?.sourceKey(importedProgram);
         const roots = options.pruneImports
           ? traceImportPhaseSync(
@@ -1302,6 +1305,7 @@ function mergePrograms(
                 alias,
                 cache?.aliasReferenceRoots,
                 cache?.localSourceKey,
+                importedNamesKey,
               ),
             (result) => ({ referenceCount: result.size }),
           )
@@ -1309,7 +1313,6 @@ function mergePrograms(
         const closureCacheKey = sourceKey
           ? importClosureCacheKey(sourceKey, alias, roots, options.pruneImports)
           : undefined;
-        const surface = cache?.linkedSurface?.(importedProgram);
         const stableClosureKey = surface?.stableImportSurfaceKey
           ? stableImportClosureCacheKey(
             surface.stableImportSurfaceKey,
@@ -1849,6 +1852,14 @@ function linkedModuleNameSet(surface: LinkedModule): Set<string> {
   }
   surface.names = names;
   return names;
+}
+
+function linkedModuleNamesKey(surface: LinkedModule): string {
+  if (surface.namesKey) return surface.namesKey;
+  const names = linkedModuleNameSet(surface);
+  const key = `names:${declarationNamesKey(names)}`;
+  surface.namesKey = key;
+  return key;
 }
 
 function checkTransitiveSupportReferences(
@@ -2888,9 +2899,9 @@ function stableImportSurfaceCacheKey(
   pruneImports: boolean,
   stableDependencyKeys: string[],
 ): string {
-  return `stable_import_surface\0${sourceId}\0${pruneImports ? "pruned" : "full"}\0${
-    interfaceKey
-  }\0${referenceKey}\0${[...stableDependencyKeys].sort().join("\0")}`;
+  return `stable_import_surface\0${sourceId}\0${
+    pruneImports ? "pruned" : "full"
+  }\0${interfaceKey}\0${referenceKey}\0${[...stableDependencyKeys].sort().join("\0")}`;
 }
 
 function prunedImportCacheKey(sourceKey: string, roots: Set<string>): string {
@@ -2914,9 +2925,9 @@ function stableImportClosureCacheKey(
   roots: Set<string>,
   pruneImports: boolean,
 ): string {
-  return `stable_import_closure\0${pruneImports ? "pruned" : "full"}\0${stableSurfaceKey}\0${
-    alias
-  }\0${[...roots].sort().join("\0")}`;
+  return `stable_import_closure\0${
+    pruneImports ? "pruned" : "full"
+  }\0${stableSurfaceKey}\0${alias}\0${[...roots].sort().join("\0")}`;
 }
 
 function qualifiedEffectImportsCacheKey(sourceKey: string, alias: string): string {
