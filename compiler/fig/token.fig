@@ -1,0 +1,251 @@
+const span = @import("./span.fig");
+
+type TokenKind = union {
+  Import, External, TypeKw, ConstKw, FnKw, LetKw, MatchKw,
+  PubKw, BoolLiteral, Identifier, NumberLiteral, StringLiteral,
+  CharLiteral, MultilineLiteral, LiteralType, Symbol, WildcardKw,
+  DoKw, ElseKw, IfKw, StructKw, UnionKw, I32Kw, I64Kw, U32Kw,
+  U64Kw, F32Kw, F64Kw
+}
+
+type GeneratedTokenCode = enum(i32) {
+  Import = 1,
+  External = 2,
+  TypeKw = 3,
+  ConstKw = 4,
+  FnKw = 5,
+  LetKw = 6,
+  MatchKw = 7,
+  PubKw = 8,
+  BoolLiteral = 9,
+  Identifier = 10,
+  NumberLiteral = 11,
+  StringLiteral = 12,
+  CharLiteral = 13,
+  MultilineLiteral = 14,
+  LiteralType = 15,
+  Symbol = 16
+}
+
+type TokenKindWeight = enum(i32) {
+  Import = 11,
+  External = 13,
+  TypeKw = 17,
+  ConstKw = 19,
+  FnKw = 23,
+  LetKw = 29,
+  MatchKw = 31,
+  PubKw = 37,
+  BoolLiteral = 41,
+  Identifier = 43,
+  NumberLiteral = 47,
+  StringLiteral = 53,
+  CharLiteral = 59,
+  MultilineLiteral = 61,
+  LiteralType = 67,
+  Symbol = 71,
+  WildcardKw = 73,
+  DoKw = 79,
+  ElseKw = 83,
+  IfKw = 89,
+  StructKw = 97,
+  UnionKw = 101,
+  I32Kw = 103,
+  I64Kw = 107,
+  U32Kw = 109,
+  U64Kw = 113,
+  F32Kw = 127,
+  F64Kw = 131
+}
+
+type DeclarationKind = union {
+  NoDeclaration, FunctionDeclaration, LetDeclaration, ConstDeclaration,
+  TypeDeclaration
+}
+
+type DeclarationKindScore = enum(i32) {
+  None = 0,
+  Function = 1,
+  Let = 2,
+  Const = 3,
+  Type = 4
+}
+
+type ExpressionKind = union {
+  NoExpression, NumberExpression, BooleanExpression, NameExpression,
+  TextExpression
+}
+
+type ExpressionKindScore = enum(i32) {
+  None = 0,
+  Number = 1,
+  Boolean = 2,
+  Name = 3,
+  Text = 4
+}
+
+type Token = struct {
+  kind: TokenKind,
+  span: span.Span,
+}
+
+fn make(kind: TokenKind, source_span: span.Span) -> Token {
+  Token {kind: kind, span: source_span}
+}
+
+fn keyword_weight(kind: TokenKind) -> i32 {
+  match kind {
+    Import => TokenKindWeight::Import,
+    External => TokenKindWeight::External,
+    TypeKw => TokenKindWeight::TypeKw,
+    ConstKw => TokenKindWeight::ConstKw,
+    FnKw => TokenKindWeight::FnKw,
+    LetKw => TokenKindWeight::LetKw,
+    MatchKw => TokenKindWeight::MatchKw,
+    PubKw => TokenKindWeight::PubKw,
+    BoolLiteral => TokenKindWeight::BoolLiteral,
+    Identifier => TokenKindWeight::Identifier,
+    NumberLiteral => TokenKindWeight::NumberLiteral,
+    StringLiteral => TokenKindWeight::StringLiteral,
+    CharLiteral => TokenKindWeight::CharLiteral,
+    MultilineLiteral => TokenKindWeight::MultilineLiteral,
+    LiteralType => TokenKindWeight::LiteralType,
+    Symbol => TokenKindWeight::Symbol,
+    WildcardKw => TokenKindWeight::WildcardKw,
+    DoKw => TokenKindWeight::DoKw,
+    ElseKw => TokenKindWeight::ElseKw,
+    IfKw => TokenKindWeight::IfKw,
+    StructKw => TokenKindWeight::StructKw,
+    UnionKw => TokenKindWeight::UnionKw,
+    I32Kw => TokenKindWeight::I32Kw,
+    I64Kw => TokenKindWeight::I64Kw,
+    U32Kw => TokenKindWeight::U32Kw,
+    U64Kw => TokenKindWeight::U64Kw,
+    F32Kw => TokenKindWeight::F32Kw,
+    F64Kw => TokenKindWeight::F64Kw,
+  }
+}
+
+fn normalize_generated_kind(code: GeneratedTokenCode) -> TokenKind {
+  match code {
+    Import => Import,
+    External => External,
+    TypeKw => TypeKw,
+    ConstKw => ConstKw,
+    FnKw => FnKw,
+    LetKw => LetKw,
+    MatchKw => MatchKw,
+    PubKw => PubKw,
+    BoolLiteral => BoolLiteral,
+    Identifier => Identifier,
+    NumberLiteral => NumberLiteral,
+    StringLiteral => StringLiteral,
+    CharLiteral => CharLiteral,
+    MultilineLiteral => MultilineLiteral,
+    LiteralType => LiteralType,
+    _ => Symbol,
+  }
+}
+
+fn is_declaration_start(kind: TokenKind) -> bool {
+  match kind {
+    PubKw => true,
+    TypeKw => true,
+    ConstKw => true,
+    FnKw => true,
+    LetKw => true,
+    External => true,
+    _ => false,
+  }
+}
+
+fn declaration_kind(kind: TokenKind) -> DeclarationKind {
+  match kind {
+    FnKw => FunctionDeclaration,
+    LetKw => LetDeclaration,
+    ConstKw => ConstDeclaration,
+    TypeKw => TypeDeclaration,
+    _ => NoDeclaration,
+  }
+}
+
+fn expression_kind(kind: TokenKind) -> ExpressionKind {
+  match kind {
+    NumberLiteral => NumberExpression,
+    BoolLiteral => BooleanExpression,
+    Identifier => NameExpression,
+    LiteralType => NameExpression,
+    StringLiteral => TextExpression,
+    CharLiteral => TextExpression,
+    MultilineLiteral => TextExpression,
+    _ => NoExpression,
+  }
+}
+
+fn is_match_like_expression_keyword(kind: TokenKind) -> bool {
+  match kind {
+    MatchKw => true,
+    IfKw => true,
+    _ => false,
+  }
+}
+
+fn declaration_kind_score(kind: DeclarationKind) -> i32 {
+  match kind {
+    NoDeclaration => DeclarationKindScore::None,
+    FunctionDeclaration => DeclarationKindScore::Function,
+    LetDeclaration => DeclarationKindScore::Let,
+    ConstDeclaration => DeclarationKindScore::Const,
+    TypeDeclaration => DeclarationKindScore::Type,
+  }
+}
+
+fn expression_kind_score(kind: ExpressionKind) -> i32 {
+  match kind {
+    NoExpression => ExpressionKindScore::None,
+    NumberExpression => ExpressionKindScore::Number,
+    BooleanExpression => ExpressionKindScore::Boolean,
+    NameExpression => ExpressionKindScore::Name,
+    TextExpression => ExpressionKindScore::Text,
+  }
+}
+
+fn is_declaration_kind(kind: DeclarationKind) -> bool {
+  match kind {
+    NoDeclaration => false,
+    _ => true,
+  }
+}
+
+fn is_expression_kind(kind: ExpressionKind) -> bool {
+  match kind {
+    NoExpression => false,
+    _ => true,
+  }
+}
+
+fn is_symbol(kind: TokenKind) -> bool {
+  match kind {
+    Symbol => true,
+    _ => false,
+  }
+}
+
+fn token_score(token: Token) -> i32 {
+  keyword_weight(token.kind)
+    + span.width(token.span)
+    + declaration_kind_score(declaration_kind(token.kind))
+    + expression_kind_score(expression_kind(token.kind))
+}
+
+fn entry(seed: i32) -> i32 {
+  let source_span = span.make(seed, seed + 4, 1, 1);
+  let token = make(
+    normalize_generated_kind((seed % GeneratedTokenCode::LiteralType) + GeneratedTokenCode::Import),
+    source_span
+  );
+  token_score(token) +(match is_declaration_start(token.kind) {
+    true => 100,
+    false => 0,
+  })
+}

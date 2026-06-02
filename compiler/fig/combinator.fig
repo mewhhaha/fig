@@ -1,0 +1,134 @@
+const span = @import("./span.fig");
+
+type ParseState = struct {
+  cursor: i32,
+  limit: i32,
+}
+
+type ParseError = union {
+  UnexpectedEnd(at: span.Span), UnexpectedToken(
+    expected: i32,
+    actual: i32,
+    at: span.Span
+  ), Ambiguous(at: span.Span)
+}
+
+type Reply(a) = struct {
+  state: ParseState,
+  value: a,
+}
+
+type Parser(a) = union {
+  Ok(reply: Reply(a)), Err(error: ParseError)
+}
+
+fn state(cursor: i32, limit: i32) -> ParseState {
+  ParseState {cursor: cursor, limit: limit}
+}
+
+fn next_state(current: ParseState) -> ParseState {
+  ParseState {
+    cursor: current.cursor + 1,
+    limit: current.limit,
+  }
+}
+
+fn reply(next: ParseState, value: a) -> Reply(a) {
+  Reply {state: next, value: value}
+}
+
+fn ok(next: ParseState, value: a) -> Parser(a) {
+  Ok(reply(next, value))
+}
+
+fn err(error: ParseError) -> Parser(a) {
+  Err(error)
+}
+
+fn pure(value: a, current: ParseState) -> Parser(a) {
+  ok(current, value)
+}
+
+fn map(
+const f: fn(x: a) -> b, parser: Parser(a)) -> Parser(b) {
+  match parser {
+    Ok(result) => ok(result.state, f(result.value)),
+    Err(error) => err(error),
+  }
+}
+
+fn bind(
+  parser: Parser(a),
+  const f: fn(x: Reply(a)) -> Parser(b)
+) -> Parser(b) {
+  match parser {
+    Ok(result) => f(result),
+    Err(error) => err(error),
+  }
+}
+
+fn apply(parser: Parser(a), const f: fn(x: a) -> b) -> Parser(b) {
+  map(f, parser)
+}
+
+fn or_else(left: Parser(a), right: Parser(a)) -> Parser(a) {
+  match left {
+    Ok(result) => Ok(result),
+    Err(_) => right,
+  }
+}
+
+fn advance(current: ParseState, source_span: span.Span) -> Parser(ParseState) {
+  match current.cursor < current.limit {
+    true => ok(next_state(current), current),
+    false => err(UnexpectedEnd(source_span)),
+  }
+}
+
+fn error_score(value: ParseError) -> i32 match {
+  UnexpectedEnd(at) => 0 - span.width(at),
+  UnexpectedToken(expected, actual, at) => expected - actual - span.width(at),
+  Ambiguous(at) => 0 - 1000 - span.width(at),
+}
+
+fn error_span(value: ParseError) -> span.Span match {
+  UnexpectedEnd(at) => at,
+  UnexpectedToken(_, _, at) => at,
+  Ambiguous(at) => at,
+}
+
+fn error_tag(value: ParseError) -> i32 match {
+  UnexpectedEnd(_) => 1,
+  UnexpectedToken(_, _, _) => 2,
+  Ambiguous(_) => 3,
+}
+
+fn error_expected(value: ParseError) -> i32 match {
+  UnexpectedEnd(_) => 0,
+  UnexpectedToken(expected, _, _) => expected,
+  Ambiguous(_) => 0,
+}
+
+fn error_actual(value: ParseError) -> i32 match {
+  UnexpectedEnd(_) => 0,
+  UnexpectedToken(_, actual, _) => actual,
+  Ambiguous(_) => 0,
+}
+
+fn score(value: Parser(i32)) -> i32 match {
+  Ok(result) => result.value + result.state.cursor,
+  Err(error) => error_score(error),
+}
+
+fn add_one(value: i32) -> i32 {
+  value + 1
+}
+
+fn entry(seed: i32) -> i32 {
+  let source_span = span.make(seed, seed + 1, 1, 1);
+  let current = state(0, 1);
+  score(apply(pure(seed, current), add_one)) + score(map(
+    add_one,
+    advance(current, source_span)
+  ))
+}

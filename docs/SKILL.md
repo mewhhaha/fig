@@ -135,7 +135,7 @@ right-hand sides.
 
 Use these literal forms:
 
-- Numbers: `42`, `42i32`, `1u32`, `1i64`, `1u64`, `1.0f32`, `1.0f64`.
+- Numbers: `42`, `-1`, `42i32`, `1u32`, `1i64`, `1u64`, `1.0f32`, `1.0f64`.
 - Booleans: `true`, `false`.
 - Characters and strings: `'x'`, `"fig"`.
 - Fenced text: Triple backticks, useful for WGSL shader source.
@@ -149,10 +149,14 @@ widths `u1` through `u64`. Narrow unsigned fields may be storage-packed in produ
 
 ## Functions
 
-Declare functions with `fn name(params) -> Type { ... }`:
+Declare functions with a block body or a match body:
 
 ```fig
 fn add(a: i32, b: i32) -> i32 { a + b }
+fn choose(flag: bool) -> i32 match {
+  true => 1,
+  false => 0,
+}
 pub fn main() -> i32 { add(40, 2) }
 ```
 
@@ -160,14 +164,20 @@ Parameter forms include:
 
 - `name: Type`
 - `const name: Type` for static function/dictionary/type parameters.
-- Literal clauses such as `fn Choose(1: i32) -> i32 { 10 }` ordered before broader clauses.
 - Wildcard parameters such as `_: Type`.
-- Pattern identifiers for sum variants and tuple destructuring in supported clause contexts.
 
-Multiple clauses with the same function name are ordered and checked for compatible arity and return
-types. Use repeated function definitions when you want to check several parameter values at once;
-the first matching clause wins. Const parameters specialize at call sites and are erased from
-generated runtime parameters.
+Use a function match body when runtime parameters drive ordered pattern dispatch:
+
+```fig
+fn score(left: bool, right: bool) -> i32 match {
+  true, true => 3,
+  _, _ => 0,
+}
+```
+
+Runtime functions are limited to five non-`const` parameters. Group related trailing values into a
+small product when a function needs more runtime inputs. Const parameters specialize at call sites
+and are erased from generated runtime parameters.
 
 Function types use `fn(...) -> Type`; const function parameters enable compile-time specialization:
 
@@ -199,6 +209,8 @@ Supported expressions include:
 - Tuple and repeat values: `[1, 2]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
 - Target-typed collection literals: `#[1, 2, 3]`, `#[0, ...rest]`.
 - `match value { pattern => expr, _ => fallback }` and boolean `if cond { a } else { b }`.
+- `rec(args...)` in a runtime function tail position to re-enter the current function with new
+  runtime parameter values.
 - Binary operators listed in `grammar.ebnf`.
 - Ranges: `start .. end`.
 - Pipe-bind: `expr \name -> next`.
@@ -206,11 +218,12 @@ Supported expressions include:
 Boolean `if` is expression sugar for `match` on `bool`. There is no assignment statement; bind new
 locals with `let`. Let statements require semicolons.
 
-## Pattern Matching and Ordered Clauses
+## Pattern Matching
 
-Use `match` for variants, literals, and ordered pattern dispatch. A `match` expression has one
-scrutinee expression and ordered arms. Patterns support `_`, literals, lowercase bindings,
-PascalCase variant names, and variant payload deconstruction:
+Use `match` for variants, literals, typed refined-domain patterns, guarded arms, and ordered pattern
+dispatch. A `match` expression has one scrutinee expression and ordered arms. Patterns support `_`,
+literals, lowercase bindings, tuple patterns, PascalCase variant names, and variant payload
+deconstruction:
 
 ```fig
 fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
@@ -218,19 +231,17 @@ fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
 }
 ```
 
-Use repeated function definitions for multi-value case analysis. Clauses resolve in source order,
-and every parameter pattern in a clause is checked together:
+Guards run after the pattern has matched and can use bindings introduced by that pattern:
 
 ```fig
-fn score(true: bool, true: bool) -> i32 { 3 }
-fn score(_: bool, _: bool) -> i32 { 0 }
+match value {
+  n: i32(0..4 | 8) => n,
+  _ if value > 20 => 20,
+  _ => value,
+}
 ```
 
-Value function clauses must keep the same arity, visibility, return type, and compatible runtime
-parameter representation. Refined `i32(...)` parameter domains may vary across clauses because they
-all lower to runtime `i32`. Current value-clause dispatch is best for literal, wildcard, binding,
-and refined scalar-domain cases; use `match` arms for sum-variant payload deconstruction. Type
-functions also support ordered clauses and `match` over static values and types.
+Type functions also support ordered clauses and `match` over static values and types.
 
 ## Products, Sums, Shapes, and Arrays
 
@@ -347,9 +358,9 @@ Attached members use qualified function names, are discoverable through type ref
 called statically as `t::map(...)` inside generic code. Local proof consts such as
 `const Mapper = Functor(t);` are erased after they prove the contract.
 
-Prelude contracts such as `Eq(t)`, `Functor(t)`, `Applicative(t)`, `Monad(t)`, and `Monoid(t)` carry
-their law rewrite assumptions directly. Do not introduce or use a separate `LawfulX` contract for
-those standard proofs.
+Prelude contracts such as `Eq(t)`, `Functor(t)`, `Applicative(t)`, `Monad(t)`, and `Monoid(t)` get
+their optimizer law rewrites from the default prelude rewrite compiler plugin. Do not introduce or
+use a separate `LawfulX` contract for those standard proofs.
 
 Const dictionaries are product-shaped constants whose fields are function references:
 
@@ -470,8 +481,8 @@ pub fn main() -> i32 {
 }
 ```
 
-Use `prelude.array_static` for collection-shaped code. Prefer fixed inline arrays and iterators over
-heap-backed vectors:
+Use `prelude.array_static` for static collection-shaped code. Prefer fixed inline arrays and
+iterators when the length is known and scalar-local lowering is useful:
 
 ```fig
 const array = @import("prelude.array_static");
@@ -486,6 +497,10 @@ pub fn main() -> i32 {
 }
 ```
 
+Use direct module imports for heap-backed compiler data structures: `prelude.vec`, `prelude.list`,
+`prelude.nonempty`, `prelude.queue`, `prelude.tree`, `prelude.zipper`, `prelude.map`,
+`prelude.set`, and `prelude.graph`.
+
 Use operator syntax only after importing visible declarations, usually through `prelude.std`.
 Functional operator forms lower to attached members:
 
@@ -494,6 +509,7 @@ const merge = @import("prelude.std");
 
 pub fn mapped() -> Box(i32) { inc <$> Box {value: 1} }
 pub fn bound() -> Box(i32) { Box {value: 1} >>= wrap }
+pub fn flipped() -> Box(i32) { wrap =<< Box {value: 1} }
 ```
 
 When implementing new abstractions, keep the contract as a `type fn`, attach runtime behavior with
@@ -504,11 +520,12 @@ default for typeclass-like APIs.
 
 ## Operators
 
-Built-in parser symbols include arithmetic, comparison, boolean, append, applicative, functor, and
-monad symbols:
+The parser accepts operator symbols made from the operator character set
+`+ - * / % < > = ! & | ^ $`. Operator symbols are ordinary source-level
+names, not compiler features by themselves:
 
 ```fig
-+ - * / % == != < <= > >= && || ^^ <> <$> <*> >>=
++ - * / % == != < <= > >= && || ^^ <> <$> <&> <*> <**> >>= =<< >=> <=<
 ```
 
 Ranges use dedicated `start .. end` syntax. `..` is not an overloadable operator.
@@ -524,6 +541,9 @@ const (+) = @operator(#infixl, 60, add_point);
 Current expression syntax resolves user-defined binary operators through visible declarations,
 usually `#infix`, `#infixl`, or `#infixr`. The prelude exposes common operator declarations in
 `prelude.operators` and through `prelude.std`.
+
+Type expressions parse the same operator token, but only primitive type-level operators such as
+`==`, `!=`, and literal-type union `|` are currently type-evaluable.
 
 ## Branch-Bit Values and Local Bindings
 
@@ -621,10 +641,14 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
 - `prelude.monad`: `State(S, A)` and explicit `Reader(R, A)` helpers.
 - `prelude.operators`: common operator declarations.
 - `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, and `prelude.schedule`.
+- `prelude.vec`, `prelude.list`, `prelude.nonempty`, `prelude.queue`, `prelude.tree`,
+  `prelude.zipper`, `prelude.map`, `prelude.set`, and `prelude.graph`: heap-backed compiler data
+  structures.
 - `prelude.geometry2d`: Fixed 2D vector, color, vertex, quad, and geometry helpers.
 
-Prelude modules are pure and do not declare host IO imports. Heap-backed lists, growable vectors,
-allocation-backed append, `push`, `pop`, and `reserve` are intentionally absent.
+Prelude modules are pure and do not declare host IO imports. Fixed inline arrays remain preferred
+for static sizes; heap-backed collection modules are available for growth, queues, tree/zippers,
+ordered maps/sets, and graph traversal.
 
 ## Web Canvas Module
 

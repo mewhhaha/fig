@@ -1,0 +1,125 @@
+const lexer = @import("./lexer.fig");
+const source = @import("./source.fig");
+const span = @import("./span.fig");
+const token = @import("./token.fig");
+
+type TokenStream = struct {
+  first: token.Token,
+  second: token.Token,
+  third: token.Token,
+  fourth: token.Token,
+  length: i32,
+  source_span: span.Span,
+}
+
+fn make(
+  first: token.Token,
+  second: token.Token,
+  third: token.Token,
+  fourth: token.Token
+) -> TokenStream {
+  let first_pair = span.merge(first.span, second.span);
+  let second_pair = span.merge(third.span, fourth.span);
+  TokenStream {
+    first: first,
+    second: second,
+    third: third,
+    fourth: fourth,
+    length: 4,
+    source_span: span.merge(first_pair, second_pair),
+  }
+}
+
+fn length(source: TokenStream) -> i32 {
+  source.length
+}
+
+fn missing_token(source: TokenStream) -> token.Token {
+  token.make(
+    token.normalize_generated_kind(token.GeneratedTokenCode::Symbol),
+    source.source_span
+  )
+}
+
+fn token_at(source: TokenStream, index: i32) -> token.Token {
+  match index {
+    0 => source.first,
+    1 => source.second,
+    2 => source.third,
+    3 => source.fourth,
+    _ => missing_token(source),
+  }
+}
+
+fn declaration_kind(seed: i32) -> token.TokenKind {
+  match seed % 4 {
+    0 => token.normalize_generated_kind(token.GeneratedTokenCode::TypeKw),
+    1 => token.normalize_generated_kind(token.GeneratedTokenCode::ConstKw),
+    2 => token.normalize_generated_kind(token.GeneratedTokenCode::FnKw),
+    _ => token.normalize_generated_kind(token.GeneratedTokenCode::LetKw),
+  }
+}
+
+fn expression_kind(seed: i32) -> token.TokenKind {
+  match seed % 4 {
+    0 => token.normalize_generated_kind(token.GeneratedTokenCode::BoolLiteral),
+    1 => token.normalize_generated_kind(token.GeneratedTokenCode::Identifier),
+    2 => token.normalize_generated_kind(token.GeneratedTokenCode::NumberLiteral),
+    _ => token.normalize_generated_kind(token.GeneratedTokenCode::LiteralType),
+  }
+}
+
+fn generated_token(
+  kind: token.TokenKind,
+  start: i32,
+  width: i32
+) -> token.Token {
+  token.make(
+    kind,
+    span.make(start, start + width, 1, start + 1)
+  )
+}
+
+fn from_seed(seed: i32) -> TokenStream {
+  from_source(source.from_seed(seed))
+}
+
+fn from_source(text: source.SourceText) -> TokenStream {
+  let seed = source.module_seed(text);
+  let first = generated_token(
+    declaration_kind(source.code_at(text, 0)),
+    source.offset_at(text, 0),
+    2
+  );
+  let second = generated_token(
+    token.normalize_generated_kind(token.GeneratedTokenCode::Identifier),
+    source.offset_at(text, 1),
+    4
+  );
+  let third = generated_token(
+    expression_kind(source.code_at(text, 2)),
+    source.offset_at(text, 2),
+    3
+  );
+  let fourth = lexer.token_or_symbol(lexer.lex_source_at(
+    text,
+    3
+  ));
+  make(first, second, third, fourth)
+}
+
+fn stream_score(source: TokenStream) -> i32 {
+  token.token_score(source.first)
+    + token.token_score(source.second)
+    + token.token_score(source.third)
+    + token.token_score(source.fourth)
+    + span.width(source.source_span)
+}
+
+fn entry(seed: i32) -> i32 {
+  let text = source.from_seed(seed);
+  let tokens = from_source(text);
+  stream_score(tokens)
+    + token.token_score(token_at(tokens, seed % 4))
+    + source.source_score(text)
+}

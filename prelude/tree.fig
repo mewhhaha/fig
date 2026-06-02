@@ -1,0 +1,184 @@
+const core = @import("prelude.core");
+const layout = @import("prelude.layout");
+const option = @import("prelude.option");
+
+type fn TreeNode(a: type) -> type {
+  let TreeNode = {
+    value: a,
+    left: i32,
+    right: i32,
+  };
+  struct(TreeNode)
+}
+
+type fn Tree(a: type) -> type {
+  let Tree = {
+    nodes: layout.HeapArray(TreeNode(a)),
+    root: i32,
+  };
+  struct(Tree)
+}
+
+fn Tree::empty(const a: type) -> Tree(a) {
+  Tree {nodes: layout.HeapArray::empty(TreeNode(a)), root:
+    - 1}
+}
+
+fn Tree::from_nodes(
+  const a: type,
+  nodes: layout.HeapArray(TreeNode(a)),
+  root: i32
+) -> Tree(a) {
+  Tree {nodes, root}
+}
+
+fn Tree::push_node(
+  const a: type,
+  tree: Tree(a),
+  value: a,
+  left: i32,
+  right: i32
+) -> Tree(a) {
+  let index = layout.HeapArray::len(
+    TreeNode(a),
+    tree.nodes
+  );
+  Tree {
+    nodes: layout.HeapArray::push(
+      TreeNode(a),
+      tree.nodes,
+      TreeNode {value, left, right}
+    ),
+    root: index,
+  }
+}
+
+fn Tree::singleton(const a: type, value: a) -> Tree(a) {
+  Tree::push_node(
+    a,
+    Tree::empty(a),
+    value,
+    - 1,
+    - 1
+  )
+}
+
+fn Tree::is_empty(const a: type, tree: Tree(a)) -> bool {
+  tree.root < 0
+}
+
+fn Tree::node_at(
+  const a: type,
+  tree: Tree(a),
+  index: i32
+) -> core.Option(TreeNode(a)) {
+  match index < 0 {
+    true => None,
+    false => option.some(layout.HeapArray::get(
+      TreeNode(a),
+      tree.nodes,
+      index
+    )),
+  }
+}
+
+fn Tree::root_node(const a: type, tree: Tree(a)) -> core.Option(TreeNode(a)) {
+  Tree::node_at(a, tree, tree.root)
+}
+
+fn Tree::value(const a: type, tree: Tree(a)) -> core.Option(a) {
+  match Tree::root_node(a, tree) {
+    Some(node) => option.some(node.value),
+    None => None,
+  }
+}
+
+fn Tree::left(const a: type, tree: Tree(a)) -> core.Option(Tree(a)) {
+  match Tree::root_node(a, tree) {
+    Some(node) => match node.left < 0 {
+      true => None,
+      false => option.some(Tree {nodes: tree.nodes, root: node.left}),
+    },
+    None => None,
+  }
+}
+
+fn Tree::right(const a: type, tree: Tree(a)) -> core.Option(Tree(a)) {
+  match Tree::root_node(a, tree) {
+    Some(node) => match node.right < 0 {
+      true => None,
+      false => option.some(Tree {nodes: tree.nodes, root: node.right}),
+    },
+    None => None,
+  }
+}
+
+fn Tree::fold_preorder(
+  const a: type,
+  const b: type,
+  tree: Tree(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  Tree::fold_preorder_at(
+    a,
+    b,
+    tree.nodes,
+    tree.root,
+    acc,
+    f
+  )
+}
+
+fn Tree::fold_preorder_at(
+  const a: type,
+  const b: type,
+  nodes: layout.HeapArray(TreeNode(a)),
+  index: i32,
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  match index < 0 {
+    true => acc,
+    false => layout.HeapArray::get(
+      TreeNode(a),
+      nodes,
+      index
+    )
+      \node -> Tree::fold_preorder_node(
+      a,
+      b,
+      nodes,
+      node,
+      acc,
+      f
+    ),
+  }
+}
+
+fn Tree::fold_preorder_node(
+  const a: type,
+  const b: type,
+  nodes: layout.HeapArray(TreeNode(a)),
+  node: TreeNode(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  let with_value = f(acc, node.value);
+  let with_left = Tree::fold_preorder_at(
+    a,
+    b,
+    nodes,
+    node.left,
+    with_value,
+    f
+  );
+  Tree::fold_preorder_at(
+    a,
+    b,
+    nodes,
+    node.right,
+    with_left,
+    f
+  )
+}

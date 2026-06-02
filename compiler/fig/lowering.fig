@@ -1,0 +1,232 @@
+const ast = @import("./ast.fig");
+const checker = @import("./checker.fig");
+const diagnostic = @import("./diagnostic.fig");
+const span = @import("./span.fig");
+
+type AbiClass = union {
+  AbiVoid, AbiScalar, AbiHandle, AbiFunction
+}
+
+type LoweredValue = union {
+  LoweredVoid, LoweredI32(value: i32), LoweredHandle(
+    layout: i32,
+    handle: i32
+  ), LoweredFunction(index: i32)
+}
+
+type LoweredDecl = struct {
+  name: ast.SymbolId,
+  abi: AbiClass,
+  value: LoweredValue,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type LoweredProgram = struct {
+  program: ast.Program,
+  entry: LoweredDecl,
+  secondary: LoweredDecl,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+fn abi_score(value: AbiClass) -> i32 match {
+  AbiVoid => 0,
+  AbiScalar => 11,
+  AbiHandle => 17,
+  AbiFunction => 23,
+}
+
+fn abi_tag(value: AbiClass) -> i32 match {
+  AbiVoid => 0,
+  AbiScalar => 1,
+  AbiHandle => 2,
+  AbiFunction => 3,
+}
+
+fn abi_for_type(value_type: checker.Type) -> AbiClass {
+  match checker.type_tag(value_type) {
+    1 => AbiScalar,
+    2 => AbiScalar,
+    3 => AbiFunction,
+    4 => AbiHandle,
+    _ => AbiVoid,
+  }
+}
+
+fn lower_value(
+  value: AbiClass,
+  _seed: i32
+) -> LoweredValue match {
+  AbiVoid, _seed => LoweredVoid,
+  AbiScalar, seed => LoweredI32(seed),
+  AbiHandle, seed => LoweredHandle(
+    checker.type_tag(checker.product_type(2)),
+    seed
+  ),
+  AbiFunction, seed => LoweredFunction(seed),
+}
+
+fn value_score(value: LoweredValue) -> i32 match {
+  LoweredVoid => 0,
+  LoweredI32(value) => value,
+  LoweredHandle(layout, handle) => layout + handle,
+  LoweredFunction(index) => index,
+}
+
+fn value_tag(value: LoweredValue) -> i32 match {
+  LoweredVoid => 0,
+  LoweredI32(_) => 1,
+  LoweredHandle(_, _) => 2,
+  LoweredFunction(_) => 3,
+}
+
+fn value_primary(value: LoweredValue) -> i32 match {
+  LoweredVoid => 0,
+  LoweredI32(value) => value,
+  LoweredHandle(layout, _) => layout,
+  LoweredFunction(index) => index,
+}
+
+fn value_secondary(value: LoweredValue) -> i32 match {
+  LoweredVoid => 0,
+  LoweredI32(_) => 0,
+  LoweredHandle(_, handle) => handle,
+  LoweredFunction(_) => 0,
+}
+
+fn needs_lowering_error(
+  value: AbiClass,
+  decl: ast.Decl
+) -> bool match {
+  AbiVoid, decl => ast.decl_tag(decl) != 5,
+  AbiScalar, _decl => false,
+  AbiHandle, _decl => false,
+  AbiFunction, _decl => false,
+}
+
+fn lower_diagnostics(
+  checked: checker.CheckedDecl,
+  abi: AbiClass,
+  source_span: span.Span
+) -> diagnostic.DiagnosticBag {
+  match needs_lowering_error(abi, checked.decl) {
+    true => diagnostic.push(
+      checked.env.diagnostics,
+      diagnostic.make(
+        diagnostic.CodeTypeMismatch,
+        diagnostic.Error,
+        source_span,
+        checker.type_tag(checked.value_type),
+        0
+      )
+    ),
+    false => checked.env.diagnostics,
+  }
+}
+
+fn lower_declaration(
+  checked: checker.CheckedDecl,
+  source_span: span.Span
+) -> LoweredDecl {
+  let abi = abi_for_type(checked.value_type);
+  LoweredDecl {
+    name: ast.decl_name(checked.decl),
+    abi: abi,
+    value: lower_value(
+      abi,
+      ast.decl_score(checked.decl)
+    ),
+    diagnostics: lower_diagnostics(
+      checked,
+      abi,
+      source_span
+    ),
+  }
+}
+
+fn lowered_program(
+  program: ast.Program,
+  entry: LoweredDecl,
+  secondary: LoweredDecl
+) -> LoweredProgram {
+  let diagnostics = match program.declaration_count > 1 {
+    true => diagnostic.merge(
+      entry.diagnostics,
+      secondary.diagnostics
+    ),
+    false => entry.diagnostics,
+  };
+  LoweredProgram {
+    program: program,
+    entry: entry,
+    secondary: secondary,
+    diagnostics: diagnostics,
+  }
+}
+
+fn lower_program(
+  checked: checker.CheckedProgram,
+  source_span: span.Span
+) -> LoweredProgram {
+  let entry = lower_declaration(
+    checked.entry,
+    source_span
+  );
+  let secondary = lower_declaration(
+    checked.secondary,
+    source_span
+  );
+  lowered_program(
+    checked.program,
+    entry,
+    secondary
+  )
+}
+
+fn lowered_decl_score(value: LoweredDecl) -> i32 {
+  value.name
+    + abi_score(value.abi)
+    + value_score(value.value)
+    + diagnostic.bag_score(value.diagnostics)
+}
+
+fn lowered_program_score(value: LoweredProgram) -> i32 {
+  ast.program_score(value.program)
+    + lowered_decl_score(value.entry)
+    + lowered_decl_score(value.secondary)
+    + diagnostic.bag_score(value.diagnostics)
+}
+
+fn entry(seed: i32) -> i32 {
+  let decl = ast.fn_decl(
+    seed,
+    1,
+    ast.named_type(seed + 1),
+    ast.block(ast.int_expr(seed + 2))
+  );
+  let source_span = span.make(seed, seed + 6, 1, 1);
+  let checked = checker.check_declaration(
+    checker.seed_env(seed),
+    decl,
+    source_span
+  );
+  let program = ast.program(
+    seed,
+    1,
+    decl,
+    ast.empty_decl(),
+    source_span
+  );
+  let checked_program = checker.check_program(
+    checker.seed_env(seed),
+    program,
+    source_span
+  );
+  lowered_decl_score(lower_declaration(
+    checked,
+    source_span
+  ))
+    + lowered_program_score(lower_program(
+      checked_program,
+      source_span
+    ))
+}

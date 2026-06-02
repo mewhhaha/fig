@@ -1,0 +1,33 @@
+const list = @import("prelude.list");
+
+type fn NonEmpty(a: type) -> type {
+  let NonEmpty = {
+    head: a,
+    tail: list.List(a),
+  };
+  struct(NonEmpty)
+}
+
+fn NonEmpty::singleton(value: a) -> NonEmpty(a) {
+  NonEmpty {head: value, tail: list.List::empty(a)}
+}
+
+fn NonEmpty::cons(value: a, xs: NonEmpty(a)) -> NonEmpty(a) {
+  NonEmpty {head: value, tail: NonEmpty::to_list(xs)}
+}
+
+fn NonEmpty::head(xs: NonEmpty(a)) -> a {
+  xs.head
+}
+
+fn NonEmpty::tail(xs: NonEmpty(a)) -> list.List(a) {
+  xs.tail
+}
+
+fn NonEmpty::len(xs: NonEmpty(a)) -> i32 {
+  1 + list.List::len(a, xs.tail)
+}
+
+fn NonEmpty::to_list(xs: NonEmpty(a)) -> list.List(a) {
+  list.List::cons(a, xs.head, xs.tail)
+}

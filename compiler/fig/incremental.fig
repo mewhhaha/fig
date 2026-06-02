@@ -1,0 +1,482 @@
+const artifact = @import("./artifact.fig");
+const diagnostic = @import("./diagnostic.fig");
+const modgraph = @import("./modgraph.fig");
+const source = @import("./source.fig");
+
+type ModuleRole = union {
+  RootModule, FeatureModule, UtilityModule, SharedModule
+}
+
+type SourceChange = union {
+  NoChange, EditModule(role: ModuleRole, delta: i32)
+}
+
+type InvalidationReason = union {
+  NoInvalidation, SourceChanged(module_id: i32), DependencyChanged(module_id: i32)
+}
+
+type CacheEntryState = union {
+  CacheMissing, CacheFresh, CacheStale(reason: InvalidationReason)
+}
+
+type ModuleNode = struct {
+  role: ModuleRole,
+  record: modgraph.ModuleRecord,
+  second_import_id: i32,
+  source_revision: i32,
+  dependency_revision: i32,
+}
+
+type ModuleCluster = struct {
+  root: ModuleNode,
+  feature: ModuleNode,
+  utility: ModuleNode,
+  shared: ModuleNode,
+  count: i32,
+}
+
+type CacheEntry = struct {
+  module_id: i32,
+  source_revision: i32,
+  dependency_revision: i32,
+  artifact_revision: i32,
+  compiled: artifact.ArtifactSummary,
+  state: CacheEntryState,
+}
+
+type ArtifactCache = struct {
+  root: CacheEntry,
+  feature: CacheEntry,
+  utility: CacheEntry,
+  shared: CacheEntry,
+  hit_count: i32,
+  miss_count: i32,
+  invalidation_count: i32,
+}
+
+type RefreshStep = struct {
+  before: CacheEntry,
+  after: CacheEntry,
+  reason: InvalidationReason,
+}
+
+type RefreshPlan = struct {
+  root: RefreshStep,
+  feature: RefreshStep,
+  utility: RefreshStep,
+  shared: RefreshStep,
+  cache: ArtifactCache,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+fn role_score(value: ModuleRole) -> i32 match {
+  RootModule => 101,
+  FeatureModule => 103,
+  UtilityModule => 107,
+  SharedModule => 109,
+}
+
+fn reason_score(value: InvalidationReason) -> i32 match {
+  NoInvalidation => 0,
+  SourceChanged(module_id) => module_id + 11,
+  DependencyChanged(module_id) => module_id + 17,
+}
+
+fn state_score(value: CacheEntryState) -> i32 match {
+  CacheMissing => 1,
+  CacheFresh => 2,
+  CacheStale(reason) => 3 + reason_score(reason),
+}
+
+fn is_invalidated(value: InvalidationReason) -> bool match {
+  NoInvalidation => false,
+  SourceChanged(_) => true,
+  DependencyChanged(_) => true,
+}
+
+fn state_from_reason(value: InvalidationReason) -> CacheEntryState match {
+  NoInvalidation => CacheFresh,
+  SourceChanged(module_id) => CacheStale(SourceChanged(module_id)),
+  DependencyChanged(module_id) => CacheStale(DependencyChanged(module_id)),
+}
+
+fn source_revision(
+  role: ModuleRole,
+  text: source.SourceText
+) -> i32 {
+  role_score(role) * 997 + source.source_score(text)
+}
+
+fn node(
+  role: ModuleRole,
+  record: modgraph.ModuleRecord,
+  second_import_id: i32,
+  dependency_revision: i32
+) -> ModuleNode {
+  ModuleNode {
+    role: role,
+    record: record,
+    second_import_id: second_import_id,
+    source_revision: source_revision(
+      role,
+      record.source
+    ),
+    dependency_revision: dependency_revision,
+  }
+}
+
+fn from_seed(seed: i32) -> ModuleCluster {
+  let shared = node(
+    SharedModule,
+    modgraph.module_record(
+      seed + 3,
+      0,
+      source.from_seed(seed + 3)
+    ),
+    0,
+    0
+  );
+  let feature = node(
+    FeatureModule,
+    modgraph.module_record(
+      seed + 1,
+      shared.record.module_id,
+      source.from_seed(seed + 1)
+    ),
+    0,
+    shared.source_revision
+  );
+  let utility = node(
+    UtilityModule,
+    modgraph.module_record(
+      seed + 2,
+      shared.record.module_id,
+      source.from_seed(seed + 2)
+    ),
+    0,
+    shared.source_revision
+  );
+  let root = node(
+    RootModule,
+    modgraph.module_record(
+      seed,
+      feature.record.module_id,
+      source.from_seed(seed)
+    ),
+    utility.record.module_id,
+    feature.source_revision + utility.source_revision
+  );
+  ModuleCluster {
+    root: root,
+    feature: feature,
+    utility: utility,
+    shared: shared,
+    count: 4,
+  }
+}
+
+fn change_from_seed(seed: i32) -> SourceChange {
+  match seed % 5 {
+    0 => NoChange,
+    1 => EditModule(RootModule, seed + 31),
+    2 => EditModule(FeatureModule, seed + 37),
+    3 => EditModule(UtilityModule, seed + 41),
+    _ => EditModule(SharedModule, seed + 43),
+  }
+}
+
+fn changed_source(
+  node: ModuleNode,
+  other: SourceChange
+) -> source.SourceText match {
+  node, NoChange => node.record.source,
+  node, EditModule(role, delta) => match role_score(role) == role_score(node.role) {
+    true => source.from_seed(node.record.module_id + delta),
+    false => node.record.source,
+  },
+}
+
+fn apply_change(
+  cluster: ModuleCluster,
+  change: SourceChange
+) -> ModuleCluster {
+  let shared = node(
+    SharedModule,
+    modgraph.module_record(
+      cluster.shared.record.module_id,
+      0,
+      changed_source(cluster.shared, change)
+    ),
+    0,
+    0
+  );
+  let feature = node(
+    FeatureModule,
+    modgraph.module_record(
+      cluster.feature.record.module_id,
+      shared.record.module_id,
+      changed_source(cluster.feature, change)
+    ),
+    0,
+    shared.source_revision
+  );
+  let utility = node(
+    UtilityModule,
+    modgraph.module_record(
+      cluster.utility.record.module_id,
+      shared.record.module_id,
+      changed_source(cluster.utility, change)
+    ),
+    0,
+    shared.source_revision
+  );
+  let root = node(
+    RootModule,
+    modgraph.module_record(
+      cluster.root.record.module_id,
+      feature.record.module_id,
+      changed_source(cluster.root, change)
+    ),
+    utility.record.module_id,
+    feature.source_revision + utility.source_revision
+  );
+  ModuleCluster {
+    root: root,
+    feature: feature,
+    utility: utility,
+    shared: shared,
+    count: cluster.count,
+  }
+}
+
+fn compile_node(node: ModuleNode, seed: i32) -> artifact.ModuleArtifact {
+  artifact.compile_source(
+    node.record.module_id,
+    node.record.source,
+    diagnostic.empty(),
+    seed
+  )
+}
+
+fn cache_entry(
+  node: ModuleNode,
+  state: CacheEntryState,
+  seed: i32
+) -> CacheEntry {
+  let compiled = compile_node(node, seed);
+  let summary = artifact.summarize(compiled);
+  CacheEntry {
+    module_id: node.record.module_id,
+    source_revision: node.source_revision,
+    dependency_revision: node.dependency_revision,
+    artifact_revision: artifact.summary_score(summary)
+      + node.source_revision
+      + node.dependency_revision,
+    compiled: summary,
+    state: state,
+  }
+}
+
+fn with_state(
+  entry: CacheEntry,
+  state: CacheEntryState
+) -> CacheEntry {
+  CacheEntry {
+    module_id: entry.module_id,
+    source_revision: entry.source_revision,
+    dependency_revision: entry.dependency_revision,
+    artifact_revision: entry.artifact_revision,
+    compiled: entry.compiled,
+    state: state,
+  }
+}
+
+fn initial_cache(cluster: ModuleCluster, seed: i32) -> ArtifactCache {
+  ArtifactCache {
+    root: cache_entry(cluster.root, CacheFresh, seed),
+    feature: cache_entry(
+      cluster.feature,
+      CacheFresh,
+      seed + 1
+    ),
+    utility: cache_entry(
+      cluster.utility,
+      CacheFresh,
+      seed + 2
+    ),
+    shared: cache_entry(
+      cluster.shared,
+      CacheFresh,
+      seed + 3
+    ),
+    hit_count: 0,
+    miss_count: 4,
+    invalidation_count: 0,
+  }
+}
+
+fn invalidation_reason(
+  entry: CacheEntry,
+  node: ModuleNode
+) -> InvalidationReason {
+  match entry.source_revision == node.source_revision {
+    false => SourceChanged(node.record.module_id),
+    true => match entry.dependency_revision == node.dependency_revision {
+      false => DependencyChanged(node.record.module_id),
+      true => NoInvalidation,
+    },
+  }
+}
+
+fn refresh_entry(
+  before: CacheEntry,
+  node: ModuleNode,
+  seed: i32
+) -> RefreshStep {
+  let reason = invalidation_reason(before, node);
+  let marked = with_state(
+    before,
+    state_from_reason(reason)
+  );
+  let after = match is_invalidated(reason) {
+    true => cache_entry(node, CacheFresh, seed),
+    false => with_state(before, CacheFresh),
+  };
+  RefreshStep {
+    before: marked,
+    after: after,
+    reason: reason,
+  }
+}
+
+fn invalidation_count(step: RefreshStep) -> i32 {
+  match is_invalidated(step.reason) {
+    true => 1,
+    false => 0,
+  }
+}
+
+fn refreshed_cache(
+  root: RefreshStep,
+  feature: RefreshStep,
+  utility: RefreshStep,
+  shared: RefreshStep
+) -> ArtifactCache {
+  let invalidations = invalidation_count(root)
+    + invalidation_count(feature)
+    + invalidation_count(utility)
+    + invalidation_count(shared);
+  ArtifactCache {
+    root: root.after,
+    feature: feature.after,
+    utility: utility.after,
+    shared: shared.after,
+    hit_count: 4 - invalidations,
+    miss_count: 0,
+    invalidation_count: invalidations,
+  }
+}
+
+fn refresh_plan(
+  before: ArtifactCache,
+  next: ModuleCluster,
+  seed: i32
+) -> RefreshPlan {
+  let shared = refresh_entry(
+    before.shared,
+    next.shared,
+    seed + 3
+  );
+  let feature = refresh_entry(
+    before.feature,
+    next.feature,
+    seed + 1
+  );
+  let utility = refresh_entry(
+    before.utility,
+    next.utility,
+    seed + 2
+  );
+  let root = refresh_entry(
+    before.root,
+    next.root,
+    seed
+  );
+  RefreshPlan {
+    root: root,
+    feature: feature,
+    utility: utility,
+    shared: shared,
+    cache: refreshed_cache(
+      root,
+      feature,
+      utility,
+      shared
+    ),
+    diagnostics: diagnostic.empty(),
+  }
+}
+
+fn node_score(node: ModuleNode) -> i32 {
+  role_score(node.role)
+    + modgraph.module_score(node.record)
+    + node.second_import_id
+    + node.source_revision
+    + node.dependency_revision
+}
+
+fn cluster_score(cluster: ModuleCluster) -> i32 {
+  node_score(cluster.root)
+    + node_score(cluster.feature)
+    + node_score(cluster.utility)
+    + node_score(cluster.shared)
+    + cluster.count
+}
+
+fn entry_score(entry: CacheEntry) -> i32 {
+  entry.module_id
+    + entry.source_revision
+    + entry.dependency_revision
+    + entry.artifact_revision
+    + artifact.summary_score(entry.compiled)
+    + state_score(entry.state)
+}
+
+fn cache_score(cache: ArtifactCache) -> i32 {
+  entry_score(cache.root)
+    + entry_score(cache.feature)
+    + entry_score(cache.utility)
+    + entry_score(cache.shared)
+    + cache.hit_count
+    + cache.miss_count
+    + cache.invalidation_count
+}
+
+fn step_score(step: RefreshStep) -> i32 {
+  entry_score(step.before)
+    + entry_score(step.after)
+    + reason_score(step.reason)
+}
+
+fn plan_score(plan: RefreshPlan) -> i32 {
+  step_score(plan.root)
+    + step_score(plan.feature)
+    + step_score(plan.utility)
+    + step_score(plan.shared)
+    + cache_score(plan.cache)
+    + diagnostic.bag_score(plan.diagnostics)
+}
+
+fn entry(seed: i32) -> i32 {
+  let before = from_seed(seed);
+  let after = apply_change(
+    before,
+    change_from_seed(seed)
+  );
+  let cache = initial_cache(before, seed);
+  cluster_score(after) + plan_score(refresh_plan(
+    cache,
+    after,
+    seed + 10
+  ))
+}

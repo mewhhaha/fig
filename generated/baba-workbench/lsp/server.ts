@@ -18,7 +18,6 @@ export interface DocumentSymbol {
 
 const documentSymbolNodes = new Set([
   "FnDecl",
-  "ContractFnDecl",
   "TypeFnDecl",
   "ConstDecl",
 ]);

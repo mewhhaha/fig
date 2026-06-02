@@ -26,26 +26,18 @@ fn map4_i32(const f: fn(x: i32) -> i32, xs: layout.Lane4I32) -> layout.Lane4I32 
 }
 
 fn map4_i32_go(
-  i: i32(4),
+  i: i32,
   const f: fn(x: i32) -> i32,
   xs: layout.Lane4I32,
   builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn map4_i32_go(
-  i: i32(0..4),
-  const f: fn(x: i32) -> i32,
-  xs: layout.Lane4I32,
-  builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  map4_i32_go(
+) -> layout.Lane4I32 match {
+  i: i32(4), xs, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  i: i32(0..4), xs, builder => map4_i32_go(
     i + 1,
     f,
     xs,
     layout.InlineArrayBuilder::push(4, i32, builder, i, f(xs[i]))
-  )
+  ),
 }
 
 fn zip_with4_i32(const f: fn(a: i32, b: i32) -> i32, xs: layout.Lane4I32, ys: layout.Lane4I32) -> layout.Lane4I32 {
@@ -53,53 +45,48 @@ fn zip_with4_i32(const f: fn(a: i32, b: i32) -> i32, xs: layout.Lane4I32, ys: la
 }
 
 fn zip_with4_i32_go(
-  i: i32(4),
+  i: i32,
   const f: fn(a: i32, b: i32) -> i32,
   xs: layout.Lane4I32,
   ys: layout.Lane4I32,
   builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn zip_with4_i32_go(
-  i: i32(0..4),
-  const f: fn(a: i32, b: i32) -> i32,
-  xs: layout.Lane4I32,
-  ys: layout.Lane4I32,
-  builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  zip_with4_i32_go(
+) -> layout.Lane4I32 match {
+  i: i32(4), xs, ys, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  i: i32(0..4), xs, ys, builder => zip_with4_i32_go(
     i + 1,
     f,
     xs,
     ys,
     layout.InlineArrayBuilder::push(4, i32, builder, i, f(xs[i], ys[i]))
-  )
+  ),
 }
 
 fn fold4_i32(const f: fn(acc: i32, x: i32) -> i32, init: i32, xs: layout.Lane4I32) -> i32 {
   fold4_i32_go(0, f, init, xs)
 }
 
-fn fold4_i32_go(i: i32(4), const f: fn(acc: i32, x: i32) -> i32, acc: i32, xs: layout.Lane4I32) -> i32 {
-  acc
-}
-
-fn fold4_i32_go(i: i32(0..4), const f: fn(acc: i32, x: i32) -> i32, acc: i32, xs: layout.Lane4I32) -> i32 {
-  fold4_i32_go(i + 1, f, f(acc, xs[i]), xs)
+fn fold4_i32_go(
+  i: i32,
+  const f: fn(acc: i32, x: i32) -> i32,
+  acc: i32,
+  xs: layout.Lane4I32
+) -> i32 match {
+  i: i32(4), acc, xs => acc,
+  i: i32(0..4), acc, xs => fold4_i32_go(i + 1, f, f(acc, xs[i]), xs),
 }
 
 fn reduce4_i32(const f: fn(a: i32, b: i32) -> i32, xs: layout.Lane4I32) -> i32 {
   reduce4_i32_go(1, f, xs, xs[0])
 }
 
-fn reduce4_i32_go(i: i32(4), const f: fn(a: i32, b: i32) -> i32, xs: layout.Lane4I32, acc: i32) -> i32 {
-  acc
-}
-
-fn reduce4_i32_go(i: i32(1..4), const f: fn(a: i32, b: i32) -> i32, xs: layout.Lane4I32, acc: i32) -> i32 {
-  reduce4_i32_go(i + 1, f, xs, f(acc, xs[i]))
+fn reduce4_i32_go(
+  i: i32,
+  const f: fn(a: i32, b: i32) -> i32,
+  xs: layout.Lane4I32,
+  acc: i32
+) -> i32 match {
+  i: i32(4), xs, acc => acc,
+  i: i32(1..4), xs, acc => reduce4_i32_go(i + 1, f, xs, f(acc, xs[i])),
 }
 
 fn lane4_add_i32(xs: layout.Lane4I32, ys: layout.Lane4I32) -> layout.Lane4I32 {
@@ -126,78 +113,83 @@ fn lane4_any_i32(xs: layout.Lane4I32, const pred: fn(x: i32) -> bool) -> bool {
   lane4_any_i32_go(0, xs, pred)
 }
 
-fn lane4_any_i32_go(i: i32(4), xs: layout.Lane4I32, const pred: fn(x: i32) -> bool) -> bool {
-  false
-}
-
-fn lane4_any_i32_go(i: i32(0..4), xs: layout.Lane4I32, const pred: fn(x: i32) -> bool) -> bool {
-  match pred(xs[i]) {
+fn lane4_any_i32_go(
+  i: i32,
+  xs: layout.Lane4I32,
+  const pred: fn(x: i32) -> bool
+) -> bool match {
+  i: i32(4), xs => false,
+  i: i32(0..4), xs => match pred(xs[i]) {
     true => true,
     false => lane4_any_i32_go(i + 1, xs, pred),
-  }
+  },
 }
 
 fn lane4_all_i32(xs: layout.Lane4I32, const pred: fn(x: i32) -> bool) -> bool {
   lane4_all_i32_go(0, xs, pred)
 }
 
-fn lane4_all_i32_go(i: i32(4), xs: layout.Lane4I32, const pred: fn(x: i32) -> bool) -> bool {
-  true
-}
-
-fn lane4_all_i32_go(i: i32(0..4), xs: layout.Lane4I32, const pred: fn(x: i32) -> bool) -> bool {
-  match pred(xs[i]) {
+fn lane4_all_i32_go(
+  i: i32,
+  xs: layout.Lane4I32,
+  const pred: fn(x: i32) -> bool
+) -> bool match {
+  i: i32(4), xs => true,
+  i: i32(0..4), xs => match pred(xs[i]) {
     true => lane4_all_i32_go(i + 1, xs, pred),
     false => false,
-  }
+  },
 }
 
 fn lane4_count_i32(xs: layout.Lane4I32, const pred: fn(x: i32) -> bool) -> i32 {
   lane4_count_i32_go(0, xs, pred, 0)
 }
 
-fn lane4_count_i32_go(i: i32(4), xs: layout.Lane4I32, const pred: fn(x: i32) -> bool, total: i32) -> i32 {
-  total
-}
-
-fn lane4_count_i32_go(i: i32(0..4), xs: layout.Lane4I32, const pred: fn(x: i32) -> bool, total: i32) -> i32 {
-  let add: i32 = match pred(xs[i]) { true => 1, false => 0 };
-  lane4_count_i32_go(
+fn lane4_count_i32_go(
+  i: i32,
+  xs: layout.Lane4I32,
+  const pred: fn(x: i32) -> bool,
+  total: i32
+) -> i32 match {
+  i: i32(4), xs, total => total,
+  i: i32(0..4), xs, total => match pred(xs[i]) { true => 1, false => 0 } \add_value -> lane4_count_i32_go(
     i + 1,
     xs,
     pred,
-    total + add
-  )
+    total + add_value
+  ),
 }
 
 fn lane4_contains_i32(xs: layout.Lane4I32, value: i32) -> bool {
   lane4_contains_i32_go(0, xs, value)
 }
 
-fn lane4_contains_i32_go(i: i32(4), xs: layout.Lane4I32, value: i32) -> bool {
-  false
-}
-
-fn lane4_contains_i32_go(i: i32(0..4), xs: layout.Lane4I32, value: i32) -> bool {
-  match xs[i] == value {
+fn lane4_contains_i32_go(
+  i: i32,
+  xs: layout.Lane4I32,
+  value: i32
+) -> bool match {
+  i: i32(4), xs, value => false,
+  i: i32(0..4), xs, value => match xs[i] == value {
     true => true,
     false => lane4_contains_i32_go(i + 1, xs, value),
-  }
+  },
 }
 
 fn lane4_index_of_i32(xs: layout.Lane4I32, value: i32) -> core.Option(i32) {
   lane4_index_of_i32_go(0, xs, value)
 }
 
-fn lane4_index_of_i32_go(i: i32(4), xs: layout.Lane4I32, value: i32) -> core.Option(i32) {
-  0
-}
-
-fn lane4_index_of_i32_go(i: i32(0..4), xs: layout.Lane4I32, value: i32) -> core.Option(i32) {
-  match xs[i] == value {
-    true => i,
+fn lane4_index_of_i32_go(
+  i: i32,
+  xs: layout.Lane4I32,
+  value: i32
+) -> core.Option(i32) match {
+  i: i32(4), xs, value => None,
+  i: i32(0..4), xs, value => match xs[i] == value {
+    true => Some(i),
     false => lane4_index_of_i32_go(i + 1, xs, value),
-  }
+  },
 }
 
 fn lane4_sum_i32(xs: layout.Lane4I32) -> i32 {
@@ -221,23 +213,14 @@ fn lane4_set_i32(xs: layout.Lane4I32, i: i32, value: i32) -> layout.Lane4I32 {
 }
 
 fn lane4_set_i32_go(
-  lane: i32(4),
+  lane: i32,
   xs: layout.Lane4I32,
   i: i32,
   value: i32,
   builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_set_i32_go(
-  lane: i32(0..4),
-  xs: layout.Lane4I32,
-  i: i32,
-  value: i32,
-  builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  lane4_set_i32_go(
+) -> layout.Lane4I32 match {
+  lane: i32(4), xs, i, value, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  lane: i32(0..4), xs, i, value, builder => lane4_set_i32_go(
     lane + 1,
     xs,
     i,
@@ -249,7 +232,7 @@ fn lane4_set_i32_go(
       lane,
       match lane == i { true => value, false => xs[lane] }
     )
-  )
+  ),
 }
 
 fn lane4_update_i32(xs: layout.Lane4I32, i: i32, const f: fn(x: i32) -> i32) -> layout.Lane4I32 {
@@ -257,24 +240,14 @@ fn lane4_update_i32(xs: layout.Lane4I32, i: i32, const f: fn(x: i32) -> i32) -> 
 }
 
 fn lane4_update_i32_go(
-  lane: i32(4),
+  lane: i32,
   xs: layout.Lane4I32,
   i: i32,
   const f: fn(x: i32) -> i32,
   builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_update_i32_go(
-  lane: i32(0..4),
-  xs: layout.Lane4I32,
-  i: i32,
-  const f: fn(x: i32) -> i32,
-  builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  let old = xs[lane];
-  lane4_update_i32_go(
+) -> layout.Lane4I32 match {
+  lane: i32(4), xs, i, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  lane: i32(0..4), xs, i, builder => xs[lane] \old -> lane4_update_i32_go(
     lane + 1,
     xs,
     i,
@@ -286,7 +259,7 @@ fn lane4_update_i32_go(
       lane,
       match lane == i { true => f(old), false => old }
     )
-  )
+  ),
 }
 
 fn lane4_replace_where_i32(
@@ -298,24 +271,14 @@ fn lane4_replace_where_i32(
 }
 
 fn lane4_replace_where_i32_go(
-  lane: i32(4),
+  lane: i32,
   xs: layout.Lane4I32,
   const pred: fn(x: i32) -> bool,
   value: i32,
   builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_replace_where_i32_go(
-  lane: i32(0..4),
-  xs: layout.Lane4I32,
-  const pred: fn(x: i32) -> bool,
-  value: i32,
-  builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  let old = xs[lane];
-  lane4_replace_where_i32_go(
+) -> layout.Lane4I32 match {
+  lane: i32(4), xs, value, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  lane: i32(0..4), xs, value, builder => xs[lane] \old -> lane4_replace_where_i32_go(
     lane + 1,
     xs,
     pred,
@@ -327,7 +290,7 @@ fn lane4_replace_where_i32_go(
       lane,
       match pred(old) { true => value, false => old }
     )
-  )
+  ),
 }
 
 fn lane4_take_i32(xs: layout.Lane4I32, n: i32) -> layout.Lane4I32 {
@@ -335,21 +298,13 @@ fn lane4_take_i32(xs: layout.Lane4I32, n: i32) -> layout.Lane4I32 {
 }
 
 fn lane4_take_i32_go(
-  lane: i32(4),
+  lane: i32,
   xs: layout.Lane4I32,
   n: i32,
   builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_take_i32_go(
-  lane: i32(0..4),
-  xs: layout.Lane4I32,
-  n: i32,
-  builder: layout.InlineArrayBuilder(4, i32)
-) -> layout.Lane4I32 {
-  lane4_take_i32_go(
+) -> layout.Lane4I32 match {
+  lane: i32(4), xs, n, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  lane: i32(0..4), xs, n, builder => lane4_take_i32_go(
     lane + 1,
     xs,
     n,
@@ -360,7 +315,7 @@ fn lane4_take_i32_go(
       lane,
       match lane < n { true => xs[lane], false => 0 }
     )
-  )
+  ),
 }
 
 fn lane4_drop_i32(xs: layout.Lane4I32, n: i32) -> layout.Lane4I32 {
@@ -373,88 +328,94 @@ fn lane4_drop_i32(xs: layout.Lane4I32, n: i32) -> layout.Lane4I32 {
   }
 }
 
-fn lane4_drop1_i32(i: i32(4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_drop1_i32(i: i32(0..4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  lane4_drop1_i32(
+fn lane4_drop1_i32(
+  i: i32,
+  xs: layout.Lane4I32,
+  builder: layout.InlineArrayBuilder(4, i32)
+) -> layout.Lane4I32 match {
+  i: i32(4), xs, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  i: i32(0..4), xs, builder => lane4_drop1_i32(
     i + 1,
     xs,
     layout.InlineArrayBuilder::push(4, i32, builder, i, match i < 3 { true => xs[i + 1], false => 0 })
-  )
+  ),
 }
 
-fn lane4_drop2_i32(i: i32(4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_drop2_i32(i: i32(0..4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  lane4_drop2_i32(
+fn lane4_drop2_i32(
+  i: i32,
+  xs: layout.Lane4I32,
+  builder: layout.InlineArrayBuilder(4, i32)
+) -> layout.Lane4I32 match {
+  i: i32(4), xs, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  i: i32(0..4), xs, builder => lane4_drop2_i32(
     i + 1,
     xs,
     layout.InlineArrayBuilder::push(4, i32, builder, i, match i < 2 { true => xs[i + 2], false => 0 })
-  )
+  ),
 }
 
-fn lane4_drop3_i32(i: i32(4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_drop3_i32(i: i32(0..4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  lane4_drop3_i32(
+fn lane4_drop3_i32(
+  i: i32,
+  xs: layout.Lane4I32,
+  builder: layout.InlineArrayBuilder(4, i32)
+) -> layout.Lane4I32 match {
+  i: i32(4), xs, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  i: i32(0..4), xs, builder => lane4_drop3_i32(
     i + 1,
     xs,
     layout.InlineArrayBuilder::push(4, i32, builder, i, match i < 1 { true => xs[i + 3], false => 0 })
-  )
+  ),
 }
 
 fn lane4_reverse_i32(xs: layout.Lane4I32) -> layout.Lane4I32 {
   lane4_reverse_i32_go(0, xs, layout.InlineArrayBuilder::start(4, i32))
 }
 
-fn lane4_reverse_i32_go(i: i32(4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_reverse_i32_go(i: i32(0..4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  lane4_reverse_i32_go(
+fn lane4_reverse_i32_go(
+  i: i32,
+  xs: layout.Lane4I32,
+  builder: layout.InlineArrayBuilder(4, i32)
+) -> layout.Lane4I32 match {
+  i: i32(4), xs, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  i: i32(0..4), xs, builder => lane4_reverse_i32_go(
     i + 1,
     xs,
     layout.InlineArrayBuilder::push(4, i32, builder, i, xs[3 - i])
-  )
+  ),
 }
 
 fn lane4_rotate_left_i32(xs: layout.Lane4I32) -> layout.Lane4I32 {
   lane4_rotate_left_i32_go(0, xs, layout.InlineArrayBuilder::start(4, i32))
 }
 
-fn lane4_rotate_left_i32_go(i: i32(4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_rotate_left_i32_go(i: i32(0..4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  lane4_rotate_left_i32_go(
+fn lane4_rotate_left_i32_go(
+  i: i32,
+  xs: layout.Lane4I32,
+  builder: layout.InlineArrayBuilder(4, i32)
+) -> layout.Lane4I32 match {
+  i: i32(4), xs, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  i: i32(0..4), xs, builder => lane4_rotate_left_i32_go(
     i + 1,
     xs,
     layout.InlineArrayBuilder::push(4, i32, builder, i, match i == 3 { true => xs[0], false => xs[i + 1] })
-  )
+  ),
 }
 
 fn lane4_rotate_right_i32(xs: layout.Lane4I32) -> layout.Lane4I32 {
   lane4_rotate_right_i32_go(0, xs, layout.InlineArrayBuilder::start(4, i32))
 }
 
-fn lane4_rotate_right_i32_go(i: i32(4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  layout.InlineArrayBuilder::finish(4, i32, builder)
-}
-
-fn lane4_rotate_right_i32_go(i: i32(0..4), xs: layout.Lane4I32, builder: layout.InlineArrayBuilder(4, i32)) -> layout.Lane4I32 {
-  lane4_rotate_right_i32_go(
+fn lane4_rotate_right_i32_go(
+  i: i32,
+  xs: layout.Lane4I32,
+  builder: layout.InlineArrayBuilder(4, i32)
+) -> layout.Lane4I32 match {
+  i: i32(4), xs, builder => layout.InlineArrayBuilder::finish(4, i32, builder),
+  i: i32(0..4), xs, builder => lane4_rotate_right_i32_go(
     i + 1,
     xs,
     layout.InlineArrayBuilder::push(4, i32, builder, i, match i == 0 { true => xs[3], false => xs[i - 1] })
-  )
+  ),
 }
 
 fn mat4_rows_i32(
@@ -478,15 +439,16 @@ fn get(xs: layout.Lane4I32, i: i32) -> core.Option(i32) {
   get_go(0, xs, i)
 }
 
-fn get_go(lane: i32(4), xs: layout.Lane4I32, i: i32) -> core.Option(i32) {
-  0
-}
-
-fn get_go(lane: i32(0..4), xs: layout.Lane4I32, i: i32) -> core.Option(i32) {
-  match lane == i {
-    true => xs[lane],
+fn get_go(
+  lane: i32,
+  xs: layout.Lane4I32,
+  i: i32
+) -> core.Option(i32) match {
+  lane: i32(4), xs, i => None,
+  lane: i32(0..4), xs, i => match lane == i {
+    true => Some(xs[lane]),
     false => get_go(lane + 1, xs, i),
-  }
+  },
 }
 
 type fn RuntimeView(a: type) {
@@ -542,26 +504,18 @@ fn Iter::map(xs: Iter, const f: fn(x: i32) -> i32) -> Iter {
 }
 
 fn Iter::map_go(
-  i: i32(4),
+  i: i32,
   xs: Iter,
   const f: fn(x: i32) -> i32,
   builder: layout.InlineArrayBuilder(4, i32)
-) -> Iter {
-  Iter {items: layout.InlineArrayBuilder::finish(4, i32, builder), keep: xs.keep}
-}
-
-fn Iter::map_go(
-  i: i32(0..4),
-  xs: Iter,
-  const f: fn(x: i32) -> i32,
-  builder: layout.InlineArrayBuilder(4, i32)
-) -> Iter {
-  Iter::map_go(
+) -> Iter match {
+  i: i32(4), xs, builder => Iter {items: layout.InlineArrayBuilder::finish(4, i32, builder), keep: xs.keep},
+  i: i32(0..4), xs, builder => Iter::map_go(
     i + 1,
     xs,
     f,
     layout.InlineArrayBuilder::push(4, i32, builder, i, f(xs.items[i]))
-  )
+  ),
 }
 
 fn Iter::filter(xs: Iter, const pred: fn(x: i32) -> bool) -> Iter {
@@ -569,21 +523,13 @@ fn Iter::filter(xs: Iter, const pred: fn(x: i32) -> bool) -> Iter {
 }
 
 fn Iter::filter_go(
-  i: i32(4),
+  i: i32,
   xs: Iter,
   const pred: fn(x: i32) -> bool,
   builder: layout.InlineArrayBuilder(4, bool)
-) -> Iter {
-  Iter {items: xs.items, keep: layout.InlineArrayBuilder::finish(4, bool, builder)}
-}
-
-fn Iter::filter_go(
-  i: i32(0..4),
-  xs: Iter,
-  const pred: fn(x: i32) -> bool,
-  builder: layout.InlineArrayBuilder(4, bool)
-) -> Iter {
-  Iter::filter_go(
+) -> Iter match {
+  i: i32(4), xs, builder => Iter {items: xs.items, keep: layout.InlineArrayBuilder::finish(4, bool, builder)},
+  i: i32(0..4), xs, builder => Iter::filter_go(
     i + 1,
     xs,
     pred,
@@ -594,7 +540,7 @@ fn Iter::filter_go(
       i,
       match xs.keep[i] { true => pred(xs.items[i]), false => false }
     )
-  )
+  ),
 }
 
 fn Iter::reverse(xs: Iter) -> Iter {
@@ -607,30 +553,21 @@ fn Iter::reverse(xs: Iter) -> Iter {
 }
 
 fn Iter::reverse_go(
-  i: i32(4),
+  i: i32,
   xs: Iter,
   item_builder: layout.InlineArrayBuilder(4, i32),
   keep_builder: layout.InlineArrayBuilder(4, bool)
-) -> Iter {
-  Iter {
+) -> Iter match {
+  i: i32(4), xs, item_builder, keep_builder => Iter {
     items: layout.InlineArrayBuilder::finish(4, i32, item_builder),
     keep: layout.InlineArrayBuilder::finish(4, bool, keep_builder)
-  }
-}
-
-fn Iter::reverse_go(
-  i: i32(0..4),
-  xs: Iter,
-  item_builder: layout.InlineArrayBuilder(4, i32),
-  keep_builder: layout.InlineArrayBuilder(4, bool)
-) -> Iter {
-  let source = 3 - i;
-  Iter::reverse_go(
+  },
+  i: i32(0..4), xs, item_builder, keep_builder => 3 - i \source -> Iter::reverse_go(
     i + 1,
     xs,
     layout.InlineArrayBuilder::push(4, i32, item_builder, i, xs.items[source]),
     layout.InlineArrayBuilder::push(4, bool, keep_builder, i, xs.keep[source])
-  )
+  ),
 }
 
 fn Iter::take2(xs: Iter) -> Iter {
@@ -642,21 +579,13 @@ fn Iter::drop1(xs: Iter) -> Iter {
 }
 
 fn Iter::take_go(
-  i: i32(4),
+  i: i32,
   xs: Iter,
   n: i32,
   builder: layout.InlineArrayBuilder(4, bool)
-) -> Iter {
-  Iter {items: xs.items, keep: layout.InlineArrayBuilder::finish(4, bool, builder)}
-}
-
-fn Iter::take_go(
-  i: i32(0..4),
-  xs: Iter,
-  n: i32,
-  builder: layout.InlineArrayBuilder(4, bool)
-) -> Iter {
-  Iter::take_go(
+) -> Iter match {
+  i: i32(4), xs, n, builder => Iter {items: xs.items, keep: layout.InlineArrayBuilder::finish(4, bool, builder)},
+  i: i32(0..4), xs, n, builder => Iter::take_go(
     i + 1,
     xs,
     n,
@@ -667,25 +596,17 @@ fn Iter::take_go(
       i,
       match i < n { true => xs.keep[i], false => false }
     )
-  )
+  ),
 }
 
 fn Iter::drop_go(
-  i: i32(4),
+  i: i32,
   xs: Iter,
   n: i32,
   builder: layout.InlineArrayBuilder(4, bool)
-) -> Iter {
-  Iter {items: xs.items, keep: layout.InlineArrayBuilder::finish(4, bool, builder)}
-}
-
-fn Iter::drop_go(
-  i: i32(0..4),
-  xs: Iter,
-  n: i32,
-  builder: layout.InlineArrayBuilder(4, bool)
-) -> Iter {
-  Iter::drop_go(
+) -> Iter match {
+  i: i32(4), xs, n, builder => Iter {items: xs.items, keep: layout.InlineArrayBuilder::finish(4, bool, builder)},
+  i: i32(0..4), xs, n, builder => Iter::drop_go(
     i + 1,
     xs,
     n,
@@ -696,24 +617,26 @@ fn Iter::drop_go(
       i,
       match i < n { true => false, false => xs.keep[i] }
     )
-  )
+  ),
 }
 
 fn Iter::fold(xs: Iter, init: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
   Iter::fold_go(0, xs, init, f)
 }
 
-fn Iter::fold_go(i: i32(4), xs: Iter, acc: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
-  acc
-}
-
-fn Iter::fold_go(i: i32(0..4), xs: Iter, acc: i32, const f: fn(acc: i32, x: i32) -> i32) -> i32 {
-  Iter::fold_go(
+fn Iter::fold_go(
+  i: i32,
+  xs: Iter,
+  acc: i32,
+  const f: fn(acc: i32, x: i32) -> i32
+) -> i32 match {
+  i: i32(4), xs, acc => acc,
+  i: i32(0..4), xs, acc => Iter::fold_go(
     i + 1,
     xs,
     match xs.keep[i] { true => f(acc, xs.items[i]), false => acc },
     f
-  )
+  ),
 }
 
 fn Iter::reduce(xs: Iter, const f: fn(a: i32, b: i32) -> i32) -> i32 {
@@ -724,56 +647,58 @@ fn Iter::any(xs: Iter, const pred: fn(x: i32) -> bool) -> bool {
   Iter::any_go(0, xs, pred)
 }
 
-fn Iter::any_go(i: i32(4), xs: Iter, const pred: fn(x: i32) -> bool) -> bool {
-  false
-}
-
-fn Iter::any_go(i: i32(0..4), xs: Iter, const pred: fn(x: i32) -> bool) -> bool {
-  match xs.keep[i] {
+fn Iter::any_go(
+  i: i32,
+  xs: Iter,
+  const pred: fn(x: i32) -> bool
+) -> bool match {
+  i: i32(4), xs => false,
+  i: i32(0..4), xs => match xs.keep[i] {
     true => match pred(xs.items[i]) { true => true, false => Iter::any_go(i + 1, xs, pred) },
     false => Iter::any_go(i + 1, xs, pred),
-  }
+  },
 }
 
 fn Iter::all(xs: Iter, const pred: fn(x: i32) -> bool) -> bool {
   Iter::all_go(0, xs, pred)
 }
 
-fn Iter::all_go(i: i32(4), xs: Iter, const pred: fn(x: i32) -> bool) -> bool {
-  true
-}
-
-fn Iter::all_go(i: i32(0..4), xs: Iter, const pred: fn(x: i32) -> bool) -> bool {
-  match xs.keep[i] {
+fn Iter::all_go(
+  i: i32,
+  xs: Iter,
+  const pred: fn(x: i32) -> bool
+) -> bool match {
+  i: i32(4), xs => true,
+  i: i32(0..4), xs => match xs.keep[i] {
     true => match pred(xs.items[i]) { true => Iter::all_go(i + 1, xs, pred), false => false },
     false => Iter::all_go(i + 1, xs, pred),
-  }
+  },
 }
 
 fn Iter::count(xs: Iter) -> i32 {
   Iter::count_go(0, xs, 0)
 }
 
-fn Iter::count_go(i: i32(4), xs: Iter, total: i32) -> i32 {
-  total
-}
-
-fn Iter::count_go(i: i32(0..4), xs: Iter, total: i32) -> i32 {
-  let add: i32 = match xs.keep[i] { true => 1, false => 0 };
-  Iter::count_go(i + 1, xs, total + add)
+fn Iter::count_go(
+  i: i32,
+  xs: Iter,
+  total: i32
+) -> i32 match {
+  i: i32(4), xs, total => total,
+  i: i32(0..4), xs, total => match xs.keep[i] { true => 1, false => 0 } \add_value -> Iter::count_go(i + 1, xs, total + add_value),
 }
 
 fn Iter::sum(xs: Iter) -> i32 {
   Iter::sum_go(0, xs, 0)
 }
 
-fn Iter::sum_go(i: i32(4), xs: Iter, total: i32) -> i32 {
-  total
-}
-
-fn Iter::sum_go(i: i32(0..4), xs: Iter, total: i32) -> i32 {
-  let add: i32 = match xs.keep[i] { true => xs.items[i], false => 0 };
-  Iter::sum_go(i + 1, xs, total + add)
+fn Iter::sum_go(
+  i: i32,
+  xs: Iter,
+  total: i32
+) -> i32 match {
+  i: i32(4), xs, total => total,
+  i: i32(0..4), xs, total => match xs.keep[i] { true => xs.items[i], false => 0 } \add_value -> Iter::sum_go(i + 1, xs, total + add_value),
 }
 
 fn Iter::collect(xs: Iter) -> CompactArray(4, i32) {
@@ -781,26 +706,19 @@ fn Iter::collect(xs: Iter) -> CompactArray(4, i32) {
 }
 
 fn Iter::collect_go(
-  i: i32(4),
+  i: i32,
   xs: Iter,
   builder: CompactArrayBuilder(4, i32)
-) -> CompactArray(4, i32) {
-  CompactArray::collect_finish(4, i32, builder)
-}
-
-fn Iter::collect_go(
-  i: i32(0..4),
-  xs: Iter,
-  builder: CompactArrayBuilder(4, i32)
-) -> CompactArray(4, i32) {
-  Iter::collect_go(
+) -> CompactArray(4, i32) match {
+  i: i32(4), xs, builder => CompactArray::collect_finish(4, i32, builder),
+  i: i32(0..4), xs, builder => Iter::collect_go(
     i + 1,
     xs,
     match xs.keep[i] {
       true => CompactArray::collect_push(4, i32, builder, xs.items[i]),
       false => builder,
     }
-  )
+  ),
 }
 
 fn CompactArray::collect_start(const n: count, const a: type) -> CompactArrayBuilder(n, a) {
@@ -849,13 +767,13 @@ fn CompactArray::is_full(const n: count, const a: type, xs: CompactArray(n, a)) 
 
 fn CompactArray::get(const n: count, const a: type, xs: CompactArray(n, a), i: i32) -> core.Option(a) {
   let xs_for_len = xs;
-let xs_for_items = xs;
+  let xs_for_items = xs;
   match 0 <= i {
     true => match i < xs_for_len.len {
-      true => xs_for_items.items[i],
-      false => 0,
+      true => Some(xs_for_items.items[i]),
+      false => None,
     },
-    false => 0,
+    false => None,
   }
 }
 
@@ -866,7 +784,7 @@ fn CompactArray::push(
   value: a
 ) -> CompactArray(n, a) {
   let xs_update = xs;
-let xs_full = xs;
+  let xs_full = xs;
   match xs_update.len < n {
     true => CompactArray {items: layout.InlineArrayBuilder::push(n, a, xs_update.items, xs_update.len, value), len: xs_update.len + 1},
     false => xs_full,

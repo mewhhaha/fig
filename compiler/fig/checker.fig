@@ -1,0 +1,562 @@
+const ast = @import("./ast.fig");
+const diagnostic = @import("./diagnostic.fig");
+const span = @import("./span.fig");
+
+type Type = union {
+  TypeUnknown, TypeI32, TypeBool, TypeFunction(
+    param_count: i32,
+    result: i32
+  ), TypeProduct(field_count: i32), TypeError
+}
+
+type Symbol = struct {
+  name: ast.SymbolId,
+  value_type: Type,
+}
+
+type CheckEnv = struct {
+  first: Symbol,
+  second: Symbol,
+  count: i32,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type CheckedExpr = struct {
+  expr: ast.Expr,
+  value_type: Type,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type CheckedDecl = struct {
+  decl: ast.Decl,
+  value_type: Type,
+  env: CheckEnv,
+}
+
+type CheckedProgram = struct {
+  program: ast.Program,
+  entry: CheckedDecl,
+  secondary: CheckedDecl,
+  env: CheckEnv,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+fn unknown_type() -> Type {
+  TypeUnknown
+}
+
+fn i32_type() -> Type {
+  TypeI32
+}
+
+fn bool_type() -> Type {
+  TypeBool
+}
+
+fn error_type() -> Type {
+  TypeError
+}
+
+fn function_type(param_count: i32, result: Type) -> Type {
+  TypeFunction(param_count, type_tag(result))
+}
+
+fn product_type(field_count: i32) -> Type {
+  TypeProduct(field_count)
+}
+
+fn type_tag(value: Type) -> i32 match {
+  TypeUnknown => 0,
+  TypeI32 => 1,
+  TypeBool => 2,
+  TypeFunction(_, _) => 3,
+  TypeProduct(_) => 4,
+  TypeError => 5,
+}
+
+fn type_payload(value: Type) -> i32 match {
+  TypeUnknown => 0,
+  TypeI32 => 0,
+  TypeBool => 0,
+  TypeFunction(param_count, result) => param_count + result,
+  TypeProduct(field_count) => field_count,
+  TypeError => 0,
+}
+
+fn type_score(value_type: Type) -> i32 {
+  type_tag(value_type) * 31 + type_payload(value_type)
+}
+
+fn same_type(left: Type, right: Type) -> bool {
+  match type_tag(left) == type_tag(right) {
+    true => type_payload(left) == type_payload(right),
+    false => false,
+  }
+}
+
+fn type_from_symbol(name: ast.SymbolId) -> Type {
+  match name % 5 {
+    0 => i32_type(),
+    1 => bool_type(),
+    2 => product_type(2),
+    3 => function_type(1, i32_type()),
+    _ => unknown_type(),
+  }
+}
+
+fn symbol(name: ast.SymbolId, value_type: Type) -> Symbol {
+  Symbol {name: name, value_type: value_type}
+}
+
+fn placeholder_symbol() -> Symbol {
+  symbol(0, unknown_type())
+}
+
+fn empty_env() -> CheckEnv {
+  CheckEnv {
+    first: placeholder_symbol(),
+    second: placeholder_symbol(),
+    count: 0,
+    diagnostics: diagnostic.empty(),
+  }
+}
+
+fn seed_env(seed: i32) -> CheckEnv {
+  define_symbol(
+    define_symbol(empty_env(), seed, i32_type()),
+    seed + 1,
+    bool_type()
+  )
+}
+
+fn define_symbol(
+  env: CheckEnv,
+  name: ast.SymbolId,
+  value_type: Type
+) -> CheckEnv {
+  let next = symbol(name, value_type);
+  match env.count {
+    0 => CheckEnv {
+      first: next,
+      second: env.second,
+      count: 1,
+      diagnostics: env.diagnostics,
+    },
+    1 => CheckEnv {
+      first: env.first,
+      second: next,
+      count: 2,
+      diagnostics: env.diagnostics,
+    },
+    _ => CheckEnv {
+      first: env.first,
+      second: env.second,
+      count: env.count + 1,
+      diagnostics: env.diagnostics,
+    },
+  }
+}
+
+fn lookup_type(env: CheckEnv, name: ast.SymbolId) -> Type {
+  match env.count {
+    0 => unknown_type(),
+    1 => match env.first.name == name {
+      true => env.first.value_type,
+      false => unknown_type(),
+    },
+    _ => match env.first.name == name {
+      true => env.first.value_type,
+      false => match env.second.name == name {
+        true => env.second.value_type,
+        false => unknown_type(),
+      },
+    },
+  }
+}
+
+fn unknown_symbol_diagnostic(
+  name: ast.SymbolId,
+  source_span: span.Span
+) -> diagnostic.Diagnostic {
+  diagnostic.make(
+    diagnostic.CodeUnknownSymbol,
+    diagnostic.Error,
+    source_span,
+    name,
+    0
+  )
+}
+
+fn type_mismatch_diagnostic(
+  expected: Type,
+  actual: Type,
+  source_span: span.Span
+) -> diagnostic.Diagnostic {
+  diagnostic.make(
+    diagnostic.CodeTypeMismatch,
+    diagnostic.Error,
+    source_span,
+    type_tag(expected),
+    type_tag(actual)
+  )
+}
+
+fn checked_expr(
+  expr: ast.Expr,
+  value_type: Type,
+  diagnostics: diagnostic.DiagnosticBag
+) -> CheckedExpr {
+  CheckedExpr {
+    expr: expr,
+    value_type: value_type,
+    diagnostics: diagnostics,
+  }
+}
+
+fn check_var(
+  env: CheckEnv,
+  expr: ast.Expr,
+  source_span: span.Span
+) -> CheckedExpr {
+  let name = ast.expr_first(expr);
+  let value_type = lookup_type(env, name);
+  match type_tag(value_type) == type_tag(unknown_type()) {
+    true => checked_expr(
+      expr,
+      error_type(),
+      diagnostic.push(
+        env.diagnostics,
+        unknown_symbol_diagnostic(name, source_span)
+      )
+    ),
+    false => checked_expr(
+      expr,
+      value_type,
+      env.diagnostics
+    ),
+  }
+}
+
+fn binary_operand_type(value: i32) -> Type {
+  match value >= 0 {
+    true => i32_type(),
+    false => error_type(),
+  }
+}
+
+fn check_binary(
+  env: CheckEnv,
+  expr: ast.Expr,
+  source_span: span.Span
+) -> CheckedExpr {
+  let left_type = binary_operand_type(ast.expr_first(expr));
+  let right_type = binary_operand_type(ast.expr_third(expr));
+  let ok = match same_type(left_type, i32_type()) {
+    true => same_type(right_type, i32_type()),
+    false => false,
+  };
+  match ok {
+    true => checked_expr(
+      expr,
+      i32_type(),
+      env.diagnostics
+    ),
+    false => checked_expr(
+      expr,
+      error_type(),
+      diagnostic.push(
+        env.diagnostics,
+        type_mismatch_diagnostic(
+          i32_type(),
+          right_type,
+          source_span
+        )
+      )
+    ),
+  }
+}
+
+fn check_call(
+  env: CheckEnv,
+  expr: ast.Expr,
+  source_span: span.Span
+) -> CheckedExpr {
+  let callee_type = binary_operand_type(ast.expr_first(expr));
+  let arg_type = binary_operand_type(ast.expr_second(expr));
+  let ok = match same_type(callee_type, i32_type()) {
+    true => same_type(arg_type, i32_type()),
+    false => false,
+  };
+  match ok {
+    true => checked_expr(
+      expr,
+      i32_type(),
+      env.diagnostics
+    ),
+    false => checked_expr(
+      expr,
+      error_type(),
+      diagnostic.push(
+        env.diagnostics,
+        type_mismatch_diagnostic(
+          i32_type(),
+          arg_type,
+          source_span
+        )
+      )
+    ),
+  }
+}
+
+fn check_expr(
+  env: CheckEnv,
+  expr: ast.Expr,
+  source_span: span.Span
+) -> CheckedExpr {
+  match ast.expr_tag(expr) {
+    1 => checked_expr(
+      expr,
+      i32_type(),
+      env.diagnostics
+    ),
+    2 => checked_expr(
+      expr,
+      bool_type(),
+      env.diagnostics
+    ),
+    3 => check_var(env, expr, source_span),
+    4 => check_binary(env, expr, source_span),
+    5 => check_call(env, expr, source_span),
+    _ => checked_expr(
+      expr,
+      error_type(),
+      diagnostic.push(
+        env.diagnostics,
+        type_mismatch_diagnostic(
+          unknown_type(),
+          error_type(),
+          source_span
+        )
+      )
+    ),
+  }
+}
+
+fn check_expected(
+  checked: CheckedExpr,
+  expected: Type,
+  source_span: span.Span
+) -> diagnostic.DiagnosticBag {
+  match same_type(checked.value_type, expected) {
+    true => checked.diagnostics,
+    false => diagnostic.push(
+      checked.diagnostics,
+      type_mismatch_diagnostic(
+        expected,
+        checked.value_type,
+        source_span
+      )
+    ),
+  }
+}
+
+fn checked_decl(
+  decl: ast.Decl,
+  value_type: Type,
+  env: CheckEnv
+) -> CheckedDecl {
+  CheckedDecl {decl: decl, value_type: value_type, env: env}
+}
+
+fn checked_program(
+  program: ast.Program,
+  entry: CheckedDecl,
+  secondary: CheckedDecl,
+  env: CheckEnv
+) -> CheckedProgram {
+  CheckedProgram {
+    program: program,
+    entry: entry,
+    secondary: secondary,
+    env: env,
+    diagnostics: env.diagnostics,
+  }
+}
+
+fn check_value_decl(
+  env: CheckEnv,
+  decl: ast.Decl,
+  source_span: span.Span
+) -> CheckedDecl {
+  let expected = type_from_symbol(ast.decl_type_name(decl));
+  let value = check_expr(
+    env,
+    ast.decl_value_expr(decl),
+    source_span
+  );
+  let diagnostics = check_expected(
+    value,
+    expected,
+    source_span
+  );
+  let next_env = define_symbol(
+    CheckEnv {
+      first: env.first,
+      second: env.second,
+      count: env.count,
+      diagnostics: diagnostics,
+    },
+    ast.decl_name(decl),
+    expected
+  );
+  checked_decl(decl, expected, next_env)
+}
+
+fn check_function_decl(
+  env: CheckEnv,
+  decl: ast.Decl,
+  source_span: span.Span
+) -> CheckedDecl {
+  let expected = type_from_symbol(ast.decl_type_name(decl));
+  let body = check_expr(
+    env,
+    ast.decl_value_expr(decl),
+    source_span
+  );
+  let diagnostics = check_expected(
+    body,
+    expected,
+    source_span
+  );
+  let fn_type = function_type(
+    ast.decl_param_count(decl),
+    expected
+  );
+  let next_env = define_symbol(
+    CheckEnv {
+      first: env.first,
+      second: env.second,
+      count: env.count,
+      diagnostics: diagnostics,
+    },
+    ast.decl_name(decl),
+    fn_type
+  );
+  checked_decl(decl, fn_type, next_env)
+}
+
+fn check_declaration(
+  env: CheckEnv,
+  decl: ast.Decl,
+  source_span: span.Span
+) -> CheckedDecl {
+  match ast.decl_tag(decl) {
+    1 => check_function_decl(env, decl, source_span),
+    2 => check_value_decl(env, decl, source_span),
+    3 => check_value_decl(env, decl, source_span),
+    4 => checked_decl(
+      decl,
+      product_type(ast.decl_param_count(decl)),
+      define_symbol(
+        env,
+        ast.decl_name(decl),
+        product_type(ast.decl_param_count(decl))
+      )
+    ),
+    _ => checked_decl(decl, unknown_type(), env),
+  }
+}
+
+fn check_secondary_declaration(
+  has_secondary: bool,
+  env: CheckEnv,
+  decl: ast.Decl,
+  source_span: span.Span
+) -> CheckedDecl {
+  match has_secondary {
+    true => check_declaration(env, decl, source_span),
+    false => checked_decl(decl, unknown_type(), env),
+  }
+}
+
+fn check_program(
+  env: CheckEnv,
+  program: ast.Program,
+  source_span: span.Span
+) -> CheckedProgram {
+  let entry = check_declaration(
+    env,
+    program.entry_decl,
+    source_span
+  );
+  let secondary = check_secondary_declaration(
+    program.declaration_count > 1,
+    entry.env,
+    program.secondary_decl,
+    source_span
+  );
+  checked_program(
+    program,
+    entry,
+    secondary,
+    secondary.env
+  )
+}
+
+fn symbol_score(symbol: Symbol) -> i32 {
+  symbol.name + type_score(symbol.value_type)
+}
+
+fn env_score(env: CheckEnv) -> i32 {
+  symbol_score(env.first)
+    + symbol_score(env.second)
+    + env.count
+    + diagnostic.bag_score(env.diagnostics)
+}
+
+fn checked_expr_score(value: CheckedExpr) -> i32 {
+  ast.expr_score(value.expr)
+    + type_score(value.value_type)
+    + diagnostic.bag_score(value.diagnostics)
+}
+
+fn checked_decl_score(value: CheckedDecl) -> i32 {
+  ast.decl_score(value.decl)
+    + type_score(value.value_type)
+    + env_score(value.env)
+}
+
+fn checked_program_score(value: CheckedProgram) -> i32 {
+  ast.program_score(value.program)
+    + checked_decl_score(value.entry)
+    + checked_decl_score(value.secondary)
+    + env_score(value.env)
+    + diagnostic.bag_score(value.diagnostics)
+}
+
+fn entry(seed: i32) -> i32 {
+  let decl = ast.let_decl(
+    seed,
+    ast.named_type(seed + 1),
+    ast.var_expr(seed + 2)
+  );
+  let source_span = span.make(seed, seed + 4, 1, 1);
+  let checked = check_declaration(
+    seed_env(seed),
+    decl,
+    source_span
+  );
+  let program = ast.program(
+    seed,
+    1,
+    decl,
+    ast.empty_decl(),
+    source_span
+  );
+  checked_decl_score(checked)
+    + checked_program_score(check_program(
+      seed_env(seed),
+      program,
+      source_span
+    ))
+}

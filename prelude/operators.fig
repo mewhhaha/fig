@@ -204,6 +204,16 @@ fn op_apply(
 
 const (<*>) = @operator(#infixl, 65, op_apply);
 
+fn op_apply_flipped(
+  x: t(a),
+  v: t(fn(x: a) -> b),
+  const _proof: OpApply(t)
+) -> t(b) {
+  t::apply(v, x)
+}
+
+const (<**>) = @operator(#infixl, 65, op_apply_flipped);
+
 type fn OpMap(t: type fn(a: type) -> type) -> type {
   let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
   @require(@type_has_member(t, #map), "operator <$> requires map");
@@ -221,6 +231,16 @@ fn op_map(
 
 const (<$>) = @operator(#infixl, 65, op_map);
 
+fn op_map_flipped(
+  v: t(a),
+  const f: fn(x: a) -> b,
+  const _proof: OpMap(t)
+) -> t(b) {
+  t::map(f, v)
+}
+
+const (<&>) = @operator(#infixl, 65, op_map_flipped);
+
 type fn OpBind(t: type fn(a: type) -> type) -> type {
   let Expected = fn(v: t(a), const f: fn(x: a) -> t(b)) -> t(b);
   @require(@type_has_member(t, #bind), "operator >>= requires bind");
@@ -237,3 +257,33 @@ fn op_bind(
 }
 
 const (>>=) = @operator(#infixl, 10, op_bind);
+
+fn op_bind_flipped(
+  const f: fn(x: a) -> t(b),
+  v: t(a),
+  const _proof: OpBind(t)
+) -> t(b) {
+  t::bind(v, f)
+}
+
+const (=<<) = @operator(#infixr, 10, op_bind_flipped);
+
+fn op_kleisli_forward(
+  const f: fn(x: a) -> t(b),
+  const g: fn(x: b) -> t(c),
+  const _proof: OpBind(t)
+) -> fn(x: a) -> t(c) {
+  \x -> t::bind(f(x), g)
+}
+
+const (>=>) = @operator(#infixr, 10, op_kleisli_forward);
+
+fn op_kleisli_reverse(
+  const g: fn(x: b) -> t(c),
+  const f: fn(x: a) -> t(b),
+  const _proof: OpBind(t)
+) -> fn(x: a) -> t(c) {
+  \x -> t::bind(f(x), g)
+}
+
+const (<=<) = @operator(#infixr, 10, op_kleisli_reverse);

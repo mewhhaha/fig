@@ -1,11 +1,11 @@
 const core = @import("prelude.core");
 
 fn some(value: a) -> core.Option(a) {
-  value
+  Some(value)
 }
 
 fn none() -> core.Option(a) {
-  0
+  None
 }
 
 fn core.Option::is_some(value: core.Option(a)) -> bool {

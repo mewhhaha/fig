@@ -79,6 +79,23 @@ export interface CompilerDoStrategyBuiltin {
   name: string;
 }
 
+export interface CompilerRewriteRule {
+  name: string;
+  left: string;
+  right: string;
+  owner?: string;
+  validate?: boolean;
+  generic?: {
+    contract: string;
+    typeParam: string;
+  };
+}
+
+export interface CompilerContractImplication {
+  contract: string;
+  implies: readonly string[];
+}
+
 export interface CompilerPlugin {
   apiVersion: CompilerPluginApiVersion;
   id: string;
@@ -87,6 +104,8 @@ export interface CompilerPlugin {
   annotationBuiltins?: readonly CompilerAnnotationBuiltin[];
   intrinsics?: readonly CompilerIntrinsicBuiltin[];
   doStrategies?: readonly CompilerDoStrategyBuiltin[];
+  rewriteRules?: readonly CompilerRewriteRule[];
+  contractImplications?: readonly CompilerContractImplication[];
 }
 
 export interface CompilerPluginRegistry {
@@ -96,6 +115,8 @@ export interface CompilerPluginRegistry {
   annotationBuiltins: ReadonlyMap<string, CompilerAnnotationBuiltin>;
   intrinsics: ReadonlyMap<string, CompilerIntrinsicBuiltin>;
   doStrategies: ReadonlyMap<string, CompilerDoStrategyBuiltin>;
+  rewriteRules: readonly CompilerRewriteRule[];
+  contractImplications: ReadonlyMap<string, readonly string[]>;
   diagnostics: readonly Diagnostic[];
 }
 
@@ -109,7 +130,6 @@ export type CompilerSpecialFormKind =
   | "do_strategy"
   | "annotation"
   | "instrumentation"
-  | "rewrite"
   | "internal";
 
 export interface CompilerSpecialForm {
@@ -299,11 +319,88 @@ export const coreIntrinsicsPlugin: CompilerPlugin = {
   ],
 };
 
+export const preludeRewritesPlugin: CompilerPlugin = {
+  apiVersion: COMPILER_PLUGIN_API_VERSION,
+  id: "prelude-rewrites",
+  rewriteRules: [
+    {
+      name: "Eq::reflexive",
+      owner: "Eq",
+      validate: false,
+      generic: { contract: "Eq", typeParam: "T" },
+      left: "\\x -> T::eql(x, x)",
+      right: "\\x -> true",
+    },
+    {
+      name: "Functor::map_identity",
+      owner: "Functor",
+      validate: false,
+      generic: { contract: "Functor", typeParam: "T" },
+      left: "\\x -> T::map(identity, x)",
+      right: "\\x -> x",
+    },
+    {
+      name: "Applicative::apply_pure_identity",
+      owner: "Applicative",
+      validate: false,
+      generic: { contract: "Applicative", typeParam: "T" },
+      left: "\\x -> T::apply(T::pure(identity), x)",
+      right: "\\x -> x",
+    },
+    {
+      name: "Applicative::apply_pure",
+      owner: "Applicative",
+      validate: false,
+      generic: { contract: "Applicative", typeParam: "T" },
+      left: "\\(f, x) -> T::apply(T::pure(f), x)",
+      right: "\\(f, x) -> T::map(f, x)",
+    },
+    {
+      name: "Monad::bind_pure_left",
+      owner: "Monad",
+      validate: false,
+      generic: { contract: "Monad", typeParam: "T" },
+      left: "\\(x, f) -> T::bind(T::pure(x), f)",
+      right: "\\(x, f) -> f(x)",
+    },
+    {
+      name: "Monad::bind_pure_right",
+      owner: "Monad",
+      validate: false,
+      generic: { contract: "Monad", typeParam: "T" },
+      left: "\\m -> T::bind(m, T::pure)",
+      right: "\\m -> m",
+    },
+    {
+      name: "Monoid::append_empty_left",
+      owner: "Monoid",
+      validate: false,
+      generic: { contract: "Monoid", typeParam: "T" },
+      left: "\\x -> T::append(T::empty(), x)",
+      right: "\\x -> x",
+    },
+    {
+      name: "Monoid::append_empty_right",
+      owner: "Monoid",
+      validate: false,
+      generic: { contract: "Monoid", typeParam: "T" },
+      left: "\\x -> T::append(x, T::empty())",
+      right: "\\x -> x",
+    },
+  ],
+  contractImplications: [
+    { contract: "Monad", implies: ["Applicative"] },
+    { contract: "Applicative", implies: ["Functor"] },
+    { contract: "Monoid", implies: ["Semigroup"] },
+  ],
+};
+
 export const builtinCompilerPlugins = [
   coreImportsPlugin,
   coreStaticPlugin,
   coreAnnotationsPlugin,
   coreIntrinsicsPlugin,
+  preludeRewritesPlugin,
 ] as const;
 
 export function createCompilerPluginRegistry(
@@ -317,6 +414,9 @@ export function createCompilerPluginRegistry(
   const annotationBuiltins = new Map<string, CompilerAnnotationBuiltin>();
   const intrinsics = new Map<string, CompilerIntrinsicBuiltin>();
   const doStrategies = new Map<string, CompilerDoStrategyBuiltin>();
+  const rewriteRules: CompilerRewriteRule[] = [];
+  const rewriteRuleNames = new Set<string>();
+  const contractImplications = new Map<string, string[]>();
 
   for (const plugin of allPlugins) {
     if (plugin.apiVersion !== COMPILER_PLUGIN_API_VERSION) {
@@ -337,6 +437,27 @@ export function createCompilerPluginRegistry(
     addNamed(plugin, "static builtin", plugin.staticBuiltins, staticBuiltins);
     addNamed(plugin, "annotation builtin", plugin.annotationBuiltins, annotationBuiltins);
     addNamed(plugin, "do strategy", plugin.doStrategies, doStrategies);
+    for (const rule of plugin.rewriteRules ?? []) {
+      if (rewriteRuleNames.has(rule.name)) {
+        diagnostics.push({
+          code: "plugin.duplicate_rewrite",
+          message: `rewrite rule ${rule.name} is registered more than once`,
+        });
+      } else {
+        rewriteRuleNames.add(rule.name);
+        rewriteRules.push(rule);
+      }
+    }
+    for (const implication of plugin.contractImplications ?? []) {
+      const existing = contractImplications.get(implication.contract);
+      if (existing) {
+        for (const implied of implication.implies) {
+          if (!existing.includes(implied)) existing.push(implied);
+        }
+      } else {
+        contractImplications.set(implication.contract, [...implication.implies]);
+      }
+    }
     for (const intrinsic of plugin.intrinsics ?? []) {
       const previous = intrinsics.get(intrinsic.id);
       if (previous) {
@@ -357,6 +478,8 @@ export function createCompilerPluginRegistry(
     annotationBuiltins,
     intrinsics,
     doStrategies,
+    rewriteRules,
+    contractImplications,
     diagnostics,
   };
 
@@ -396,7 +519,6 @@ const exactCompilerSpecialForms = [
   { name: "unlikely", kind: "annotation", sourceFacing: true },
   { name: "trace", kind: "instrumentation", sourceFacing: true },
   { name: "profile", kind: "instrumentation", sourceFacing: true },
-  { name: "assume", kind: "rewrite", sourceFacing: true },
   { name: "satisfies", kind: "static", sourceFacing: true },
   { name: "field", kind: "internal", sourceFacing: false },
   { name: "replace_field", kind: "internal", sourceFacing: false },

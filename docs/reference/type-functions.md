@@ -5,6 +5,7 @@ Fixed product, sum, and alias layouts can use type declaration sugar:
 ```fig
 type Point = struct {x: i32, y: i32}
 type Option(a) = union {None, Some(value: a)}
+type Color = enum(i32) {Red = 1, Green = 2, Blue = 3}
 type Count = i32
 ```
 
@@ -46,7 +47,7 @@ type fn Choose(_: type) -> type { i32 }
 ## Type Expressions
 
 Type-level expressions include primitive type names, qualified names, type calls, literals, shape
-expressions, tuple and repeat types, type matches, equality comparisons, and builtins.
+expressions, tuple and repeat types, type matches, primitive type-level operators, and builtins.
 
 ```fig
 match a { i32 => bool, _ => a }
@@ -56,6 +57,8 @@ match a { i32 => bool, _ => a }
 ```
 
 `struct(ShapeBinding)` creates a product type. `union(a, b, ...)` creates a sum type.
+`enum(i32) {Name = value}` creates a scalar alias with named integer members. Enum members are
+referenced with associated value syntax, for example `Color::Red`.
 Current expression syntax resolves user-defined binary operators through visible operator
 declarations:
 
@@ -144,8 +147,8 @@ value through a contract, local proof constants when a proof is needed only insi
 explicit `const` proof parameters when the caller must select or provide the proof.
 
 Prelude contracts such as `Eq(t)`, `Functor(t)`, `Applicative(t)`, `Monad(t)`, and `Monoid(t)` are
-law-bearing proofs. Their associated `contract fn ... -> rewrite` declarations attach optimizer
-rewrite facts directly to the base contract; there is no separate `LawfulX` proof layer.
+law-bearing proofs. Their optimizer laws come from the default prelude rewrite compiler plugin;
+there is no source-level `contract fn ... -> rewrite` form and no separate `LawfulX` proof layer.
 
 For effect-style APIs, prefer typed rows and handlers. Do not require callers to pass a separate
 capability-list const plus a separate proof when the required context can be inferred from a typed

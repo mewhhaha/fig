@@ -125,9 +125,9 @@ A finite-static proof needs:
 For example:
 
 ```fig
-fn sum_go(i: i32(4), xs: Lane4I32, acc: i32) -> i32 { acc }
-fn sum_go(i: i32(0..4), xs: Lane4I32, acc: i32) -> i32 {
-  sum_go(i + 1, xs, acc + xs[i])
+fn sum_go(i: i32, xs: Lane4I32, acc: i32) -> i32 match {
+  i: i32(4) => acc,
+  i: i32(0..4) => sum_go(i + 1, xs, acc + xs[i]),
 }
 ```
 

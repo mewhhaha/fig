@@ -1,0 +1,222 @@
+const span = @import("./span.fig");
+const source = @import("./source.fig");
+const token = @import("./token.fig");
+
+type CharClass = union {
+  Whitespace, Lower, Upper, Digit, Quote, Slash, SymbolChar,
+  End
+}
+
+type LexerCursor = struct {
+  offset: i32,
+  line: i32,
+  column: i32,
+  remaining: i32,
+}
+
+type LexError = union {
+  UnknownChar(at: span.Span), UnterminatedText(at: span.Span)
+}
+
+type Lexeme = struct {
+  kind: token.TokenKind,
+  span: span.Span,
+}
+
+type LexResult = union {
+  Lexed(value: Lexeme, cursor: LexerCursor), LexFailed(error: LexError)
+}
+
+fn cursor(
+  offset: i32,
+  line: i32,
+  column: i32,
+  remaining: i32
+) -> LexerCursor {
+  LexerCursor {
+    offset: offset,
+    line: line,
+    column: column,
+    remaining: remaining,
+  }
+}
+
+fn lexeme(
+  kind: token.TokenKind,
+  source_span: span.Span
+) -> Lexeme {
+  Lexeme {kind: kind, span: source_span}
+}
+
+fn at_span(current: LexerCursor, width: i32) -> span.Span {
+  span.make(
+    current.offset,
+    current.offset + width,
+    current.line,
+    current.column
+  )
+}
+
+fn bounded_remaining(current: LexerCursor, width: i32) -> i32 {
+  match current.remaining > width {
+    true => current.remaining - width,
+    false => 0,
+  }
+}
+
+fn advance(current: LexerCursor, width: i32) -> LexerCursor {
+  LexerCursor {
+    offset: current.offset + width,
+    line: current.line,
+    column: current.column + width,
+    remaining: bounded_remaining(current, width),
+  }
+}
+
+fn classify_code(code: i32) -> CharClass {
+  match code {
+    0 => End,
+    1 => Whitespace,
+    2 => Lower,
+    3 => Upper,
+    4 => Digit,
+    5 => Quote,
+    6 => Slash,
+    _ => match code % 5 {
+      0 => SymbolChar,
+      1 => Lower,
+      2 => Upper,
+      3 => Digit,
+      _ => Whitespace,
+    },
+  }
+}
+
+fn kind_from_class(value: CharClass) -> token.TokenKind match {
+  Whitespace => token.normalize_generated_kind(token.GeneratedTokenCode::Symbol),
+  Lower => token.normalize_generated_kind(token.GeneratedTokenCode::Identifier),
+  Upper => token.normalize_generated_kind(token.GeneratedTokenCode::LiteralType),
+  Digit => token.normalize_generated_kind(token.GeneratedTokenCode::NumberLiteral),
+  Quote => token.normalize_generated_kind(token.GeneratedTokenCode::StringLiteral),
+  Slash => token.normalize_generated_kind(token.GeneratedTokenCode::Symbol),
+  SymbolChar => token.normalize_generated_kind(token.GeneratedTokenCode::Symbol),
+  End => token.normalize_generated_kind(token.GeneratedTokenCode::Symbol),
+}
+
+fn lex_width(
+  value: CharClass,
+  _seed: i32
+) -> i32 match {
+  Whitespace, _seed => 1,
+  Lower, seed => (seed % 8) + 1,
+  Upper, seed => (seed % 6) + 1,
+  Digit, seed => (seed % 5) + 1,
+  Quote, seed => (seed % 10) + 2,
+  Slash, _seed => 1,
+  SymbolChar, _seed => 1,
+  End, _seed => 0,
+}
+
+fn is_end(value: CharClass) -> bool match {
+  Whitespace => false,
+  Lower => false,
+  Upper => false,
+  Digit => false,
+  Quote => false,
+  Slash => false,
+  SymbolChar => false,
+  End => true,
+}
+
+fn is_unterminated(
+  value: CharClass,
+  _seed: i32
+) -> bool match {
+  Whitespace, _seed => false,
+  Lower, _seed => false,
+  Upper, _seed => false,
+  Digit, _seed => false,
+  Quote, seed => (seed % 11) == 0,
+  Slash, _seed => false,
+  SymbolChar, _seed => false,
+  End, _seed => false,
+}
+
+fn lex_one(
+  current: LexerCursor,
+  class: CharClass,
+  seed: i32
+) -> LexResult {
+  let width = lex_width(class, seed);
+  let source_span = at_span(current, width);
+  match is_end(class) {
+    true => LexFailed(UnknownChar(source_span)),
+    false => match is_unterminated(class, seed) {
+      true => LexFailed(UnterminatedText(source_span)),
+      false => Lexed(
+        lexeme(kind_from_class(class), source_span),
+        advance(current, width)
+      ),
+    },
+  }
+}
+
+fn error_span(value: LexError) -> span.Span match {
+  UnknownChar(at) => at,
+  UnterminatedText(at) => at,
+}
+
+fn token_from_lexeme(value: Lexeme) -> token.Token {
+  token.make(value.kind, value.span)
+}
+
+fn token_or_symbol(value: LexResult) -> token.Token match {
+  Lexed(value, _) => token_from_lexeme(value),
+  LexFailed(error) => token.make(
+    token.normalize_generated_kind(token.GeneratedTokenCode::Symbol),
+    error_span(error)
+  ),
+}
+
+fn first_token_from_seed(seed: i32) -> token.Token {
+  let current = cursor(seed, 1, 1, (seed % 64) + 32);
+  let class = classify_code((seed % 13) + 1);
+  token_or_symbol(lex_one(current, class, seed))
+}
+
+fn cursor_from_source(
+  text: source.SourceText,
+  index: i32
+) -> LexerCursor {
+  cursor(
+    source.offset_at(text, index),
+    1,
+    index + 1,
+    text.length - index
+  )
+}
+
+fn lex_source_at(text: source.SourceText, index: i32) -> LexResult {
+  lex_one(
+    cursor_from_source(text, index),
+    classify_code(source.code_at(text, index)),
+    source.module_seed(text) + index
+  )
+}
+
+fn first_token_from_source(text: source.SourceText) -> token.Token {
+  token_or_symbol(lex_source_at(text, 0))
+}
+
+fn result_score(value: LexResult) -> i32 match {
+  Lexed(value, next) => token.token_score(token_from_lexeme(value))
+    + next.offset
+    + next.remaining,
+  LexFailed(error) => 0 - span.width(error_span(error)),
+}
+
+fn entry(seed: i32) -> i32 {
+  let text = source.from_seed(seed);
+  let result = lex_source_at(text, seed % 4);
+  result_score(result) + token.token_score(first_token_from_source(text))
+}

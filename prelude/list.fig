@@ -1,0 +1,175 @@
+const core = @import("prelude.core");
+const layout = @import("prelude.layout");
+const option = @import("prelude.option");
+
+type fn ListNode(a: type) -> type {
+  let ListNode = {
+    value: a,
+    next: i32,
+  };
+  struct(ListNode)
+}
+
+type fn List(a: type) -> type {
+  let List = {
+    nodes: layout.HeapArray(ListNode(a)),
+    head: i32,
+    len: i32,
+  };
+  struct(List)
+}
+
+fn List::empty(const a: type) -> List(a) {
+  List {nodes: layout.HeapArray::empty(ListNode(a)), head:
+    - 1, len: 0}
+}
+
+fn List::singleton(const a: type, value: a) -> List(a) {
+  List::cons(a, value, List::empty(a))
+}
+
+fn List::cons(const a: type, value: a, xs: List(a)) -> List(a) {
+  let index = layout.HeapArray::len(
+    ListNode(a),
+    xs.nodes
+  );
+  List {
+    nodes: layout.HeapArray::push(
+      ListNode(a),
+      xs.nodes,
+      ListNode {value, next: xs.head}
+    ),
+    head: index,
+    len: xs.len + 1,
+  }
+}
+
+fn List::is_empty(const a: type, xs: List(a)) -> bool {
+  xs.len == 0
+}
+
+fn List::len(const a: type, xs: List(a)) -> i32 {
+  xs.len
+}
+
+fn List::head(const a: type, xs: List(a)) -> core.Option(a) {
+  match xs.head < 0 {
+    true => None,
+    false => option.some(layout.HeapArray::get(
+      ListNode(a),
+      xs.nodes,
+      xs.head
+    ).value),
+  }
+}
+
+fn List::tail(const a: type, xs: List(a)) -> List(a) {
+  match xs.head < 0 {
+    true => xs,
+    false => layout.HeapArray::get(
+      ListNode(a),
+      xs.nodes,
+      xs.head
+    )
+      \node -> List {
+      nodes: xs.nodes,
+      head: node.next,
+      len: xs.len - 1,
+    },
+  }
+}
+
+fn List::fold(
+  const a: type,
+  const b: type,
+  xs: List(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  List::fold_loop(a, b, xs.nodes, xs.head, acc, f)
+}
+
+fn List::fold_loop(
+  const a: type,
+  const b: type,
+  nodes: layout.HeapArray(ListNode(a)),
+  index: i32,
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  match index < 0 {
+    true => acc,
+    false => layout.HeapArray::get(
+      ListNode(a),
+      nodes,
+      index
+    )
+      \node -> List::fold_loop(
+      a,
+      b,
+      nodes,
+      node.next,
+      f(acc, node.value),
+      f
+    ),
+  }
+}
+
+fn List::reverse(const a: type, xs: List(a)) -> List(a) {
+  List::fold(
+    a,
+    List(a),
+    xs,
+    List::empty(a),
+    List::reverse_step
+  )
+}
+
+fn List::reverse_step(acc: List(a), value: a) -> List(a) {
+  List::cons(a, value, acc)
+}
+
+fn List::map(
+  const a: type,
+  const b: type,
+  xs: List(a),
+  const f: fn(x: a) -> b
+) -> List(b) {
+  List::reverse(
+    b,
+    List::map_loop(
+      a,
+      b,
+      xs.nodes,
+      xs.head,
+      List::empty(b),
+      f
+    )
+  )
+}
+
+fn List::map_loop(
+  const a: type,
+  const b: type,
+  nodes: layout.HeapArray(ListNode(a)),
+  index: i32,
+  out: List(b),
+  const f: fn(x: a) -> b
+) -> List(b) {
+  match index < 0 {
+    true => out,
+    false => layout.HeapArray::get(
+      ListNode(a),
+      nodes,
+      index
+    )
+      \node -> List::map_loop(
+      a,
+      b,
+      nodes,
+      node.next,
+      List::cons(b, f(node.value), out),
+      f
+    ),
+  }
+}

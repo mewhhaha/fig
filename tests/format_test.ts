@@ -83,10 +83,9 @@ pub fn main(host:io)->i32{clock(host)}`,
       "fn main() -> i32 {\n  let point = {x: 1, y: 2};\n  match Point.x {\n    1 => 2, // arm\n    _ => 3\n  } \\value -> value\n}\n",
   },
   {
-    name: "branch hints on functions and match arms",
-    input: "pub @unlikely fn score(x:i32)->i32{match x{@likely 0=>1,@unlikely _=>2}}",
-    expected:
-      "pub @unlikely fn score(x: i32) -> i32 {\n  match x {\n    @likely 0 => 1,\n    @unlikely _ => 2\n  }\n}\n",
+    name: "branch hints on match arms",
+    input: "pub fn score(x:i32)->i32 match {@likely 0=>1,@unlikely _=>2}",
+    expected: "pub fn score(x: i32) -> i32 match {\n  @likely 0 => 1,\n  @unlikely _ => 2\n}\n",
   },
   {
     name: "debug trace statements",
@@ -205,17 +204,17 @@ _=>2 // fallback
       '/// import docs\nconst std = @import("prelude.std"); // import tail\n/// type docs\ntype fn Row(a: type) -> struct {\n  // slot docs\n  let Row = {\n    x: a, // x tail\n  };\n  struct(Row) // final expr tail\n}\n\nfn make() -> World {\n  World {\n    defaults: @field(default_components, #key) // tail\n  }\n}\n\nfn classify(x: i32) -> i32 {\n  match x {\n    0 => 1, // zero\n    _ => 2 // fallback\n  }\n}\n',
   },
   {
-    name: "function clauses and custom operators",
+    name: "function match bodies and custom operators",
     input:
-      "fn Choose(0)->i32{0} fn Choose(_)->i32{1} fn Box::append(a:Box,b:Box)->Box{Box {value:a.value <> b.value}}",
+      "fn choose(x:i32)->i32 match{0=>0,_=>1} fn Box::append(a:Box,b:Box)->Box{Box {value:a.value <> b.value}}",
     expected:
-      "fn Choose(0) -> i32 {\n  0\n}\nfn Choose(_) -> i32 {\n  1\n}\n\nfn Box::append(a: Box, b: Box) -> Box {\n  Box {value: a.value <> b.value}\n}\n",
+      "fn choose(x: i32) -> i32 match {\n  0 => 0,\n  _ => 1\n}\n\nfn Box::append(a: Box, b: Box) -> Box {\n  Box {value: a.value <> b.value}\n}\n",
   },
   {
-    name: "dotted function clauses stay grouped",
-    input: "fn Box::append(0)->i32{0} fn Box::append(_)->i32{1} fn Box::clear()->i32{0}",
+    name: "dotted function match bodies stay grouped",
+    input: "fn Box::append(x:i32)->i32 match{0=>0,_=>1} fn Box::clear()->i32{0}",
     expected:
-      "fn Box::append(0) -> i32 {\n  0\n}\nfn Box::append(_) -> i32 {\n  1\n}\n\nfn Box::clear() -> i32 {\n  0\n}\n",
+      "fn Box::append(x: i32) -> i32 match {\n  0 => 0,\n  _ => 1\n}\n\nfn Box::clear() -> i32 {\n  0\n}\n",
   },
   {
     name: "strings chars fenced text and comment markers inside literals",
@@ -287,8 +286,7 @@ _=>2 // fallback
   },
   {
     name: "operator declarations",
-    input:
-      "fn append(a:Box,b:Box)->Box{a} const (<>)=@operator(#infixr,55,append);",
+    input: "fn append(a:Box,b:Box)->Box{a} const (<>)=@operator(#infixr,55,append);",
     expected:
       "fn append(a: Box, b: Box) -> Box {\n  a\n}\n\nconst (<>) = @operator(#infixr, 55, append);\n",
   },
@@ -330,11 +328,11 @@ defaults:@field(defaults,#key)
       "type fn Eq(t: type) {\n  let Eq = {\n    eql: fn(a: t, b: t) -> bool,\n    neq: fn(a: t, b: t) -> bool\n  };\n  struct(Eq)\n}\n\nfn eql_point(a: Point, b: Point) -> bool {\n  a.x == b.x\n}\n\nfn neq_point(a: Point, b: Point) -> bool {\n  a.x != b.x\n}\n\nconst point_eq: Eq(Point) = {eql: eql_point, neq: neq_point};\n",
   },
   {
-    name: "constructor pattern parameters and attached members",
+    name: "constructor patterns in match bodies and attached members",
     input:
-      "fn Choose(Some(value))->i32{value} fn Choose(None)->i32{0} fn World::tick(world:World,dt_ms:i32)->World{World.step(dt_ms)} fn World::render(world:World)->Geometry{Geometry.empty()}",
+      "fn choose(value:Option(i32))->i32 match{Some(value)=>value,None=>0} fn World::tick(world:World,dt_ms:i32)->World{World.step(dt_ms)} fn World::render(world:World)->Geometry{Geometry.empty()}",
     expected:
-      "fn Choose(Some(value)) -> i32 {\n  value\n}\nfn Choose(None) -> i32 {\n  0\n}\n\nfn World::tick(world: World, dt_ms: i32) -> World {\n  World.step(dt_ms)\n}\n\nfn World::render(world: World) -> Geometry {\n  Geometry.empty()\n}\n",
+      "fn choose(value: Option(i32)) -> i32 match {\n  Some(value) => value,\n  None => 0\n}\n\nfn World::tick(world: World, dt_ms: i32) -> World {\n  World.step(dt_ms)\n}\n\nfn World::render(world: World) -> Geometry {\n  Geometry.empty()\n}\n",
   },
   {
     name: "newline separated const declarations without semicolons",

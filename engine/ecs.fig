@@ -246,11 +246,13 @@ fn batch_map3_with_state(
     write_batch,
     read_a_batch,
     read_b_batch,
-    layout.HeapArray::new(
-      write_component,
-      write_batch.len
-    ),
-    state_value,
+    {
+      out: layout.HeapArray::new(
+        write_component,
+        write_batch.len
+      ),
+      state_value: state_value
+    },
     step
   )
 }
@@ -260,8 +262,7 @@ fn batch_map3_with_state_loop(
   write_batch: Batch(write_component),
   read_a_batch: Batch(read_a_component),
   read_b_batch: Batch(read_b_component),
-  out: Batch(write_component),
-  state_value: state,
+  rest: struct({out: Batch(write_component), state_value: state}),
   const step: fn(
     index: i32,
     item: write_component,
@@ -276,33 +277,35 @@ fn batch_map3_with_state_loop(
       write_batch,
       read_a_batch,
       read_b_batch,
-      layout.HeapArray::push(
-        write_component,
-        out,
-        step(
-          index,
-          layout.HeapArray::get(
-            write_component,
-            write_batch,
-            index
-          ),
-          layout.HeapArray::get(
-            read_a_component,
-            read_a_batch,
-            index
-          ),
-          layout.HeapArray::get(
-            read_b_component,
-            read_b_batch,
-            index
-          ),
-          state_value
-        )
-      ),
-      state_value,
+      {
+        out: layout.HeapArray::push(
+          write_component,
+          rest.out,
+          step(
+            index,
+            layout.HeapArray::get(
+              write_component,
+              write_batch,
+              index
+            ),
+            layout.HeapArray::get(
+              read_a_component,
+              read_a_batch,
+              index
+            ),
+            layout.HeapArray::get(
+              read_b_component,
+              read_b_batch,
+              index
+            ),
+            rest.state_value
+          )
+        ),
+        state_value: rest.state_value
+      },
       step
     ),
-    false => out,
+    false => rest.out,
   }
 }
 
@@ -326,12 +329,14 @@ fn batch_map4_with_state(
     write_batch,
     read_a_batch,
     read_b_batch,
-    read_c_batch,
-    layout.HeapArray::new(
-      write_component,
-      write_batch.len
-    ),
-    state_value,
+    {
+      read_c_batch: read_c_batch,
+      out: layout.HeapArray::new(
+        write_component,
+        write_batch.len
+      ),
+      state_value: state_value
+    },
     step
   )
 }
@@ -341,9 +346,11 @@ fn batch_map4_with_state_loop(
   write_batch: Batch(write_component),
   read_a_batch: Batch(read_a_component),
   read_b_batch: Batch(read_b_component),
-  read_c_batch: Batch(read_c_component),
-  out: Batch(write_component),
-  state_value: state,
+  rest: struct({
+    read_c_batch: Batch(read_c_component),
+    out: Batch(write_component),
+    state_value: state
+  }),
   const step: fn(
     index: i32,
     item: write_component,
@@ -359,39 +366,41 @@ fn batch_map4_with_state_loop(
       write_batch,
       read_a_batch,
       read_b_batch,
-      read_c_batch,
-      layout.HeapArray::push(
-        write_component,
-        out,
-        step(
-          index,
-          layout.HeapArray::get(
-            write_component,
-            write_batch,
-            index
-          ),
-          layout.HeapArray::get(
-            read_a_component,
-            read_a_batch,
-            index
-          ),
-          layout.HeapArray::get(
-            read_b_component,
-            read_b_batch,
-            index
-          ),
-          layout.HeapArray::get(
-            read_c_component,
-            read_c_batch,
-            index
-          ),
-          state_value
-        )
-      ),
-      state_value,
+      {
+        read_c_batch: rest.read_c_batch,
+        out: layout.HeapArray::push(
+          write_component,
+          rest.out,
+          step(
+            index,
+            layout.HeapArray::get(
+              write_component,
+              write_batch,
+              index
+            ),
+            layout.HeapArray::get(
+              read_a_component,
+              read_a_batch,
+              index
+            ),
+            layout.HeapArray::get(
+              read_b_component,
+              read_b_batch,
+              index
+            ),
+            layout.HeapArray::get(
+              read_c_component,
+              rest.read_c_batch,
+              index
+            ),
+            rest.state_value
+          )
+        ),
+        state_value: rest.state_value
+      },
       step
     ),
-    false => out,
+    false => rest.out,
   }
 }
 

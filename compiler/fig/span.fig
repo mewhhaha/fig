@@ -1,0 +1,54 @@
+type Span = struct {
+  start: i32,
+  end: i32,
+  line: i32,
+  column: i32,
+}
+
+fn make(start: i32, end: i32, line: i32, column: i32) -> Span {
+  Span {start: start, end: end, line: line, column: column}
+}
+
+fn width(span: Span) -> i32 {
+  span.end - span.start
+}
+
+fn contains(span: Span, offset: i32) -> bool {
+  match span.start <= offset {
+    true => offset < span.end,
+    false => false,
+  }
+}
+
+fn shift_after(span: Span, after: i32, delta: i32) -> Span {
+  let next_start = match span.start >= after {
+    true => span.start + delta,
+    false => span.start,
+  };
+  let next_end = match span.end >= after {
+    true => span.end + delta,
+    false => span.end,
+  };
+  Span {start: next_start, end: next_end, line: span.line, column: span.column}
+}
+
+fn merge(left: Span, right: Span) -> Span {
+  let start = match left.start < right.start {
+    true => left.start,
+    false => right.start,
+  };
+  let end = match left.end > right.end {
+    true => left.end,
+    false => right.end,
+  };
+  Span {start: start, end: end, line: left.line, column: left.column}
+}
+
+fn entry(seed: i32) -> i32 {
+  let first = make(seed, seed + 12, 1, 1);
+  let second = shift_after(first, seed + 4, 3);
+  width(second) +(match contains(second, seed + 7) {
+    true => 1,
+    false => 0,
+  })
+}

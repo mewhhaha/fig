@@ -9,3 +9,4 @@ tmp/large_compile_bench/*
 examples/*.wasm
 generated/baba-workbench/src/
 generated/baba-workbench/tree-sitter-shovel.wasm
+compiler/go/compilerbench

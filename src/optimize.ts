@@ -23,6 +23,12 @@ import {
 } from "./refined_scalar.ts";
 import { runtimeTypeInfo, splitRuntimeTypeArgs } from "./runtime_types.ts";
 import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
+import {
+  type CompilerPluginOptions,
+  type CompilerPluginRegistry,
+  createCompilerPluginRegistry,
+} from "./plugins.ts";
+import { type RewriteFact, rewriteFactsFromRegistry } from "./rewrites.ts";
 
 export type OptMode = "debug" | "release";
 
@@ -59,7 +65,7 @@ export interface OptimizeProfile {
   };
 }
 
-export interface OptimizeOptions {
+export interface OptimizeOptions extends CompilerPluginOptions {
   optMode?: OptMode;
   profile?: OptimizeProfileName | OptimizeProfile;
   runtimeProfile?: boolean;
@@ -452,6 +458,8 @@ interface OptimizationChangeSet {
   declarations: Set<string>;
   visitedFunctions: number;
   visitedDeclarations: number;
+  skippedFunctions: number;
+  skippedDeclarations: number;
 }
 
 interface OptimizerPassState {
@@ -565,7 +573,7 @@ export function optimizeProgram(program: Program, options: OptimizeOptions = {})
 
 function programHasRuntimeProfileExpressions(program: Program): boolean {
   for (const decl of program.declarations) {
-    if (decl.kind === "fn" || decl.kind === "contract") {
+    if (decl.kind === "fn") {
       if (blockHasRuntimeProfileExpressions(decl.body)) return true;
       continue;
     }
@@ -659,14 +667,48 @@ function cloneOptimizerValue<T>(value: T): T {
 
 function cloneOptimizerUnknown(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(cloneOptimizerUnknown);
-  const clone: Record<string, unknown> = {};
-  const source = value as Record<string, unknown>;
-  for (const key in source) {
-    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
-    clone[key] = cloneOptimizerUnknown(source[key]);
+  const root = cloneOptimizerContainer(value);
+  const seen = new WeakMap<object, unknown>();
+  seen.set(value, root);
+  const work: { source: object; target: unknown }[] = [{ source: value, target: root }];
+  while (work.length > 0) {
+    const item = work.pop();
+    if (!item) continue;
+    if (Array.isArray(item.source) && Array.isArray(item.target)) {
+      for (let index = 0; index < item.source.length; index++) {
+        const child = item.source[index];
+        const cloned = cloneOptimizerChild(child, seen, work);
+        item.target[index] = cloned;
+      }
+      continue;
+    }
+    const target = item.target as Record<string, unknown>;
+    const source = item.source as Record<string, unknown>;
+    for (const key in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      target[key] = cloneOptimizerChild(source[key], seen, work);
+    }
   }
-  return clone;
+  return root;
+}
+
+function cloneOptimizerChild(
+  value: unknown,
+  seen: WeakMap<object, unknown>,
+  work: { source: object; target: unknown }[],
+): unknown {
+  if (!value || typeof value !== "object") return value;
+  const existing = seen.get(value);
+  if (existing) return existing;
+  const target = cloneOptimizerContainer(value);
+  seen.set(value, target);
+  work.push({ source: value, target });
+  return target;
+}
+
+function cloneOptimizerContainer(value: object): unknown {
+  if (Array.isArray(value)) return new Array(value.length);
+  return {};
 }
 
 function inlinePureForwardingWrappers(
@@ -718,7 +760,11 @@ function inlinePureForwardingWrappers(
         return {
           ...expr,
           value: rewriteExpr(expr.value),
-          arms: expr.arms.map((arm) => ({ ...arm, value: rewriteExpr(arm.value) })),
+          arms: expr.arms.map((arm) => ({
+            ...arm,
+            guard: arm.guard ? rewriteExpr(arm.guard) : undefined,
+            value: rewriteExpr(arm.value),
+          })),
         };
       case "shape":
       case "product_constructor":
@@ -885,6 +931,8 @@ function runOptimizePasses(
         optimizerTraceCounters(program, scope, {
           optimizedFunctions: changes.visitedFunctions,
           visitedDeclarations: changes.visitedDeclarations,
+          skippedFunctions: changes.skippedFunctions,
+          skippedDeclarations: changes.skippedDeclarations,
           dirtyFunctions: passState.dirtyFunctions.size,
           dirtyDeclarations: passState.dirtyDeclarations.size,
           changedFunctions: changes.functions.size,
@@ -900,6 +948,8 @@ function runOptimizePasses(
         optimizerTraceCounters(program, scope, {
           optimizedFunctions: changes.visitedFunctions,
           visitedDeclarations: changes.visitedDeclarations,
+          skippedFunctions: changes.skippedFunctions,
+          skippedDeclarations: changes.skippedDeclarations,
           dirtyFunctions: passState.dirtyFunctions.size,
           dirtyDeclarations: passState.dirtyDeclarations.size,
           changedFunctions: changes.functions.size,
@@ -933,6 +983,8 @@ function emptyOptimizationChangeSet(): OptimizationChangeSet {
     declarations: new Set(),
     visitedFunctions: 0,
     visitedDeclarations: 0,
+    skippedFunctions: 0,
+    skippedDeclarations: 0,
   };
 }
 
@@ -945,6 +997,8 @@ function mergeOptimizationChangeSets(
     for (const name of set.declarations) merged.declarations.add(name);
     merged.visitedFunctions += set.visitedFunctions;
     merged.visitedDeclarations += set.visitedDeclarations;
+    merged.skippedFunctions += set.skippedFunctions;
+    merged.skippedDeclarations += set.skippedDeclarations;
   }
   return merged;
 }
@@ -1144,7 +1198,6 @@ function optimizerTraceCounters(
     declarations: program.declarations.length,
     functions: functions.length,
     generatedFunctions: functions.filter((decl) => decl.generated).length,
-    contracts: program.declarations.filter((decl) => decl.kind === "contract").length,
     reachableFunctions: scope?.reachableFunctions.size,
     changedFunctions: scope?.reachableFunctions.size,
     ...extra,
@@ -1307,29 +1360,16 @@ function referencedRuntimeNames(expr: Expr | BlockExpr | undefined): string[] {
   return names;
 }
 
-interface RewriteTemplate {
-  params: string[];
-  body: Expr;
-}
-
-interface RewriteFact {
-  source: string;
-  owner?: string;
-  generic?: {
-    contract: string;
-    typeParam: string;
-  };
-  left: RewriteTemplate;
-  right: RewriteTemplate;
-}
-
 interface RewriteApplyContext {
   trace?: OptimizeOptions["trace"];
   target?: string;
+  pluginRegistry: CompilerPluginRegistry;
 }
 
 function applyAssumeRewrites(program: Program, options: OptimizeOptions): Program {
-  const facts = collectRewriteFacts(program);
+  const pluginRegistry = createCompilerPluginRegistry(options.plugins);
+  if (pluginRegistry.diagnostics.length) return program;
+  const facts = rewriteFactsFromRegistry(pluginRegistry);
   if (!facts.length) return program;
   program.declarations = program.declarations.map((decl) => {
     if (decl.kind === "fn") {
@@ -1338,6 +1378,7 @@ function applyAssumeRewrites(program: Program, options: OptimizeOptions): Progra
         body: assumeRewriteBlock(decl.body, facts, decl.params, {
           trace: options.trace,
           target: decl.name,
+          pluginRegistry,
         }),
       };
     }
@@ -1347,53 +1388,13 @@ function applyAssumeRewrites(program: Program, options: OptimizeOptions): Progra
         value: assumeRewriteExpr(decl.value, facts, {
           trace: options.trace,
           target: decl.name,
+          pluginRegistry,
         }),
       };
     }
     return decl;
   });
   return program;
-}
-
-function collectRewriteFacts(program: Program): RewriteFact[] {
-  return program.declarations.flatMap((decl): RewriteFact[] => {
-    if (decl.kind !== "contract" || decl.resultKind !== "rewrite") return [];
-    const assume = decl.body.expr;
-    if (
-      assume?.kind !== "call" || assume.callee.kind !== "var" || assume.callee.name !== "@assume"
-    ) {
-      return [];
-    }
-    const [left, right] = assume.args;
-    if (
-      left?.kind !== "const_fn" || right?.kind !== "const_fn" ||
-      left.params.length !== right.params.length
-    ) return [];
-    const generic = genericRewriteBinding(decl);
-    return [{
-      source: decl.name,
-      ...(decl.memberOf ? { owner: decl.memberOf.owner } : {}),
-      ...(generic ? { generic } : {}),
-      left: { params: left.params, body: left.body },
-      right: { params: right.params, body: right.body },
-    }];
-  });
-}
-
-function genericRewriteBinding(
-  decl: Extract<Program["declarations"][number], { kind: "contract"; resultKind: "rewrite" }>,
-): RewriteFact["generic"] | undefined {
-  if (decl.params.length !== 1) return undefined;
-  const typeParam = decl.params[0]?.name;
-  if (!typeParam) return undefined;
-  for (const stmt of decl.body.statements) {
-    if (stmt.kind !== "proof_const") continue;
-    const proof = typeCallParts(stmt.value);
-    if (proof?.args.length === 1 && proof.args[0] === typeParam) {
-      return { contract: proof.callee, typeParam };
-    }
-  }
-  return undefined;
 }
 
 function typeCallParts(expr: TypeExpr): { callee: string; args: string[] } | undefined {
@@ -1427,9 +1428,14 @@ function assumeRewriteBlock(
   block: BlockExpr,
   facts: RewriteFact[],
   params: Param[] = [],
-  context: RewriteApplyContext = {},
+  context: RewriteApplyContext,
 ): BlockExpr {
-  const activeFacts = instantiateGenericRewriteFacts(block, facts, params);
+  const activeFacts = instantiateGenericRewriteFacts(
+    block,
+    facts,
+    params,
+    context.pluginRegistry,
+  );
   return {
     ...block,
     statements: block.statements.map((stmt) =>
@@ -1445,19 +1451,20 @@ function instantiateGenericRewriteFacts(
   block: BlockExpr,
   facts: RewriteFact[],
   params: Param[],
+  pluginRegistry: CompilerPluginRegistry,
 ): RewriteFact[] {
   const instantiated: RewriteFact[] = [];
   for (const param of params) {
     if (!param.const || !param.type) continue;
     const proof = proofTypeParts(param.type);
     if (!proof || proof.args.length !== 1) continue;
-    instantiateProofRewriteFacts(facts, proof, instantiated);
+    instantiateProofRewriteFacts(facts, proof, instantiated, pluginRegistry);
   }
   for (const stmt of block.statements) {
     if (stmt.kind !== "proof_const") continue;
     const proof = typeCallParts(stmt.value);
     if (!proof || proof.args.length !== 1) continue;
-    instantiateProofRewriteFacts(facts, proof, instantiated);
+    instantiateProofRewriteFacts(facts, proof, instantiated, pluginRegistry);
   }
   return rewriteFactsWithInstantiations(facts, instantiated);
 }
@@ -1476,8 +1483,9 @@ function instantiateProofRewriteFacts(
   facts: RewriteFact[],
   proof: { callee: string; args: string[] },
   instantiated: RewriteFact[],
+  pluginRegistry: CompilerPluginRegistry,
 ) {
-  const contracts = impliedContracts(proof.callee);
+  const contracts = impliedContracts(proof.callee, pluginRegistry);
   for (const fact of facts) {
     if (!fact.generic || !contracts.has(contractBaseName(fact.generic.contract))) continue;
     instantiated.push(instantiateGenericRewriteFact(fact, proof.args[0]!));
@@ -1494,18 +1502,19 @@ function rewriteFactsWithInstantiations(
 function instantiateGenericRewriteFactsFromProof(
   facts: RewriteFact[],
   proof: { callee: string; args: string[] } | undefined,
+  pluginRegistry: CompilerPluginRegistry,
 ): RewriteFact[] {
   if (!proof || proof.args.length !== 1) return facts;
   const instantiated: RewriteFact[] = [];
-  instantiateProofRewriteFacts(facts, proof, instantiated);
+  instantiateProofRewriteFacts(facts, proof, instantiated, pluginRegistry);
   return rewriteFactsWithInstantiations(facts, instantiated);
 }
 
-function impliedContracts(contract: string): Set<string> {
+function impliedContracts(contract: string, pluginRegistry: CompilerPluginRegistry): Set<string> {
   const base = contractBaseName(contract);
   const result = new Set([base]);
   const visit = (name: string) => {
-    for (const implied of CONTRACT_IMPLICATIONS.get(name) ?? []) {
+    for (const implied of pluginRegistry.contractImplications.get(name) ?? []) {
       if (result.has(implied)) continue;
       result.add(implied);
       visit(implied);
@@ -1518,12 +1527,6 @@ function impliedContracts(contract: string): Set<string> {
 function contractBaseName(name: string): string {
   return name.split(".").at(-1) ?? name;
 }
-
-const CONTRACT_IMPLICATIONS = new Map<string, string[]>([
-  ["Monad", ["Applicative"]],
-  ["Applicative", ["Functor"]],
-  ["Monoid", ["Semigroup"]],
-]);
 
 function instantiateGenericRewriteFact(fact: RewriteFact, concrete: string): RewriteFact {
   const typeParam = fact.generic!.typeParam;
@@ -1598,6 +1601,9 @@ function substituteTypeConstructorRefs(expr: Expr, typeParam: string, concrete: 
         value: substituteTypeConstructorRefs(expr.value, typeParam, concrete),
         arms: expr.arms.map((arm) => ({
           ...arm,
+          guard: arm.guard
+            ? substituteTypeConstructorRefs(arm.guard, typeParam, concrete)
+            : undefined,
           value: substituteTypeConstructorRefs(arm.value, typeParam, concrete),
         })),
       };
@@ -1659,7 +1665,7 @@ function substituteTypeConstructorRefs(expr: Expr, typeParam: string, concrete: 
 function assumeRewriteExpr(
   expr: Expr,
   facts: RewriteFact[],
-  context: RewriteApplyContext = {},
+  context: RewriteApplyContext,
 ): Expr {
   const rewrittenChildren = assumeRewriteExprChildren(expr, facts, context);
   for (const fact of facts) {
@@ -1692,6 +1698,7 @@ function assumeRewriteExprChildren(
       const scopedFacts = instantiateGenericRewriteFactsFromProof(
         facts,
         typeCallParts(expr.strategy.effect),
+        context.pluginRegistry,
       );
       return {
         ...expr,
@@ -1744,6 +1751,7 @@ function assumeRewriteExprChildren(
         value: assumeRewriteExpr(expr.value, facts, context),
         arms: expr.arms.map((arm) => ({
           ...arm,
+          guard: arm.guard ? assumeRewriteExpr(arm.guard, facts, context) : undefined,
           value: assumeRewriteExpr(arm.value, facts, context),
         })),
       };
@@ -1808,7 +1816,7 @@ function matchRewriteTemplate(
       return actual.kind === "literal" && pattern.value === actual.value &&
         pattern.literalKind === actual.literalKind;
     case "var":
-      return actual.kind === "var" && pattern.name === actual.name;
+      return actual.kind === "var" && rewriteVarNamesMatch(pattern.name, actual.name);
     case "call":
       return actual.kind === "call" &&
         matchRewriteTemplate(pattern.callee, actual.callee, params, bindings) &&
@@ -1829,6 +1837,17 @@ function matchRewriteTemplate(
     default:
       return stableExprKey(pattern) === stableExprKey(actual);
   }
+}
+
+function rewriteVarNamesMatch(pattern: string, actual: string): boolean {
+  if (pattern === actual) return true;
+  if (pattern.includes(".") || pattern.includes("::")) return false;
+  return terminalValueName(actual) === pattern;
+}
+
+function terminalValueName(name: string): string {
+  const associated = name.split("::").at(-1) ?? name;
+  return associated.split(".").at(-1) ?? associated;
 }
 
 function substituteRewriteTemplate(expr: Expr, bindings: Map<string, Expr>): Expr {
@@ -1874,6 +1893,7 @@ function substituteRewriteTemplate(expr: Expr, bindings: Map<string, Expr>): Exp
         value: substituteRewriteTemplate(expr.value, bindings),
         arms: expr.arms.map((arm) => ({
           ...arm,
+          guard: arm.guard ? substituteRewriteTemplate(arm.guard, bindings) : undefined,
           value: substituteRewriteTemplate(arm.value, bindings),
         })),
       };
@@ -2074,6 +2094,7 @@ function buildOptimizationPlan(
   const recurrences = precomputed.recurrences ?? summarizeRecurrences(program, scope);
   const summaries = precomputed.summaries ??
     functionSummaries(program, functions, recurrences, scope);
+  const typeDecls = programTypeDecls(program);
   const recurrenceIndex = recurrenceSummariesByFunction(recurrences);
   const plans = new Map<string, FunctionPlan>();
   const decisions: OptimizationDecision[] = [];
@@ -2125,7 +2146,7 @@ function buildOptimizationPlan(
       });
       continue;
     }
-    const inline = chooseInlineAction(fn, summary, profile, functions);
+    const inline = chooseInlineAction(fn, summary, profile, functions, typeDecls);
     if (inline.action.kind === "inline") {
       addAction(name, inline.action, {
         pass: "plan.inline",
@@ -2273,6 +2294,7 @@ function chooseInlineAction(
   summary: FunctionSummary,
   profile: OptimizeProfile,
   functions: Map<string, FnDecl>,
+  typeDecls: TypeDecl[],
 ): {
   action: PlannedAction | { kind: "skip"; reason: string };
   rule: RewriteRuleId;
@@ -2325,6 +2347,26 @@ function chooseInlineAction(
       action: { kind: "skip", reason: `recursive kind is ${summary.recursiveKind}` },
       rule: "call.inline.skip_recursive",
       reason: `recursive kind is ${summary.recursiveKind}`,
+      evidence,
+    };
+  }
+  const scalarRecursiveWrapper = summary.returnClass === "scalar" &&
+    blockCallsRecursiveFunction(fn.body, functions);
+  if (scalarRecursiveWrapper) {
+    return {
+      action: { kind: "skip", reason: "scalar helper calls a recursive function" },
+      rule: "call.inline.skip_recursive",
+      reason: "scalar helper calls a recursive function",
+      evidence,
+    };
+  }
+  const scalarUnionParamMatch = summary.returnClass === "scalar" &&
+    functionMatchesUnionParam(fn, typeDecls);
+  if (scalarUnionParamMatch) {
+    return {
+      action: { kind: "skip", reason: "scalar helper matches on a union parameter" },
+      rule: "call.inline.skip_recursive",
+      reason: "scalar helper matches on a union parameter",
       evidence,
     };
   }
@@ -2415,6 +2457,121 @@ function tailCallsFunction(block: BlockExpr, target: string): boolean {
   const calls = recursiveCallDetails(block, new Set([target]), target, true)
     .filter((call) => call.target === target);
   return calls.length > 0 && calls.every((call) => call.tail);
+}
+
+function blockCallsRecursiveFunction(
+  block: BlockExpr,
+  functions: Map<string, FnDecl>,
+): boolean {
+  let callsRecursive = false;
+  const visit = (expr: Expr | undefined) => {
+    if (!expr || callsRecursive) return;
+    if (expr.kind === "call" && expr.callee.kind === "var") {
+      const callee = functions.get(expr.callee.name);
+      const recursiveCallee = callee && directSelfRecursiveKind(callee) !== "none";
+      if (recursiveCallee) {
+        callsRecursive = true;
+        return;
+      }
+    }
+    for (const child of exprChildrenForPlanning(expr)) visit(child);
+  };
+  for (const stmt of block.statements) {
+    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "debug_trace") {
+      for (const arg of stmt.args) visit(arg);
+      continue;
+    }
+    visit(stmt.value);
+  }
+  visit(block.expr);
+  return callsRecursive;
+}
+
+function functionMatchesUnionParam(fn: FnDecl, typeDecls: TypeDecl[]): boolean {
+  const unionParams = new Set<string>();
+  for (const param of fn.params) {
+    if (param.const) continue;
+    if (typeAnnotationIsUnion(param.type, typeDecls)) unionParams.add(param.name);
+  }
+  if (!unionParams.size) return false;
+
+  let matchesUnionParam = false;
+  const visit = (expr: Expr | undefined) => {
+    if (!expr || matchesUnionParam) return;
+    if (expr.kind === "match" && expr.value.kind === "var") {
+      const matchedBase = baseName(expr.value.name);
+      if (unionParams.has(matchedBase)) {
+        matchesUnionParam = true;
+        return;
+      }
+    }
+    for (const child of exprChildrenForPlanning(expr)) visit(child);
+  };
+  for (const stmt of fn.body.statements) {
+    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "debug_trace") {
+      for (const arg of stmt.args) visit(arg);
+      continue;
+    }
+    visit(stmt.value);
+  }
+  visit(fn.body.expr);
+  return matchesUnionParam;
+}
+
+function typeAnnotationIsUnion(type: string | undefined, typeDecls: TypeDecl[]): boolean {
+  const decl = findTypeDeclForAnnotation(type, typeDecls);
+  if (!decl) return false;
+  if (decl.resultKind === "union") return true;
+  return decl.normalized?.kind === "sum";
+}
+
+function findTypeDeclForAnnotation(
+  type: string | undefined,
+  typeDecls: TypeDecl[],
+): TypeDecl | undefined {
+  let current = typeAnnotationName(type);
+  const seen = new Set<string>();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    let found: TypeDecl | undefined;
+    for (const decl of typeDecls) {
+      const nameMatches = decl.name === current;
+      const terminalMatches = !typeNameIsQualified(current) &&
+        terminalTypeName(decl.name) === terminalTypeName(current);
+      if (nameMatches || terminalMatches) {
+        found = decl;
+        break;
+      }
+    }
+    if (!found) return undefined;
+    if (found.normalized?.kind !== "alias") return found;
+    current = typeAnnotationName(found.normalized.type);
+  }
+  return undefined;
+}
+
+function typeAnnotationName(type: string | undefined): string | undefined {
+  const trimmed = type?.trim();
+  if (!trimmed) return undefined;
+  const paren = trimmed.indexOf("(");
+  if (paren >= 0) return trimmed.slice(0, paren).trim();
+  return trimmed;
+}
+
+function typeNameIsQualified(name: string): boolean {
+  return name.includes(".") || name.includes("::");
+}
+
+function terminalTypeName(name: string): string {
+  const dot = name.lastIndexOf(".");
+  const colon = name.lastIndexOf("::");
+  const index = Math.max(dot, colon);
+  if (index < 0) return name;
+  let offset = 1;
+  if (index === colon) offset = 2;
+  return name.slice(index + offset);
 }
 
 function chooseRecurrenceAction(
@@ -2613,7 +2770,10 @@ function exprChildrenForPlanning(expr: Expr): Expr[] {
     case "range":
       return [expr.start, expr.end];
     case "match":
-      return [expr.value, ...expr.arms.map((arm) => arm.value)];
+      return [
+        expr.value,
+        ...expr.arms.flatMap((arm) => arm.guard ? [arm.guard, arm.value] : [arm.value]),
+      ];
     case "block":
     case "do":
     case "literal":
@@ -2730,7 +2890,11 @@ function expandFiniteStaticRecurrences(
         return {
           ...expr,
           value: rewriteExpr(expr.value, depths),
-          arms: expr.arms.map((arm) => ({ ...arm, value: rewriteExpr(arm.value, depths) })),
+          arms: expr.arms.map((arm) => ({
+            ...arm,
+            guard: arm.guard ? rewriteExpr(arm.guard, depths) : undefined,
+            value: rewriteExpr(arm.value, depths),
+          })),
         };
       case "shape":
       case "product_constructor":
@@ -2894,6 +3058,7 @@ function inlineGeneratedClauseExpr(expr: Expr, clauses: Map<string, FnDecl>): Ex
         value: inlineGeneratedClauseExpr(expr.value, clauses),
         arms: expr.arms.map((arm) => ({
           ...arm,
+          guard: arm.guard ? inlineGeneratedClauseExpr(arm.guard, clauses) : undefined,
           value: inlineGeneratedClauseExpr(arm.value, clauses),
         })),
       };
@@ -3462,13 +3627,16 @@ function foldAbstractFactsInExpr(expr: Expr, env: Map<string, AbstractValue>): E
         : undefined;
       if (constant) {
         const selected = expr.arms.find((arm) => abstractPatternMatches(arm.pattern, constant));
-        if (selected) return foldAbstractFactsInExpr(selected.value, env);
+        if (selected && patternBindingNames(selected.pattern).length === 0) {
+          return foldAbstractFactsInExpr(selected.value, env);
+        }
       }
       return {
         ...expr,
         value,
         arms: expr.arms.map((arm) => ({
           ...arm,
+          guard: arm.guard ? foldAbstractFactsInExpr(arm.guard, env) : undefined,
           value: foldAbstractFactsInExpr(arm.value, env),
         })),
       };
@@ -3767,26 +3935,34 @@ function optimizeDeclarations(
     if (!decl) continue;
     changes.visitedDeclarations++;
     if (decl.kind === "fn") changes.visitedFunctions++;
-    const optimized = optimizeDecl(
-      decl,
-      forwarding,
-      inlineable,
-      functions,
-      config,
-      scope,
-    );
-    if (
-      decl.kind === "fn" && optimized.kind === "fn" &&
-      stableExprKey(decl.body) !== stableExprKey(optimized.body)
-    ) {
-      changes.functions.add(decl.name);
-    }
-    if (
-      (decl.kind === "let" || decl.kind === "const") &&
-      (optimized.kind === "let" || optimized.kind === "const") &&
-      stableExprKey(decl.value) !== stableExprKey(optimized.value)
-    ) {
-      changes.declarations.add(decl.name);
+    let optimized: Declaration;
+    try {
+      optimized = optimizeDecl(
+        decl,
+        forwarding,
+        inlineable,
+        functions,
+        config,
+        scope,
+      );
+      if (
+        decl.kind === "fn" && optimized.kind === "fn" &&
+        stableExprKey(decl.body) !== stableExprKey(optimized.body)
+      ) {
+        changes.functions.add(decl.name);
+      }
+      if (
+        (decl.kind === "let" || decl.kind === "const") &&
+        (optimized.kind === "let" || optimized.kind === "const") &&
+        stableExprKey(decl.value) !== stableExprKey(optimized.value)
+      ) {
+        changes.declarations.add(decl.name);
+      }
+    } catch (error) {
+      if (!isStackOverflowError(error)) throw error;
+      changes.skippedDeclarations++;
+      if (decl.kind === "fn") changes.skippedFunctions++;
+      continue;
     }
     program.declarations[index] = optimized;
   }
@@ -4235,6 +4411,16 @@ function rewriteStaticProjections(
           for (const name of patternBindingNames(arm.pattern)) scoped.delete(name);
           return {
             ...arm,
+            guard: arm.guard
+              ? rewriteStaticProjections(
+                arm.guard,
+                scoped,
+                forwarding,
+                inlineable,
+                functions,
+                config,
+              )
+              : undefined,
             value: rewriteStaticProjections(
               arm.value,
               scoped,
@@ -4492,7 +4678,11 @@ function stripDebugTraceStatements(program: Program) {
         return {
           ...expr,
           value: stripExpr(expr.value),
-          arms: expr.arms.map((arm) => ({ ...arm, value: stripExpr(arm.value) })),
+          arms: expr.arms.map((arm) => ({
+            ...arm,
+            guard: arm.guard ? stripExpr(arm.guard) : undefined,
+            value: stripExpr(arm.value),
+          })),
         };
       case "shape":
       case "product_constructor":
@@ -4526,7 +4716,7 @@ function stripDebugTraceStatements(program: Program) {
     }
   };
   program.declarations = program.declarations.map((decl) => {
-    if (decl.kind === "fn" || decl.kind === "contract") {
+    if (decl.kind === "fn") {
       return { ...decl, body: stripBlock(decl.body) };
     }
     if (decl.kind === "let" || decl.kind === "const") {
@@ -4579,7 +4769,11 @@ function stripRuntimeProfileExpressions(program: Program) {
         return {
           ...expr,
           value: stripExpr(expr.value),
-          arms: expr.arms.map((arm) => ({ ...arm, value: stripExpr(arm.value) })),
+          arms: expr.arms.map((arm) => ({
+            ...arm,
+            guard: arm.guard ? stripExpr(arm.guard) : undefined,
+            value: stripExpr(arm.value),
+          })),
         };
       case "shape":
       case "product_constructor":
@@ -4613,7 +4807,7 @@ function stripRuntimeProfileExpressions(program: Program) {
     }
   };
   program.declarations = program.declarations.map((decl) => {
-    if (decl.kind === "fn" || decl.kind === "contract") {
+    if (decl.kind === "fn") {
       return { ...decl, body: stripBlock(decl.body) };
     }
     if (decl.kind === "let" || decl.kind === "const") {
@@ -4746,6 +4940,9 @@ function optimizeExpr(
         value,
         arms: expr.arms.map((arm) => ({
           ...arm,
+          guard: arm.guard
+            ? optimizeExpr(arm.guard, forwarding, inlineable, functions, config)
+            : undefined,
           value: optimizeExpr(arm.value, forwarding, inlineable, functions, config, {
             allowMultiValueResult: options.allowMultiValueResult,
           }),
@@ -5055,7 +5252,11 @@ function rewriteExpr(expr: Expr, drops: Map<string, Set<number>>): Expr {
       return {
         ...expr,
         value: rewriteExpr(expr.value, drops),
-        arms: expr.arms.map((arm) => ({ ...arm, value: rewriteExpr(arm.value, drops) })),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          guard: arm.guard ? rewriteExpr(arm.guard, drops) : undefined,
+          value: rewriteExpr(arm.value, drops),
+        })),
       };
     case "shape":
     case "product_constructor":
@@ -5161,6 +5362,19 @@ function extractLocalEqualityExpr(
   functions: Map<string, FnDecl>,
   config: OptimizerConfig,
 ): Expr {
+  try {
+    return extractLocalEqualityExprUnchecked(expr, functions, config);
+  } catch (error) {
+    if (isStackOverflowError(error)) return expr;
+    throw error;
+  }
+}
+
+function extractLocalEqualityExprUnchecked(
+  expr: Expr,
+  functions: Map<string, FnDecl>,
+  config: OptimizerConfig,
+): Expr {
   if (!localEqualityEligible(expr, functions)) return expr;
   const seen = new Map<string, Expr>();
   const queue: Expr[] = [expr];
@@ -5178,7 +5392,8 @@ function extractLocalEqualityExpr(
 }
 
 function localEqualityEligible(expr: Expr, functions: Map<string, FnDecl>): boolean {
-  return !hasRuntimeEffect(expr, functions) && localEqualityNodeCount(expr) <= 12;
+  if (localEqualityNodeCount(expr) > 12) return false;
+  return !hasRuntimeEffect(expr, functions);
 }
 
 function localEqualityNodeCount(expr: Expr): number {
@@ -5246,7 +5461,7 @@ function localEqualityRewrites(expr: Expr, functions: Map<string, FnDecl>): Expr
   }
   const factored = factorCommonProduct(expr, functions);
   if (factored) rewrites.push(factored);
-  return rewrites.filter((candidate) => localEqualityEligible(candidate, functions));
+  return rewrites.filter((candidate) => localEqualityNodeCount(candidate) <= 12);
 }
 
 function isCommutativeOp(op: string): boolean {
@@ -5898,6 +6113,12 @@ function recursiveCallDetails(
       : [];
   switch (expr.kind) {
     case "call": {
+      if (expr.tailRec) {
+        return [
+          { clause, target: clause, tail: tailPosition, args: expr.args },
+          ...expr.args.flatMap((arg) => recursiveCallDetails(arg, targets, clause, false)),
+        ];
+      }
       const calleeName = expr.callee.kind === "var" ? expr.callee.name : undefined;
       const calls = targets.has(calleeName ?? "")
         ? [{ clause, target: calleeName!, tail: tailPosition, args: expr.args }]
@@ -6007,10 +6228,10 @@ function directSelfCalls(
   if (!expr) return result;
   switch (expr.kind) {
     case "call":
-      if (expr.callee.kind === "var" && expr.callee.name === name) {
+      if (expr.tailRec || (expr.callee.kind === "var" && expr.callee.name === name)) {
         if (tailPosition) result.tail = true;
         else result.nonTail = true;
-      } else {
+      } else if (!expr.tailRec) {
         add(directSelfCalls(expr.callee, name, false));
       }
       expr.args.forEach((arg) => add(directSelfCalls(arg, name, false)));
@@ -6096,6 +6317,10 @@ function calledFunctionList(expr: Expr | BlockExpr | undefined): string[] {
     if (!item) return;
     switch (item.kind) {
       case "call":
+        if (item.tailRec) {
+          item.args.forEach(visit);
+          return;
+        }
         if (item.callee.kind === "var") names.push(item.callee.name);
         visit(item.callee);
         item.args.forEach(visit);
@@ -6270,6 +6495,7 @@ function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
     case "profile":
       return [...expr.args, expr.body];
     case "call":
+      if (expr.tailRec) return expr.args;
       return [expr.callee, ...expr.args];
     case "index":
       return [expr.target, expr.index];
@@ -6280,7 +6506,10 @@ function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
     case "pipe_bind":
       return [expr.value, expr.body];
     case "match":
-      return [expr.value, ...expr.arms.map((arm) => arm.value)];
+      return [
+        expr.value,
+        ...expr.arms.flatMap((arm) => arm.guard ? [arm.guard, arm.value] : [arm.value]),
+      ];
     case "shape":
     case "product_constructor":
       return expr.slots.flatMap((slot) => slot.index ? [slot.index, slot.value] : [slot.value]);
@@ -6315,6 +6544,21 @@ function inlineCall(
   options: { allowMultiValue: boolean },
   typeDecls: TypeDecl[],
 ): Expr | undefined {
+  try {
+    return inlineCallUnchecked(name, args, inlineable, options, typeDecls);
+  } catch (error) {
+    if (isStackOverflowError(error)) return undefined;
+    throw error;
+  }
+}
+
+function inlineCallUnchecked(
+  name: string,
+  args: Expr[],
+  inlineable: Map<string, FnDecl>,
+  options: { allowMultiValue: boolean },
+  typeDecls: TypeDecl[],
+): Expr | undefined {
   const fn = inlineable.get(name);
   if (!fn || fn.params.length !== args.length) return undefined;
   if (!options.allowMultiValue && runtimeTypeInfo(fn.returnType, typeDecls).class !== "scalar") {
@@ -6342,6 +6586,11 @@ function inlineCall(
     statements: [...statements, ...body.statements],
     expr: body.expr,
   };
+}
+
+function isStackOverflowError(error: unknown): boolean {
+  if (!(error instanceof RangeError)) return false;
+  return error.message.includes("call stack");
 }
 
 function inlineCallExpr(
@@ -6448,7 +6697,12 @@ function renameExprBindings(expr: Expr, env: Map<string, string>, fnName: string
         arms: expr.arms.map((arm) => {
           const scoped = new Map(env);
           const pattern = renamePatternBindings(arm.pattern, scoped, fnName);
-          return { ...arm, pattern, value: renameExprBindings(arm.value, scoped, fnName) };
+          return {
+            ...arm,
+            pattern,
+            guard: arm.guard ? renameExprBindings(arm.guard, scoped, fnName) : undefined,
+            value: renameExprBindings(arm.value, scoped, fnName),
+          };
         }),
       };
     case "shape":
@@ -6521,8 +6775,14 @@ function renamePatternBindings(
         ...pattern,
         args: pattern.args.map((arg) => renamePatternBindings(arg, env, fnName)),
       };
+    case "typed":
+      return {
+        ...pattern,
+        pattern: renamePatternBindings(pattern.pattern, env, fnName),
+      };
     case "wildcard":
     case "literal":
+    case "enum_member":
     case "type":
       return pattern;
   }
@@ -6775,61 +7035,92 @@ function blockUsedNames(block: BlockExpr): Set<string> {
 }
 
 function baseName(name: string): string {
-  return name.split(/[.[(]/, 1)[0] ?? name;
+  let end = name.length;
+  for (let index = 0; index < name.length; index++) {
+    const code = name.charCodeAt(index);
+    const isTerminator = code === 46 || code === 91 || code === 40;
+    if (!isTerminator) continue;
+    end = index;
+    break;
+  }
+  return name.slice(0, end);
 }
 
 function hasRuntimeEffect(expr: Expr, functions: Map<string, FnDecl>): boolean {
-  switch (expr.kind) {
-    case "do":
-      return true;
-    case "const_fn":
-      return hasRuntimeEffect(expr.body, functions);
-    case "profile":
-      return true;
-    case "call": {
-      const callee = expr.callee.kind === "var" ? functions.get(expr.callee.name) : undefined;
-      return (expr.callee.kind === "var" &&
-        (!callee || functionHasRuntimeEffect(callee, functions))) ||
-        hasRuntimeEffect(expr.callee, functions) ||
-        expr.args.some((arg) => hasRuntimeEffect(arg, functions));
+  const stack: Expr[] = [expr];
+  while (stack.length > 0) {
+    const item = stack.pop();
+    if (!item) continue;
+    switch (item.kind) {
+      case "do":
+      case "profile":
+        return true;
+      case "const_fn":
+        stack.push(item.body);
+        continue;
+      case "call": {
+        if (item.callee.kind === "var") {
+          const callee = functions.get(item.callee.name);
+          if (!callee || functionHasRuntimeEffect(callee, functions)) return true;
+        } else {
+          stack.push(item.callee);
+        }
+        for (const arg of item.args) stack.push(arg);
+        continue;
+      }
+      case "index":
+        stack.push(item.target, item.index);
+        continue;
+      case "binary":
+        stack.push(item.left, item.right);
+        continue;
+      case "operator_chain":
+        for (const value of operatorChainValues(item)) stack.push(value);
+        continue;
+      case "pipe_bind":
+        stack.push(item.value, item.body);
+        continue;
+      case "match":
+        stack.push(item.value);
+        for (const arm of item.arms) {
+          if (arm.guard) stack.push(arm.guard);
+          stack.push(arm.value);
+        }
+        continue;
+      case "shape":
+      case "product_constructor":
+        for (const slot of item.slots) {
+          if (slot.index) stack.push(slot.index);
+          stack.push(slot.value);
+        }
+        continue;
+      case "range":
+        stack.push(item.start, item.end);
+        continue;
+      case "static_for_slots":
+        stack.push(item.value);
+        if (item.source.kind === "range") {
+          stack.push(item.source.start, item.source.end);
+        } else {
+          stack.push(item.source.shape);
+        }
+        continue;
+      case "field":
+        stack.push(item.value, item.key);
+        continue;
+      case "block":
+        if (item.expr) stack.push(item.expr);
+        for (const stmt of item.statements) {
+          if (stmt.kind === "debug_trace") return true;
+          if (stmt.kind === "let" || stmt.kind === "destructure_let") stack.push(stmt.value);
+        }
+        continue;
+      case "literal":
+      case "var":
+        continue;
     }
-    case "index":
-      return hasRuntimeEffect(expr.target, functions) || hasRuntimeEffect(expr.index, functions);
-    case "binary":
-      return hasRuntimeEffect(expr.left, functions) || hasRuntimeEffect(expr.right, functions);
-    case "operator_chain":
-      return operatorChainValues(expr).some((item) => hasRuntimeEffect(item, functions));
-    case "pipe_bind":
-      return hasRuntimeEffect(expr.value, functions) || hasRuntimeEffect(expr.body, functions);
-    case "match":
-      return hasRuntimeEffect(expr.value, functions) ||
-        expr.arms.some((arm) => hasRuntimeEffect(arm.value, functions));
-    case "shape":
-    case "product_constructor":
-      return expr.slots.some((slot) =>
-        (slot.index ? hasRuntimeEffect(slot.index, functions) : false) ||
-        hasRuntimeEffect(slot.value, functions)
-      );
-    case "range":
-      return hasRuntimeEffect(expr.start, functions) || hasRuntimeEffect(expr.end, functions);
-    case "static_for_slots":
-      return hasRuntimeEffect(expr.value, functions) ||
-        (expr.source.kind === "range"
-          ? hasRuntimeEffect(expr.source.start, functions) ||
-            hasRuntimeEffect(expr.source.end, functions)
-          : hasRuntimeEffect(expr.source.shape, functions));
-    case "field":
-      return hasRuntimeEffect(expr.value, functions) || hasRuntimeEffect(expr.key, functions);
-    case "block":
-      return expr.statements.some((stmt) =>
-        stmt.kind === "debug_trace" ||
-        ((stmt.kind === "let" || stmt.kind === "destructure_let") &&
-          hasRuntimeEffect(stmt.value, functions))
-      ) || (expr.expr ? hasRuntimeEffect(expr.expr, functions) : false);
-    case "literal":
-    case "var":
-      return false;
   }
+  return false;
 }
 
 function functionHasRuntimeEffect(fn: FnDecl, functions: Map<string, FnDecl>): boolean {
@@ -6893,6 +7184,12 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
       }
       return expr;
     case "call":
+      if (expr.tailRec) {
+        return {
+          ...expr,
+          args: expr.args.map((arg) => substituteVar(arg, name, value)),
+        };
+      }
       return {
         ...expr,
         callee: substituteVar(expr.callee, name, value),
@@ -6916,12 +7213,14 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
       return {
         ...expr,
         value: substituteVar(expr.value, name, value),
-        arms: expr.arms.map((arm) => ({
-          ...arm,
-          value: patternBindsName(arm.pattern, name)
-            ? arm.value
-            : substituteVar(arm.value, name, value),
-        })),
+        arms: expr.arms.map((arm) => {
+          const shadowed = patternBindsName(arm.pattern, name);
+          return {
+            ...arm,
+            guard: arm.guard && !shadowed ? substituteVar(arm.guard, name, value) : arm.guard,
+            value: shadowed ? arm.value : substituteVar(arm.value, name, value),
+          };
+        }),
       };
     case "shape":
     case "product_constructor":

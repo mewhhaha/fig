@@ -1,0 +1,157 @@
+const ast = @import("./ast.fig");
+const combinator = @import("./combinator.fig");
+const textlex = @import("./textlex.fig");
+
+type SummaryKind = enum(i32) {
+  Declarations = 0,
+  KindCount = 1,
+  FunctionParams = 2,
+  TypeParams = 3,
+  DeclarationSignature = 4,
+  FunctionParamSignature = 5,
+  TypeParamSignature = 6,
+  FunctionParamTypeSignature = 7,
+  FunctionReturnSignature = 8,
+  ValueAnnotationSignature = 9,
+  FunctionBodySignature = 10,
+  TypeBodySignature = 11,
+  FunctionLocalLets = 12,
+  TypeResultKind = 13,
+  TypeSugarStatements = 14,
+  ValueMatchExpressions = 15,
+  FunctionMatchBodies = 16,
+  ValueDoExpressions = 17,
+  ValueMatchArms = 18,
+  ValuePipeBinds = 19,
+  DeclaredTypeClassSignature = 20,
+  DeclaredAbiClassSignature = 21,
+  SymbolEnvironmentSignature = 22,
+  ExportAbiSignature = 23,
+  ValueBodyTypeClassSignature = 24,
+  ValueBodyAbiClassSignature = 25,
+  SimpleBodyTypeCheckSignature = 26,
+  NamedTypeEnvironmentSignature = 27,
+  ResolvedDeclaredTypeClassSignature = 28,
+  ResolvedSimpleBodyTypeCheckSignature = 29,
+  ResolvedDeclaredAbiClassSignature = 30,
+  ResolvedSymbolEnvironmentSignature = 31,
+  ResolvedExportAbiSignature = 32,
+  DirectImportTypeEnvironmentSignature = 33,
+  ValueCallExpressions = 34,
+  FunctionLocalProofConsts = 35,
+  ResolvedValueBodyTypeClassSignature = 36,
+  ResolvedValueBodyAbiClassSignature = 37,
+  ValueDoBinds = 38,
+  ValueOperators = 39,
+  ValueOperatorSignature = 40
+}
+
+type ImportResolutionMode = enum(i32) {
+  TypeClass = 0,
+  AbiClass = 1
+}
+
+type TokenWindow = struct {
+  source: textlex.TextTokenStream,
+  start: i32,
+  end: i32,
+}
+
+type DeclSlice = struct {
+  source: textlex.TextTokenStream,
+  start: i32,
+  end: i32,
+  decl: ast.Decl,
+}
+
+type LookupBudget = i32
+
+type Signature = struct {
+  value: i32,
+}
+
+fn full_window(source: textlex.TextTokenStream) -> TokenWindow {
+  TokenWindow {
+    source: source,
+    start: 0,
+    end: textlex.length(source),
+  }
+}
+
+fn window(
+  source: textlex.TextTokenStream,
+  start: i32,
+  end: i32
+) -> TokenWindow {
+  TokenWindow {
+    source: source,
+    start: start,
+    end: end,
+  }
+}
+
+fn token_window_state(value: TokenWindow) -> combinator.ParseState {
+  combinator.state(value.start, value.end)
+}
+
+fn token_window_contains(value: TokenWindow, index: i32) -> bool {
+  let after_start = index >= value.start;
+  match after_start {
+    true => index < value.end,
+    false => false,
+  }
+}
+
+fn decl_slice(
+  source: textlex.TextTokenStream,
+  start: i32,
+  end: i32,
+  decl: ast.Decl
+) -> DeclSlice {
+  DeclSlice {
+    source: source,
+    start: start,
+    end: end,
+    decl: decl,
+  }
+}
+
+fn lookup_budget(remaining: i32) -> LookupBudget {
+  remaining
+}
+
+fn lookup_budget_exhausted(value: LookupBudget) -> bool {
+  value <= 0
+}
+
+fn lookup_budget_spend(value: LookupBudget) -> LookupBudget {
+  lookup_budget(value - 1)
+}
+
+fn import_resolution_mode_is_abi(value: ImportResolutionMode) -> bool {
+  value == ImportResolutionMode::AbiClass
+}
+
+fn signature(value: i32) -> Signature {
+  Signature {value: value}
+}
+
+fn signature_append(total: Signature, value: i32) -> Signature {
+  signature(total.value * 131 + value)
+}
+
+fn signature_mix(total: i32, value: i32) -> i32 {
+  let mixed = signature_append(signature(total), value);
+  mixed.value
+}
+
+fn entry(seed: i32) -> i32 {
+  let source = textlex.stream_from_buffer(textlex.from_seed(seed));
+  let window_value = full_window(source);
+  let budget = lookup_budget(4);
+  let mode_score = match lookup_budget_exhausted(budget) {
+    true => 0,
+    false => ImportResolutionMode::AbiClass,
+  };
+  seed + SummaryKind::Declarations + window_value.end + mode_score
+}

@@ -418,6 +418,31 @@ Deno.test("LSP code action replaces do-strategy inferred type holes", async () =
   assertEquals(action.edit?.changes[uri]?.[0].newText, "i32");
 });
 
+Deno.test("LSP quickfix groups trailing runtime parameters", async () => {
+  const uri = pathToUri("/tmp/main.fig");
+  const cache = new AnalysisCache();
+  const source = [
+    "fn sum(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {",
+    "  a + b + c + d + e + f",
+    "}",
+    "pub fn main() -> i32 { sum(1, 2, 3, 4, 5, 6) }",
+  ].join("\n");
+  cache.open(uri, 1, source);
+  const result = await cache.reanalyze(uri);
+  assert(result);
+  const diagnostic = result.diagnostics.find((item) => item.code === "fn.too_many_runtime_params");
+  assert(diagnostic);
+
+  const actions = codeActions(result, diagnostic.range);
+  const action = actions.find((item) => item.title === "Group trailing parameters into a struct");
+  assert(action);
+  const edits = action.edit?.changes[uri] ?? [];
+  assert(edits.some((edit) => edit.newText === "rest: struct({e: i32, f: i32})"));
+  assert(edits.some((edit) => edit.newText === "rest.e"));
+  assert(edits.some((edit) => edit.newText === "rest.f"));
+  assert(edits.some((edit) => edit.newText === "{e: 5, f: 6}"));
+});
+
 Deno.test("LSP analysis routes open imported diagnostics to imported URI", async () => {
   const rootUri = pathToUri("/tmp/project/main.fig");
   const importedUri = pathToUri("/tmp/project/broken.fig");

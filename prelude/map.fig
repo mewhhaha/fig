@@ -1,0 +1,762 @@
+const core = @import("prelude.core");
+const layout = @import("prelude.layout");
+const option = @import("prelude.option");
+const order = @import("prelude.order");
+
+type fn MapNode(k: type, v: type) -> type {
+  let MapNode = {
+    key: k,
+    value: v,
+    left: i32,
+    right: i32,
+    red: bool,
+  };
+  struct(MapNode)
+}
+
+type fn MapRoot(k: type, v: type) -> type {
+  let MapRoot = {
+    nodes: layout.HeapArray(MapNode(k, v)),
+    root: i32,
+  };
+  struct(MapRoot)
+}
+
+type fn InsertResult(k: type, v: type) -> type {
+  let InsertResult = {
+    nodes: layout.HeapArray(MapNode(k, v)),
+    root: i32,
+    added: bool,
+  };
+  struct(InsertResult)
+}
+
+type fn Map(k: type, v: type) -> type {
+  let Map = {
+    nodes: layout.HeapArray(MapNode(k, v)),
+    root: i32,
+    len: i32,
+  };
+  struct(Map)
+}
+
+fn not(value: bool) -> bool {
+  match value {
+    true => false,
+    false => true
+  }
+}
+
+fn Map::empty(const k: type, const v: type) -> Map(
+  k,
+  v
+) {
+  Map {nodes: layout.HeapArray::empty(MapNode(k, v)), root:
+    - 1, len: 0}
+}
+
+fn Map::len(
+  const k: type,
+  const v: type,
+  xs: Map(k, v)
+) -> i32 {
+  xs.len
+}
+
+fn Map::is_empty(
+  const k: type,
+  const v: type,
+  xs: Map(k, v)
+) -> bool {
+  xs.len == 0
+}
+
+fn Map::node_is_red(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  index: i32
+) -> bool {
+  match index < 0 {
+    true => false,
+    false => layout.HeapArray::get(
+      MapNode(k, v),
+      nodes,
+      index
+    ).red,
+  }
+}
+
+fn Map::left_is_red(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  index: i32
+) -> bool {
+  match index < 0 {
+    true => false,
+    false => layout.HeapArray::get(
+      MapNode(k, v),
+      nodes,
+      index
+    )
+      \node -> Map::node_is_red(k, v, nodes, node.left),
+  }
+}
+
+fn Map::right_is_red(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  index: i32
+) -> bool {
+  match index < 0 {
+    true => false,
+    false => layout.HeapArray::get(
+      MapNode(k, v),
+      nodes,
+      index
+    )
+      \node -> Map::node_is_red(
+      k,
+      v,
+      nodes,
+      node.right
+    ),
+  }
+}
+
+fn Map::left_left_is_red(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  index: i32
+) -> bool {
+  match index < 0 {
+    true => false,
+    false => layout.HeapArray::get(
+      MapNode(k, v),
+      nodes,
+      index
+    )
+      \node -> Map::left_is_red(k, v, nodes, node.left),
+  }
+}
+
+fn Map::rotate_left(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32
+) -> MapRoot(k, v) {
+  let root_node = layout.HeapArray::get(
+    MapNode(k, v),
+    nodes,
+    root
+  );
+  let child_index = root_node.right;
+  let child_node = layout.HeapArray::get(
+    MapNode(k, v),
+    nodes,
+    child_index
+  );
+  let moved_root = MapNode {
+    key: root_node.key,
+    value: root_node.value,
+    left: root_node.left,
+    right: child_node.left,
+    red: true,
+  };
+  let moved_child = MapNode {
+    key: child_node.key,
+    value: child_node.value,
+    left: root,
+    right: child_node.right,
+    red: root_node.red,
+  };
+  let with_root = layout.HeapArray::set(
+    MapNode(k, v),
+    nodes,
+    root,
+    moved_root
+  );
+  MapRoot {
+    nodes: layout.HeapArray::set(
+      MapNode(k, v),
+      with_root,
+      child_index,
+      moved_child
+    ),
+    root: child_index,
+  }
+}
+
+fn Map::rotate_right(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32
+) -> MapRoot(k, v) {
+  let root_node = layout.HeapArray::get(
+    MapNode(k, v),
+    nodes,
+    root
+  );
+  let child_index = root_node.left;
+  let child_node = layout.HeapArray::get(
+    MapNode(k, v),
+    nodes,
+    child_index
+  );
+  let moved_root = MapNode {
+    key: root_node.key,
+    value: root_node.value,
+    left: child_node.right,
+    right: root_node.right,
+    red: true,
+  };
+  let moved_child = MapNode {
+    key: child_node.key,
+    value: child_node.value,
+    left: child_node.left,
+    right: root,
+    red: root_node.red,
+  };
+  let with_root = layout.HeapArray::set(
+    MapNode(k, v),
+    nodes,
+    root,
+    moved_root
+  );
+  MapRoot {
+    nodes: layout.HeapArray::set(
+      MapNode(k, v),
+      with_root,
+      child_index,
+      moved_child
+    ),
+    root: child_index,
+  }
+}
+
+fn Map::flip_colors(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32
+) -> MapRoot(k, v) {
+  let root_node = layout.HeapArray::get(
+    MapNode(k, v),
+    nodes,
+    root
+  );
+  let left_node = layout.HeapArray::get(
+    MapNode(k, v),
+    nodes,
+    root_node.left
+  );
+  let right_node = layout.HeapArray::get(
+    MapNode(k, v),
+    nodes,
+    root_node.right
+  );
+  let next_root = MapNode {
+    key: root_node.key,
+    value: root_node.value,
+    left: root_node.left,
+    right: root_node.right,
+    red: not(root_node.red),
+  };
+  let next_left = MapNode {
+    key: left_node.key,
+    value: left_node.value,
+    left: left_node.left,
+    right: left_node.right,
+    red: not(left_node.red),
+  };
+  let next_right = MapNode {
+    key: right_node.key,
+    value: right_node.value,
+    left: right_node.left,
+    right: right_node.right,
+    red: not(right_node.red),
+  };
+  let with_root = layout.HeapArray::set(
+    MapNode(k, v),
+    nodes,
+    root,
+    next_root
+  );
+  let with_left = layout.HeapArray::set(
+    MapNode(k, v),
+    with_root,
+    root_node.left,
+    next_left
+  );
+  MapRoot {
+    nodes: layout.HeapArray::set(
+      MapNode(k, v),
+      with_left,
+      root_node.right,
+      next_right
+    ),
+    root,
+  }
+}
+
+fn Map::fix_up(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32
+) -> MapRoot(k, v) {
+  let rotate_left_needed = match Map::right_is_red(
+    k,
+    v,
+    nodes,
+    root
+  ) {
+    true => not(Map::left_is_red(k, v, nodes, root)),
+    false => false,
+  };
+  let left_fixed: MapRoot(k, v) = match rotate_left_needed {
+    true => Map::rotate_left(k, v, nodes, root),
+    false => MapRoot {nodes, root},
+  };
+  let rotate_right_needed = match Map::left_is_red(
+    k,
+    v,
+    left_fixed.nodes,
+    left_fixed.root
+  ) {
+    true => Map::left_left_is_red(
+      k,
+      v,
+      left_fixed.nodes,
+      left_fixed.root
+    ),
+    false => false,
+  };
+  let right_fixed: MapRoot(k, v) = match rotate_right_needed {
+    true => Map::rotate_right(
+      k,
+      v,
+      left_fixed.nodes,
+      left_fixed.root
+    ),
+    false => left_fixed,
+  };
+  let flip_needed = match Map::left_is_red(
+    k,
+    v,
+    right_fixed.nodes,
+    right_fixed.root
+  ) {
+    true => Map::right_is_red(
+      k,
+      v,
+      right_fixed.nodes,
+      right_fixed.root
+    ),
+    false => false,
+  };
+  match flip_needed {
+    true => Map::flip_colors(
+      k,
+      v,
+      right_fixed.nodes,
+      right_fixed.root
+    ),
+    false => right_fixed,
+  }
+}
+
+fn Map::insert(
+  const k: type,
+  const v: type,
+  xs: Map(k, v),
+  key: k,
+  value: v,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> Map(k, v) {
+  let inserted: InsertResult(k, v) = Map::insert_at(
+    k,
+    v,
+    xs.nodes,
+    xs.root,
+    key,
+    value,
+    compare
+  );
+  let black: MapRoot(k, v) = Map::black_root(
+    k,
+    v,
+    inserted.nodes,
+    inserted.root
+  );
+  Map {
+    nodes: black.nodes,
+    root: black.root,
+    len: match inserted.added {
+      true => xs.len + 1,
+      false => xs.len
+    },
+  }
+}
+
+fn Map::black_root(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32
+) -> MapRoot(k, v) {
+  match root < 0 {
+    true => MapRoot {nodes, root},
+    false => layout.HeapArray::get(
+      MapNode(k, v),
+      nodes,
+      root
+    )
+      \node -> Map::black_root_node(
+      k,
+      v,
+      nodes,
+      root,
+      node
+    ),
+  }
+}
+
+fn Map::black_root_node(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32,
+  node: MapNode(k, v)
+) -> MapRoot(k, v) {
+  MapRoot {
+    nodes: layout.HeapArray::set(
+      MapNode(k, v),
+      nodes,
+      root,
+      MapNode {
+        key: node.key,
+        value: node.value,
+        left: node.left,
+        right: node.right,
+        red: false,
+      }
+    ),
+    root,
+  }
+}
+
+fn Map::insert_at(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32,
+  key: k,
+  value: v,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> InsertResult(k, v) {
+  match root < 0 {
+    true => layout.HeapArray::len(
+      MapNode(k, v),
+      nodes
+    )
+      \index -> InsertResult {
+      nodes: layout.HeapArray::push(
+        MapNode(k, v),
+        nodes,
+        MapNode {key, value, left: - 1, right: - 1, red: true}
+      ),
+      root: index,
+      added: true,
+    },
+    false => Map::insert_existing(
+      k,
+      v,
+      nodes,
+      root,
+      key,
+      value,
+      compare
+    ),
+  }
+}
+
+fn Map::insert_existing(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32,
+  key: k,
+  value: v,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> InsertResult(k, v) {
+  let node = layout.HeapArray::get(
+    MapNode(k, v),
+    nodes,
+    root
+  );
+  match compare(key, node.key) {
+    Less => Map::insert_left(
+      k,
+      v,
+      nodes,
+      root,
+      node,
+      key,
+      value,
+      compare
+    ),
+    Greater => Map::insert_right(
+      k,
+      v,
+      nodes,
+      root,
+      node,
+      key,
+      value,
+      compare
+    ),
+    Equal => InsertResult {
+      nodes: layout.HeapArray::set(
+        MapNode(k, v),
+        nodes,
+        root,
+        MapNode {
+          key: node.key,
+          value,
+          left: node.left,
+          right: node.right,
+          red: node.red,
+        }
+      ),
+      root,
+      added: false,
+    },
+  }
+}
+
+fn Map::insert_left(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32,
+  node: MapNode(k, v),
+  key: k,
+  value: v,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> InsertResult(k, v) {
+  let inserted: InsertResult(k, v) = Map::insert_at(
+    k,
+    v,
+    nodes,
+    node.left,
+    key,
+    value,
+    compare
+  );
+  let with_child = layout.HeapArray::set(
+    MapNode(k, v),
+    inserted.nodes,
+    root,
+    MapNode {
+      key: node.key,
+      value: node.value,
+      left: inserted.root,
+      right: node.right,
+      red: node.red,
+    }
+  );
+  let fixed: MapRoot(k, v) = Map::fix_up(
+    k,
+    v,
+    with_child,
+    root
+  );
+  InsertResult {nodes: fixed.nodes, root: fixed.root, added: inserted.added}
+}
+
+fn Map::insert_right(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32,
+  node: MapNode(k, v),
+  key: k,
+  value: v,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> InsertResult(k, v) {
+  let inserted: InsertResult(k, v) = Map::insert_at(
+    k,
+    v,
+    nodes,
+    node.right,
+    key,
+    value,
+    compare
+  );
+  let with_child = layout.HeapArray::set(
+    MapNode(k, v),
+    inserted.nodes,
+    root,
+    MapNode {
+      key: node.key,
+      value: node.value,
+      left: node.left,
+      right: inserted.root,
+      red: node.red,
+    }
+  );
+  let fixed: MapRoot(k, v) = Map::fix_up(
+    k,
+    v,
+    with_child,
+    root
+  );
+  InsertResult {nodes: fixed.nodes, root: fixed.root, added: inserted.added}
+}
+
+fn Map::get(
+  const k: type,
+  const v: type,
+  xs: Map(k, v),
+  key: k,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> core.Option(v) {
+  Map::get_at(k, v, xs.nodes, xs.root, key, compare)
+}
+
+fn Map::get_at(
+  const k: type,
+  const v: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32,
+  key: k,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> core.Option(v) {
+  match root < 0 {
+    true => None,
+    false => layout.HeapArray::get(
+      MapNode(k, v),
+      nodes,
+      root
+    )
+      \node -> match compare(key, node.key) {
+      Less => Map::get_at(
+        k,
+        v,
+        nodes,
+        node.left,
+        key,
+        compare
+      ),
+      Greater => Map::get_at(
+        k,
+        v,
+        nodes,
+        node.right,
+        key,
+        compare
+      ),
+      Equal => option.some(node.value),
+    },
+  }
+}
+
+fn Map::contains(
+  const k: type,
+  const v: type,
+  xs: Map(k, v),
+  key: k,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> bool {
+  match Map::get(k, v, xs, key, compare) {
+    Some => true,
+    None => false
+  }
+}
+
+fn Map::fold_in_order(
+  const k: type,
+  const v: type,
+  const acc: type,
+  xs: Map(k, v),
+  initial: acc,
+  const f: fn(acc: acc, key: k, value: v) -> acc
+) -> acc {
+  Map::fold_in_order_at(
+    k,
+    v,
+    acc,
+    xs.nodes,
+    xs.root,
+    initial,
+    f
+  )
+}
+
+fn Map::fold_in_order_at(
+  const k: type,
+  const v: type,
+  const acc: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  root: i32,
+  initial: acc,
+  const f: fn(acc: acc, key: k, value: v) -> acc
+) -> acc {
+  match root < 0 {
+    true => initial,
+    false => layout.HeapArray::get(
+      MapNode(k, v),
+      nodes,
+      root
+    )
+      \node -> Map::fold_in_order_node(
+      k,
+      v,
+      acc,
+      nodes,
+      node,
+      initial,
+      f
+    ),
+  }
+}
+
+fn Map::fold_in_order_node(
+  const k: type,
+  const v: type,
+  const acc: type,
+  nodes: layout.HeapArray(MapNode(k, v)),
+  node: MapNode(k, v),
+  initial: acc,
+  const f: fn(acc: acc, key: k, value: v) -> acc
+) -> acc {
+  let left = Map::fold_in_order_at(
+    k,
+    v,
+    acc,
+    nodes,
+    node.left,
+    initial,
+    f
+  );
+  let current = f(left, node.key, node.value);
+  Map::fold_in_order_at(
+    k,
+    v,
+    acc,
+    nodes,
+    node.right,
+    current,
+    f
+  )
+}
+
+fn compare_i32(a: i32, b: i32) -> order.Ordering {
+  order.compare_i32(a, b)
+}

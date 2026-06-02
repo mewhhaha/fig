@@ -1,0 +1,67 @@
+const core = @import("prelude.core");
+const layout = @import("prelude.layout");
+const option = @import("prelude.option");
+
+type fn Queue(a: type) -> type {
+  let Queue = {
+    items: layout.HeapArray(a),
+    front: i32,
+  };
+  struct(Queue)
+}
+
+type fn Dequeued(a: type) -> type {
+  let Dequeued = {
+    value: a,
+    queue: Queue(a),
+  };
+  struct(Dequeued)
+}
+
+fn Queue::empty(const a: type) -> Queue(a) {
+  Queue {items: layout.HeapArray::empty(a), front: 0}
+}
+
+fn Queue::len(const a: type, xs: Queue(a)) -> i32 {
+  layout.HeapArray::len(a, xs.items) - xs.front
+}
+
+fn Queue::is_empty(const a: type, xs: Queue(a)) -> bool {
+  Queue::len(a, xs) <= 0
+}
+
+fn Queue::push_back(
+  const a: type,
+  xs: Queue(a),
+  value: a
+) -> Queue(a) {
+  Queue {
+    items: layout.HeapArray::push(a, xs.items, value),
+    front: xs.front
+  }
+}
+
+fn Queue::peek_front(const a: type, xs: Queue(a)) -> core.Option(a) {
+  match Queue::is_empty(a, xs) {
+    true => None,
+    false => option.some(layout.HeapArray::get(
+      a,
+      xs.items,
+      xs.front
+    )),
+  }
+}
+
+fn Queue::pop_front(const a: type, xs: Queue(a)) -> core.Option(Dequeued(a)) {
+  match Queue::is_empty(a, xs) {
+    true => None,
+    false => option.some(Dequeued {
+      value: layout.HeapArray::get(
+        a,
+        xs.items,
+        xs.front
+      ),
+      queue: Queue {items: xs.items, front: xs.front + 1},
+    }),
+  }
+}

@@ -229,6 +229,29 @@ Deno.test("stable memory ABI host calls heap arrays with JS arrays", async () =>
   assertEquals(host.call("main", [4, 5, 6]), [4, 5, 6]);
 });
 
+Deno.test("stable memory ABI host calls reclaim temporary heap array arguments", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    pub fn main(xs: layout.HeapArray(i32)) -> i32 {
+      layout.HeapArray::len(i32, xs)
+    }
+  `;
+
+  const fig = await instantiateFig(await wasmFromSource(source, { resolveModule }));
+  const host = createFigHost(fig.abi, fig.instance);
+  const objects = fig.instance.exports.fig_objects;
+  if (!(objects instanceof WebAssembly.Memory)) throw new Error("missing ABI object memory");
+  const before = new DataView(objects.buffer).getUint32(0, true);
+  const input = Array.from({ length: 4096 }, (_item, index) => index);
+
+  for (let index = 0; index < 64; index++) {
+    assertEquals(host.call("main", input), 4096);
+  }
+
+  const after = new DataView(objects.buffer).getUint32(0, true);
+  assertEquals(after, before);
+});
+
 Deno.test("stable memory ABI host calls option-like sums with JS variants", async () => {
   const source = `
     type fn Option(a: type) -> type {
@@ -237,6 +260,12 @@ Deno.test("stable memory ABI host calls option-like sums with JS variants", asyn
       union(None, Some)
     }
     pub fn main(x: Option(i32)) -> Option(i32) { x }
+    pub fn score(x: Option(i32)) -> i32 {
+      match x {
+        Some(value) => value + 10,
+        None => 1,
+      }
+    }
   `;
 
   const fig = await instantiateFig(await wasmFromSource(source));
@@ -244,6 +273,9 @@ Deno.test("stable memory ABI host calls option-like sums with JS variants", asyn
 
   assertEquals(host.call("main", { variant: "Some", value: 7 }), { variant: "Some", value: 7 });
   assertEquals(host.call("main", { variant: "None" }), { variant: "None" });
+  assertEquals(host.call("score", { variant: "Some", value: 0 }), 10);
+  assertEquals(host.call("score", { variant: "Some", value: 7 }), 17);
+  assertEquals(host.call("score", { variant: "None" }), 1);
 });
 
 Deno.test("stable memory ABI helpers write to the named buffer memory", async () => {

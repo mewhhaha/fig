@@ -1,0 +1,288 @@
+const core = @import("prelude.core");
+const layout = @import("prelude.layout");
+const option = @import("prelude.option");
+
+type fn Vec(a: type) -> type {
+  layout.HeapArray(a)
+}
+
+type fn Builder(a: type) -> type {
+  Vec(a)
+}
+
+type fn Slice(a: type) -> type {
+  let Slice = {
+    source: Vec(a),
+    start: i32,
+    len: i32,
+  };
+  struct(Slice)
+}
+
+fn Vec::new(const a: type, capacity: i32) -> Vec(a) {
+  layout.HeapArray::new(a, capacity)
+}
+
+fn Vec::empty(const a: type) -> Vec(a) {
+  layout.HeapArray::empty(a)
+}
+
+fn Vec::len(const a: type, xs: Vec(a)) -> i32 {
+  layout.HeapArray::len(a, xs)
+}
+
+fn Vec::capacity(const a: type, xs: Vec(a)) -> i32 {
+  layout.HeapArray::capacity(a, xs)
+}
+
+fn Vec::get(const a: type, xs: Vec(a), index: i32) -> a {
+  layout.HeapArray::get(a, xs, index)
+}
+
+fn Vec::set(
+  const a: type,
+  xs: Vec(a),
+  index: i32,
+  value: a
+) -> Vec(a) {
+  layout.HeapArray::set(a, xs, index, value)
+}
+
+fn Vec::push(const a: type, xs: Vec(a), value: a) -> Vec(a) {
+  layout.HeapArray::push(a, xs, value)
+}
+
+fn Vec::is_empty(const a: type, xs: Vec(a)) -> bool {
+  Vec::len(a, xs) == 0
+}
+
+fn Vec::map(
+  const a: type,
+  const b: type,
+  xs: Vec(a),
+  const f: fn(x: a) -> b
+) -> Vec(b) {
+  Vec::map_loop(
+    a,
+    b,
+    xs,
+    f,
+    0,
+    Vec::new(b, Vec::len(a, xs))
+  )
+}
+
+fn Vec::map_loop(
+  const a: type,
+  const b: type,
+  xs: Vec(a),
+  const f: fn(x: a) -> b,
+  index: i32,
+  out: Vec(b)
+) -> Vec(b) {
+  match index < Vec::len(a, xs) {
+    true => Vec::map_loop(
+      a,
+      b,
+      xs,
+      f,
+      index + 1,
+      Vec::push(b, out, f(Vec::get(a, xs, index)))
+    ),
+    false => out,
+  }
+}
+
+fn Vec::filter(
+  const a: type,
+  xs: Vec(a),
+  const pred: fn(x: a) -> bool
+) -> Vec(a) {
+  Vec::filter_loop(a, xs, pred, 0, Vec::empty(a))
+}
+
+fn Vec::filter_loop(
+  const a: type,
+  xs: Vec(a),
+  const pred: fn(x: a) -> bool,
+  index: i32,
+  out: Vec(a)
+) -> Vec(a) {
+  match index < Vec::len(a, xs) {
+    true => Vec::get(a, xs, index)
+      \value -> match pred(value) {
+      true => Vec::filter_loop(
+        a,
+        xs,
+        pred,
+        index + 1,
+        Vec::push(a, out, value)
+      ),
+      false => Vec::filter_loop(
+        a,
+        xs,
+        pred,
+        index + 1,
+        out
+      ),
+    },
+    false => out,
+  }
+}
+
+fn Vec::fold(
+  const a: type,
+  const b: type,
+  xs: Vec(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  Vec::fold_loop(a, b, xs, acc, f, 0)
+}
+
+fn Vec::fold_loop(
+  const a: type,
+  const b: type,
+  xs: Vec(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b,
+  index: i32
+) -> b {
+  match index < Vec::len(a, xs) {
+    true => Vec::fold_loop(
+      a,
+      b,
+      xs,
+      f(acc, Vec::get(a, xs, index)),
+      f,
+      index + 1
+    ),
+    false => acc,
+  }
+}
+
+fn Vec::find(
+  const a: type,
+  xs: Vec(a),
+  const pred: fn(x: a) -> bool
+) -> core.Option(a) {
+  Vec::find_loop(a, xs, pred, 0)
+}
+
+fn Vec::find_loop(
+  const a: type,
+  xs: Vec(a),
+  const pred: fn(x: a) -> bool,
+  index: i32
+) -> core.Option(a) {
+  match index < Vec::len(a, xs) {
+    true => Vec::get(a, xs, index)
+      \value -> match pred(value) {
+      true => option.some(value),
+      false => Vec::find_loop(a, xs, pred, index + 1),
+    },
+    false => None,
+  }
+}
+
+fn Vec::any(
+  const a: type,
+  xs: Vec(a),
+  const pred: fn(x: a) -> bool
+) -> bool {
+  match Vec::find(a, xs, pred) {
+    Some => true,
+    None => false
+  }
+}
+
+fn Vec::all(
+  const a: type,
+  xs: Vec(a),
+  const pred: fn(x: a) -> bool
+) -> bool {
+  Vec::all_loop(a, xs, pred, 0)
+}
+
+fn Vec::all_loop(
+  const a: type,
+  xs: Vec(a),
+  const pred: fn(x: a) -> bool,
+  index: i32
+) -> bool {
+  match index < Vec::len(a, xs) {
+    true => match pred(Vec::get(a, xs, index)) {
+      true => Vec::all_loop(a, xs, pred, index + 1),
+      false => false,
+    },
+    false => true,
+  }
+}
+
+fn Builder::start(const a: type, capacity: i32) -> Builder(a) {
+  Vec::new(a, capacity)
+}
+
+fn Builder::push(
+  const a: type,
+  builder: Builder(a),
+  value: a
+) -> Builder(a) {
+  Vec::push(a, builder, value)
+}
+
+fn Builder::finish(const a: type, builder: Builder(a)) -> Vec(a) {
+  builder
+}
+
+fn Slice::from_vec(const a: type, xs: Vec(a)) -> Slice(a) {
+  Slice {source: xs, start: 0, len: Vec::len(a, xs)}
+}
+
+fn Slice::range(
+  const a: type,
+  xs: Vec(a),
+  start: i32,
+  len: i32
+) -> Slice(a) {
+  Slice {source: xs, start, len}
+}
+
+fn Slice::len(const a: type, xs: Slice(a)) -> i32 {
+  xs.len
+}
+
+fn Slice::get(const a: type, xs: Slice(a), index: i32) -> a {
+  Vec::get(a, xs.source, xs.start + index)
+}
+
+fn Slice::fold(
+  const a: type,
+  const b: type,
+  xs: Slice(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  Slice::fold_loop(a, b, xs, acc, f, 0)
+}
+
+fn Slice::fold_loop(
+  const a: type,
+  const b: type,
+  xs: Slice(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b,
+  index: i32
+) -> b {
+  match index < xs.len {
+    true => Slice::fold_loop(
+      a,
+      b,
+      xs,
+      f(acc, Slice::get(a, xs, index)),
+      f,
+      index + 1
+    ),
+    false => acc,
+  }
+}

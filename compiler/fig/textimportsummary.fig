@@ -1,0 +1,277 @@
+const parser = @import("./parser.fig");
+const textlex = @import("./textlex.fig");
+const textmodel = @import("./textmodel.fig");
+
+type Context = struct {
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32,
+}
+
+type ResolutionRecord = struct {
+  module_hash: i32,
+  alias_hash: i32,
+  type_environment_signature: i32,
+  resolved_declared_type_signature: i32,
+  resolved_declared_abi_signature: i32,
+  resolved_value_body_type_signature: i32,
+  resolved_value_body_abi_signature: i32,
+  resolved_simple_body_type_check_signature: i32,
+  resolved_symbol_environment_signature: i32,
+  resolved_export_abi_signature: i32,
+}
+
+fn context(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> Context {
+  Context {
+    source: source,
+    import_source: import_source,
+    module_hash: module_hash,
+  }
+}
+
+fn Context::type_environment_signature(context_value: Context) -> i32 {
+  parser.text_direct_import_type_environment_signature(
+    context_value.source,
+    context_value.import_source,
+    context_value.module_hash
+  )
+}
+
+fn Context::resolved_declared_type_class_signature(context_value: Context) -> i32 {
+  parser.text_direct_import_resolved_declared_type_class_signature(
+    context_value.source,
+    context_value.import_source,
+    context_value.module_hash
+  )
+}
+
+fn Context::resolved_declared_abi_class_signature(context_value: Context) -> i32 {
+  parser.text_direct_import_resolved_declared_abi_class_signature(
+    context_value.source,
+    context_value.import_source,
+    context_value.module_hash
+  )
+}
+
+fn Context::resolved_value_body_type_class_signature(
+  context_value: Context
+) -> i32 {
+  parser.text_direct_import_resolved_value_body_type_class_signature(
+    context_value.source,
+    context_value.import_source,
+    context_value.module_hash
+  )
+}
+
+fn Context::resolved_value_body_abi_class_signature(
+  context_value: Context
+) -> i32 {
+  parser.text_direct_import_resolved_value_body_abi_class_signature(
+    context_value.source,
+    context_value.import_source,
+    context_value.module_hash
+  )
+}
+
+fn Context::resolved_simple_body_type_check_signature(
+  context_value: Context
+) -> i32 {
+  parser.text_direct_import_resolved_simple_body_type_check_signature(
+    context_value.source,
+    context_value.import_source,
+    context_value.module_hash
+  )
+}
+
+fn Context::resolved_symbol_environment_signature(context_value: Context) -> i32 {
+  parser.text_direct_import_resolved_symbol_environment_signature(
+    context_value.source,
+    context_value.import_source,
+    context_value.module_hash
+  )
+}
+
+fn Context::resolved_export_abi_signature(context_value: Context) -> i32 {
+  parser.text_direct_import_resolved_export_abi_signature(
+    context_value.source,
+    context_value.import_source,
+    context_value.module_hash
+  )
+}
+
+fn resolution_record_hash(
+  record: ResolutionRecord
+) -> i32 {
+  let with_module = textmodel.signature_mix(73, record.module_hash);
+  let with_alias = textmodel.signature_mix(with_module, record.alias_hash);
+  let with_type_env = textmodel.signature_mix(
+    with_alias,
+    record.type_environment_signature
+  );
+  let with_resolved_type = textmodel.signature_mix(
+    with_type_env,
+    record.resolved_declared_type_signature
+  );
+  let with_resolved_abi = textmodel.signature_mix(
+    with_resolved_type,
+    record.resolved_declared_abi_signature
+  );
+  let with_value_body_type = textmodel.signature_mix(
+    with_resolved_abi,
+    record.resolved_value_body_type_signature
+  );
+  let with_value_body_abi = textmodel.signature_mix(
+    with_value_body_type,
+    record.resolved_value_body_abi_signature
+  );
+  let with_simple_body_check = textmodel.signature_mix(
+    with_value_body_abi,
+    record.resolved_simple_body_type_check_signature
+  );
+  let with_symbol_environment = textmodel.signature_mix(
+    with_simple_body_check,
+    record.resolved_symbol_environment_signature
+  );
+  textmodel.signature_mix(
+    with_symbol_environment,
+    record.resolved_export_abi_signature
+  )
+}
+
+fn Context::record(context_value: Context, alias_hash: i32) -> ResolutionRecord {
+  ResolutionRecord {
+    module_hash: context_value.module_hash,
+    alias_hash: alias_hash,
+    type_environment_signature: Context::type_environment_signature(
+      context_value
+    ),
+    resolved_declared_type_signature: Context::resolved_declared_type_class_signature(
+      context_value
+    ),
+    resolved_declared_abi_signature: Context::resolved_declared_abi_class_signature(
+      context_value
+    ),
+    resolved_value_body_type_signature: Context::resolved_value_body_type_class_signature(
+      context_value
+    ),
+    resolved_value_body_abi_signature: Context::resolved_value_body_abi_class_signature(
+      context_value
+    ),
+    resolved_simple_body_type_check_signature: Context::resolved_simple_body_type_check_signature(
+      context_value
+    ),
+    resolved_symbol_environment_signature: Context::resolved_symbol_environment_signature(
+      context_value
+    ),
+    resolved_export_abi_signature: Context::resolved_export_abi_signature(
+      context_value
+    ),
+  }
+}
+
+fn Context::resolution_record_signature(context_value: Context) -> i32 {
+  let alias_hash = parser.text_direct_import_alias_hash(
+    context_value.source,
+    context_value.module_hash
+  );
+  match alias_hash == 0 {
+    true => 0,
+    false => resolution_record_hash(Context::record(context_value, alias_hash)),
+  }
+}
+
+fn type_environment_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::type_environment_signature(context(source, import_source, module_hash))
+}
+
+fn resolved_declared_type_class_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::resolved_declared_type_class_signature(
+    context(source, import_source, module_hash)
+  )
+}
+
+fn resolved_declared_abi_class_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::resolved_declared_abi_class_signature(
+    context(source, import_source, module_hash)
+  )
+}
+
+fn resolved_value_body_type_class_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::resolved_value_body_type_class_signature(
+    context(source, import_source, module_hash)
+  )
+}
+
+fn resolved_value_body_abi_class_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::resolved_value_body_abi_class_signature(
+    context(source, import_source, module_hash)
+  )
+}
+
+fn resolved_simple_body_type_check_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::resolved_simple_body_type_check_signature(
+    context(source, import_source, module_hash)
+  )
+}
+
+fn resolved_symbol_environment_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::resolved_symbol_environment_signature(
+    context(source, import_source, module_hash)
+  )
+}
+
+fn resolved_export_abi_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::resolved_export_abi_signature(
+    context(source, import_source, module_hash)
+  )
+}
+
+fn resolution_record_signature(
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  Context::resolution_record_signature(
+    context(source, import_source, module_hash)
+  )
+}
+
+fn entry(seed: i32) -> i32 {
+  seed + 1
+}

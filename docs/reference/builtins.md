@@ -35,9 +35,8 @@ The compiler classifies first-party special forms by the context where each one 
 | Declaration       | `@import`, `@external`                                                                       | top-level `const` declaration values              |
 | Static/type-level | `@type_*`, `@type_list_*`, `@shape_*`, `@require`, `@compile_error`, `@satisfies`, `@wgsl_*` | type and const evaluation, as documented per form |
 | Do strategy       | `@io`, `@monad`, `@applicative`                                                              | `do @strategy(...) { ... }`                       |
-| Annotation        | `@likely`, `@unlikely`                                                                       | branch hints on functions and match arms          |
+| Annotation        | `@likely`, `@unlikely`                                                                       | branch hints on match arms                        |
 | Instrumentation   | `@trace`, `@profile`                                                                         | runtime function bodies                           |
-| Rewrite           | `@assume`                                                                                    | final expression of `contract fn ... -> rewrite`  |
 | Internal support  | `@field`, `@replace_field`, `@empty`, `@inline_array_*`, `@branch_*`                         | compiler-generated or narrow library wrapper code |
 
 `static_for_slots` is an internal checked-AST form used by generated fixed-layout code. It is not
@@ -96,9 +95,8 @@ separate from the optimizer `--profile name` flag, which selects optimization bu
 
 `@require` emits a diagnostic when the first argument is not `true`.
 
-`@assume(lhs_template, rhs_template)` is not a general static builtin. It is a contract-body form
-accepted only as the final expression of `contract fn ... -> rewrite`, where both arguments must be
-matching const-function templates.
+`@assume` is not a source builtin. Rewrite assumptions are supplied by compiler plugins as
+const-function template strings.
 
 ## Type Reflection
 

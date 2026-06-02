@@ -69,8 +69,7 @@ fn quad2d_rect(
   y: i32,
   w: i32,
   h: i32,
-  z: i32,
-  color: i32
+  style: struct({z: i32, color: i32})
 ) -> Quad2dI32 {
   let x0 = x;
   let x_for_w = x;
@@ -92,14 +91,14 @@ fn quad2d_rect(
   let y01 = y0;
   let y12 = y_for_h_a + h_a;
   let y13 = y_for_h_b + h_b;
-  let z01 = z;
-  let z23 = z;
+  let z01 = style.z;
+  let z23 = style.z;
   let z0 = z01;
   let z1 = z01;
   let z2 = z23;
   let z3 = z23;
-  let color01 = color;
-  let color23 = color;
+  let color01 = style.color;
+  let color23 = style.color;
   let color0 = color01;
   let color1 = color01;
   let color2 = color23;
@@ -270,10 +269,9 @@ fn emit_rect2d(
   y: i32,
   w: i32,
   h: i32,
-  z: i32,
-  color: i32
+  style: struct({z: i32, color: i32})
 ) -> Geometry2dI32 {
-  emit_quad2d(quad2d_rect(x, y, w, h, z, color))
+  emit_quad2d(quad2d_rect(x, y, w, h, style))
 }
 
 fn emit_rect2d_batch(
@@ -282,11 +280,10 @@ fn emit_rect2d_batch(
   y: i32,
   w: i32,
   h: i32,
-  z: i32,
-  color: i32
+  style: struct({z: i32, color: i32})
 ) -> Geometry2dBatchI32(capacity) {
   emit_quad2d_batch(
     capacity,
-    quad2d_rect(x, y, w, h, z, color)
+    quad2d_rect(x, y, w, h, style)
   )
 }

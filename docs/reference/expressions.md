@@ -2,7 +2,7 @@
 
 Expressions include literals, variables, calls, field access, indexing, constructors, shape values,
 tuple values, collection literals, matches, `if` sugar, binary operators, ranges, blocks, and
-pipe-bind.
+pipe-bind. `rec(...)` is a checked tail-recursive step for the current runtime function.
 
 ```fig
 add(1, 2)
@@ -17,14 +17,62 @@ if ready { 1 } else { 0 }
 1 .. 4
 ```
 
+## Tail Recursion
+
+Use `rec(...)` in a function tail position to re-enter the current runtime function with new runtime
+parameter values:
+
+```fig
+fn sum(n: i32, acc: i32) -> i32 {
+  match n {
+    0 => acc,
+    _ => rec(n - 1, acc + n),
+  }
+}
+```
+
+`rec(...)` must be returned directly from a tail position, and its argument count must match the
+function's runtime parameter count. It is invalid in call arguments, arithmetic operands, local
+initializers, const-function literals, and top-level bindings.
+
 ## Match
 
-Use `match` for variants, literals, and other ordered pattern dispatch. Function clauses are also
-ordered and can be used for literal and wildcard dispatch.
+Use `match` for variants, literals, refined-domain typed patterns, guards, and other ordered pattern
+dispatch. Numeric enum members are patterns too, and bare enum variants are inferred when the
+scrutinee has a known enum type.
 
 ```fig
 fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
   match value { Some(inner) => inner, None => fallback }
+}
+
+fn clamp_domain(value: i32) -> i32 {
+  match value {
+    n: i32(0..100) => n,
+    _ if value < 0 => 0,
+    _ => 100,
+  }
+}
+
+type Status = enum(i32) {Ready = 1, Done = 2}
+
+fn status_score(status: Status) -> i32 {
+  match status {
+    Ready => 10,
+    Done => 20,
+    _ => 0,
+  }
+}
+```
+
+When several runtime inputs define the cases, use a function match body. It keeps the function
+signature single and puts deconstruction beside the branch results:
+
+```fig
+fn score(left: bool, right: bool) -> i32 match {
+  true, true => 3,
+  true, false => 1,
+  _, _ => 0,
 }
 ```
 
@@ -192,7 +240,7 @@ Player {
 ```
 
 Source-level static slot generation is not part of the expression language. Write explicit record or
-product slots, or express fixed repetition through recursive function clauses over refined domains.
+product slots, or express fixed repetition through recursive helpers that match refined domains.
 
 ## Tuples and Collections
 
@@ -230,8 +278,10 @@ let ys: Layout.InlineArrayList(4, i32) = #[0, ...tail];
 
 ## Operators
 
-The parser accepts these binary operator symbols: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`,
-`>`, `>=`, `&&`, `||`, `^^`, `<>`, `<$>`, `<*>`, and `>>=`.
+The parser accepts operator symbols made from the operator character set
+`+ - * / % < > = ! & | ^ $`. Operator symbols are not compiler features by themselves; they become
+meaningful only through visible operator declarations, except for primitive operators implemented
+directly for primitive types.
 
 Ranges use dedicated `start .. end` syntax. `..` is not an overloadable operator.
 
@@ -239,4 +289,6 @@ Primitive operators are available for primitive types where implemented. Other o
 resolved through visible operator declarations, commonly imported through `prelude.operators` or
 `prelude.std`.
 
-Type expressions support `==` and `!=` for compile-time comparison.
+Type expressions parse the same operator token. The checker currently evaluates only primitive
+type-level operators such as `==`, `!=`, and literal-type union `|`; other type-expression operators
+are rejected as not type-evaluable.

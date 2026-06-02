@@ -11,7 +11,11 @@ export interface ParseOptions {
 }
 
 export async function parse(source: string, options: ParseOptions = {}): Promise<Program> {
-  return parseWithOffset(source, source, 0, options);
+  return parseSync(source, options);
+}
+
+export function parseSync(source: string, options: ParseOptions = {}): Program {
+  return parseWithOffsetSync(source, source, 0, options);
 }
 
 export async function parseFragment(
@@ -20,15 +24,15 @@ export async function parseFragment(
   spanOffset: number,
   options: ParseOptions = {},
 ): Promise<Program> {
-  return parseWithOffset(source, fullSource, spanOffset, options);
+  return parseWithOffsetSync(source, fullSource, spanOffset, options);
 }
 
-async function parseWithOffset(
+function parseWithOffsetSync(
   source: string,
   fullSource: string,
   spanOffset: number,
   options: ParseOptions,
-): Promise<Program> {
+): Program {
   const lines = new SourceLineMap(fullSource);
   const result = traceSync(
     options.trace,

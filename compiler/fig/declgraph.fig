@@ -1,0 +1,348 @@
+const ast = @import("./ast.fig");
+const checker = @import("./checker.fig");
+const diagnostic = @import("./diagnostic.fig");
+const span = @import("./span.fig");
+
+type NodeKind = union {
+  NodeFunction, NodeValue, NodeType, NodeImport
+}
+
+type EdgeKind = union {
+  ValueDependency, TypeDependency, ImportDependency
+}
+
+type ResolutionState = union {
+  Pending, Resolved, Failed(diagnostics: diagnostic.DiagnosticBag)
+}
+
+type DeclNode = struct {
+  node_id: i32,
+  name: ast.SymbolId,
+  decl: ast.Decl,
+  kind: NodeKind,
+  declared_type: checker.Type,
+  inferred_type: checker.Type,
+  state: ResolutionState,
+  span: span.Span,
+}
+
+type DeclEdge = struct {
+  from_id: i32,
+  to_id: i32,
+  kind: EdgeKind,
+  weight: i32,
+}
+
+type SymbolGraph = struct {
+  first: DeclNode,
+  second: DeclNode,
+  third: DeclNode,
+  fourth: DeclNode,
+  first_edge: DeclEdge,
+  second_edge: DeclEdge,
+  third_edge: DeclEdge,
+  node_count: i32,
+  edge_count: i32,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type ResolutionOrder = struct {
+  first_id: i32,
+  second_id: i32,
+  third_id: i32,
+  fourth_id: i32,
+  count: i32,
+  cycle_count: i32,
+}
+
+fn node_kind(value: NodeKind) -> i32 match {
+  NodeFunction => 1,
+  NodeValue => 2,
+  NodeType => 3,
+  NodeImport => 4,
+}
+
+fn edge_kind(value: EdgeKind) -> i32 match {
+  ValueDependency => 11,
+  TypeDependency => 13,
+  ImportDependency => 17,
+}
+
+fn state_score(value: ResolutionState) -> i32 match {
+  Pending => 0,
+  Resolved => 1,
+  Failed(diagnostics) => 2 + diagnostic.bag_score(diagnostics),
+}
+
+fn state_diagnostics(value: ResolutionState) -> diagnostic.DiagnosticBag match {
+  Pending => diagnostic.empty(),
+  Resolved => diagnostic.empty(),
+  Failed(diagnostics) => diagnostics,
+}
+
+fn kind_from_decl(decl: ast.Decl) -> NodeKind {
+  match ast.decl_tag(decl) {
+    1 => NodeFunction,
+    2 => NodeValue,
+    3 => NodeValue,
+    4 => NodeType,
+    _ => NodeImport,
+  }
+}
+
+fn declared_type(decl: ast.Decl) -> checker.Type {
+  match ast.decl_tag(decl) {
+    1 => checker.function_type(
+      ast.decl_param_count(decl),
+      checker.type_from_symbol(ast.decl_type_name(decl))
+    ),
+    2 => checker.type_from_symbol(ast.decl_type_name(decl)),
+    3 => checker.type_from_symbol(ast.decl_type_name(decl)),
+    4 => checker.product_type(ast.decl_param_count(decl)),
+    _ => checker.unknown_type(),
+  }
+}
+
+fn node(
+  node_id: i32,
+  decl: ast.Decl,
+  source_span: span.Span
+) -> DeclNode {
+  DeclNode {
+    node_id: node_id,
+    name: ast.decl_name(decl),
+    decl: decl,
+    kind: kind_from_decl(decl),
+    declared_type: declared_type(decl),
+    inferred_type: checker.unknown_type(),
+    state: Pending,
+    span: source_span,
+  }
+}
+
+fn placeholder_node() -> DeclNode {
+  node(
+    0,
+    ast.source_import_decl(0, 0),
+    span.make(0, 0, 0, 0)
+  )
+}
+
+fn edge(from_id: i32, to_id: i32, kind: EdgeKind) -> DeclEdge {
+  DeclEdge {
+    from_id: from_id,
+    to_id: to_id,
+    kind: kind,
+    weight: from_id + to_id + edge_kind(kind),
+  }
+}
+
+fn placeholder_edge() -> DeclEdge {
+  edge(0, 0, ImportDependency)
+}
+
+fn graph(
+  first: DeclNode,
+  second: DeclNode,
+  third: DeclNode,
+  fourth: DeclNode,
+  first_edge: DeclEdge,
+  second_edge: DeclEdge,
+  third_edge: DeclEdge
+) -> SymbolGraph {
+  SymbolGraph {
+    first: first,
+    second: second,
+    third: third,
+    fourth: fourth,
+    first_edge: first_edge,
+    second_edge: second_edge,
+    third_edge: third_edge,
+    node_count: 4,
+    edge_count: 3,
+    diagnostics: diagnostic.empty(),
+  }
+}
+
+fn from_seed(seed: i32) -> SymbolGraph {
+  let type_decl = ast.type_decl(seed, 2);
+  let value_decl = ast.let_decl(
+    seed + 1,
+    ast.named_type(seed),
+    ast.int_expr(seed + 10)
+  );
+  let const_decl = ast.const_decl(
+    seed + 2,
+    ast.named_type(seed + 1),
+    ast.var_expr(seed + 1)
+  );
+  let fn_decl = ast.fn_decl(
+    seed + 3,
+    1,
+    ast.named_type(seed + 2),
+    ast.block(ast.var_expr(seed + 2))
+  );
+  graph(
+    node(
+      1,
+      type_decl,
+      span.make(seed, seed + 2, 1, 1)
+    ),
+    node(
+      2,
+      value_decl,
+      span.make(seed + 2, seed + 4, 2, 1)
+    ),
+    node(
+      3,
+      const_decl,
+      span.make(seed + 4, seed + 6, 3, 1)
+    ),
+    node(
+      4,
+      fn_decl,
+      span.make(seed + 6, seed + 8, 4, 1)
+    ),
+    edge(2, 1, TypeDependency),
+    edge(3, 2, ValueDependency),
+    edge(4, 3, ValueDependency)
+  )
+}
+
+fn has_back_edge(edge: DeclEdge) -> bool {
+  edge.to_id >= edge.from_id
+}
+
+fn cycle_count(graph: SymbolGraph) -> i32 {
+  (match has_back_edge(graph.first_edge) {
+    true => 1,
+    false => 0,
+  })
+    +(match has_back_edge(graph.second_edge) {
+    true => 1,
+    false => 0,
+  })
+    +(match has_back_edge(graph.third_edge) {
+    true => 1,
+    false => 0,
+  })
+}
+
+fn resolution_order(graph: SymbolGraph) -> ResolutionOrder {
+  ResolutionOrder {
+    first_id: graph.first.node_id,
+    second_id: graph.second.node_id,
+    third_id: graph.third.node_id,
+    fourth_id: graph.fourth.node_id,
+    count: graph.node_count,
+    cycle_count: cycle_count(graph),
+  }
+}
+
+fn bind_node(env: checker.CheckEnv, node: DeclNode) -> checker.CheckEnv {
+  checker.define_symbol(
+    env,
+    node.name,
+    node.declared_type
+  )
+}
+
+fn resolve_node(env: checker.CheckEnv, node: DeclNode) -> DeclNode {
+  let checked = checker.check_declaration(
+    env,
+    node.decl,
+    node.span
+  );
+  let next_state: ResolutionState = match diagnostic.count(checked.env.diagnostics)
+    == 0 {
+    true => Resolved,
+    false => Failed(checked.env.diagnostics),
+  };
+  DeclNode {
+    node_id: node.node_id,
+    name: node.name,
+    decl: node.decl,
+    kind: node.kind,
+    declared_type: node.declared_type,
+    inferred_type: checked.value_type,
+    state: next_state,
+    span: node.span,
+  }
+}
+
+fn resolve(graph: SymbolGraph) -> SymbolGraph {
+  let env0 = checker.empty_env();
+  let first = resolve_node(env0, graph.first);
+  let env1 = bind_node(env0, first);
+  let second = resolve_node(env1, graph.second);
+  let env2 = bind_node(env1, second);
+  let third = resolve_node(env2, graph.third);
+  let env3 = bind_node(env2, third);
+  let fourth = resolve_node(env3, graph.fourth);
+  SymbolGraph {
+    first: first,
+    second: second,
+    third: third,
+    fourth: fourth,
+    first_edge: graph.first_edge,
+    second_edge: graph.second_edge,
+    third_edge: graph.third_edge,
+    node_count: graph.node_count,
+    edge_count: graph.edge_count,
+    diagnostics: diagnostic.merge(
+      diagnostic.merge(
+        state_diagnostics(first.state),
+        state_diagnostics(second.state)
+      ),
+      diagnostic.merge(
+        state_diagnostics(third.state),
+        state_diagnostics(fourth.state)
+      )
+    ),
+  }
+}
+
+fn node_score(node: DeclNode) -> i32 {
+  node.node_id
+    + node.name
+    + ast.decl_score(node.decl)
+    + node_kind(node.kind)
+    + checker.type_score(node.declared_type)
+    + checker.type_score(node.inferred_type)
+    + state_score(node.state)
+    + span.width(node.span)
+}
+
+fn edge_score(edge: DeclEdge) -> i32 {
+  edge.from_id
+    + edge.to_id
+    + edge_kind(edge.kind)
+    + edge.weight
+}
+
+fn order_score(order: ResolutionOrder) -> i32 {
+  order.first_id
+    + order.second_id
+    + order.third_id
+    + order.fourth_id
+    + order.count
+    + order.cycle_count
+}
+
+fn graph_score(graph: SymbolGraph) -> i32 {
+  node_score(graph.first)
+    + node_score(graph.second)
+    + node_score(graph.third)
+    + node_score(graph.fourth)
+    + edge_score(graph.first_edge)
+    + edge_score(graph.second_edge)
+    + edge_score(graph.third_edge)
+    + graph.node_count
+    + graph.edge_count
+    + diagnostic.bag_score(graph.diagnostics)
+    + order_score(resolution_order(graph))
+}
+
+fn entry(seed: i32) -> i32 {
+  graph_score(resolve(from_seed(seed)))
+}

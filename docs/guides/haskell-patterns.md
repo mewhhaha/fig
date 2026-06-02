@@ -11,7 +11,8 @@ The practical rule is:
 - Typeclasses become `type fn` contracts plus attached members.
 - Typeclass dictionaries become erased `const _proof` parameters or transparent annotations.
 - Higher-kinded constraints use type constructor parameters.
-- `fmap`, `<*>`, `>>=`, and `do` are available through explicit contracts and do strategies.
+- `fmap`, `<$>`, `<&>`, `<*>`, `<**>`, `>>=`, `=<<`, `>=>`, `<=<`, and `do`
+  are available through explicit contracts and do strategies.
 - Effects are ordinary typed values handled by explicit runners.
 
 ## Algebraic Data Types
@@ -326,6 +327,14 @@ pub fn mapped() -> Box(i32) {
 pub fn bound() -> Box(i32) {
   Box {value: 1} >>= wrap
 }
+
+pub fn flipped_bound() -> Box(i32) {
+  wrap =<< Box {value: 1}
+}
+
+pub fn kleisli() -> Box(i32) {
+  (wrap >=> wrap)(1)
+}
 ```
 
 Operator calls resolve through visible declarations, usually from `prelude.operators` or
@@ -334,18 +343,10 @@ fails.
 
 ## Rewrite Laws
 
-Haskell laws are normally comments, tests, or equational reasoning. Fig can encode some laws as
-rewrite contracts:
-
-```fig
-contract fn Monad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
-  const proof = Monad(T);
-  @assume(\m -> T::bind(m, T::pure), \m -> m)
-}
-```
-
-Rewrite contracts are compiler-facing facts. They use `contract fn ... -> rewrite` and must end in
-`@assume(lhs_template, rhs_template)`.
+Haskell laws are normally comments, tests, or equational reasoning. Fig keeps optimizer-facing laws
+out of source code: rewrite rules are compiler-plugin facts expressed as const-function template
+strings. The default prelude rewrite plugin supplies the standard `Functor`, `Applicative`,
+`Monad`, and `Monoid` simplifications when rewrite assumptions are enabled.
 
 ## Strictness and Evaluation
 
@@ -426,4 +427,4 @@ When porting Haskell-shaped code to Fig:
 6. Use `do @monad` for dependent sequencing.
 7. Use `prelude.monad` or `prelude.effect` for Reader/State-style programs.
 8. Use `match` and union constructors for ordinary ADT handling.
-9. Add rewrite contracts only for laws the compiler should know.
+9. Add compiler-plugin rewrite rules only for laws the compiler should know.

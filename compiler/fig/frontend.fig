@@ -1,0 +1,949 @@
+const ast = @import("./ast.fig");
+const artifact = @import("./artifact.fig");
+const checker = @import("./checker.fig");
+const combinator = @import("./combinator.fig");
+const declgraph = @import("./declgraph.fig");
+const diagnostic = @import("./diagnostic.fig");
+const lexer = @import("./lexer.fig");
+const layout = @import("prelude.layout");
+const lowering = @import("./lowering.fig");
+const modgraph = @import("./modgraph.fig");
+const parser = @import("./parser.fig");
+const resolver = @import("./resolver.fig");
+const span = @import("./span.fig");
+const stream = @import("./stream.fig");
+const textgrammar = @import("./textgrammar.fig");
+const textimportsummary = @import("./textimportsummary.fig");
+const textfacts = @import("./textfacts.fig");
+const textlex = @import("./textlex.fig");
+const textmodel = @import("./textmodel.fig");
+const textsummary = @import("./textsummary.fig");
+const token = @import("./token.fig");
+const wasm = @import("./wasm.fig");
+
+type FrontendSummary = struct {
+  token_score: i32,
+  declaration_score: i32,
+  diagnostic_score: i32,
+  check_score: i32,
+  lower_score: i32,
+  wasm_score: i32,
+  module_score: i32,
+  resolver_score: i32,
+  artifact_score: i32,
+  declgraph_score: i32,
+  textlex_score: i32,
+  textparse_score: i32,
+  program_score: i32,
+  program_check_score: i32,
+  program_lower_score: i32,
+  function_program_score: i32,
+  function_check_score: i32,
+  function_lower_score: i32,
+  program_wasm_score: i32,
+  function_wasm_score: i32,
+  multi_function_score: i32,
+  multi_function_check_score: i32,
+  multi_function_lower_score: i32,
+  multi_function_wasm_score: i32,
+  zero_function_score: i32,
+  zero_function_check_score: i32,
+  zero_function_lower_score: i32,
+  zero_function_wasm_score: i32,
+  three_function_score: i32,
+  three_function_check_score: i32,
+  three_function_lower_score: i32,
+  three_function_wasm_score: i32,
+  pub_function_score: i32,
+  pub_function_check_score: i32,
+  pub_function_lower_score: i32,
+  pub_function_wasm_score: i32,
+  source_width: i32,
+}
+
+type TextCompileState = struct {
+  current: combinator.ParseState,
+  env: checker.CheckEnv,
+  score: i32,
+  count: i32,
+}
+
+type TextSource = struct {
+  stream: textlex.TextTokenStream,
+  codes: layout.HeapArray(i32),
+  seed: i32,
+}
+
+fn TextSource::from_codes(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> TextSource {
+  TextSource {
+    stream: textlex.stream_from_buffer(
+      textlex.buffer_from_codes(seed, seed * 16, codes)
+    ),
+    codes: codes,
+    seed: seed,
+  }
+}
+
+fn TextSource::compile(input: TextSource) -> i32 {
+  let source_span = textlex.source_span(input.stream);
+  textlex.stream_score(input.stream)
+    + compile_text_declaration_loop(
+    input.stream,
+    source_span,
+    input.seed,
+    initial_text_compile_state(input.stream)
+  )
+}
+
+fn TextSource::summary(
+  input: TextSource,
+  summary_kind: textmodel.SummaryKind,
+  summary_arg: i32
+) -> i32 {
+  textsummary.run(
+    input.stream,
+    summary_kind,
+    summary_arg
+  )
+}
+
+fn TextSource::checked_declaration_type_signature(input: TextSource) -> i32 {
+  textfacts.checked_declaration_type_signature(input.stream)
+}
+
+fn TextSource::checked_diagnostic_signature(input: TextSource) -> i32 {
+  textfacts.checked_diagnostic_signature(input.stream)
+}
+
+fn TextSource::lowered_declaration_signature(input: TextSource) -> i32 {
+  textfacts.lowered_declaration_signature(input.stream)
+}
+
+fn TextSource::checked_declaration_record_signature(input: TextSource) -> i32 {
+  textfacts.checked_declaration_record_signature(input.stream)
+}
+
+fn TextSource::checked_expression_record_signature(input: TextSource) -> i32 {
+  textfacts.checked_expression_record_signature(input.stream)
+}
+
+fn TextSource::checked_expression_child_record_signature(input: TextSource) -> i32 {
+  textfacts.checked_expression_child_record_signature(input.stream)
+}
+
+fn TextSource::checked_local_environment_signature(input: TextSource) -> i32 {
+  textfacts.checked_local_environment_signature(input.stream)
+}
+
+fn TextSource::checked_expression_shape_signature(input: TextSource) -> i32 {
+  textfacts.checked_expression_shape_signature(input.stream)
+}
+
+fn TextSource::lowered_export_record_signature(input: TextSource) -> i32 {
+  textfacts.lowered_export_record_signature(input.stream)
+}
+
+fn TextSource::wasm_function_record_signature(input: TextSource) -> i32 {
+  textfacts.wasm_function_record_signature(input.stream, input.codes, input.seed)
+}
+
+fn TextSource::wasm_section_record_signature(input: TextSource) -> i32 {
+  textfacts.wasm_section_record_signature(input.stream, input.codes, input.seed)
+}
+
+fn TextSource::wasm_byte_record_signature(input: TextSource) -> i32 {
+  textfacts.wasm_byte_record_signature(input.stream, input.codes, input.seed)
+}
+
+fn summarize(
+  first: token.Token,
+  decl: ast.Decl,
+  source_span: span.Span
+) -> FrontendSummary {
+  FrontendSummary {
+    token_score: token.token_score(first),
+    declaration_score: ast.decl_score(decl),
+    diagnostic_score: diagnostic.bag_score(diagnostic.empty()),
+    check_score: 0,
+    lower_score: 0,
+    wasm_score: 0,
+    module_score: 0,
+    resolver_score: 0,
+    artifact_score: 0,
+    declgraph_score: 0,
+    textlex_score: 0,
+    textparse_score: 0,
+    program_score: 0,
+    program_check_score: 0,
+    program_lower_score: 0,
+    function_program_score: 0,
+    function_check_score: 0,
+    function_lower_score: 0,
+    program_wasm_score: 0,
+    function_wasm_score: 0,
+    multi_function_score: 0,
+    multi_function_check_score: 0,
+    multi_function_lower_score: 0,
+    multi_function_wasm_score: 0,
+    zero_function_score: 0,
+    zero_function_check_score: 0,
+    zero_function_lower_score: 0,
+    zero_function_wasm_score: 0,
+    three_function_score: 0,
+    three_function_check_score: 0,
+    three_function_lower_score: 0,
+    three_function_wasm_score: 0,
+    pub_function_score: 0,
+    pub_function_check_score: 0,
+    pub_function_lower_score: 0,
+    pub_function_wasm_score: 0,
+    source_width: span.width(source_span),
+  }
+}
+
+fn summary_score(summary: FrontendSummary) -> i32 {
+  summary.token_score
+    + summary.declaration_score
+    + summary.diagnostic_score
+    + summary.check_score
+    + summary.lower_score
+    + summary.wasm_score
+    + summary.module_score
+    + summary.resolver_score
+    + summary.artifact_score
+    + summary.declgraph_score
+    + summary.textlex_score
+    + summary.textparse_score
+    + summary.program_score
+    + summary.program_check_score
+    + summary.program_lower_score
+    + summary.function_program_score
+    + summary.function_check_score
+    + summary.function_lower_score
+    + summary.program_wasm_score
+    + summary.function_wasm_score
+    + summary.multi_function_score
+    + summary.multi_function_check_score
+    + summary.multi_function_lower_score
+    + summary.multi_function_wasm_score
+    + summary.zero_function_score
+    + summary.zero_function_check_score
+    + summary.zero_function_lower_score
+    + summary.zero_function_wasm_score
+    + summary.three_function_score
+    + summary.three_function_check_score
+    + summary.three_function_lower_score
+    + summary.three_function_wasm_score
+    + summary.pub_function_score
+    + summary.pub_function_check_score
+    + summary.pub_function_lower_score
+    + summary.pub_function_wasm_score
+    + summary.source_width
+}
+
+fn declaration_from_token(
+  kind: token.TokenKind,
+  seed: i32
+) -> ast.Decl {
+  parser.declaration_from_kind(
+    token.declaration_kind(kind),
+    seed
+  )
+}
+
+fn text_compile_state(
+  current: combinator.ParseState,
+  env: checker.CheckEnv,
+  score: i32,
+  count: i32
+) -> TextCompileState {
+  TextCompileState {
+    current: current,
+    env: env,
+    score: score,
+    count: count,
+  }
+}
+
+fn initial_text_compile_state(source: textlex.TextTokenStream) -> TextCompileState {
+  text_compile_state(
+    combinator.state(0, textlex.length(source)),
+    checker.empty_env(),
+    0,
+    0
+  )
+}
+
+fn finish_text_compile_state(state: TextCompileState) -> i32 {
+  state.score + state.count
+}
+
+fn text_compile_declaration_score(
+  frame: parser.DeclFrame,
+  checked: checker.CheckedDecl,
+  lowered: lowering.LoweredDecl,
+  emitted: wasm.WasmModule
+) -> i32 {
+  parser.frame_score(frame)
+    + checker.checked_decl_score(checked)
+    + lowering.lowered_decl_score(lowered)
+    + wasm.module_score(emitted)
+    + wasm.binary_score(wasm.encode_binary(emitted))
+}
+
+fn stop_text_compile_state(
+  source: textlex.TextTokenStream,
+  state: TextCompileState,
+  error: combinator.ParseError
+) -> TextCompileState {
+  text_compile_state(
+    combinator.state(textlex.length(source), textlex.length(source)),
+    state.env,
+    state.score + combinator.error_score(error),
+    state.count
+  )
+}
+
+fn advance_text_compile_state(
+  state: TextCompileState,
+  next: combinator.ParseState,
+  env: checker.CheckEnv,
+  score: i32
+) -> TextCompileState {
+  text_compile_state(
+    next,
+    env,
+    state.score + score,
+    state.count + 1
+  )
+}
+
+fn compile_text_declaration_step(
+  source: textlex.TextTokenStream,
+  source_span: span.Span,
+  seed: i32,
+  state: TextCompileState
+) -> TextCompileState {
+  compile_text_declaration_step_result(
+    source,
+    source_span,
+    state,
+    parser.parse_text_declaration_stream(
+      state.current,
+      source,
+      seed + state.count
+    )
+  )
+}
+
+fn compile_text_declaration_step_result(
+  source: textlex.TextTokenStream,
+  source_span: span.Span,
+  state: TextCompileState,
+  fourth: combinator.Parser(parser.DeclFrame)
+) -> TextCompileState match {
+  source, source_span, state, Ok(result) => checker.check_declaration(
+    state.env,
+    result.value.decl,
+    source_span
+  ) \checked -> lowering.lower_declaration(
+    checked,
+    source_span
+  ) \lowered -> wasm.emit_module(lowered, source_span) \emitted -> advance_text_compile_state(
+    state,
+    parser.next_text_declaration_state(result.state, source),
+    checked.env,
+    text_compile_declaration_score(
+      result.value,
+      checked,
+      lowered,
+      emitted
+    )
+  ),
+  source, _source_span, state, Err(error) => stop_text_compile_state(source, state, error),
+}
+
+fn compile_text_declaration_loop(
+  source: textlex.TextTokenStream,
+  source_span: span.Span,
+  seed: i32,
+  state: TextCompileState
+) -> i32 {
+  finish_text_compile_state(
+    compile_text_declaration_state_loop(
+      source,
+      source_span,
+      seed,
+      state
+    )
+  )
+}
+
+fn compile_text_declaration_state_loop(
+  source: textlex.TextTokenStream,
+  source_span: span.Span,
+  seed: i32,
+  state: TextCompileState
+) -> TextCompileState {
+  match state.current.cursor < textlex.length(source) {
+    false => state,
+    true => compile_text_declaration_state_loop(
+      source,
+      source_span,
+      seed,
+      compile_text_declaration_step(
+        source,
+        source_span,
+        seed,
+        state
+      )
+    ),
+  }
+}
+
+fn compile_text_declaration_count_loop(
+  source: textlex.TextTokenStream,
+  source_span: span.Span,
+  seed: i32,
+  state: TextCompileState
+) -> i32 {
+  let done = compile_text_declaration_state_loop(
+    source,
+    source_span,
+    seed,
+    state
+  );
+  done.count
+}
+
+fn compile_code_array(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::compile(TextSource::from_codes(codes, seed))
+}
+
+fn compile_code_summary(
+  codes: layout.HeapArray(i32),
+  seed: i32,
+  summary_kind: textmodel.SummaryKind,
+  summary_arg: i32
+) -> i32 {
+  TextSource::summary(
+    TextSource::from_codes(codes, seed),
+    summary_kind,
+    summary_arg
+  )
+}
+
+fn compile_checked_declaration_type_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::checked_declaration_type_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_checked_diagnostic_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::checked_diagnostic_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_lowered_declaration_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::lowered_declaration_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_checked_declaration_record_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::checked_declaration_record_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_checked_expression_record_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::checked_expression_record_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_checked_expression_child_record_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::checked_expression_child_record_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_checked_local_environment_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::checked_local_environment_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_checked_expression_shape_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::checked_expression_shape_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_lowered_export_record_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::lowered_export_record_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_wasm_function_record_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::wasm_function_record_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_wasm_section_record_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::wasm_section_record_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_wasm_byte_record_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::wasm_byte_record_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_wasm_byte_buffer(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> layout.HeapArray(i32) {
+  let source = TextSource::from_codes(codes, seed);
+  textfacts.wasm_byte_buffer(source.stream, codes, seed)
+}
+
+fn compile_direct_import_type_environment_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.type_environment_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_direct_import_resolved_declared_type_class_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.resolved_declared_type_class_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_direct_import_resolved_declared_abi_class_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.resolved_declared_abi_class_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_direct_import_resolved_value_body_type_class_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.resolved_value_body_type_class_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_direct_import_resolved_value_body_abi_class_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.resolved_value_body_abi_class_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_direct_import_resolved_simple_body_type_check_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.resolved_simple_body_type_check_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_direct_import_resolved_symbol_environment_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.resolved_symbol_environment_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_direct_import_resolved_export_abi_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.resolved_export_abi_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_direct_import_resolution_record_signature(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  let source = TextSource::from_codes(codes, 0);
+  let import_source = TextSource::from_codes(import_codes, 0);
+  textimportsummary.resolution_record_signature(
+    source.stream,
+    import_source.stream,
+    module_hash
+  )
+}
+
+fn compile_frontend_slice(seed: i32) -> FrontendSummary {
+  let module_graph = modgraph.from_seed(seed);
+  let resolve_step = resolver.resolve(
+    resolver.state(module_graph),
+    resolver.request(
+      modgraph.root_id(module_graph),
+      modgraph.root_import_id(module_graph),
+      span.make(seed, seed + 1, 1, 1)
+    )
+  );
+  let module_source = resolver.step_source(resolve_step);
+  let source = stream.from_source(module_source);
+  let first = stream.token_at(source, 0);
+  let kind = first.kind;
+  let source_span = source.source_span;
+  let parsed = parser.parse_declaration_stream(
+    combinator.state(0, stream.length(source)),
+    source,
+    seed
+  );
+  let fallback = declaration_from_token(kind, seed);
+  let decl = parser.parsed_decl_or_fallback(
+    parsed,
+    fallback
+  );
+  let summary = summarize(first, decl, source_span);
+  let checked = checker.check_declaration(
+    checker.seed_env(seed),
+    decl,
+    source_span
+  );
+  let lowered = lowering.lower_declaration(
+    checked,
+    source_span
+  );
+  let emitted = wasm.emit_module(lowered, source_span);
+  let artifacts = artifact.compile_graph(seed);
+  let symbol_graph = declgraph.resolve(declgraph.from_seed(seed));
+  let text_tokens = textlex.stream_from_buffer(textlex.from_seed(seed));
+  let function_tokens = textlex.stream_from_buffer(
+    textlex.function_from_seed(seed + 1)
+  );
+  let multi_function_tokens = textlex.stream_from_buffer(
+    textlex.multi_function_from_seed(seed + 2)
+  );
+  let zero_function_tokens = textlex.stream_from_buffer(
+    textlex.zero_function_from_seed(seed + 3)
+  );
+  let three_function_tokens = textlex.stream_from_buffer(
+    textlex.three_function_from_seed(seed + 4)
+  );
+  let pub_function_tokens = textlex.stream_from_buffer(
+    textlex.pub_function_from_seed(seed + 5)
+  );
+  let text_parsed = textgrammar.parse_declaration(
+    combinator.state(0, textlex.length(text_tokens)),
+    text_tokens,
+    seed + 1
+  );
+  let text_program = textgrammar.parse_program(
+    combinator.state(0, textlex.length(text_tokens)),
+    text_tokens,
+    seed,
+    seed + 2
+  );
+  let text_program_value = textgrammar.program_or_fallback(
+    text_program,
+    ast.program(
+      seed,
+      0,
+      ast.empty_decl(),
+      ast.empty_decl(),
+      textlex.source_span(text_tokens)
+    )
+  );
+  let checked_text_program = checker.check_program(
+    checker.empty_env(),
+    text_program_value,
+    text_program_value.span
+  );
+  let lowered_text_program = lowering.lower_program(
+    checked_text_program,
+    text_program_value.span
+  );
+  let emitted_text_program = wasm.emit_program(
+    lowered_text_program,
+    text_program_value.span
+  );
+  let function_program = textgrammar.parse_program(
+    combinator.state(0, textlex.length(function_tokens)),
+    function_tokens,
+    seed + 1,
+    seed + 3
+  );
+  let function_program_value = textgrammar.program_or_fallback(
+    function_program,
+    ast.program(
+      seed + 1,
+      0,
+      ast.empty_decl(),
+      ast.empty_decl(),
+      textlex.source_span(function_tokens)
+    )
+  );
+  let checked_function_program = checker.check_program(
+    checker.empty_env(),
+    function_program_value,
+    function_program_value.span
+  );
+  let lowered_function_program = lowering.lower_program(
+    checked_function_program,
+    function_program_value.span
+  );
+  let emitted_function_program = wasm.emit_program(
+    lowered_function_program,
+    function_program_value.span
+  );
+  let multi_function_program = textgrammar.parse_program(
+    combinator.state(0, textlex.length(multi_function_tokens)),
+    multi_function_tokens,
+    seed + 2,
+    seed + 4
+  );
+  let multi_function_program_value = textgrammar.program_or_fallback(
+    multi_function_program,
+    ast.program(
+      seed + 2,
+      0,
+      ast.empty_decl(),
+      ast.empty_decl(),
+      textlex.source_span(multi_function_tokens)
+    )
+  );
+  let checked_multi_function_program = checker.check_program(
+    checker.empty_env(),
+    multi_function_program_value,
+    multi_function_program_value.span
+  );
+  let lowered_multi_function_program = lowering.lower_program(
+    checked_multi_function_program,
+    multi_function_program_value.span
+  );
+  let emitted_multi_function_program = wasm.emit_program(
+    lowered_multi_function_program,
+    multi_function_program_value.span
+  );
+  let zero_function_program = textgrammar.parse_program(
+    combinator.state(0, textlex.length(zero_function_tokens)),
+    zero_function_tokens,
+    seed + 3,
+    seed + 5
+  );
+  let zero_function_program_value = textgrammar.program_or_fallback(
+    zero_function_program,
+    ast.program(
+      seed + 3,
+      0,
+      ast.empty_decl(),
+      ast.empty_decl(),
+      textlex.source_span(zero_function_tokens)
+    )
+  );
+  let checked_zero_function_program = checker.check_program(
+    checker.empty_env(),
+    zero_function_program_value,
+    zero_function_program_value.span
+  );
+  let lowered_zero_function_program = lowering.lower_program(
+    checked_zero_function_program,
+    zero_function_program_value.span
+  );
+  let emitted_zero_function_program = wasm.emit_program(
+    lowered_zero_function_program,
+    zero_function_program_value.span
+  );
+  let three_function_program = textgrammar.parse_program(
+    combinator.state(0, textlex.length(three_function_tokens)),
+    three_function_tokens,
+    seed + 4,
+    seed + 6
+  );
+  let three_function_program_value = textgrammar.program_or_fallback(
+    three_function_program,
+    ast.program(
+      seed + 4,
+      0,
+      ast.empty_decl(),
+      ast.empty_decl(),
+      textlex.source_span(three_function_tokens)
+    )
+  );
+  let checked_three_function_program = checker.check_program(
+    checker.empty_env(),
+    three_function_program_value,
+    three_function_program_value.span
+  );
+  let lowered_three_function_program = lowering.lower_program(
+    checked_three_function_program,
+    three_function_program_value.span
+  );
+  let emitted_three_function_program = wasm.emit_program(
+    lowered_three_function_program,
+    three_function_program_value.span
+  );
+  let pub_function_program = textgrammar.parse_program(
+    combinator.state(0, textlex.length(pub_function_tokens)),
+    pub_function_tokens,
+    seed + 5,
+    seed + 7
+  );
+  let pub_function_program_value = textgrammar.program_or_fallback(
+    pub_function_program,
+    ast.program(
+      seed + 5,
+      0,
+      ast.empty_decl(),
+      ast.empty_decl(),
+      textlex.source_span(pub_function_tokens)
+    )
+  );
+  let checked_pub_function_program = checker.check_program(
+    checker.empty_env(),
+    pub_function_program_value,
+    pub_function_program_value.span
+  );
+  let lowered_pub_function_program = lowering.lower_program(
+    checked_pub_function_program,
+    pub_function_program_value.span
+  );
+  let emitted_pub_function_program = wasm.emit_program(
+    lowered_pub_function_program,
+    pub_function_program_value.span
+  );
+  FrontendSummary {
+    token_score: summary.token_score,
+    declaration_score: summary.declaration_score,
+    diagnostic_score: parser.parsed_diagnostic_score(parsed),
+    check_score: checker.checked_decl_score(checked),
+    lower_score: lowering.lowered_decl_score(lowered),
+    wasm_score: wasm.module_score(emitted)
+      + wasm.binary_score(wasm.encode_binary(emitted)),
+    module_score: modgraph.graph_score(module_graph),
+    resolver_score: resolver.step_score(resolve_step),
+    artifact_score: artifact.table_score(artifacts),
+    declgraph_score: declgraph.graph_score(symbol_graph),
+    textlex_score: textlex.stream_score(text_tokens)
+      + textlex.stream_score(function_tokens)
+      + textlex.stream_score(multi_function_tokens)
+      + textlex.stream_score(zero_function_tokens)
+      + textlex.stream_score(three_function_tokens)
+      + textlex.stream_score(pub_function_tokens),
+    textparse_score: textgrammar.declaration_score(text_parsed)
+      + textgrammar.declaration_diagnostic_score(text_parsed),
+    program_score: textgrammar.program_score(text_program),
+    program_check_score: checker.checked_program_score(checked_text_program),
+    program_lower_score: lowering.lowered_program_score(lowered_text_program),
+    function_program_score: textgrammar.program_score(function_program),
+    function_check_score: checker.checked_program_score(checked_function_program),
+    function_lower_score: lowering.lowered_program_score(lowered_function_program),
+    program_wasm_score: wasm.module_score(emitted_text_program)
+      + wasm.binary_score(wasm.encode_binary(emitted_text_program)),
+    function_wasm_score: wasm.module_score(emitted_function_program)
+      + wasm.binary_score(wasm.encode_binary(emitted_function_program)),
+    multi_function_score: textgrammar.program_score(multi_function_program),
+    multi_function_check_score: checker.checked_program_score(checked_multi_function_program),
+    multi_function_lower_score: lowering.lowered_program_score(lowered_multi_function_program),
+    multi_function_wasm_score: wasm.module_score(emitted_multi_function_program)
+      + wasm.binary_score(wasm.encode_binary(emitted_multi_function_program)),
+    zero_function_score: textgrammar.program_score(zero_function_program),
+    zero_function_check_score: checker.checked_program_score(checked_zero_function_program),
+    zero_function_lower_score: lowering.lowered_program_score(lowered_zero_function_program),
+    zero_function_wasm_score: wasm.module_score(emitted_zero_function_program)
+      + wasm.binary_score(wasm.encode_binary(emitted_zero_function_program)),
+    three_function_score: textgrammar.program_score(three_function_program),
+    three_function_check_score: checker.checked_program_score(checked_three_function_program),
+    three_function_lower_score: lowering.lowered_program_score(lowered_three_function_program),
+    three_function_wasm_score: wasm.module_score(emitted_three_function_program)
+      + wasm.binary_score(wasm.encode_binary(emitted_three_function_program)),
+    pub_function_score: textgrammar.program_score(pub_function_program),
+    pub_function_check_score: checker.checked_program_score(checked_pub_function_program),
+    pub_function_lower_score: lowering.lowered_program_score(lowered_pub_function_program),
+    pub_function_wasm_score: wasm.module_score(emitted_pub_function_program)
+      + wasm.binary_score(wasm.encode_binary(emitted_pub_function_program)),
+    source_width: summary.source_width,
+  }
+}
+
+fn entry(seed: i32) -> i32 {
+  summary_score(compile_frontend_slice(seed))
+}

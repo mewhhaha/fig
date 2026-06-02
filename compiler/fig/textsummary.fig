@@ -1,0 +1,76 @@
+const combinator = @import("./combinator.fig");
+const parser = @import("./parser.fig");
+const textlex = @import("./textlex.fig");
+const textmodel = @import("./textmodel.fig");
+
+type Context = struct {
+  kind: textmodel.SummaryKind,
+  arg: i32,
+}
+
+fn context(kind: textmodel.SummaryKind, arg: i32) -> Context {
+  Context {kind: kind, arg: arg}
+}
+
+fn Context::apply_decl(
+  context_value: Context,
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  total: i32,
+  result: combinator.Reply(parser.DeclFrame)
+) -> i32 {
+  parser.text_declaration_summary_total_for_slice(
+    textmodel.decl_slice(
+      source,
+      current.cursor,
+      result.state.cursor,
+      result.value.decl
+    ),
+    parser.text_summary_context(0, context_value.kind, context_value.arg),
+    total
+  )
+}
+
+fn Context::scan(
+  context_value: Context,
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        source,
+        parser.next_text_declaration_state(result.state, source),
+        Context::apply_decl(context_value, source, current, total, result)
+      ),
+    },
+  }
+}
+
+fn run(
+  source: textlex.TextTokenStream,
+  kind: textmodel.SummaryKind,
+  arg: i32
+) -> i32 {
+  let window = textmodel.full_window(source);
+  Context::scan(
+    context(kind, arg),
+    source,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn entry(seed: i32) -> i32 {
+  seed
+    + textmodel.SummaryKind::Declarations
+    + textmodel.SummaryKind::ResolvedValueBodyAbiClassSignature
+}

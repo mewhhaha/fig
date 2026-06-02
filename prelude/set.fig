@@ -1,0 +1,40 @@
+const map = @import("prelude.map");
+const order = @import("prelude.order");
+
+type fn Set(k: type) -> type {
+  map.Map(k, bool)
+}
+
+fn Set::empty(const k: type) -> Set(k) {
+  map.Map::empty(k, bool)
+}
+
+fn Set::len(const k: type, xs: Set(k)) -> i32 {
+  map.Map::len(k, bool, xs)
+}
+
+fn Set::is_empty(const k: type, xs: Set(k)) -> bool {
+  map.Map::is_empty(k, bool, xs)
+}
+
+fn Set::insert(
+  const k: type,
+  xs: Set(k),
+  key: k,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> Set(k) {
+  map.Map::insert(k, bool, xs, key, true, compare)
+}
+
+fn Set::contains(
+  const k: type,
+  xs: Set(k),
+  key: k,
+  const compare: fn(a: k, b: k) -> order.Ordering
+) -> bool {
+  map.Map::contains(k, bool, xs, key, compare)
+}
+
+fn Set::compare_i32(a: i32, b: i32) -> order.Ordering {
+  order.compare_i32(a, b)
+}

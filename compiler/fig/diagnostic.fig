@@ -1,0 +1,175 @@
+const combinator = @import("./combinator.fig");
+const span = @import("./span.fig");
+
+type Severity = union {
+  Error, Warning, Note
+}
+
+type SeverityScore = enum(i32) {
+  Error = 100,
+  Warning = 10,
+  Note = 1
+}
+
+type DiagnosticCode = union {
+  CodeUnexpectedEnd, CodeUnexpectedToken, CodeAmbiguousParse,
+  CodeUnknownSymbol, CodeTypeMismatch, CodeMissingModule
+}
+
+type DiagnosticCodeScore = enum(i32) {
+  UnexpectedEnd = 11,
+  UnexpectedToken = 13,
+  AmbiguousParse = 17,
+  UnknownSymbol = 19,
+  TypeMismatch = 23,
+  MissingModule = 29
+}
+
+type Diagnostic = struct {
+  code: DiagnosticCode,
+  severity: Severity,
+  span: span.Span,
+  primary: i32,
+  secondary: i32,
+}
+
+type DiagnosticBag = struct {
+  first: Diagnostic,
+  second: Diagnostic,
+  count: i32,
+  error_count: i32,
+}
+
+fn severity_score(value: Severity) -> i32 match {
+  Error => SeverityScore::Error,
+  Warning => SeverityScore::Warning,
+  Note => SeverityScore::Note,
+}
+
+fn code_score(value: DiagnosticCode) -> i32 match {
+  CodeUnexpectedEnd => DiagnosticCodeScore::UnexpectedEnd,
+  CodeUnexpectedToken => DiagnosticCodeScore::UnexpectedToken,
+  CodeAmbiguousParse => DiagnosticCodeScore::AmbiguousParse,
+  CodeUnknownSymbol => DiagnosticCodeScore::UnknownSymbol,
+  CodeTypeMismatch => DiagnosticCodeScore::TypeMismatch,
+  CodeMissingModule => DiagnosticCodeScore::MissingModule,
+}
+
+fn make(
+  code: DiagnosticCode,
+  severity: Severity,
+  source_span: span.Span,
+  primary: i32,
+  secondary: i32
+) -> Diagnostic {
+  Diagnostic {
+    code: code,
+    severity: severity,
+    span: source_span,
+    primary: primary,
+    secondary: secondary,
+  }
+}
+
+fn placeholder() -> Diagnostic {
+  make(
+    CodeUnexpectedEnd,
+    Note,
+    span.make(0, 0, 0, 0),
+    0,
+    0
+  )
+}
+
+fn empty() -> DiagnosticBag {
+  DiagnosticBag {
+    first: placeholder(),
+    second: placeholder(),
+    count: 0,
+    error_count: 0,
+  }
+}
+
+fn is_error(value: Severity) -> i32 match {
+  Error => 1,
+  Warning => 0,
+  Note => 0,
+}
+
+fn push(bag: DiagnosticBag, diagnostic: Diagnostic) -> DiagnosticBag {
+  match bag.count {
+    0 => DiagnosticBag {
+      first: diagnostic,
+      second: bag.second,
+      count: 1,
+      error_count: bag.error_count + is_error(diagnostic.severity),
+    },
+    1 => DiagnosticBag {
+      first: bag.first,
+      second: diagnostic,
+      count: 2,
+      error_count: bag.error_count + is_error(diagnostic.severity),
+    },
+    _ => DiagnosticBag {
+      first: bag.first,
+      second: bag.second,
+      count: bag.count + 1,
+      error_count: bag.error_count + is_error(diagnostic.severity),
+    },
+  }
+}
+
+fn code_from_parse_error(error: combinator.ParseError) -> DiagnosticCode {
+  match combinator.error_tag(error) {
+    1 => CodeUnexpectedEnd,
+    2 => CodeUnexpectedToken,
+    _ => CodeAmbiguousParse,
+  }
+}
+
+fn from_parse_error(error: combinator.ParseError) -> Diagnostic {
+  make(
+    code_from_parse_error(error),
+    Error,
+    combinator.error_span(error),
+    combinator.error_expected(error),
+    combinator.error_actual(error)
+  )
+}
+
+fn diagnostic_score(diagnostic: Diagnostic) -> i32 {
+  code_score(diagnostic.code)
+    + severity_score(diagnostic.severity)
+    + span.width(diagnostic.span)
+    + diagnostic.primary
+    - diagnostic.secondary
+}
+
+fn bag_score(bag: DiagnosticBag) -> i32 {
+  diagnostic_score(bag.first)
+    + diagnostic_score(bag.second)
+    + bag.count
+    + bag.error_count
+}
+
+fn merge(left: DiagnosticBag, right: DiagnosticBag) -> DiagnosticBag {
+  match right.count {
+    0 => left,
+    1 => push(left, right.first),
+    _ => push(push(left, right.first), right.second),
+  }
+}
+
+fn count(bag: DiagnosticBag) -> i32 {
+  bag.count
+}
+
+fn entry(seed: i32) -> i32 {
+  let source_span = span.make(seed, seed + 3, 1, 1);
+  let error = combinator.UnexpectedToken(
+    1,
+    0,
+    source_span
+  );
+  bag_score(push(empty(), from_parse_error(error)))
+}

@@ -55,12 +55,14 @@ Deno.test("golden WAT for multi-arm match", async () => {
   );
 });
 
-Deno.test("golden WAT for literal function clauses", async () => {
+Deno.test("golden WAT for literal function match bodies", async () => {
   assertEquals(
     await watFromSource(
       `
-      fn something_n(1: i32) -> i32 { 10 }
-      fn something_n(a: i32) -> i32 { a }
+      fn something_n(a: i32) -> i32 match {
+        1 => 10,
+        a => a,
+      }
       pub fn main() -> i32 { something_n(2) }
     `,
       { optMode: "release" },

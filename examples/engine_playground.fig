@@ -225,8 +225,7 @@ fn emit_render_item(item: RenderItem2d) -> RenderBatch {
     item.transform.y,
     item.sprite.w,
     item.sprite.h,
-    item.transform.z,
-    item.sprite.color
+    {z: item.transform.z, color: item.sprite.color}
   )
 }
 

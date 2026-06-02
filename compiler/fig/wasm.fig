@@ -1,0 +1,473 @@
+const ast = @import("./ast.fig");
+const checker = @import("./checker.fig");
+const diagnostic = @import("./diagnostic.fig");
+const lowering = @import("./lowering.fig");
+const span = @import("./span.fig");
+
+type WasmValType = union {
+  WasmNoVal, WasmI32, WasmI64, WasmExternRef
+}
+
+type WasmInstr = union {
+  InstrNop, InstrConst(value: i32), InstrLocalGet(index: i32),
+  InstrCall(index: i32), InstrReturn, InstrDrop, InstrTrap(code: i32)
+}
+
+type WasmFunc = struct {
+  name: ast.SymbolId,
+  param_count: i32,
+  result: WasmValType,
+  first: WasmInstr,
+  second: WasmInstr,
+  third: WasmInstr,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type WasmModule = struct {
+  first: WasmFunc,
+  second: WasmFunc,
+  function_count: i32,
+  export_count: i32,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type WasmSectionKind = union {
+  SectionType, SectionFunction, SectionExport, SectionCode
+}
+
+type WasmByte = struct {
+  value: i32,
+}
+
+type WasmBytes = struct {
+  first: WasmByte,
+  second: WasmByte,
+  third: WasmByte,
+  fourth: WasmByte,
+  length: i32,
+  checksum: i32,
+}
+
+type WasmSection = struct {
+  kind: WasmSectionKind,
+  payload: WasmBytes,
+  size: i32,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type WasmBinary = struct {
+  magic: i32,
+  version: i32,
+  type_section: WasmSection,
+  function_section: WasmSection,
+  export_section: WasmSection,
+  code_section: WasmSection,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+fn byte(value: i32) -> WasmByte {
+  WasmByte {value: value % 256}
+}
+
+fn byte_score(value: WasmByte) -> i32 {
+  value.value
+}
+
+fn bytes4(
+  first: i32,
+  second: i32,
+  third: i32,
+  fourth: i32,
+  length: i32
+) -> WasmBytes {
+  let first_byte = byte(first);
+  let second_byte = byte(second);
+  let third_byte = byte(third);
+  let fourth_byte = byte(fourth);
+  WasmBytes {
+    first: first_byte,
+    second: second_byte,
+    third: third_byte,
+    fourth: fourth_byte,
+    length: length,
+    checksum: byte_score(first_byte)
+      + byte_score(second_byte) * 3
+      + byte_score(third_byte) * 5
+      + byte_score(fourth_byte) * 7
+      + length * 11,
+  }
+}
+
+fn bytes_score(value: WasmBytes) -> i32 {
+  byte_score(value.first)
+    + byte_score(value.second)
+    + byte_score(value.third)
+    + byte_score(value.fourth)
+    + value.length
+    + value.checksum
+}
+
+fn section_kind_score(value: WasmSectionKind) -> i32 match {
+  SectionType => 1,
+  SectionFunction => 3,
+  SectionExport => 7,
+  SectionCode => 10,
+}
+
+fn val_type_score(value: WasmValType) -> i32 match {
+  WasmNoVal => 0,
+  WasmI32 => 1,
+  WasmI64 => 2,
+  WasmExternRef => 3,
+}
+
+fn instr_score(value: WasmInstr) -> i32 match {
+  InstrNop => 0,
+  InstrConst(value) => value + 11,
+  InstrLocalGet(index) => index + 17,
+  InstrCall(index) => index + 23,
+  InstrReturn => 29,
+  InstrDrop => 31,
+  InstrTrap(code) => code + 37,
+}
+
+fn val_type_byte(value: WasmValType) -> i32 match {
+  WasmNoVal => 64,
+  WasmI32 => 127,
+  WasmI64 => 126,
+  WasmExternRef => 111,
+}
+
+fn result_arity(value: WasmValType) -> i32 match {
+  WasmNoVal => 0,
+  WasmI32 => 1,
+  WasmI64 => 1,
+  WasmExternRef => 1,
+}
+
+fn instr_opcode(value: WasmInstr) -> i32 match {
+  InstrNop => 1,
+  InstrConst(_) => 65,
+  InstrLocalGet(_) => 32,
+  InstrCall(_) => 16,
+  InstrReturn => 15,
+  InstrDrop => 26,
+  InstrTrap(_) => 0,
+}
+
+fn instr_immediate(value: WasmInstr) -> i32 match {
+  InstrNop => 0,
+  InstrConst(value) => value,
+  InstrLocalGet(index) => index,
+  InstrCall(index) => index,
+  InstrReturn => 0,
+  InstrDrop => 0,
+  InstrTrap(code) => code,
+}
+
+fn val_type_for_abi(abi: lowering.AbiClass) -> WasmValType {
+  match lowering.abi_tag(abi) {
+    1 => WasmI32,
+    2 => WasmExternRef,
+    3 => WasmI32,
+    _ => WasmNoVal,
+  }
+}
+
+fn instr_from_value(value: lowering.LoweredValue) -> WasmInstr {
+  match lowering.value_tag(value) {
+    1 => InstrConst(lowering.value_primary(value)),
+    2 => InstrConst(
+      lowering.value_primary(value)
+        + lowering.value_secondary(value)
+    ),
+    3 => InstrCall(lowering.value_primary(value)),
+    _ => InstrDrop,
+  }
+}
+
+fn terminator_for_result(value: WasmValType) -> WasmInstr match {
+  WasmNoVal => InstrDrop,
+  WasmI32 => InstrReturn,
+  WasmI64 => InstrReturn,
+  WasmExternRef => InstrReturn,
+}
+
+fn func_score(value: WasmFunc) -> i32 {
+  value.name
+    + value.param_count
+    + val_type_score(value.result)
+    + instr_score(value.first)
+    + instr_score(value.second)
+    + instr_score(value.third)
+    + diagnostic.bag_score(value.diagnostics)
+}
+
+fn active_second_func_score(value: WasmModule) -> i32 {
+  match value.function_count > 1 {
+    true => func_score(value.second),
+    false => 0,
+  }
+}
+
+fn module_score(value: WasmModule) -> i32 {
+  func_score(value.first)
+    + active_second_func_score(value)
+    + value.function_count
+    + value.export_count
+    + diagnostic.bag_score(value.diagnostics)
+}
+
+fn section_score(value: WasmSection) -> i32 {
+  section_kind_score(value.kind)
+    + bytes_score(value.payload)
+    + value.size
+    + diagnostic.bag_score(value.diagnostics)
+}
+
+fn binary_score(value: WasmBinary) -> i32 {
+  value.magic
+    + value.version
+    + section_score(value.type_section)
+    + section_score(value.function_section)
+    + section_score(value.export_section)
+    + section_score(value.code_section)
+    + diagnostic.bag_score(value.diagnostics)
+}
+
+fn emit_function(
+  lowered: lowering.LoweredDecl,
+  _source_span: span.Span
+) -> WasmFunc {
+  let result = val_type_for_abi(lowered.abi);
+  WasmFunc {
+    name: lowered.name,
+    param_count: 0,
+    result: result,
+    first: instr_from_value(lowered.value),
+    second: terminator_for_result(result),
+    third: InstrNop,
+    diagnostics: lowered.diagnostics,
+  }
+}
+
+fn empty_function() -> WasmFunc {
+  WasmFunc {
+    name: 0,
+    param_count: 0,
+    result: WasmNoVal,
+    first: InstrNop,
+    second: InstrDrop,
+    third: InstrNop,
+    diagnostics: diagnostic.empty(),
+  }
+}
+
+fn emit_module(
+  lowered: lowering.LoweredDecl,
+  source_span: span.Span
+) -> WasmModule {
+  let first = emit_function(lowered, source_span);
+  WasmModule {
+    first: first,
+    second: empty_function(),
+    function_count: 1,
+    export_count: 1,
+    diagnostics: lowered.diagnostics,
+  }
+}
+
+fn program_function_count(program: ast.Program) -> i32 {
+  match program.declaration_count > 1 {
+    true => 2,
+    false => 1,
+  }
+}
+
+fn program_module_diagnostics(
+  program: ast.Program,
+  first: WasmFunc,
+  second: WasmFunc
+) -> diagnostic.DiagnosticBag {
+  match program.declaration_count > 1 {
+    true => diagnostic.merge(
+      first.diagnostics,
+      second.diagnostics
+    ),
+    false => first.diagnostics,
+  }
+}
+
+fn emit_program(
+  lowered: lowering.LoweredProgram,
+  source_span: span.Span
+) -> WasmModule {
+  let first = emit_function(
+    lowered.entry,
+    source_span
+  );
+  let second = emit_function(
+    lowered.secondary,
+    source_span
+  );
+  WasmModule {
+    first: first,
+    second: second,
+    function_count: program_function_count(lowered.program),
+    export_count: program_function_count(lowered.program),
+    diagnostics: program_module_diagnostics(
+      lowered.program,
+      first,
+      second
+    ),
+  }
+}
+
+fn section(
+  kind: WasmSectionKind,
+  payload: WasmBytes,
+  diagnostics: diagnostic.DiagnosticBag
+) -> WasmSection {
+  WasmSection {
+    kind: kind,
+    payload: payload,
+    size: payload.length + 2,
+    diagnostics: diagnostics,
+  }
+}
+
+fn encode_type_section(function: WasmFunc) -> WasmSection {
+  section(
+    SectionType,
+    bytes4(
+      96,
+      function.param_count,
+      result_arity(function.result),
+      val_type_byte(function.result),
+      4
+    ),
+    function.diagnostics
+  )
+}
+
+fn encode_function_section(value: WasmModule) -> WasmSection {
+  section(
+    SectionFunction,
+    bytes4(
+      value.function_count,
+      0,
+      0,
+      0,
+      2
+    ),
+    value.diagnostics
+  )
+}
+
+fn encode_export_section(value: WasmModule) -> WasmSection {
+  section(
+    SectionExport,
+    bytes4(
+      value.export_count,
+      value.first.name,
+      0,
+      0,
+      4
+    ),
+    value.diagnostics
+  )
+}
+
+fn body_size(function: WasmFunc) -> i32 {
+  1
+    + instr_score(function.first) % 7
+    + instr_score(function.second) % 7
+    + instr_score(function.third) % 7
+}
+
+fn second_body_size(value: WasmModule) -> i32 {
+  match value.function_count > 1 {
+    true => body_size(value.second),
+    false => 0,
+  }
+}
+
+fn second_opcode(value: WasmModule) -> i32 {
+  match value.function_count > 1 {
+    true => instr_opcode(value.second.first),
+    false => 0,
+  }
+}
+
+fn encode_code_section(value: WasmModule) -> WasmSection {
+  let function = value.first;
+  section(
+    SectionCode,
+    bytes4(
+      value.function_count,
+      body_size(function) + second_body_size(value),
+      instr_opcode(function.first),
+      instr_opcode(function.second)
+        + instr_immediate(function.first)
+        + second_opcode(value),
+      4
+    ),
+    value.diagnostics
+  )
+}
+
+fn encode_binary(value: WasmModule) -> WasmBinary {
+  WasmBinary {
+    magic: 1836278016,
+    version: 1,
+    type_section: encode_type_section(value.first),
+    function_section: encode_function_section(value),
+    export_section: encode_export_section(value),
+    code_section: encode_code_section(value),
+    diagnostics: value.diagnostics,
+  }
+}
+
+fn entry(seed: i32) -> i32 {
+  let decl = ast.fn_decl(
+    seed,
+    1,
+    ast.named_type(seed + 1),
+    ast.block(ast.call_expr(seed + 2, seed + 3))
+  );
+  let source_span = span.make(seed, seed + 10, 1, 1);
+  let checked = checker.check_declaration(
+    checker.seed_env(seed),
+    decl,
+    source_span
+  );
+  let lowered = lowering.lower_declaration(
+    checked,
+    source_span
+  );
+  let emitted = emit_module(lowered, source_span);
+  let program = ast.program(
+    seed,
+    1,
+    decl,
+    ast.empty_decl(),
+    source_span
+  );
+  let checked_program = checker.check_program(
+    checker.seed_env(seed),
+    program,
+    source_span
+  );
+  let lowered_program = lowering.lower_program(
+    checked_program,
+    source_span
+  );
+  let emitted_program = emit_program(
+    lowered_program,
+    source_span
+  );
+  module_score(emitted)
+    + binary_score(encode_binary(emitted))
+    + module_score(emitted_program)
+    + binary_score(encode_binary(emitted_program))
+}

@@ -1,0 +1,176 @@
+const combinator = @import("./combinator.fig");
+const span = @import("./span.fig");
+const textlex = @import("./textlex.fig");
+const token = @import("./token.fig");
+
+type TextInput = struct {
+  source: textlex.TextTokenStream,
+  state: combinator.ParseState,
+  seed: i32,
+}
+
+type fn TextParser(a: type) -> type {
+  fn(input: TextInput) -> combinator.Parser(a)
+}
+
+fn input(
+  source: textlex.TextTokenStream,
+  state: combinator.ParseState,
+  seed: i32
+) -> TextInput {
+  TextInput {
+    source: source,
+    state: state,
+    seed: seed,
+  }
+}
+
+fn with_state(input_value: TextInput, state: combinator.ParseState) -> TextInput {
+  TextInput {
+    source: input_value.source,
+    state: state,
+    seed: input_value.seed,
+  }
+}
+
+fn run(parser: TextParser(a), input_value: TextInput) -> combinator.Parser(a) {
+  parser(input_value)
+}
+
+fn TextParser::pure(value: a) -> TextParser(a) {
+  \input_value -> combinator.ok(input_value.state, value)
+}
+
+fn TextParser::map(const f: fn(x: a) -> b, parser: TextParser(a)) -> TextParser(b) {
+  \input_value -> match run(parser, input_value) {
+    Ok(result) => combinator.ok(result.state, f(result.value)),
+    Err(error) => Err(error),
+  }
+}
+
+fn TextParser::apply(
+  parser: TextParser(fn(x: a) -> b),
+  value: TextParser(a)
+) -> TextParser(b) {
+  \input_value -> match run(parser, input_value) {
+    Ok(result) => match run(value, with_state(input_value, result.state)) {
+      Ok(value_result) => combinator.ok(
+        value_result.state,
+        result.value(value_result.value)
+      ),
+      Err(error) => Err(error),
+    },
+    Err(error) => Err(error),
+  }
+}
+
+fn TextParser::bind(
+  parser: TextParser(a),
+  const f: fn(x: a) -> TextParser(b)
+) -> TextParser(b) {
+  \input_value -> match run(parser, input_value) {
+    Ok(result) => run(f(result.value), with_state(input_value, result.state)),
+    Err(error) => Err(error),
+  }
+}
+
+fn bind_reply(
+  parser: TextParser(a),
+  f: fn(x: combinator.Reply(a)) -> TextParser(b)
+) -> TextParser(b) {
+  \input_value -> match run(parser, input_value) {
+    Ok(result) => run(f(result), with_state(input_value, result.state)),
+    Err(error) => Err(error),
+  }
+}
+
+fn or_else(left: TextParser(a), right: TextParser(a)) -> TextParser(a) {
+  \input_value -> match run(left, input_value) {
+    Ok(result) => Ok(result),
+    Err(_) => run(right, input_value),
+  }
+}
+
+fn token_at_current(input_value: TextInput) -> token.Token {
+  textlex.token_at(input_value.source, input_value.state.cursor)
+}
+
+fn punctuation_at_current(input_value: TextInput) -> textlex.TextPunctuation {
+  textlex.punctuation_at(input_value.source, input_value.state.cursor)
+}
+
+fn advance_one(input_value: TextInput) -> combinator.ParseState {
+  combinator.next_state(input_value.state)
+}
+
+fn unexpected_token(
+  expected: i32,
+  actual: i32,
+  at: span.Span
+) -> combinator.ParseError {
+  combinator.UnexpectedToken(expected, actual, at)
+}
+
+fn expect_punctuation(expected: textlex.TextPunctuation) -> TextParser(token.Token) {
+  \input_value -> {
+    let current = token_at_current(input_value);
+    let actual = punctuation_at_current(input_value);
+    let actual_score = textlex.punctuation_score(actual);
+    let expected_score = textlex.punctuation_score(expected);
+    match actual_score == expected_score {
+      true => combinator.ok(advance_one(input_value), current),
+      false => combinator.err(unexpected_token(
+        expected_score,
+        actual_score,
+        current.span
+      )),
+    }
+  }
+}
+
+fn any_token() -> TextParser(token.Token) {
+  \input_value -> match input_value.state.cursor < input_value.state.limit {
+    true => combinator.ok(
+      advance_one(input_value),
+      token_at_current(input_value)
+    ),
+    false => combinator.err(combinator.UnexpectedEnd(
+      textlex.source_span(input_value.source)
+    )),
+  }
+}
+
+fn expect_kind(expected: token.TokenKind, _expected_score: i32) -> TextParser(token.Token) {
+  \input_value -> {
+    let current = token_at_current(input_value);
+    let actual_score = token.keyword_weight(current.kind);
+    let required_score = token.keyword_weight(expected);
+    match actual_score == required_score {
+      true => combinator.ok(advance_one(input_value), current),
+      false => combinator.err(unexpected_token(
+        required_score,
+        actual_score,
+        current.span
+      )),
+    }
+  }
+}
+
+fn parser_score(value: combinator.Parser(token.Token)) -> i32 match {
+  Ok(result) => token.token_score(result.value) + result.state.cursor,
+  Err(error) => combinator.error_score(error),
+}
+
+fn entry(seed: i32) -> i32 {
+  let source = textlex.stream_from_buffer(textlex.from_seed(seed));
+  let start = input(source, combinator.state(0, textlex.length(source)), seed);
+  parser_score(run(expect_kind(token.LetKw, 1), start))
+    + parser_score(run(expect_punctuation(textlex.PunctEqual), start))
+    + parser_score(
+    do @applicative(TextParser(_)) {
+      value <- expect_kind(token.LetKw, 1);
+      _name <- any_token();
+      pure(value)
+    } \parser -> run(parser, start)
+  )
+}

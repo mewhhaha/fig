@@ -1,0 +1,17 @@
+type Option(a) = union {
+  None, Some(value: a)
+}
+
+fn score(left: bool, right: bool) -> i32 match {
+  true, true => 3,
+  _, _ => 0,
+}
+
+fn unwrap(value: Option(i32)) -> i32 match {
+  Some(inner) => inner,
+  None => 0,
+}
+
+pub fn main() -> i32 {
+  score(true, false) + unwrap(Some(4))
+}

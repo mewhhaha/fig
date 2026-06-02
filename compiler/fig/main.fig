@@ -1,0 +1,623 @@
+const ast = @import("./ast.fig");
+const artifact = @import("./artifact.fig");
+const checker = @import("./checker.fig");
+const combinator = @import("./combinator.fig");
+const declgraph = @import("./declgraph.fig");
+const diagnostic = @import("./diagnostic.fig");
+const frontend = @import("./frontend.fig");
+const incremental = @import("./incremental.fig");
+const lexer = @import("./lexer.fig");
+const layout = @import("prelude.layout");
+const lowering = @import("./lowering.fig");
+const modgraph = @import("./modgraph.fig");
+const parser = @import("./parser.fig");
+const resolver = @import("./resolver.fig");
+const source = @import("./source.fig");
+const span = @import("./span.fig");
+const stream = @import("./stream.fig");
+const textfacts = @import("./textfacts.fig");
+const textgrammar = @import("./textgrammar.fig");
+const textimportsummary = @import("./textimportsummary.fig");
+const textlex = @import("./textlex.fig");
+const textmodel = @import("./textmodel.fig");
+const textparser = @import("./textparser.fig");
+const textsummary = @import("./textsummary.fig");
+const token = @import("./token.fig");
+const wasm = @import("./wasm.fig");
+
+pub fn main(seed: i32) -> i32 {
+  span.entry(seed)
+    + token.entry(seed
+    + 1)
+    + ast.entry(seed
+    + 2)
+    + artifact.entry(seed
+    + 3)
+    + checker.entry(seed
+    + 4)
+    + combinator.entry(seed
+    + 5)
+    + declgraph.entry(seed
+    + 6)
+    + diagnostic.entry(seed
+    + 7)
+    + lexer.entry(seed
+    + 8)
+    + lowering.entry(seed
+    + 9)
+    + modgraph.entry(seed
+    + 10)
+    + resolver.entry(seed
+    + 11)
+    + source.entry(seed
+    + 12)
+    + stream.entry(seed
+    + 13)
+    + parser.entry(seed
+    + 14)
+    + incremental.entry(seed
+    + 15)
+    + textlex.entry(seed
+    + 16)
+    + textparser.entry(seed
+    + 17)
+    + frontend.entry(seed
+    + 18)
+    + wasm.entry(seed
+    + 19)
+    + textsummary.entry(seed
+    + 20)
+    + textimportsummary.entry(seed
+    + 21)
+    + textgrammar.entry(seed
+    + 22)
+    + textmodel.entry(seed
+    + 23)
+    + textfacts.entry(seed
+    + 24)
+}
+
+pub fn compile_codes(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_array(codes, 0)
+}
+
+pub fn compile_code_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(codes, 0, textmodel.SummaryKind::Declarations, 0)
+}
+
+pub fn compile_declaration_kind_count(
+  codes: layout.HeapArray(i32),
+  kind_tag: i32
+) -> i32 {
+  frontend.compile_code_summary(codes, 0, textmodel.SummaryKind::KindCount, kind_tag)
+}
+
+pub fn compile_function_param_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(codes, 0, textmodel.SummaryKind::FunctionParams, 0)
+}
+
+pub fn compile_type_param_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(codes, 0, textmodel.SummaryKind::TypeParams, 0)
+}
+
+pub fn compile_declaration_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(codes, 0, textmodel.SummaryKind::DeclarationSignature, 0)
+}
+
+pub fn compile_function_param_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionParamSignature,
+    0
+  )
+}
+
+pub fn compile_type_param_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::TypeParamSignature,
+    0
+  )
+}
+
+pub fn compile_function_param_type_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionParamTypeSignature,
+    0
+  )
+}
+
+pub fn compile_function_return_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionReturnSignature,
+    0
+  )
+}
+
+pub fn compile_value_annotation_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueAnnotationSignature,
+    0
+  )
+}
+
+pub fn compile_function_body_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionBodySignature,
+    0
+  )
+}
+
+pub fn compile_type_body_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::TypeBodySignature,
+    0
+  )
+}
+
+pub fn compile_function_local_let_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionLocalLets,
+    0
+  )
+}
+
+pub fn compile_function_local_proof_const_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionLocalProofConsts,
+    0
+  )
+}
+
+pub fn compile_type_result_kind_count(
+  codes: layout.HeapArray(i32),
+  result_tag: i32
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::TypeResultKind,
+    result_tag
+  )
+}
+
+pub fn compile_type_sugar_statement_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::TypeSugarStatements,
+    0
+  )
+}
+
+pub fn compile_value_match_expression_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueMatchExpressions,
+    0
+  )
+}
+
+pub fn compile_function_match_body_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionMatchBodies,
+    0
+  )
+}
+
+pub fn compile_value_do_expression_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueDoExpressions,
+    0
+  )
+}
+
+pub fn compile_value_do_bind_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueDoBinds,
+    0
+  )
+}
+
+pub fn compile_value_match_arm_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueMatchArms,
+    0
+  )
+}
+
+pub fn compile_value_pipe_bind_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValuePipeBinds,
+    0
+  )
+}
+
+pub fn compile_value_operator_expression_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueOperators,
+    0
+  )
+}
+
+pub fn compile_value_operator_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueOperatorSignature,
+    0
+  )
+}
+
+pub fn compile_value_call_expression_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueCallExpressions,
+    0
+  )
+}
+
+pub fn compile_declared_type_class_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::DeclaredTypeClassSignature,
+    0
+  )
+}
+
+pub fn compile_declared_abi_class_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::DeclaredAbiClassSignature,
+    0
+  )
+}
+
+pub fn compile_symbol_environment_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::SymbolEnvironmentSignature,
+    0
+  )
+}
+
+pub fn compile_export_abi_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ExportAbiSignature,
+    0
+  )
+}
+
+pub fn compile_value_body_type_class_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueBodyTypeClassSignature,
+    0
+  )
+}
+
+pub fn compile_value_body_abi_class_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueBodyAbiClassSignature,
+    0
+  )
+}
+
+pub fn compile_resolved_value_body_type_class_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ResolvedValueBodyTypeClassSignature,
+    0
+  )
+}
+
+pub fn compile_resolved_value_body_abi_class_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ResolvedValueBodyAbiClassSignature,
+    0
+  )
+}
+
+pub fn compile_simple_body_type_check_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::SimpleBodyTypeCheckSignature,
+    0
+  )
+}
+
+pub fn compile_named_type_environment_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::NamedTypeEnvironmentSignature,
+    0
+  )
+}
+
+pub fn compile_direct_import_type_environment_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_type_environment_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_direct_import_resolved_declared_type_class_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_resolved_declared_type_class_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_direct_import_resolved_declared_abi_class_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_resolved_declared_abi_class_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_direct_import_resolved_value_body_type_class_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_resolved_value_body_type_class_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_direct_import_resolved_value_body_abi_class_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_resolved_value_body_abi_class_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_direct_import_resolved_simple_body_type_check_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_resolved_simple_body_type_check_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_direct_import_resolved_symbol_environment_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_resolved_symbol_environment_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_direct_import_resolved_export_abi_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_resolved_export_abi_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_direct_import_resolution_record_signature_hash(
+  codes: layout.HeapArray(i32),
+  import_codes: layout.HeapArray(i32),
+  module_hash: i32
+) -> i32 {
+  frontend.compile_direct_import_resolution_record_signature(
+    codes,
+    import_codes,
+    module_hash
+  )
+}
+
+pub fn compile_resolved_declared_type_class_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ResolvedDeclaredTypeClassSignature,
+    0
+  )
+}
+
+pub fn compile_resolved_declared_abi_class_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ResolvedDeclaredAbiClassSignature,
+    0
+  )
+}
+
+pub fn compile_resolved_symbol_environment_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ResolvedSymbolEnvironmentSignature,
+    0
+  )
+}
+
+pub fn compile_resolved_export_abi_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ResolvedExportAbiSignature,
+    0
+  )
+}
+
+pub fn compile_resolved_simple_body_type_check_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ResolvedSimpleBodyTypeCheckSignature,
+    0
+  )
+}
+
+pub fn compile_checked_declaration_type_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_checked_declaration_type_signature(codes, 0)
+}
+
+pub fn compile_checked_diagnostic_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_checked_diagnostic_signature(codes, 0)
+}
+
+pub fn compile_lowered_declaration_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_lowered_declaration_signature(codes, 0)
+}
+
+pub fn compile_checked_declaration_record_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_checked_declaration_record_signature(codes, 0)
+}
+
+pub fn compile_checked_expression_record_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_checked_expression_record_signature(codes, 0)
+}
+
+pub fn compile_checked_expression_child_record_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_checked_expression_child_record_signature(codes, 0)
+}
+
+pub fn compile_checked_local_environment_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_checked_local_environment_signature(codes, 0)
+}
+
+pub fn compile_checked_expression_shape_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_checked_expression_shape_signature(codes, 0)
+}
+
+pub fn compile_lowered_export_record_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_lowered_export_record_signature(codes, 0)
+}
+
+pub fn compile_wasm_function_record_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_wasm_function_record_signature(codes, 0)
+}
+
+pub fn compile_wasm_section_record_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_wasm_section_record_signature(codes, 0)
+}
+
+pub fn compile_wasm_byte_record_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_wasm_byte_record_signature(codes, 0)
+}
+
+pub fn compile_wasm_byte_buffer(
+  codes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  frontend.compile_wasm_byte_buffer(codes, 0)
+}

@@ -49,9 +49,6 @@ export type AstNode =
   | TypeExprArgsAstNode
   | FnDeclAstNode
   | FnTailAstNode
-  | ContractFnDeclAstNode
-  | ContractReturnSigAstNode
-  | ContractResultKindAstNode
   | BranchHintAstNode
   | FnNameAstNode
   | FnSigAstNode
@@ -119,6 +116,7 @@ export type AstNode =
   | TupleOverrideSlotAstNode
   | TupleValueRepeatAstNode
   | PatternAstNode
+  | PatternMemberAstNode
   | PatternIdentAstNode
   | PatternArgsAstNode
   | TuplePatternAstNode
@@ -170,6 +168,7 @@ export type AstNode =
   | TypeRepeatCountAstNode
   | VisibilityAstNode
   | LiteralAstNode
+  | SignedNumberAstNode
   | BoolAstNode
   | OpAstNode
   | TypeOpAstNode;
@@ -464,27 +463,6 @@ export interface FnDeclAstNode {
 export interface FnTailAstNode {
   kind: "FnTail";
   type: "FnTail";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface ContractFnDeclAstNode {
-  kind: "ContractFnDecl";
-  type: "ContractFnDecl";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface ContractReturnSigAstNode {
-  kind: "ContractReturnSig";
-  type: "ContractReturnSig";
-  node: SyntaxNodeLike;
-  fields: Record<string, never>;
-}
-
-export interface ContractResultKindAstNode {
-  kind: "ContractResultKind";
-  type: "ContractResultKind";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }
@@ -958,6 +936,13 @@ export interface PatternAstNode {
   fields: Record<string, never>;
 }
 
+export interface PatternMemberAstNode {
+  kind: "PatternMember";
+  type: "PatternMember";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
 export interface PatternIdentAstNode {
   kind: "PatternIdent";
   type: "PatternIdent";
@@ -1311,6 +1296,13 @@ export interface VisibilityAstNode {
 export interface LiteralAstNode {
   kind: "Literal";
   type: "Literal";
+  node: SyntaxNodeLike;
+  fields: Record<string, never>;
+}
+
+export interface SignedNumberAstNode {
+  kind: "SignedNumber";
+  type: "SignedNumber";
   node: SyntaxNodeLike;
   fields: Record<string, never>;
 }

@@ -1,0 +1,87 @@
+const span = @import("./span.fig");
+
+type SourceText = struct {
+  module_id: i32,
+  base_offset: i32,
+  first_code: i32,
+  second_code: i32,
+  third_code: i32,
+  fourth_code: i32,
+  length: i32,
+}
+
+fn make(
+  module_id: i32,
+  base_offset: i32,
+  first_code: i32,
+  second_code: i32,
+  third_code: i32,
+  fourth_code: i32
+) -> SourceText {
+  SourceText {
+    module_id: module_id,
+    base_offset: base_offset,
+    first_code: first_code,
+    second_code: second_code,
+    third_code: third_code,
+    fourth_code: fourth_code,
+    length: 4,
+  }
+}
+
+fn from_seed(seed: i32) -> SourceText {
+  make(
+    seed,
+    seed * 4,
+    (seed % 11) + 1,
+    ((seed + 3) % 13) + 1,
+    ((seed + 5) % 17) + 1,
+    ((seed + 7) % 19) + 1
+  )
+}
+
+fn code_at(source: SourceText, index: i32) -> i32 {
+  match index {
+    0 => source.first_code,
+    1 => source.second_code,
+    2 => source.third_code,
+    3 => source.fourth_code,
+    _ => 0,
+  }
+}
+
+fn offset_at(source: SourceText, index: i32) -> i32 {
+  source.base_offset + index
+}
+
+fn span_at(source: SourceText, index: i32, width: i32) -> span.Span {
+  span.make(
+    offset_at(source, index),
+    offset_at(source, index) + width,
+    1,
+    index + 1
+  )
+}
+
+fn module_seed(source: SourceText) -> i32 {
+  source.module_id + source.base_offset
+}
+
+fn source_score(source: SourceText) -> i32 {
+  source.module_id
+    + source.base_offset
+    + source.first_code
+    + source.second_code
+    + source.third_code
+    + source.fourth_code
+    + source.length
+}
+
+fn entry(seed: i32) -> i32 {
+  let text = from_seed(seed);
+  source_score(text) + span.width(span_at(
+    text,
+    seed % 4,
+    2
+  ))
+}

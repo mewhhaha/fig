@@ -1,1 +1,39 @@
 const scalar = @import("prelude.scalar");
+
+type Ordering = union {
+  Less, Equal, Greater
+}
+
+fn compare_i32(a: i32, b: i32) -> Ordering {
+  match a < b {
+    true => Less,
+    false => match a > b {
+      true => Greater,
+      false => Equal,
+    },
+  }
+}
+
+fn Ordering::is_less(value: Ordering) -> bool {
+  match value {
+    Less => true,
+    Equal => false,
+    Greater => false
+  }
+}
+
+fn Ordering::is_equal(value: Ordering) -> bool {
+  match value {
+    Less => false,
+    Equal => true,
+    Greater => false
+  }
+}
+
+fn Ordering::is_greater(value: Ordering) -> bool {
+  match value {
+    Less => false,
+    Equal => false,
+    Greater => true
+  }
+}

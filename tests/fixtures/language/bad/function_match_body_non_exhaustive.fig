@@ -1,0 +1,4 @@
+// expect: type.non_exhaustive_match
+fn choose(flag: bool) -> i32 match {
+  true => 1,
+}

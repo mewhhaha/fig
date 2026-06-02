@@ -49,7 +49,6 @@ export interface IndexedSymbol {
   name: string;
   kind:
     | "fn"
-    | "contract"
     | "const"
     | "let"
     | "type"
@@ -611,7 +610,7 @@ export function completionsAt(result: AnalysisResult, position: Position): Compl
 export function documentSymbols(result: AnalysisResult): DocumentSymbol[] {
   return result.symbols
     .filter((item) =>
-      ["fn", "contract", "const", "let", "type", "import", "member", "variant"].includes(item.kind)
+      ["fn", "const", "let", "type", "import", "member", "variant"].includes(item.kind)
     )
     .filter((item) => !item.container || item.kind === "member" || item.kind === "variant")
     .map((item) => ({
@@ -767,7 +766,7 @@ export function workspaceSymbols(results: AnalysisResult[], query = ""): SymbolI
   return results.flatMap((result) => result.symbols)
     .filter((symbol) => !needle || symbol.name.toLowerCase().includes(needle))
     .filter((symbol) =>
-      ["fn", "contract", "const", "let", "type", "import", "member", "variant"].includes(
+      ["fn", "const", "let", "type", "import", "member", "variant"].includes(
         symbol.kind,
       )
     )
@@ -800,10 +799,131 @@ export function codeActions(result: AnalysisResult, range: Range): CodeAction[] 
         });
       }
     }
+    if (diagnostic.code === "fn.too_many_runtime_params") {
+      const action = groupTrailingParametersAction(result, diagnostic);
+      if (action) actions.push(action);
+    }
   }
   actions.push(...inferredTypeHoleCodeActions(result, range));
   actions.push(...refactorCodeActions(result, range));
   return dedupeCodeActions(actions);
+}
+
+function groupTrailingParametersAction(
+  result: AnalysisResult,
+  diagnostic: Diagnostic,
+): CodeAction | undefined {
+  const program = result.syntaxProgram ?? result.program;
+  if (!program) return undefined;
+  const diagnosticStart = result.mapper.offsetAt(diagnostic.range.start);
+  const fn = program.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && !!decl.span && decl.span.start <= diagnosticStart &&
+    diagnosticStart <= decl.span.end
+  );
+  if (!fn || !fn.span) return undefined;
+  const runtime = fn.params.filter((param) => !param.const);
+  if (runtime.length <= 5) return undefined;
+  const keep = runtime.slice(0, 4);
+  const grouped = runtime.slice(4);
+  if (!grouped.every((param) => param.span && isSimpleGroupedParam(param))) return undefined;
+  const first = grouped[0]!;
+  const last = grouped[grouped.length - 1]!;
+  if (!first.span || !last.span) return undefined;
+  const restName = freshGroupedParamName(fn);
+  const groupedType = `struct({${
+    grouped.map((param) => `${param.name}: ${param.type}`).join(", ")
+  }})`;
+  const edits: TextEdit[] = [{
+    range: result.mapper.range(first.span.start, last.span.end),
+    newText: `${restName}: ${groupedType}`,
+  }];
+  edits.push(...groupedParamBodyEdits(result, fn, grouped, restName));
+  edits.push(...groupedParamCallEdits(result, fn, keep.length, grouped));
+  return {
+    title: "Group trailing parameters into a struct",
+    kind: "quickfix",
+    diagnostics: [diagnostic],
+    edit: { changes: { [result.document.uri]: dedupeEdits(edits) } },
+  };
+}
+
+function freshGroupedParamName(fn: FnDecl): string {
+  const used = new Set(fn.params.map((param) => param.name));
+  if (!used.has("rest")) return "rest";
+  for (let index = 1; index < 1000; index++) {
+    const candidate = `rest${index}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return "__rest";
+}
+
+function isSimpleGroupedParam(param: FnDecl["params"][number]): boolean {
+  return !param.pattern || param.pattern.kind === "binding";
+}
+
+function groupedParamBodyEdits(
+  result: AnalysisResult,
+  fn: FnDecl,
+  grouped: FnDecl["params"],
+  restName: string,
+): TextEdit[] {
+  const bodySpan = fn.body.span;
+  if (!bodySpan) return [];
+  const source = result.document.text;
+  const edits: TextEdit[] = [];
+  const names = new Set(grouped.map((param) => param.name));
+  const pattern = /\b[A-Za-z_][A-Za-z0-9_]*\b/g;
+  pattern.lastIndex = bodySpan.start;
+  for (
+    let match = pattern.exec(source);
+    match && match.index < bodySpan.end;
+    match = pattern.exec(source)
+  ) {
+    const name = match[0];
+    if (!names.has(name)) continue;
+    edits.push({
+      range: result.mapper.range(match.index, match.index + name.length),
+      newText: `${restName}.${name}`,
+    });
+  }
+  return edits;
+}
+
+function groupedParamCallEdits(
+  result: AnalysisResult,
+  fn: FnDecl,
+  keepCount: number,
+  grouped: FnDecl["params"],
+): TextEdit[] {
+  const program = result.syntaxProgram ?? result.program;
+  if (!program) return [];
+  const edits: TextEdit[] = [];
+  const visit = (expr: Expr | undefined) => {
+    if (!expr) return;
+    if (
+      expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === fn.name &&
+      expr.args.length >= keepCount + grouped.length
+    ) {
+      const first = expr.args[keepCount];
+      const last = expr.args[keepCount + grouped.length - 1];
+      if (first?.span && last?.span) {
+        const fields = grouped.map((param, index) => {
+          const arg = expr.args[keepCount + index]!;
+          return `${param.name}: ${sourceForSpan(result, arg.span!)}`;
+        }).join(", ");
+        edits.push({
+          range: result.mapper.range(first.span.start, last.span.end),
+          newText: `{${fields}}`,
+        });
+      }
+    }
+    for (const child of childExprs(expr)) visit(child);
+  };
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") visit(decl.body);
+    else if (decl.kind === "let" || decl.kind === "const") visit(decl.value);
+  }
+  return edits;
 }
 
 function inferredTypeHoleCodeActions(result: AnalysisResult, range: Range): CodeAction[] {
@@ -926,8 +1046,7 @@ function freshPipelineBinder(result: AnalysisResult, span: NonNullable<Expr["spa
     used.add(match[0]);
   }
   const owner = result.symbols.find((symbol) =>
-    (symbol.kind === "fn" || symbol.kind === "contract") &&
-    rangeContainsSpan(result, symbol.range, span)
+    symbol.kind === "fn" && rangeContainsSpan(result, symbol.range, span)
   );
   const container = owner?.name;
   for (const symbol of result.symbols) {
@@ -948,6 +1067,7 @@ function freshPipelineBinder(result: AnalysisResult, span: NonNullable<Expr["spa
 
 function nestedMatchFlattenEdit(result: AnalysisResult, expr: Expr): CodeAction | undefined {
   if (expr.kind !== "match" || !expr.span || expr.arms.length === 0) return undefined;
+  if (expr.arms.some((arm) => arm.guard)) return undefined;
   const innerMatches = expr.arms.map((arm) => arm.value);
   if (
     !innerMatches.every((item): item is Extract<Expr, { kind: "match" }> => item.kind === "match")
@@ -955,6 +1075,7 @@ function nestedMatchFlattenEdit(result: AnalysisResult, expr: Expr): CodeAction 
     return undefined;
   }
   const firstInner = innerMatches[0];
+  if (innerMatches.some((item) => item.arms.some((arm) => arm.guard))) return undefined;
   if (!firstInner.value.span || !expr.value.span) return undefined;
   const innerValue = sourceForSpan(result, firstInner.value.span);
   if (
@@ -1037,8 +1158,11 @@ function patternBindingNamesForHover(pattern: ParamPattern): string[] {
       return pattern.items.flatMap(patternBindingNamesForHover);
     case "constructor":
       return pattern.args.flatMap(patternBindingNamesForHover);
+    case "typed":
+      return patternBindingNamesForHover(pattern.pattern);
     case "wildcard":
     case "literal":
+    case "enum_member":
     case "type":
       return [];
   }
@@ -1175,7 +1299,7 @@ function symbolForDecl(
     detail: detailForDecl(decl, program, topLevelTypes),
   };
   const extra: IndexedSymbol[] = [];
-  if (decl.kind === "fn" || decl.kind === "contract") {
+  if (decl.kind === "fn") {
     const localTypes = new Map(topLevelTypes);
     for (const param of decl.params) localTypes.set(param.name, param.type);
     for (const param of decl.params) {
@@ -1357,6 +1481,11 @@ function symbolsForExpr(
         ),
       ];
     case "call":
+      if (expr.tailRec) {
+        return expr.args.flatMap((arg) =>
+          symbolsForExpr(uri, arg, source, mapper, container, program, localTypes)
+        );
+      }
       return [
         ...symbolsForExpr(uri, expr.callee, source, mapper, container, program, localTypes),
         ...expr.args.flatMap((arg) =>
@@ -1772,7 +1901,7 @@ function destructuredImportCompletionContext(
 }
 
 function declarationCompletionName(decl: Declaration): string | undefined {
-  return decl.kind === "fn" || decl.kind === "contract" || decl.kind === "const" ||
+  return decl.kind === "fn" || decl.kind === "const" ||
       decl.kind === "let" || decl.kind === "type"
     ? decl.name
     : undefined;
@@ -1848,11 +1977,6 @@ function detailForDecl(
   if (decl.kind === "type") {
     return `type fn ${decl.name}(${
       decl.params.map((param) => `${param.name}: ${param.kind}`).join(", ")
-    }) -> ${decl.resultKind}`;
-  }
-  if (decl.kind === "contract") {
-    return `contract fn ${decl.name}(${
-      decl.params.map((param) => `${param.name}: ${param.type}`).join(", ")
     }) -> ${decl.resultKind}`;
   }
   if (decl.kind === "operator") {
@@ -1996,6 +2120,7 @@ function directSymbolAt(result: AnalysisResult, position: Position): IndexedSymb
   const word = wordAt(result.document.text, offset);
   if (!word) return undefined;
   const candidates = result.symbols.filter((symbol) => {
+    if (symbol.uri !== result.document.uri) return false;
     const start = result.mapper.offsetAt(symbol.selectionRange.start);
     const end = result.mapper.offsetAt(symbol.selectionRange.end);
     return offset >= start && offset <= end;
@@ -2165,7 +2290,7 @@ function nearestPipeBinderSymbol(
   if (!best) return undefined;
   const range = result.mapper.range(best.start, best.end);
   const indexed = result.symbols.find((symbol) =>
-    symbol.kind === "local" && symbol.name === name &&
+    symbol.kind === "local" && symbol.uri === result.document.uri && symbol.name === name &&
     result.mapper.offsetAt(symbol.selectionRange.start) === best.start
   );
   const detail = indexed?.detail ?? nearestPipeBinderType(result, name, best.start);
@@ -2191,6 +2316,7 @@ function nearestPipeBinderType(
   const container = enclosingFunctionName(result, binderStart);
   const candidates = result.symbols.filter((symbol) =>
     symbol.kind === "local" &&
+    symbol.uri === result.document.uri &&
     symbol.name === name &&
     symbol.container === container &&
     symbol.detail
@@ -2446,6 +2572,8 @@ function checkedAstHoverAt(
       for (const item of pattern.items) visitPattern(item);
     } else if (pattern.kind === "constructor") {
       for (const item of pattern.args) visitPattern(item);
+    } else if (pattern.kind === "typed") {
+      visitPattern(pattern.pattern, pattern.type);
     }
   };
   const visitCount = (count: TypeCountExpr | undefined) => {
@@ -2554,13 +2682,15 @@ function checkedAstHoverAt(
       case "match":
         visitExpr(expr.value, localTypes);
         for (const arm of expr.arms) {
-          add(arm.span, `${renderParamPatternHover(arm.pattern)} => ...`, "match arm");
+          const guard = arm.guard ? " if ..." : "";
+          add(arm.span, `${renderParamPatternHover(arm.pattern)}${guard} => ...`, "match arm");
           visitPattern(arm.pattern);
+          if (arm.guard) visitExpr(arm.guard, localTypes);
           visitExpr(arm.value, localTypes);
         }
         break;
       case "call":
-        visitExpr(expr.callee, localTypes);
+        if (!expr.tailRec) visitExpr(expr.callee, localTypes);
         for (const arg of expr.args) visitExpr(arg, localTypes);
         break;
       case "index":
@@ -2675,7 +2805,7 @@ function checkedAstHoverAt(
     }
   }
   for (const decl of result.program.declarations) {
-    if (decl.kind === "fn" || decl.kind === "contract") {
+    if (decl.kind === "fn") {
       add(
         decl.nameSpan ?? decl.span,
         decl.name,
@@ -2781,8 +2911,12 @@ function childExprs(expr: Expr): Expr[] {
     case "pipe_bind":
       return [expr.value, expr.body];
     case "match":
-      return [expr.value, ...expr.arms.map((arm) => arm.value)];
+      return [
+        expr.value,
+        ...expr.arms.flatMap((arm) => arm.guard ? [arm.guard, arm.value] : [arm.value]),
+      ];
     case "call":
+      if (expr.tailRec) return expr.args;
       return [expr.callee, ...expr.args];
     case "index":
       return [expr.target, expr.index];
@@ -2868,6 +3002,7 @@ function expressionSyntaxInfo(
     case "block":
       return { name: "block expression", kind: "local" };
     case "call":
+      if (expr.tailRec) return { name: "rec expression", kind: "local" };
       return { name: renderExprName(expr), kind: "local", detail: "call expression" };
     case "field":
       return { name: "field projection", kind: "local" };
@@ -3018,6 +3153,16 @@ function memberCompletionItems(
   if (!decl?.normalized) return undefined;
   const items: CompletionItem[] = [];
   if (receiverSymbol?.kind === "type" && context.separator === "::") {
+    if (decl.enum) {
+      for (const variant of decl.enum.variants) {
+        items.push({
+          label: variant.name,
+          kind: completionKind("const"),
+          detail: decl.name,
+          documentation: variant.doc,
+        });
+      }
+    }
     if (decl.normalized.kind === "product" || decl.normalized.kind === "sum") {
       for (const member of decl.normalized.members ?? []) {
         items.push({
@@ -3163,12 +3308,16 @@ function renderParamPatternHover(pattern: ParamPattern): string {
       return "_";
     case "literal":
       return pattern.value;
+    case "enum_member":
+      return pattern.name;
     case "tuple":
       return `[${pattern.items.map(renderParamPatternHover).join(", ")}]`;
     case "constructor":
       return `${pattern.name}(${pattern.args.map(renderParamPatternHover).join(", ")})`;
     case "type":
       return pattern.name;
+    case "typed":
+      return `${renderParamPatternHover(pattern.pattern)}: ${pattern.type}`;
   }
 }
 
@@ -3184,8 +3333,12 @@ function patternHoverKind(pattern: ParamPattern): string {
       return "tuple pattern";
     case "constructor":
       return "constructor pattern";
+    case "enum_member":
+      return "enum member pattern";
     case "type":
       return "type pattern";
+    case "typed":
+      return "typed pattern";
   }
 }
 
@@ -3442,7 +3595,7 @@ function dedupeEdits(edits: TextEdit[]): TextEdit[] {
 }
 
 function semanticTokenType(kind: IndexedSymbol["kind"]): number {
-  return kind === "fn" || kind === "contract"
+  return kind === "fn"
     ? 0
     : kind === "type"
     ? 1
@@ -3524,7 +3677,7 @@ function findNameRange(
 }
 
 function completionKind(kind: IndexedSymbol["kind"]): number {
-  return kind === "fn" || kind === "contract"
+  return kind === "fn"
     ? 3
     : kind === "type"
     ? 7

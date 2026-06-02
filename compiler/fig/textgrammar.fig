@@ -1,0 +1,58 @@
+const ast = @import("./ast.fig");
+const combinator = @import("./combinator.fig");
+const diagnostic = @import("./diagnostic.fig");
+const parser = @import("./parser.fig");
+const textlex = @import("./textlex.fig");
+
+fn parse_declaration(
+  current: combinator.ParseState,
+  source: textlex.TextTokenStream,
+  seed: i32
+) -> combinator.Parser(parser.DeclFrame) {
+  parser.parse_text_declaration_stream(current, source, seed)
+}
+
+fn next_declaration_state(
+  current: combinator.ParseState,
+  source: textlex.TextTokenStream
+) -> combinator.ParseState {
+  parser.next_text_declaration_state(current, source)
+}
+
+fn parse_program(
+  current: combinator.ParseState,
+  source: textlex.TextTokenStream,
+  module_seed: i32,
+  declaration_seed: i32
+) -> combinator.Parser(parser.ProgramFrame) {
+  parser.parse_text_program(current, source, module_seed, declaration_seed)
+}
+
+fn program_or_fallback(
+  parsed: combinator.Parser(parser.ProgramFrame),
+  fallback: ast.Program
+) -> ast.Program {
+  parser.parsed_program_or_fallback(parsed, fallback)
+}
+
+fn declaration_frame_score(frame: parser.DeclFrame) -> i32 {
+  parser.frame_score(frame)
+}
+
+fn declaration_score(parsed: combinator.Parser(parser.DeclFrame)) -> i32 {
+  parser.parsed_frame_score(parsed)
+}
+
+fn declaration_diagnostic_score(
+  parsed: combinator.Parser(parser.DeclFrame)
+) -> i32 {
+  parser.parsed_diagnostic_score(parsed)
+}
+
+fn program_score(parsed: combinator.Parser(parser.ProgramFrame)) -> i32 {
+  parser.parsed_program_score(parsed)
+}
+
+fn entry(seed: i32) -> i32 {
+  seed + diagnostic.count(diagnostic.empty())
+}

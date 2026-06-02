@@ -27,9 +27,6 @@ import type {
   ConstFnParamsAstNode,
   ConstTypeFnParamAstNode,
   ConstValueAstNode,
-  ContractFnDeclAstNode,
-  ContractResultKindAstNode,
-  ContractReturnSigAstNode,
   DebugTraceStmtAstNode,
   DeclAstNode,
   DoBindStmtAstNode,
@@ -63,6 +60,7 @@ import type {
   PatternArgsAstNode,
   PatternAstNode,
   PatternIdentAstNode,
+  PatternMemberAstNode,
   PipeBindAstNode,
   PipeBindAtomAstNode,
   PipeBindNameAstNode,
@@ -89,6 +87,7 @@ import type {
   ShapeValueSlotAstNode,
   ShapeValueSlotKeyAstNode,
   ShapeValueTailAstNode,
+  SignedNumberAstNode,
   SlotPositionAstNode,
   SpreadSlotAstNode,
   StaticBuiltinAstNode,
@@ -213,9 +212,6 @@ export interface AstVisitor<R = void> {
   TypeExprArgs?: (node: TypeExprArgsAstNode) => R;
   FnDecl?: (node: FnDeclAstNode) => R;
   FnTail?: (node: FnTailAstNode) => R;
-  ContractFnDecl?: (node: ContractFnDeclAstNode) => R;
-  ContractReturnSig?: (node: ContractReturnSigAstNode) => R;
-  ContractResultKind?: (node: ContractResultKindAstNode) => R;
   BranchHint?: (node: BranchHintAstNode) => R;
   FnName?: (node: FnNameAstNode) => R;
   FnSig?: (node: FnSigAstNode) => R;
@@ -283,6 +279,7 @@ export interface AstVisitor<R = void> {
   TupleOverrideSlot?: (node: TupleOverrideSlotAstNode) => R;
   TupleValueRepeat?: (node: TupleValueRepeatAstNode) => R;
   Pattern?: (node: PatternAstNode) => R;
+  PatternMember?: (node: PatternMemberAstNode) => R;
   PatternIdent?: (node: PatternIdentAstNode) => R;
   PatternArgs?: (node: PatternArgsAstNode) => R;
   TuplePattern?: (node: TuplePatternAstNode) => R;
@@ -334,6 +331,7 @@ export interface AstVisitor<R = void> {
   TypeRepeatCount?: (node: TypeRepeatCountAstNode) => R;
   Visibility?: (node: VisibilityAstNode) => R;
   Literal?: (node: LiteralAstNode) => R;
+  SignedNumber?: (node: SignedNumberAstNode) => R;
   Bool?: (node: BoolAstNode) => R;
   Op?: (node: OpAstNode) => R;
   TypeOp?: (node: TypeOpAstNode) => R;
@@ -633,27 +631,6 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
       return {
         kind: "FnTail",
         type: "FnTail",
-        node,
-        fields: {},
-      };
-    case "ContractFnDecl":
-      return {
-        kind: "ContractFnDecl",
-        type: "ContractFnDecl",
-        node,
-        fields: {},
-      };
-    case "ContractReturnSig":
-      return {
-        kind: "ContractReturnSig",
-        type: "ContractReturnSig",
-        node,
-        fields: {},
-      };
-    case "ContractResultKind":
-      return {
-        kind: "ContractResultKind",
-        type: "ContractResultKind",
         node,
         fields: {},
       };
@@ -1126,6 +1103,13 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
         node,
         fields: {},
       };
+    case "PatternMember":
+      return {
+        kind: "PatternMember",
+        type: "PatternMember",
+        node,
+        fields: {},
+      };
     case "PatternIdent":
       return {
         kind: "PatternIdent",
@@ -1480,6 +1464,13 @@ export function projectNode(node: SyntaxNodeLike): AstNode | null {
       return {
         kind: "Literal",
         type: "Literal",
+        node,
+        fields: {},
+      };
+    case "SignedNumber":
+      return {
+        kind: "SignedNumber",
+        type: "SignedNumber",
         node,
         fields: {},
       };

@@ -41,6 +41,10 @@ const queries = generateWorkbenchQueries(grammar, {
   metadata,
   skipValidation: true,
 });
+const operatorSymbolChars = ["+", "-", "*", "/", "%", "<", ">", "=", "!", "&", "|", "^", "$"];
+const reservedOperatorSymbols = ["->", "=>", "<-", "="];
+const operatorSymbolCharSet = JSON.stringify(operatorSymbolChars);
+const reservedOperatorSymbolSet = JSON.stringify(reservedOperatorSymbols);
 const files: Array<{ path: string; content: string }> = [
   { path: "lexical.json", content: generateLexicalManifest(grammar, { spec }) },
   {
@@ -83,6 +87,39 @@ for (const file of bundle.files) {
       "[$.MatchValues],\n    [$.Primary, $.ScalarDomainType],\n    [$.TypePrimary, $.ScalarDomainType],\n  ],",
     );
   }
+  if (file.path === "tokenizer.ts") {
+    content = content.replace(
+      'const lineComment = "//";\n',
+      'const lineComment = "//";\n' +
+        `const operatorSymbolChars = new Set(${operatorSymbolCharSet});\n` +
+        `const reservedOperatorSymbols = new Set(${reservedOperatorSymbolSet});\n`,
+    );
+    content = content.replace(
+      "  const char = source[start];\n  const symbol = symbols.find((candidate) => source.startsWith(candidate, start));",
+      "  const char = source[start];\n" +
+        "  const operator = scanOperatorSymbol(source, start);\n" +
+        "  if (operator) return operator;\n\n" +
+        "  const symbol = symbols.find((candidate) => source.startsWith(candidate, start));",
+    );
+    content = content.replace(
+      "  throw new Error(`Unexpected character '${char}' at ${start}..${start + 1}`);\n}\n\nfunction scanSkip",
+      "  throw new Error(`Unexpected character '${char}' at ${start}..${start + 1}`);\n" +
+        "}\n\n" +
+        "function scanOperatorSymbol(source: string, start: number): Token | null {\n" +
+        "  if (!isOperatorSymbolChar(source[start])) return null;\n" +
+        "  let end = start + 1;\n" +
+        "  while (end < source.length && isOperatorSymbolChar(source[end])) end++;\n" +
+        "  const text = source.slice(start, end);\n" +
+        "  if (reservedOperatorSymbols.has(text)) return null;\n" +
+        '  return { kind: "OperatorSymbol", text, span: { start, end } };\n' +
+        "}\n\n" +
+        "function isOperatorSymbolChar(char: string | undefined): boolean {\n" +
+        "  if (char === undefined) return false;\n" +
+        "  return operatorSymbolChars.has(char);\n" +
+        "}\n\n" +
+        "function scanSkip",
+    );
+  }
   if (file.path === "queries/highlights.scm") {
     content = content
       .replace("(TypeAtom (LowerIdent) @type)", "(TypeAtom (LowerIdent) @type.parameter)")
@@ -100,7 +137,8 @@ for (const file of bundle.files) {
         "(ImportBindingItems (PascalIdent) @type)",
       )
       .replace("(CollectionOpen) @constant\n", "")
-      .replace("(DoBindName) @constant\n", "");
+      .replace("(DoBindName) @constant\n", "")
+      .replace("(OperatorSymbol) @constant\n", "");
     content += [
       "(DoStrategy (StaticBuiltin) @keyword.directive)",
       "(BranchHint) @keyword.directive",
@@ -126,10 +164,8 @@ const tokenKinds = [
   "import",
   "external",
   "type",
-  "contract",
   "const",
   "fn",
-  "rewrite",
   "if",
   "else",
   "let",

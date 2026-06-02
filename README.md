@@ -164,14 +164,16 @@ styles under the current language surface:
 These examples use value layouts rather than source-level memory tokens. The prelude provides fixed
 inline arrays and lane/tile aliases such as `lane4_i32`, `tile2x4_i32`, and `mat4_i32`.
 
-Use fixed inline arrays and iterators for collection-shaped code for now. `prelude.std` exposes the
+Use fixed inline arrays and iterators when collection size is static. `prelude.std` includes the
 pure fixed helpers from `prelude.array_static`, including explicit `lane4_*` helpers,
 `range_i32`/range iterators, `Iter.map`/`Iter.filter`/`Iter.fold`, and `compact_array` collection
 for fixed-capacity filtered results.
 
-Heap-backed lists and growable vectors are intentionally deferred. The standard prelude does not
-provide `list`, `vector`, `vec`, `push`, `pop`, `reserve`, or allocation-backed append APIs yet;
-those should be built on the backend heap runtime.
+Use the heap-backed collection modules when a compiler-style workload needs growth or persistent
+structure: `prelude.vec` (`Vec`, `Slice`, `Builder`), `prelude.list`, `prelude.nonempty`,
+`prelude.queue`, `prelude.tree`, `prelude.zipper`, `prelude.map`, `prelude.set`, and
+`prelude.graph`. These are ordinary pure Fig modules built on the backend heap runtime; import the
+specific module when you want its qualified API.
 
 `prelude.geometry2d` is a tiny pure playground layer for geometry-shaped programs. It provides
 integer `vec2`, `vec3`, packed `rgba8`, `vertex2d_i32`, `quad2d_i32`, and `geometry2d_i32` helpers.

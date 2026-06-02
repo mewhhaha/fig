@@ -7,11 +7,6 @@ type fn Eq(t: type) {
   @require(@type_member_type(t, #eql) == Expected, "Eq.eql has wrong type");
 }
 
-contract fn Eq::reflexive(const T: type) -> rewrite {
-  const proof = Eq(T);
-  @assume(\x -> T::eql(x, x), \x -> true)
-}
-
 type fn Semigroup(t: type) -> type {
   let Expected = fn(a: t, b: t) -> t;
   @require(@type_has_member(t, #append), "Semigroup requires append");
@@ -31,16 +26,6 @@ type fn Monoid(t: type) -> type {
   @require(@type_has_member(t, #append), "Monoid requires append");
   @require(@type_member_type(t, #append) == Append, "Monoid.append has wrong type");
   EmptyValue(t)
-}
-
-contract fn Monoid::append_empty_left(const T: type) -> rewrite {
-  const proof = Monoid(T);
-  @assume(\x -> T::append(T::empty(), x), \x -> x)
-}
-
-contract fn Monoid::append_empty_right(const T: type) -> rewrite {
-  const proof = Monoid(T);
-  @assume(\x -> T::append(x, T::empty()), \x -> x)
 }
 
 fn append(const t, const _proof: Semigroup(t), a: t, b: t) -> t {
@@ -95,13 +80,13 @@ type fn Index(n: count) -> type {
 }
 
 fn i32::try_domain(const domain: type, x: i32) -> Option(domain) {
-  x
+  Some(x)
 }
 
 fn Index::try(const n: count, x: i32) -> Option(Index(n)) {
   match 0 <= x {
-    true => match x < n { true => x, false => 0 },
-    false => 0,
+    true => match x < n { true => Some(x), false => None },
+    false => None,
   }
 }
 

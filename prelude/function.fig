@@ -39,11 +39,6 @@ type fn Functor(t: type fn(a: type) -> type) -> type {
   t
 }
 
-contract fn Functor::map_identity(const T: type fn(a: type) -> type) -> rewrite {
-  const proof = Functor(T);
-  @assume(\x -> T::map(identity, x), \x -> x)
-}
-
 fn fmap(
   v: t(a),
   const f: fn(x: a) -> b,
@@ -75,24 +70,6 @@ type fn Applicative(t: type fn(a: type) -> type) -> type {
   t
 }
 
-contract fn Applicative::apply_pure_identity(
-const T: type fn(a: type) -> type) -> rewrite {
-  const proof = Applicative(T);
-  @assume(
-    \x -> T::apply(T::pure(identity), x),
-    \x -> x
-  )
-}
-
-contract fn Applicative::apply_pure(
-const T: type fn(a: type) -> type) -> rewrite {
-  const proof = Applicative(T);
-  @assume(
-    \(f, x) -> T::apply(T::pure(f), x),
-    \(f, x) -> T::map(f, x)
-  )
-}
-
 fn pure(
   const t,
   value: a,
@@ -121,19 +98,6 @@ type fn Monad(t: type fn(a: type) -> type) -> type {
     "Monad.bind has wrong type"
   );
   t
-}
-
-contract fn Monad::bind_pure_left(const T: type fn(a: type) -> type) -> rewrite {
-  const proof = Monad(T);
-  @assume(
-    \(x, f) -> T::bind(T::pure(x), f),
-    \(x, f) -> f(x)
-  )
-}
-
-contract fn Monad::bind_pure_right(const T: type fn(a: type) -> type) -> rewrite {
-  const proof = Monad(T);
-  @assume(\m -> T::bind(m, T::pure), \m -> m)
 }
 
 fn bind(

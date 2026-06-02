@@ -1,0 +1,86 @@
+const source = @import("./source.fig");
+
+type ModuleRecord = struct {
+  module_id: i32,
+  import_id: i32,
+  source: source.SourceText,
+}
+
+type ModuleGraph = struct {
+  root: ModuleRecord,
+  dependency: ModuleRecord,
+  count: i32,
+}
+
+fn module_record(
+  module_id: i32,
+  import_id: i32,
+  text: source.SourceText
+) -> ModuleRecord {
+  ModuleRecord {
+    module_id: module_id,
+    import_id: import_id,
+    source: text,
+  }
+}
+
+fn from_seed(seed: i32) -> ModuleGraph {
+  let dependency = module_record(
+    seed + 1,
+    0,
+    source.from_seed(seed + 1)
+  );
+  let root = module_record(
+    seed,
+    dependency.module_id,
+    source.from_seed(seed)
+  );
+  ModuleGraph {
+    root: root,
+    dependency: dependency,
+    count: 2,
+  }
+}
+
+fn root_source(graph: ModuleGraph) -> source.SourceText {
+  graph.root.source
+}
+
+fn root_id(graph: ModuleGraph) -> i32 {
+  graph.root.module_id
+}
+
+fn root_import_id(graph: ModuleGraph) -> i32 {
+  graph.root.import_id
+}
+
+fn dependency_source(graph: ModuleGraph) -> source.SourceText {
+  graph.dependency.source
+}
+
+fn resolve_import(graph: ModuleGraph, import_id: i32) -> source.SourceText {
+  match graph.dependency.module_id == import_id {
+    true => graph.dependency.source,
+    false => graph.root.source,
+  }
+}
+
+fn module_score(module: ModuleRecord) -> i32 {
+  module.module_id
+    + module.import_id
+    + source.source_score(module.source)
+}
+
+fn graph_score(graph: ModuleGraph) -> i32 {
+  module_score(graph.root)
+    + module_score(graph.dependency)
+    + graph.count
+}
+
+fn entry(seed: i32) -> i32 {
+  let graph = from_seed(seed);
+  graph_score(graph) + source.source_score(resolve_import(
+    graph,
+    graph.root.import_id
+  ))
+}

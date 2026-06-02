@@ -1,0 +1,296 @@
+const span = @import("./span.fig");
+
+type SymbolId = i32
+
+type TypeAnnotation = union {
+  MissingType, NamedType(name: SymbolId), AppliedType(
+    constructor: SymbolId,
+    arg: SymbolId
+  )
+}
+
+type Param = struct {
+  name: SymbolId,
+  annotation: TypeAnnotation,
+  is_const: bool,
+}
+
+type Expr = union {
+  Missing, IntLiteral(value: i32), BoolLiteral(value: bool),
+  Var(name: SymbolId), Binary(
+    left: SymbolId,
+    op: SymbolId,
+    right: SymbolId
+  ), Call(callee: SymbolId, arg: SymbolId)
+}
+
+type Block = struct {
+  expr: Expr,
+}
+
+type Decl = union {
+  Fn(
+    name: SymbolId,
+    param_count: i32,
+    return_type: TypeAnnotation,
+    body: Block
+  ), Let(
+    name: SymbolId,
+    annotation: TypeAnnotation,
+    value: Expr
+  ), Const(
+    name: SymbolId,
+    annotation: TypeAnnotation,
+    value: Expr
+  ), Type(name: SymbolId, param_count: i32), SourceImport(
+    module: SymbolId,
+    alias: SymbolId
+  )
+}
+
+type Program = struct {
+  module_name: SymbolId,
+  declaration_count: i32,
+  entry_decl: Decl,
+  secondary_decl: Decl,
+  span: span.Span,
+}
+
+fn missing_type() -> TypeAnnotation {
+  MissingType
+}
+
+fn named_type(name: SymbolId) -> TypeAnnotation {
+  NamedType(name)
+}
+
+fn applied_type(constructor: SymbolId, arg: SymbolId) -> TypeAnnotation {
+  AppliedType(constructor, arg)
+}
+
+fn param(
+  name: SymbolId,
+  annotation: TypeAnnotation,
+  is_const: bool
+) -> Param {
+  Param {name: name, annotation: annotation, is_const: is_const}
+}
+
+fn int_expr(value: i32) -> Expr {
+  IntLiteral(value)
+}
+
+fn bool_expr(value: bool) -> Expr {
+  BoolLiteral(value)
+}
+
+fn var_expr(name: SymbolId) -> Expr {
+  Var(name)
+}
+
+fn binary_expr(
+  left: SymbolId,
+  op: SymbolId,
+  right: SymbolId
+) -> Expr {
+  Binary(left, op, right)
+}
+
+fn call_expr(callee: SymbolId, arg: SymbolId) -> Expr {
+  Call(callee, arg)
+}
+
+fn block(expr: Expr) -> Block {
+  Block {expr: expr}
+}
+
+fn fn_decl(
+  name: SymbolId,
+  param_count: i32,
+  return_type: TypeAnnotation,
+  body: Block
+) -> Decl {
+  Fn(name, param_count, return_type, body)
+}
+
+fn let_decl(
+  name: SymbolId,
+  annotation: TypeAnnotation,
+  value: Expr
+) -> Decl {
+  Let(name, annotation, value)
+}
+
+fn const_decl(
+  name: SymbolId,
+  annotation: TypeAnnotation,
+  value: Expr
+) -> Decl {
+  Const(name, annotation, value)
+}
+
+fn type_decl(name: SymbolId, param_count: i32) -> Decl {
+  Type(name, param_count)
+}
+
+fn source_import_decl(
+  module: SymbolId,
+  alias: SymbolId
+) -> Decl {
+  SourceImport(module, alias)
+}
+
+fn empty_decl() -> Decl {
+  SourceImport(0, 0)
+}
+
+fn program(
+  module_name: SymbolId,
+  declaration_count: i32,
+  entry_decl: Decl,
+  secondary_decl: Decl,
+  source_span: span.Span
+) -> Program {
+  Program {
+    module_name: module_name,
+    declaration_count: declaration_count,
+    entry_decl: entry_decl,
+    secondary_decl: secondary_decl,
+    span: source_span,
+  }
+}
+
+fn expr_score(value: Expr) -> i32 match {
+  Missing => 0,
+  IntLiteral(value) => value,
+  BoolLiteral(value) => match value {
+    true => 1,
+    false => 0,
+  },
+  Var(name) => name,
+  Binary(left, op, right) => left + op + right,
+  Call(callee, arg) => callee + arg + 5,
+}
+
+fn expr_tag(value: Expr) -> i32 match {
+  Missing => 0,
+  IntLiteral(_) => 1,
+  BoolLiteral(_) => 2,
+  Var(_) => 3,
+  Binary(_, _, _) => 4,
+  Call(_, _) => 5,
+}
+
+fn expr_first(value: Expr) -> i32 match {
+  Missing => 0,
+  IntLiteral(value) => value,
+  BoolLiteral(value) => match value {
+    true => 1,
+    false => 0,
+  },
+  Var(name) => name,
+  Binary(left, _, _) => left,
+  Call(callee, _) => callee,
+}
+
+fn expr_second(value: Expr) -> i32 match {
+  Missing => 0,
+  IntLiteral(_) => 0,
+  BoolLiteral(_) => 0,
+  Var(_) => 0,
+  Binary(_, op, _) => op,
+  Call(_, arg) => arg,
+}
+
+fn expr_third(value: Expr) -> i32 match {
+  Missing => 0,
+  IntLiteral(_) => 0,
+  BoolLiteral(_) => 0,
+  Var(_) => 0,
+  Binary(_, _, right) => right,
+  Call(_, _) => 0,
+}
+
+fn type_annotation_score(value: TypeAnnotation) -> i32 match {
+  MissingType => 0,
+  NamedType(name) => name,
+  AppliedType(constructor, arg) => constructor + arg + 7,
+}
+
+fn type_annotation_name(value: TypeAnnotation) -> SymbolId match {
+  MissingType => 0,
+  NamedType(name) => name,
+  AppliedType(constructor, _) => constructor,
+}
+
+fn decl_score(value: Decl) -> i32 match {
+  Fn(name, param_count, return_type, body) => name
+    + param_count
+    + type_annotation_score(return_type)
+    + expr_score(body.expr),
+  Let(name, annotation, value) => name + type_annotation_score(annotation) + expr_score(value),
+  Const(name, annotation, value) => name + type_annotation_score(annotation) + expr_score(value) + 3,
+  Type(name, param_count) => name + param_count,
+  SourceImport(module, alias) => module + alias,
+}
+
+fn decl_tag(value: Decl) -> i32 match {
+  Fn(_, _, _, _) => 1,
+  Let(_, _, _) => 2,
+  Const(_, _, _) => 3,
+  Type(_, _) => 4,
+  SourceImport(_, _) => 5,
+}
+
+fn decl_name(value: Decl) -> SymbolId match {
+  Fn(name, _, _, _) => name,
+  Let(name, _, _) => name,
+  Const(name, _, _) => name,
+  Type(name, _) => name,
+  SourceImport(module, _) => module,
+}
+
+fn decl_param_count(value: Decl) -> i32 match {
+  Fn(_, param_count, _, _) => param_count,
+  Let(_, _, _) => 0,
+  Const(_, _, _) => 0,
+  Type(_, param_count) => param_count,
+  SourceImport(_, _) => 0,
+}
+
+fn decl_type_name(value: Decl) -> SymbolId match {
+  Fn(_, _, return_type, _) => type_annotation_name(return_type),
+  Let(_, annotation, _) => type_annotation_name(annotation),
+  Const(_, annotation, _) => type_annotation_name(annotation),
+  Type(name, _) => name,
+  SourceImport(_, alias) => alias,
+}
+
+fn decl_value_expr(value: Decl) -> Expr match {
+  Fn(_, _, _, body) => body.expr,
+  Let(_, _, value) => value,
+  Const(_, _, value) => value,
+  Type(_, _) => Missing,
+  SourceImport(_, _) => Missing,
+}
+
+fn program_score(program: Program) -> i32 {
+  program.module_name
+    + program.declaration_count
+    + decl_score(program.entry_decl)
+    + decl_score(program.secondary_decl)
+    + span.width(program.span)
+}
+
+fn entry(seed: i32) -> i32 {
+  let body = block(int_expr(seed + 1));
+  let decl = fn_decl(seed, 1, named_type(seed + 2), body);
+  let source_span = span.make(0, seed + 20, 1, 1);
+  program_score(program(
+    seed + 3,
+    1,
+    decl,
+    empty_decl(),
+    source_span
+  ))
+}

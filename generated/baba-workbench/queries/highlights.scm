@@ -1,5 +1,4 @@
 (FnDecl (FnTail (FnName (LowerIdent) @function)))
-(ContractFnDecl (FnName (LowerIdent) @function))
 (Primary (LowerIdent) @variable)
 (Call (Primary (LowerIdent) @function.call) "(")
 (Primary (StaticBuiltin (LowerIdent) @function.builtin))
@@ -26,7 +25,6 @@
 "import" @keyword.control.import
 "type" @keyword.type
 "const" @keyword
-"contract" @keyword
 "fn" @keyword.function
 "let" @keyword
 "match" @keyword.control
@@ -42,10 +40,12 @@
 (Comment) @comment
 "do" @keyword
 "else" @keyword
+"enum" @keyword
 "if" @keyword
 "(" @punctuation.bracket
 ")" @punctuation.bracket
 "," @punctuation.delimiter
+"-" @operator
 "->" @operator
 "." @punctuation.delimiter
 ".." @operator
@@ -67,6 +67,7 @@
 "]" @punctuation.bracket
 "{" @punctuation.bracket
 "{}" @operator
+"|" @operator
 "}" @punctuation.bracket
 (fenced_text) @string.special
 (Char) @constant

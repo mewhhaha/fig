@@ -1,0 +1,1020 @@
+const diagnostic = @import("./diagnostic.fig");
+const layout = @import("prelude.layout");
+const span = @import("./span.fig");
+const token = @import("./token.fig");
+
+type TextCharClass = union {
+  TextSpace, TextNewline, TextLower, TextUpper, TextDigit,
+  TextQuote, TextSlash, TextPunctuation, TextEof
+}
+
+type TextCharCode = enum(i32) {
+  Eof = 0,
+  Newline = 10,
+  Space = 32,
+  Bang = 33,
+  Quote = 34,
+  Percent = 37,
+  LeftParen = 40,
+  RightParen = 41,
+  Asterisk = 42,
+  Plus = 43,
+  Comma = 44,
+  Minus = 45,
+  Slash = 47,
+  Digit0 = 48,
+  Digit1 = 49,
+  Digit2 = 50,
+  Digit9 = 57,
+  Colon = 58,
+  Semicolon = 59,
+  Less = 60,
+  Equal = 61,
+  Greater = 62,
+  UpperA = 65,
+  UpperB = 66,
+  UpperI = 73,
+  UpperZ = 90,
+  Underscore = 95,
+  LowerA = 97,
+  LowerB = 98,
+  LowerC = 99,
+  LowerE = 101,
+  LowerF = 102,
+  LowerL = 108,
+  LowerM = 109,
+  LowerN = 110,
+  LowerO = 111,
+  LowerP = 112,
+  LowerS = 115,
+  LowerT = 116,
+  LowerU = 117,
+  LowerX = 120,
+  LowerY = 121,
+  LowerZ = 122,
+  LeftBrace = 123,
+  RightBrace = 125
+}
+
+type TextBuffer = struct {
+  module_id: i32,
+  base_offset: i32,
+  length: i32,
+  codes: layout.HeapArray(i32),
+}
+
+type TextPunctuation = union {
+  PunctNone, PunctEqual, PunctLeftParen, PunctRightParen,
+  PunctArrow, PunctLeftBrace, PunctRightBrace, PunctComma,
+  PunctColon, PunctSlash, PunctSemicolon, PunctOther
+}
+
+type TextToken = struct {
+  token: token.Token,
+  punctuation: TextPunctuation,
+  text_hash: i32,
+}
+
+type TextCursor = struct {
+  index: i32,
+  offset: i32,
+  line: i32,
+  column: i32,
+}
+
+type TextLexeme = struct {
+  kind: token.TokenKind,
+  punctuation: TextPunctuation,
+  span: span.Span,
+  byte_width: i32,
+  text_hash: i32,
+}
+
+type TextLexError = union {
+  UnexpectedTextChar(code: i32, at: span.Span), UnterminatedString(at: span.Span)
+}
+
+type TextLexResult = union {
+  TextLexed(value: TextLexeme, cursor: TextCursor), TextLexFailed(error: TextLexError)
+}
+
+type TextTokenStream = struct {
+  tokens: layout.HeapArray(TextToken),
+  count: i32,
+  diagnostics: diagnostic.DiagnosticBag,
+  source_span: span.Span,
+}
+
+fn code_array_empty() -> layout.HeapArray(i32) {
+  layout.HeapArray::empty(i32)
+}
+
+fn push_code(
+  codes: layout.HeapArray(i32),
+  code: i32
+) -> layout.HeapArray(i32) {
+  layout.HeapArray::push(i32, codes, code)
+}
+
+fn buffer_from_codes(
+  module_id: i32,
+  base_offset: i32,
+  codes: layout.HeapArray(i32)
+) -> TextBuffer {
+  TextBuffer {
+    module_id: module_id,
+    base_offset: base_offset,
+    length: layout.HeapArray::len(i32, codes),
+    codes: codes,
+  }
+}
+
+fn from_seed(seed: i32) -> TextBuffer {
+  let codes0 = code_array_empty();
+  let codes1 = push_code(codes0, TextCharCode::LowerL);
+  let codes2 = push_code(codes1, TextCharCode::LowerE);
+  let codes3 = push_code(codes2, TextCharCode::LowerT);
+  let codes4 = push_code(codes3, TextCharCode::Space);
+  let codes5 = push_code(codes4, TextCharCode::LowerX + (seed % 3));
+  let codes6 = push_code(codes5, TextCharCode::Colon);
+  let codes7 = push_code(codes6, TextCharCode::UpperB + (seed % 3));
+  let codes8 = push_code(codes7, TextCharCode::LeftParen);
+  let codes9 = push_code(codes8, TextCharCode::UpperI);
+  let codes10 = push_code(codes9, TextCharCode::RightParen);
+  let codes11 = push_code(codes10, TextCharCode::Equal);
+  let codes12 = push_code(codes11, TextCharCode::Digit1 + (seed % 3));
+  let codes13 = push_code(codes12, TextCharCode::Space);
+  let codes14 = push_code(codes13, TextCharCode::LowerC);
+  let codes15 = push_code(codes14, TextCharCode::LowerO);
+  let codes16 = push_code(codes15, TextCharCode::LowerN);
+  let codes17 = push_code(codes16, TextCharCode::LowerS);
+  let codes18 = push_code(codes17, TextCharCode::LowerT);
+  let codes19 = push_code(codes18, TextCharCode::Space);
+  let codes20 = push_code(codes19, TextCharCode::LowerY);
+  let codes21 = push_code(codes20, TextCharCode::Colon);
+  let codes22 = push_code(codes21, TextCharCode::UpperI);
+  let codes23 = push_code(codes22, TextCharCode::Equal);
+  let codes24 = push_code(codes23, TextCharCode::Digit2 + (seed % 3));
+  buffer_from_codes(seed, seed * 16, codes24)
+}
+
+fn function_from_seed(seed: i32) -> TextBuffer {
+  let name = TextCharCode::LowerF + (seed % 3);
+  let param_name = TextCharCode::LowerX + (seed % 3);
+  let codes0 = code_array_empty();
+  let codes1 = push_code(codes0, TextCharCode::LowerF);
+  let codes2 = push_code(codes1, TextCharCode::LowerN);
+  let codes3 = push_code(codes2, TextCharCode::Space);
+  let codes4 = push_code(codes3, name);
+  let codes5 = push_code(codes4, TextCharCode::LeftParen);
+  let codes6 = push_code(codes5, param_name);
+  let codes7 = push_code(codes6, TextCharCode::Colon);
+  let codes8 = push_code(codes7, TextCharCode::UpperI);
+  let codes9 = push_code(codes8, TextCharCode::RightParen);
+  let codes10 = push_code(codes9, TextCharCode::Minus);
+  let codes11 = push_code(codes10, TextCharCode::Greater);
+  let codes12 = push_code(codes11, TextCharCode::UpperI);
+  let codes13 = push_code(codes12, TextCharCode::LeftBrace);
+  let codes14 = push_code(codes13, name);
+  let codes15 = push_code(codes14, TextCharCode::LeftParen);
+  let codes16 = push_code(codes15, param_name);
+  let codes17 = push_code(codes16, TextCharCode::RightParen);
+  let codes18 = push_code(codes17, TextCharCode::RightBrace);
+  buffer_from_codes(seed, seed * 16, codes18)
+}
+
+fn zero_function_from_seed(seed: i32) -> TextBuffer {
+  let name = TextCharCode::LowerF + (seed % 3);
+  let codes0 = code_array_empty();
+  let codes1 = push_code(codes0, TextCharCode::LowerF);
+  let codes2 = push_code(codes1, TextCharCode::LowerN);
+  let codes3 = push_code(codes2, TextCharCode::Space);
+  let codes4 = push_code(codes3, name);
+  let codes5 = push_code(codes4, TextCharCode::LeftParen);
+  let codes6 = push_code(codes5, TextCharCode::RightParen);
+  let codes7 = push_code(codes6, TextCharCode::Minus);
+  let codes8 = push_code(codes7, TextCharCode::Greater);
+  let codes9 = push_code(codes8, TextCharCode::UpperI);
+  let codes10 = push_code(codes9, TextCharCode::LeftBrace);
+  let codes11 = push_code(codes10, TextCharCode::Digit1 + (seed % 3));
+  let codes12 = push_code(codes11, TextCharCode::RightBrace);
+  buffer_from_codes(seed, seed * 16, codes12)
+}
+
+fn pub_function_from_seed(seed: i32) -> TextBuffer {
+  let name = TextCharCode::LowerF + (seed % 3);
+  let codes0 = code_array_empty();
+  let codes1 = push_code(codes0, TextCharCode::LowerP);
+  let codes2 = push_code(codes1, TextCharCode::LowerU);
+  let codes3 = push_code(codes2, TextCharCode::LowerB);
+  let codes4 = push_code(codes3, TextCharCode::Space);
+  let codes5 = push_code(codes4, TextCharCode::LowerF);
+  let codes6 = push_code(codes5, TextCharCode::LowerN);
+  let codes7 = push_code(codes6, TextCharCode::Space);
+  let codes8 = push_code(codes7, name);
+  let codes9 = push_code(codes8, TextCharCode::LeftParen);
+  let codes10 = push_code(codes9, TextCharCode::RightParen);
+  let codes11 = push_code(codes10, TextCharCode::Minus);
+  let codes12 = push_code(codes11, TextCharCode::Greater);
+  let codes13 = push_code(codes12, TextCharCode::UpperI);
+  let codes14 = push_code(codes13, TextCharCode::LeftBrace);
+  let codes15 = push_code(codes14, TextCharCode::Digit1 + (seed % 3));
+  let codes16 = push_code(codes15, TextCharCode::RightBrace);
+  buffer_from_codes(seed, seed * 16, codes16)
+}
+
+fn multi_function_from_seed(seed: i32) -> TextBuffer {
+  let name = TextCharCode::LowerF + (seed % 3);
+  let first_param = TextCharCode::LowerX + (seed % 3);
+  let second_param = TextCharCode::LowerA + (seed % 3);
+  let codes0 = code_array_empty();
+  let codes1 = push_code(codes0, TextCharCode::LowerF);
+  let codes2 = push_code(codes1, TextCharCode::LowerN);
+  let codes3 = push_code(codes2, TextCharCode::Space);
+  let codes4 = push_code(codes3, name);
+  let codes5 = push_code(codes4, TextCharCode::LeftParen);
+  let codes6 = push_code(codes5, first_param);
+  let codes7 = push_code(codes6, TextCharCode::Colon);
+  let codes8 = push_code(codes7, TextCharCode::UpperI);
+  let codes9 = push_code(codes8, TextCharCode::Comma);
+  let codes10 = push_code(codes9, second_param);
+  let codes11 = push_code(codes10, TextCharCode::Colon);
+  let codes12 = push_code(codes11, TextCharCode::UpperI);
+  let codes13 = push_code(codes12, TextCharCode::RightParen);
+  let codes14 = push_code(codes13, TextCharCode::Minus);
+  let codes15 = push_code(codes14, TextCharCode::Greater);
+  let codes16 = push_code(codes15, TextCharCode::UpperI);
+  let codes17 = push_code(codes16, TextCharCode::LeftBrace);
+  let codes18 = push_code(codes17, name);
+  let codes19 = push_code(codes18, TextCharCode::LeftParen);
+  let codes20 = push_code(codes19, first_param);
+  let codes21 = push_code(codes20, TextCharCode::RightParen);
+  let codes22 = push_code(codes21, TextCharCode::RightBrace);
+  buffer_from_codes(seed, seed * 16, codes22)
+}
+
+fn three_function_from_seed(seed: i32) -> TextBuffer {
+  let name = TextCharCode::LowerF + (seed % 3);
+  let first_param = TextCharCode::LowerX + (seed % 3);
+  let second_param = TextCharCode::LowerA + (seed % 3);
+  let third_param = TextCharCode::LowerM + (seed % 3);
+  let codes0 = code_array_empty();
+  let codes1 = push_code(codes0, TextCharCode::LowerF);
+  let codes2 = push_code(codes1, TextCharCode::LowerN);
+  let codes3 = push_code(codes2, TextCharCode::Space);
+  let codes4 = push_code(codes3, name);
+  let codes5 = push_code(codes4, TextCharCode::LeftParen);
+  let codes6 = push_code(codes5, first_param);
+  let codes7 = push_code(codes6, TextCharCode::Colon);
+  let codes8 = push_code(codes7, TextCharCode::UpperI);
+  let codes9 = push_code(codes8, TextCharCode::Comma);
+  let codes10 = push_code(codes9, second_param);
+  let codes11 = push_code(codes10, TextCharCode::Colon);
+  let codes12 = push_code(codes11, TextCharCode::UpperI);
+  let codes13 = push_code(codes12, TextCharCode::Comma);
+  let codes14 = push_code(codes13, third_param);
+  let codes15 = push_code(codes14, TextCharCode::Colon);
+  let codes16 = push_code(codes15, TextCharCode::UpperI);
+  let codes17 = push_code(codes16, TextCharCode::RightParen);
+  let codes18 = push_code(codes17, TextCharCode::Minus);
+  let codes19 = push_code(codes18, TextCharCode::Greater);
+  let codes20 = push_code(codes19, TextCharCode::UpperI);
+  let codes21 = push_code(codes20, TextCharCode::LeftBrace);
+  let codes22 = push_code(codes21, name);
+  let codes23 = push_code(codes22, TextCharCode::LeftParen);
+  let codes24 = push_code(codes23, first_param);
+  let codes25 = push_code(codes24, TextCharCode::RightParen);
+  let codes26 = push_code(codes25, TextCharCode::RightBrace);
+  buffer_from_codes(seed, seed * 16, codes26)
+}
+
+fn code_at(text: TextBuffer, index: i32) -> i32 {
+  let in_bounds = match index >= 0 {
+    true => index < text.length,
+    false => false,
+  };
+  match in_bounds {
+    true => layout.HeapArray::get(i32, text.codes, index),
+    false => 0,
+  }
+}
+
+fn text_hash_loop(
+  text: TextBuffer,
+  index: i32,
+  limit: i32,
+  total: i32
+) -> i32 {
+  match index < limit {
+    true => text_hash_loop(
+      text,
+      index + 1,
+      limit,
+      total * 33 + code_at(text, index)
+    ),
+    false => total,
+  }
+}
+
+fn text_hash(
+  text: TextBuffer,
+  start: i32,
+  width: i32
+) -> i32 {
+  text_hash_loop(text, start, start + width, 0)
+}
+
+fn cursor_at(text: TextBuffer, index: i32) -> TextCursor {
+  TextCursor {
+    index: index,
+    offset: text.base_offset + index,
+    line: 1,
+    column: index + 1,
+  }
+}
+
+fn cursor_span(cursor: TextCursor, width: i32) -> span.Span {
+  span.make(
+    cursor.offset,
+    cursor.offset + width,
+    cursor.line,
+    cursor.column
+  )
+}
+
+fn advance(cursor: TextCursor, width: i32) -> TextCursor {
+  TextCursor {
+    index: cursor.index + width,
+    offset: cursor.offset + width,
+    line: cursor.line,
+    column: cursor.column + width,
+  }
+}
+
+fn advance_newline(cursor: TextCursor) -> TextCursor {
+  TextCursor {
+    index: cursor.index + 1,
+    offset: cursor.offset + 1,
+    line: cursor.line + 1,
+    column: 1,
+  }
+}
+
+fn is_lower_code(code: i32) -> bool {
+  match code >= TextCharCode::LowerA {
+    true => code <= TextCharCode::LowerZ,
+    false => false,
+  }
+}
+
+fn is_upper_code(code: i32) -> bool {
+  match code >= TextCharCode::UpperA {
+    true => code <= TextCharCode::UpperZ,
+    false => false,
+  }
+}
+
+fn is_digit_code(code: i32) -> bool {
+  match code >= TextCharCode::Digit0 {
+    true => code <= TextCharCode::Digit9,
+    false => false,
+  }
+}
+
+fn classify(code: i32) -> TextCharClass {
+  match code {
+    TextCharCode::Eof => TextEof,
+    TextCharCode::Newline => TextNewline,
+    TextCharCode::Space => TextSpace,
+    TextCharCode::Quote => TextQuote,
+    TextCharCode::Slash => TextSlash,
+    TextCharCode::Underscore => TextLower,
+    _ => match is_lower_code(code) {
+      true => TextLower,
+      false => match is_upper_code(code) {
+        true => TextUpper,
+        false => match is_digit_code(code) {
+          true => TextDigit,
+          false => TextPunctuation,
+        },
+      },
+    },
+  }
+}
+
+fn can_continue_name(class: TextCharClass) -> bool {
+  match class {
+    TextLower => true,
+    TextUpper => true,
+    TextDigit => true,
+    _ => false,
+  }
+}
+
+fn can_continue_number(class: TextCharClass) -> bool {
+  match class {
+    TextDigit => true,
+    _ => false,
+  }
+}
+
+fn keyword_kind_from_hash(width: i32, value_hash: i32) -> token.TokenKind {
+  match width {
+    1 => match value_hash {
+      95 => token.WildcardKw,
+      _ => token.Identifier,
+    },
+    2 => match value_hash {
+      3411 => token.DoKw,
+      3476 => token.FnKw,
+      3567 => token.IfKw,
+      _ => token.Identifier,
+    },
+    3 => match value_hash {
+      112811 => token.F32Kw,
+      112912 => token.F64Kw,
+      116078 => token.I32Kw,
+      116179 => token.I64Kw,
+      121061 => token.LetKw,
+      125927 => token.PubKw,
+      129146 => token.U32Kw,
+      129247 => token.U64Kw,
+      _ => token.Identifier,
+    },
+    4 => match value_hash {
+      3751145 => token.ElseKw,
+      4296800 => token.BoolLiteral,
+      4304258 => token.TypeKw,
+      _ => token.Identifier,
+    },
+    5 => match value_hash {
+      121518887 => token.ConstKw,
+      124571339 => token.BoolLiteral,
+      132880973 => token.MatchKw,
+      142823945 => token.UnionKw,
+      _ => token.Identifier,
+    },
+    6 => match value_hash {
+      347397349 => token.StructKw,
+      _ => match value_hash == (0 - 52335941) {
+        true => token.Import,
+        false => token.Identifier,
+      },
+    },
+    8 => match value_hash {
+      1631579939 => token.External,
+      _ => token.Identifier,
+    },
+    _ => token.Identifier,
+  }
+}
+
+fn lower_name_kind(text: TextBuffer, start: i32, width: i32) -> token.TokenKind {
+  keyword_kind_from_hash(width, text_hash(text, start, width))
+}
+
+fn token_kind(class: TextCharClass) -> token.TokenKind {
+  match class {
+    TextLower => token.Identifier,
+    TextUpper => token.LiteralType,
+    TextDigit => token.NumberLiteral,
+    TextQuote => token.StringLiteral,
+    _ => token.Symbol,
+  }
+}
+
+fn scan_name_width_loop(
+  text: TextBuffer,
+  start: i32,
+  index: i32
+) -> i32 {
+  match index < text.length {
+    false => index - start,
+    true => match can_continue_name(classify(code_at(text, index))) {
+      true => scan_name_width_loop(text, start, index + 1),
+      false => index - start,
+    },
+  }
+}
+
+fn scan_name_width(text: TextBuffer, start: i32) -> i32 {
+  scan_name_width_loop(text, start, start + 1)
+}
+
+fn scan_number_width_loop(
+  text: TextBuffer,
+  start: i32,
+  index: i32
+) -> i32 {
+  match index < text.length {
+    false => index - start,
+    true => match can_continue_number(classify(code_at(text, index))) {
+      true => scan_number_width_loop(text, start, index + 1),
+      false => index - start,
+    },
+  }
+}
+
+fn scan_number_width(text: TextBuffer, start: i32) -> i32 {
+  scan_number_width_loop(text, start, start + 1)
+}
+
+fn string_width_loop(
+  text: TextBuffer,
+  start: i32,
+  index: i32
+) -> i32 {
+  match index < text.length {
+    false => 0,
+    true => match code_at(text, index) == TextCharCode::Quote {
+      true => index - start + 1,
+      false => string_width_loop(text, start, index + 1),
+    },
+  }
+}
+
+fn string_width(text: TextBuffer, start: i32) -> i32 {
+  string_width_loop(text, start, start + 1)
+}
+
+fn punctuation_width(text: TextBuffer, start: i32) -> i32 {
+  match code_at(text, start) == TextCharCode::Minus {
+    false => 1,
+    true => match code_at(text, start + 1) == TextCharCode::Greater {
+      false => 1,
+      true => 2,
+    },
+  }
+}
+
+fn punctuation_kind(text: TextBuffer, start: i32, width: i32) -> TextPunctuation {
+  let code = code_at(text, start);
+  match code {
+    TextCharCode::LeftParen => PunctLeftParen,
+    TextCharCode::RightParen => PunctRightParen,
+    TextCharCode::Comma => PunctComma,
+    TextCharCode::Minus => match width == 2 {
+      true => PunctArrow,
+      false => PunctOther,
+    },
+    TextCharCode::Slash => PunctSlash,
+    TextCharCode::Colon => PunctColon,
+    TextCharCode::Semicolon => PunctSemicolon,
+    TextCharCode::Equal => PunctEqual,
+    TextCharCode::LeftBrace => PunctLeftBrace,
+    TextCharCode::RightBrace => PunctRightBrace,
+    _ => PunctOther,
+  }
+}
+
+fn lexeme(
+  kind: token.TokenKind,
+  punctuation: TextPunctuation,
+  text: TextBuffer,
+  cursor: TextCursor,
+  width: i32
+) -> TextLexeme {
+  TextLexeme {
+    kind: kind,
+    punctuation: punctuation,
+    span: cursor_span(cursor, width),
+    byte_width: width,
+    text_hash: text_hash(text, cursor.index, width),
+  }
+}
+
+fn lex_width(
+  text: TextBuffer,
+  kind: token.TokenKind,
+  punctuation: TextPunctuation,
+  cursor: TextCursor,
+  width: i32
+) -> TextLexResult {
+  TextLexed(
+    lexeme(kind, punctuation, text, cursor, width),
+    advance(cursor, width)
+  )
+}
+
+fn lex_name(class: TextCharClass, text: TextBuffer, cursor: TextCursor) -> TextLexResult {
+  let width = scan_name_width(text, cursor.index);
+  lex_width(
+    text,
+    match class {
+      TextUpper => token.LiteralType,
+      _ => lower_name_kind(text, cursor.index, width),
+    },
+    PunctNone,
+    cursor,
+    width
+  )
+}
+
+fn lex_one(text: TextBuffer, cursor: TextCursor) -> TextLexResult {
+  let code = code_at(text, cursor.index);
+  let class = classify(code);
+  match class {
+    TextEof => TextLexFailed(UnexpectedTextChar(
+      code,
+      cursor_span(cursor, 0)
+    )),
+    TextSpace => lex_width(text, token_kind(class), PunctNone, cursor, 1),
+    TextNewline => TextLexed(
+      lexeme(token_kind(class), PunctNone, text, cursor, 1),
+      advance_newline(cursor)
+    ),
+    TextLower => lex_name(class, text, cursor),
+    TextUpper => lex_name(class, text, cursor),
+    TextDigit => lex_width(
+      text,
+      token_kind(class),
+      PunctNone,
+      cursor,
+      scan_number_width(text, cursor.index)
+    ),
+    TextQuote => match string_width(text, cursor.index) {
+      0 => TextLexFailed(UnterminatedString(cursor_span(
+        cursor,
+        text.length - cursor.index
+      ))),
+      width => lex_width(text, token_kind(class), PunctNone, cursor, width),
+    },
+    TextSlash => lex_width(text, token_kind(class), PunctSlash, cursor, 1),
+    TextPunctuation => match punctuation_width(text, cursor.index) {
+      width => lex_width(
+        text,
+        token_kind(class),
+        punctuation_kind(text, cursor.index, width),
+        cursor,
+        width
+      ),
+    },
+  }
+}
+
+fn is_line_comment_start(text: TextBuffer, cursor: TextCursor) -> bool {
+  match code_at(text, cursor.index) == TextCharCode::Slash {
+    true => code_at(text, cursor.index + 1) == TextCharCode::Slash,
+    false => false,
+  }
+}
+
+fn skip_line_comment(text: TextBuffer, cursor: TextCursor) -> TextCursor {
+  match cursor.index < text.length {
+    false => cursor,
+    true => match code_at(text, cursor.index) == TextCharCode::Newline {
+      true => cursor,
+      false => rec(text, advance(cursor, 1)),
+    },
+  }
+}
+
+fn skip_trivia(text: TextBuffer, cursor: TextCursor) -> TextCursor {
+  match cursor.index < text.length {
+    false => cursor,
+    true => match is_line_comment_start(text, cursor) {
+      true => rec(text, skip_line_comment(text, cursor)),
+      false => match classify(code_at(text, cursor.index)) {
+        TextSpace => rec(text, advance(cursor, 1)),
+        TextNewline => rec(text, advance_newline(cursor)),
+        _ => cursor,
+      },
+    },
+  }
+}
+
+fn lex_token(text: TextBuffer, cursor: TextCursor) -> TextLexResult {
+  lex_one(text, skip_trivia(text, cursor))
+}
+
+fn error_span(value: TextLexError) -> span.Span match {
+  UnexpectedTextChar(_, at) => at,
+  UnterminatedString(at) => at,
+}
+
+fn token_from_result(value: TextLexResult) -> token.Token match {
+  TextLexed(value, _) => token.make(value.kind, value.span),
+  TextLexFailed(error) => token.make(token.Symbol, error_span(error)),
+}
+
+fn text_token_from_result(value: TextLexResult) -> TextToken match {
+  TextLexed(value, _) => TextToken {
+    token: token.make(value.kind, value.span),
+    punctuation: value.punctuation,
+    text_hash: value.text_hash,
+  },
+  TextLexFailed(error) => TextToken {
+    token: token.make(token.Symbol, error_span(error)),
+    punctuation: PunctOther,
+    text_hash: 0,
+  },
+}
+
+fn cursor_from_result(
+  value: TextLexResult,
+  _fallback: TextCursor
+) -> TextCursor match {
+  TextLexed(_, cursor), _fallback => cursor,
+  TextLexFailed(_), fallback => fallback,
+}
+
+fn safe_cursor_from_result(
+  result: TextLexResult,
+  current: TextCursor,
+  fallback: TextCursor
+) -> TextCursor {
+  let candidate = cursor_from_result(result, fallback);
+  match candidate.index > current.index {
+    true => candidate,
+    false => fallback,
+  }
+}
+
+fn diag(value: TextLexError) -> diagnostic.Diagnostic match {
+  UnexpectedTextChar(code, at) => diagnostic.make(
+    diagnostic.CodeUnexpectedToken,
+    diagnostic.Error,
+    at,
+    code,
+    0
+  ),
+  UnterminatedString(at) => diagnostic.make(
+    diagnostic.CodeUnexpectedEnd,
+    diagnostic.Error,
+    at,
+    53,
+    0
+  ),
+}
+
+fn push_error(
+  bag: diagnostic.DiagnosticBag,
+  other: TextLexResult
+) -> diagnostic.DiagnosticBag match {
+  bag, TextLexed(_, _) => bag,
+  bag, TextLexFailed(error) => diagnostic.push(bag, diag(error)),
+}
+
+fn result_count(value: TextLexResult) -> i32 match {
+  TextLexed(value, _) => match value.byte_width > 0 {
+    true => 1,
+    false => 0,
+  },
+  TextLexFailed(_) => 1,
+}
+
+fn next_stream_span(
+  count: i32,
+  current_span: span.Span,
+  next: TextLexResult
+) -> span.Span {
+  match count == 0 {
+    true => token_from_result(next).span,
+    false => span.merge(current_span, token_from_result(next).span),
+  }
+}
+
+fn text_token_array_empty() -> layout.HeapArray(TextToken) {
+  layout.HeapArray::empty(TextToken)
+}
+
+fn stream_step(
+  text: TextBuffer,
+  cursor: TextCursor,
+  tokens: layout.HeapArray(TextToken),
+  count: i32,
+  diagnostics: diagnostic.DiagnosticBag,
+  source_span: span.Span,
+  result: TextLexResult
+) -> TextTokenStream {
+  let fallback_cursor = advance(cursor, 1);
+  let next_cursor = safe_cursor_from_result(
+    result,
+    cursor,
+    fallback_cursor
+  );
+  let next_tokens = layout.HeapArray::push(
+    TextToken,
+    tokens,
+    text_token_from_result(result)
+  );
+  let next_count = count + result_count(result);
+  let next_diagnostics = push_error(diagnostics, result);
+  let next_source_span = next_stream_span(
+    count,
+    source_span,
+    result
+  );
+  stream_loop(
+    text,
+    next_cursor,
+    next_tokens,
+    next_count,
+    next_diagnostics,
+    next_source_span
+  )
+}
+
+fn stream_loop(
+  text: TextBuffer,
+  cursor: TextCursor,
+  tokens: layout.HeapArray(TextToken),
+  count: i32,
+  diagnostics: diagnostic.DiagnosticBag,
+  source_span: span.Span
+) -> TextTokenStream {
+  let token_cursor = skip_trivia(text, cursor);
+  match token_cursor.index < text.length {
+    false => TextTokenStream {
+      tokens: tokens,
+      count: count,
+      diagnostics: diagnostics,
+      source_span: source_span,
+    },
+    true => match lex_one(text, token_cursor) {
+      result => stream_loop(
+        text,
+        safe_cursor_from_result(
+          result,
+          token_cursor,
+          advance(token_cursor, 1)
+        ),
+        layout.HeapArray::push(
+          TextToken,
+          tokens,
+          text_token_from_result(result)
+        ),
+        count + result_count(result),
+        push_error(diagnostics, result),
+        next_stream_span(
+          count,
+          source_span,
+          result
+        )
+      ),
+    },
+  }
+}
+
+fn stream_from_buffer(text: TextBuffer) -> TextTokenStream {
+  let start = cursor_at(text, 0);
+  let empty_span = cursor_span(start, 0);
+  stream_loop(
+    text,
+    start,
+    text_token_array_empty(),
+    0,
+    diagnostic.empty(),
+    empty_span
+  )
+}
+
+fn length(source: TextTokenStream) -> i32 {
+  source.count
+}
+
+fn source_span(source: TextTokenStream) -> span.Span {
+  source.source_span
+}
+
+fn missing_token(source: TextTokenStream) -> token.Token {
+  token.make(token.Symbol, source_span(source))
+}
+
+fn missing_text_token(source: TextTokenStream) -> TextToken {
+  TextToken {
+    token: missing_token(source),
+    punctuation: PunctOther,
+    text_hash: 0,
+  }
+}
+
+fn text_token_at(source: TextTokenStream, index: i32) -> TextToken {
+  let in_bounds = match index >= 0 {
+    true => index < source.count,
+    false => false,
+  };
+  match in_bounds {
+    true => layout.HeapArray::get(
+      TextToken,
+      source.tokens,
+      index
+    ),
+    false => missing_text_token(source),
+  }
+}
+
+fn token_at(source: TextTokenStream, index: i32) -> token.Token {
+  text_token_at(source, index).token
+}
+
+fn punctuation_at(source: TextTokenStream, index: i32) -> TextPunctuation {
+  text_token_at(source, index).punctuation
+}
+
+fn text_hash_at(source: TextTokenStream, index: i32) -> i32 {
+  text_token_at(source, index).text_hash
+}
+
+fn lexeme_score(value: TextLexeme) -> i32 {
+  token.token_score(token.make(value.kind, value.span))
+    + punctuation_score(value.punctuation)
+    + value.byte_width
+    + value.text_hash
+}
+
+fn punctuation_score(value: TextPunctuation) -> i32 {
+  match value {
+    PunctNone => 0,
+    PunctEqual => 1,
+    PunctLeftParen => 2,
+    PunctRightParen => 3,
+    PunctArrow => 4,
+    PunctLeftBrace => 5,
+    PunctRightBrace => 6,
+    PunctComma => 7,
+    PunctColon => 8,
+    PunctSlash => 9,
+    PunctSemicolon => 10,
+    PunctOther => 11,
+  }
+}
+
+fn text_token_score(value: TextToken) -> i32 {
+  token.token_score(value.token)
+    + punctuation_score(value.punctuation)
+    + value.text_hash
+}
+
+fn result_score(value: TextLexResult) -> i32 match {
+  TextLexed(value, cursor) => lexeme_score(value) + cursor.index + cursor.column,
+  TextLexFailed(error) => 0 - span.width(error_span(error)),
+}
+
+fn stream_token_score_loop(
+  stream: TextTokenStream,
+  index: i32,
+  total: i32
+) -> i32 {
+  match index < stream.count {
+    true => stream_token_score_loop(
+      stream,
+      index + 1,
+      total + text_token_score(text_token_at(stream, index))
+    ),
+    false => total,
+  }
+}
+
+fn stream_score(stream: TextTokenStream) -> i32 {
+  stream_token_score_loop(stream, 0, 0)
+    + stream.count
+    + diagnostic.bag_score(stream.diagnostics)
+}
+
+fn buffer_code_score_loop(
+  text: TextBuffer,
+  index: i32,
+  total: i32
+) -> i32 {
+  match index < text.length {
+    true => buffer_code_score_loop(
+      text,
+      index + 1,
+      total + code_at(text, index)
+    ),
+    false => total,
+  }
+}
+
+fn buffer_score(text: TextBuffer) -> i32 {
+  text.module_id
+    + text.base_offset
+    + text.length
+    + buffer_code_score_loop(text, 0, 0)
+}
+
+fn entry(seed: i32) -> i32 {
+  let text = from_seed(seed);
+  let function_text = function_from_seed(seed + 1);
+  let multi_function_text = multi_function_from_seed(seed + 2);
+  let zero_function_text = zero_function_from_seed(seed + 3);
+  let three_function_text = three_function_from_seed(seed + 4);
+  let pub_function_text = pub_function_from_seed(seed + 5);
+  buffer_score(text)
+    + result_score(lex_one(
+    text,
+    cursor_at(text, seed % 4)
+  ))
+    + stream_score(stream_from_buffer(text))
+    + buffer_score(function_text)
+    + stream_score(stream_from_buffer(function_text))
+    + buffer_score(multi_function_text)
+    + stream_score(stream_from_buffer(multi_function_text))
+    + buffer_score(zero_function_text)
+    + stream_score(stream_from_buffer(zero_function_text))
+    + buffer_score(three_function_text)
+    + stream_score(stream_from_buffer(three_function_text))
+    + buffer_score(pub_function_text)
+    + stream_score(stream_from_buffer(pub_function_text))
+}

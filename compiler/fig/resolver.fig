@@ -1,0 +1,213 @@
+const diagnostic = @import("./diagnostic.fig");
+const modgraph = @import("./modgraph.fig");
+const source = @import("./source.fig");
+const span = @import("./span.fig");
+
+type ResolveRequest = struct {
+  importer_id: i32,
+  import_id: i32,
+  span: span.Span,
+}
+
+type ResolveResult = union {
+  Resolved(module: modgraph.ModuleRecord), Missing(request: ResolveRequest)
+}
+
+type ModuleCache = struct {
+  first_id: i32,
+  second_id: i32,
+  hit_count: i32,
+  miss_count: i32,
+}
+
+type ResolveState = struct {
+  graph: modgraph.ModuleGraph,
+  cache: ModuleCache,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type ResolveStep = struct {
+  state: ResolveState,
+  result: ResolveResult,
+}
+
+fn request(
+  importer_id: i32,
+  import_id: i32,
+  source_span: span.Span
+) -> ResolveRequest {
+  ResolveRequest {
+    importer_id: importer_id,
+    import_id: import_id,
+    span: source_span,
+  }
+}
+
+fn empty_cache() -> ModuleCache {
+  ModuleCache {
+    first_id: 0 - 1,
+    second_id: 0 - 1,
+    hit_count: 0,
+    miss_count: 0,
+  }
+}
+
+fn seed_cache(graph: modgraph.ModuleGraph) -> ModuleCache {
+  ModuleCache {
+    first_id: modgraph.root_id(graph),
+    second_id: 0 - 1,
+    hit_count: 0,
+    miss_count: 0,
+  }
+}
+
+fn state(graph: modgraph.ModuleGraph) -> ResolveState {
+  ResolveState {
+    graph: graph,
+    cache: seed_cache(graph),
+    diagnostics: diagnostic.empty(),
+  }
+}
+
+fn cache_contains(cache: ModuleCache, module_id: i32) -> bool {
+  match cache.first_id == module_id {
+    true => true,
+    false => cache.second_id == module_id,
+  }
+}
+
+fn record_cache_probe(
+  cache: ModuleCache,
+  module_id: i32
+) -> ModuleCache {
+  match cache_contains(cache, module_id) {
+    true => ModuleCache {
+      first_id: cache.first_id,
+      second_id: cache.second_id,
+      hit_count: cache.hit_count + 1,
+      miss_count: cache.miss_count,
+    },
+    false => ModuleCache {
+      first_id: cache.first_id,
+      second_id: module_id,
+      hit_count: cache.hit_count,
+      miss_count: cache.miss_count + 1,
+    },
+  }
+}
+
+fn resolve_graph(
+  graph: modgraph.ModuleGraph,
+  request: ResolveRequest
+) -> ResolveResult {
+  match graph.dependency.module_id == request.import_id {
+    true => Resolved(graph.dependency),
+    false => match graph.root.module_id == request.import_id {
+      true => Resolved(graph.root),
+      false => Missing(request),
+    },
+  }
+}
+
+fn missing_module_diagnostic(request: ResolveRequest) -> diagnostic.Diagnostic {
+  diagnostic.make(
+    diagnostic.CodeMissingModule,
+    diagnostic.Error,
+    request.span,
+    request.import_id,
+    request.importer_id
+  )
+}
+
+fn diagnostics_after_result(
+  diagnostics: diagnostic.DiagnosticBag,
+  other: ResolveResult
+) -> diagnostic.DiagnosticBag match {
+  diagnostics, Resolved(_) => diagnostics,
+  diagnostics, Missing(request) => diagnostic.push(
+    diagnostics,
+    missing_module_diagnostic(request)
+  ),
+}
+
+fn result_module_id(value: ResolveResult) -> i32 match {
+  Resolved(module) => module.module_id,
+  Missing(request) => request.import_id,
+}
+
+fn resolve(
+  current: ResolveState,
+  request: ResolveRequest
+) -> ResolveStep {
+  let result = resolve_graph(current.graph, request);
+  ResolveStep {
+    state: ResolveState {
+      graph: current.graph,
+      cache: record_cache_probe(
+        current.cache,
+        result_module_id(result)
+      ),
+      diagnostics: diagnostics_after_result(
+        current.diagnostics,
+        result
+      ),
+    },
+    result: result,
+  }
+}
+
+fn result_source(
+  value: ResolveResult,
+  _graph: modgraph.ModuleGraph
+) -> source.SourceText match {
+  Resolved(module), _graph => module.source,
+  Missing(_), graph => modgraph.root_source(graph),
+}
+
+fn step_source(step: ResolveStep) -> source.SourceText {
+  result_source(step.result, step.state.graph)
+}
+
+fn cache_score(cache: ModuleCache) -> i32 {
+  cache.first_id
+    + cache.second_id
+    + cache.hit_count
+    + cache.miss_count
+}
+
+fn result_score(value: ResolveResult) -> i32 match {
+  Resolved(module) => modgraph.module_score(module),
+  Missing(request) => 0 - request.import_id,
+}
+
+fn state_score(state: ResolveState) -> i32 {
+  modgraph.graph_score(state.graph)
+    + cache_score(state.cache)
+    + diagnostic.bag_score(state.diagnostics)
+}
+
+fn step_score(step: ResolveStep) -> i32 {
+  state_score(step.state) + result_score(step.result)
+}
+
+fn entry(seed: i32) -> i32 {
+  let graph = modgraph.from_seed(seed);
+  let source_span = span.make(seed, seed + 1, 1, 1);
+  let first = resolve(
+    state(graph),
+    request(
+      modgraph.root_id(graph),
+      modgraph.root_import_id(graph),
+      source_span
+    )
+  );
+  let second = resolve(
+    first.state,
+    request(
+      modgraph.root_id(graph),
+      seed + 1000,
+      source_span
+    )
+  );
+  step_score(first) + step_score(second)
+}

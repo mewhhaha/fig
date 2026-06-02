@@ -132,7 +132,6 @@ export interface CompileCache {
   signatureHashes?: WeakMap<object, string>;
   annotationWork?: WeakMap<object, boolean>;
   doExpressionWork?: WeakMap<object, boolean>;
-  contractRewriteMisuseDeclarations?: WeakMap<object, Diagnostic[]>;
   builtinOperatorLoweredDeclarations?: WeakSet<object>;
   branchHintCheckedDeclarations?: WeakSet<object>;
   balancedBinaryDeclarations?: WeakSet<object>;
@@ -181,7 +180,6 @@ export function createCompileCache(): CompileCache {
     signatureHashes: new WeakMap(),
     annotationWork: new WeakMap(),
     doExpressionWork: new WeakMap(),
-    contractRewriteMisuseDeclarations: new WeakMap(),
     builtinOperatorLoweredDeclarations: new WeakSet(),
     branchHintCheckedDeclarations: new WeakSet(),
     balancedBinaryDeclarations: new WeakSet(),
@@ -633,7 +631,6 @@ export interface ImportPhaseTrace {
   keptDeclarationCount?: number;
   typeCount?: number;
   fnCount?: number;
-  contractCount?: number;
   sourceImportCount?: number;
   referenceCount?: number;
 }
@@ -863,6 +860,7 @@ export {
   type CompilerIntrinsicBuiltin,
   type CompilerPlugin,
   type CompilerPluginRegistry,
+  type CompilerRewriteRule,
   type CompilerStaticBuiltin,
   type ConstBuiltinContext,
   type ConstPluginValue,
@@ -2092,6 +2090,25 @@ function referencedDeclarationNames(
   return refs;
 }
 
+function doStrategyMemberReferences(strategy: string, effect: TypeExpr): string[] {
+  const effectName = doStrategyEffectConstructorName(effect);
+  if (!effectName) return [];
+  if (strategy === "monad") {
+    return [`${effectName}::pure`, `${effectName}::bind`];
+  }
+  if (strategy === "applicative") {
+    return [`${effectName}::map`, `${effectName}::pure`, `${effectName}::apply`];
+  }
+  return [];
+}
+
+function doStrategyEffectConstructorName(effect: TypeExpr): string | undefined {
+  if (effect.kind === "type_ref") return effect.name;
+  if (effect.kind === "type_static_ref") return effect.name;
+  if (effect.kind === "type_call") return doStrategyEffectConstructorName(effect.callee);
+  return undefined;
+}
+
 function visitDeclarationReferenceNames(
   decl: Declaration,
   add: (name: string | undefined) => void,
@@ -2099,7 +2116,11 @@ function visitDeclarationReferenceNames(
 ) {
   const visitPattern = (pattern: ParamPattern | undefined) => {
     if (!pattern) return;
-    if (pattern.kind === "constructor" || pattern.kind === "type") add(pattern.name);
+    if (
+      pattern.kind === "constructor" || pattern.kind === "type" || pattern.kind === "enum_member"
+    ) {
+      add(pattern.name);
+    }
     if (pattern.kind === "constructor" || pattern.kind === "tuple") {
       const items = pattern.kind === "constructor" ? pattern.args : pattern.items;
       for (const item of items) visitPattern(item);
@@ -2111,6 +2132,9 @@ function visitDeclarationReferenceNames(
       case "do":
         add(expr.strategy.name);
         visitTypeExpr(expr.strategy.effect);
+        for (const member of doStrategyMemberReferences(expr.strategy.name, expr.strategy.effect)) {
+          add(member);
+        }
         for (const stmt of expr.statements) {
           if (
             stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
@@ -2282,15 +2306,6 @@ function visitDeclarationReferenceNames(
     if (item.kind === "type") {
       visitTypeBlock(item.body);
       for (const clause of item.clauses ?? []) visitDecl(clause);
-      return;
-    }
-    if (item.kind === "contract") {
-      add(item.memberOf?.owner);
-      for (const param of item.params) {
-        addTypeSource(param.type);
-        visitPattern(param.pattern);
-      }
-      visitExpr(item.body);
       return;
     }
     if (item.kind === "operator") {
@@ -2735,13 +2750,6 @@ function declarationInterfaceKey(decl: Declaration): string {
     hash = hashUpdateString(hash, decl.effects.join(","));
     hash = hashUpdateString(hash, decl.primitiveId ?? "");
     hash = hashUpdateString(hash, decl.branchHint ?? "");
-    for (const param of decl.params) {
-      hash = hashUpdateString(hash, param.name);
-      hash = hashUpdateString(hash, param.type);
-      hash = hashUpdateString(hash, param.const ? "const" : "runtime");
-    }
-  } else if (decl.kind === "contract") {
-    hash = hashUpdateString(hash, decl.resultKind);
     for (const param of decl.params) {
       hash = hashUpdateString(hash, param.name);
       hash = hashUpdateString(hash, param.type);
@@ -3265,7 +3273,6 @@ function importTraceCounters(phase: ImportPhaseTrace) {
     declarationsOut: phase.keptDeclarationCount,
     typeCount: phase.typeCount,
     fnCount: phase.fnCount,
-    contractCount: phase.contractCount,
     sourceImportCount: phase.sourceImportCount,
     referencedNameCount: phase.referenceCount,
     keptNameCount: phase.keptDeclarationCount,
@@ -3277,7 +3284,6 @@ function importProgramCounters(program: Program) {
     declarationCount: program.declarations.length,
     typeCount: program.declarations.filter((decl) => decl.kind === "type").length,
     fnCount: program.declarations.filter((decl) => decl.kind === "fn").length,
-    contractCount: program.declarations.filter((decl) => decl.kind === "contract").length,
     sourceImportCount: program.sourceImports?.length ?? 0,
   };
 }
@@ -3542,26 +3548,6 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
       })),
       returnType: decl.returnType ? qualifyTypeSource(decl.returnType, alias, names) : undefined,
       body: qualifyExpr(decl.body, alias, names, locals) as FnDecl["body"],
-    });
-  }
-  if (decl.kind === "contract") {
-    const locals = paramLocalNames(decl.params);
-    return withMeta(decl, {
-      ...decl,
-      name: qualifyName(decl.name, alias),
-      memberOf: decl.memberOf
-        ? {
-          ...decl.memberOf,
-          owner: qualifyReference(decl.memberOf.owner, alias, names),
-          member: decl.memberOf.member,
-        }
-        : undefined,
-      params: decl.params.map((param) => ({
-        ...param,
-        type: qualifyTypeSource(param.type, alias, names),
-        pattern: param.pattern ? qualifyParamPattern(param.pattern, alias, names) : undefined,
-      })),
-      body: qualifyExpr(decl.body, alias, names, locals) as typeof decl.body,
     });
   }
   if (decl.kind === "type") return qualifyTypeDecl(decl, alias, names);
@@ -4026,7 +4012,7 @@ function qualifyParamPattern(
   alias: string,
   names: Set<string>,
 ): ParamPattern {
-  if (pattern.kind === "constructor" || pattern.kind === "type") {
+  if (pattern.kind === "constructor" || pattern.kind === "type" || pattern.kind === "enum_member") {
     return pattern.kind === "constructor"
       ? withMeta(pattern, {
         ...pattern,

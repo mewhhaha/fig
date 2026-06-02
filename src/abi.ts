@@ -39,6 +39,7 @@ export function parseFigAbiManifest(
 export function createFigHost(abi: FigAbiManifest, instance: WebAssembly.Instance): FigHost {
   return {
     call(name, ...args) {
+      const arena = snapshotAbiArena(instance);
       const fn = abi.exports.find((item) => item.name === name);
       if (!fn) throw new Error(`missing Fig export ${name}`);
       if (args.length !== fn.params.length) {
@@ -48,22 +49,72 @@ export function createFigHost(abi: FigAbiManifest, instance: WebAssembly.Instanc
       }
       const callable = instance.exports[name];
       if (typeof callable !== "function") throw new Error(`missing Wasm export ${name}`);
-      const rawArgs = fn.params.map((param, index) =>
-        encodeFigValue(abi, instance, param.type, args[index])
-      );
-      const raw = (callable as CallableFunction)(...rawArgs);
-      if (fn.results.length === 0) return undefined;
-      if (fn.results.length === 1) return decodeFigValue(abi, instance, fn.results[0]!.type, raw);
-      if (!Array.isArray(raw)) {
-        throw new Error(`Fig export ${name} returned multiple values in an unsupported host shape`);
+      try {
+        const rawArgs: Array<number | bigint> = [];
+        for (let index = 0; index < fn.params.length; index++) {
+          const param = fn.params[index]!;
+          rawArgs.push(encodeFigValue(abi, instance, param.type, args[index]));
+        }
+        const raw = (callable as CallableFunction)(...rawArgs);
+        if (fn.results.length === 0) return undefined;
+        if (fn.results.length === 1) return decodeFigValue(abi, instance, fn.results[0]!.type, raw);
+        if (!Array.isArray(raw)) {
+          throw new Error(
+            `Fig export ${name} returned multiple values in an unsupported host shape`,
+          );
+        }
+        const decoded: unknown[] = [];
+        for (let index = 0; index < fn.results.length; index++) {
+          const result = fn.results[index]!;
+          decoded.push(decodeFigValue(abi, instance, result.type, raw[index]));
+        }
+        return decoded;
+      } finally {
+        restoreAbiArena(instance, arena);
       }
-      return fn.results.map((result, index) =>
-        decodeFigValue(abi, instance, result.type, raw[index])
-      );
     },
     encode: (type, value) => encodeFigValue(abi, instance, type, value),
     decode: (type, raw) => decodeFigValue(abi, instance, type, raw),
   };
+}
+
+type AbiArenaSnapshot = {
+  objects: number | undefined;
+  buffers: number | undefined;
+};
+
+function snapshotAbiArena(instance: WebAssembly.Instance): AbiArenaSnapshot {
+  return {
+    objects: memoryCursor(exportedMemory(instance, "fig_objects")),
+    buffers: memoryCursor(exportedMemory(instance, "fig_buffers")),
+  };
+}
+
+function restoreAbiArena(instance: WebAssembly.Instance, snapshot: AbiArenaSnapshot) {
+  restoreMemoryCursor(exportedMemory(instance, "fig_objects"), snapshot.objects);
+  restoreMemoryCursor(exportedMemory(instance, "fig_buffers"), snapshot.buffers);
+}
+
+function exportedMemory(
+  instance: WebAssembly.Instance,
+  name: string,
+): WebAssembly.Memory | undefined {
+  const memory = instance.exports[name];
+  if (memory instanceof WebAssembly.Memory) return memory;
+  return undefined;
+}
+
+function memoryCursor(memory: WebAssembly.Memory | undefined): number | undefined {
+  if (!memory) return undefined;
+  if (memory.buffer.byteLength < 4) return undefined;
+  return new DataView(memory.buffer).getUint32(0, true);
+}
+
+function restoreMemoryCursor(memory: WebAssembly.Memory | undefined, cursor: number | undefined) {
+  if (!memory) return;
+  if (cursor === undefined) return;
+  if (memory.buffer.byteLength < 4) return;
+  new DataView(memory.buffer).setUint32(0, cursor, true);
 }
 
 export function encodeFigValue(
@@ -352,6 +403,23 @@ function encodeSumValue(
   const view = objectView(instance);
   assertWritableHandle(view, ptr, layout.size, layout.type);
   if (!layout.fields.length) return ptr;
+  const tagField = layout.fields.find((field) => field.name === "tag");
+  if (tagField) {
+    writeField(instance, view, ptr + 16 + tagField.offset, tagField, variant.tag);
+    const payloadFields = layout.fields.filter((field) => field.name !== "tag");
+    if (variant.fields.length > payloadFields.length) {
+      throw new Error(
+        `unsupported ABI sum layout ${layout.type}: variant payload does not match runtime layout`,
+      );
+    }
+    for (let index = 0; index < payloadFields.length; index++) {
+      const field = payloadFields[index]!;
+      const variantField = variant.fields[index];
+      const fieldValue = variantField ? variantFieldValue(value, variantField, layout) : 0;
+      writeField(instance, view, ptr + 16 + field.offset, field, fieldValue);
+    }
+    return ptr;
+  }
   if (!variant.fields.length) {
     writeZeroFields(instance, view, ptr, layout);
     return ptr;
@@ -386,6 +454,26 @@ function decodeSumValue(
   }
   const empty = layout.variants.find((variant) => variant.fields.length === 0);
   const payloadVariants = layout.variants.filter((variant) => variant.fields.length > 0);
+  const tagField = layout.fields.find((field) => field.name === "tag");
+  if (tagField) {
+    const tag = Number(readField(instance, view, ptr + 16 + tagField.offset, tagField));
+    const variant = layout.variants.find((item) => item.tag === tag);
+    if (!variant) throw new Error(`unknown sum tag ${tag} for ${layout.type}`);
+    const payloadFields = layout.fields.filter((field) => field.name !== "tag");
+    if (!variant.fields.length) return { variant: variant.name };
+    if (variant.fields.length > payloadFields.length) {
+      throw new Error(
+        `unsupported ABI sum layout ${layout.type}: variant payload does not match runtime layout`,
+      );
+    }
+    const out: Record<string, unknown> = { variant: variant.name };
+    for (let index = 0; index < variant.fields.length; index++) {
+      const field = payloadFields[index]!;
+      const variantField = variant.fields[index]!;
+      out[variantField.name] = readField(instance, view, ptr + 16 + field.offset, field);
+    }
+    return out;
+  }
   if (layout.fields.length === 1 && empty && payloadVariants.length === 1) {
     const field = layout.fields[0]!;
     const raw = readField(instance, view, ptr + 16 + field.offset, field);

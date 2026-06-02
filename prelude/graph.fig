@@ -1,0 +1,223 @@
+const map = @import("prelude.map");
+const queue = @import("prelude.queue");
+const set = @import("prelude.set");
+const vec = @import("prelude.vec");
+
+type Edge = struct {
+  from: i32,
+  to: i32,
+}
+
+type Graph = struct {
+  node_count: i32,
+  edges: vec.Vec(Edge),
+}
+
+type SearchState = struct {
+  pending: queue.Queue(i32),
+  seen: set.Set(i32),
+}
+
+fn Graph::empty(node_count: i32) -> Graph {
+  Graph {node_count, edges: vec.Vec::empty(Edge)}
+}
+
+fn Graph::add_edge(graph: Graph, from: i32, to: i32) -> Graph {
+  Graph {
+    node_count: graph.node_count,
+    edges: vec.Vec::push(
+      Edge,
+      graph.edges,
+      Edge {from, to}
+    ),
+  }
+}
+
+fn Graph::edge_count(graph: Graph) -> i32 {
+  vec.Vec::len(Edge, graph.edges)
+}
+
+fn Graph::has_edge(graph: Graph, from: i32, to: i32) -> bool {
+  Graph::has_edge_loop(graph, from, to, 0)
+}
+
+fn Graph::has_edge_loop(
+  graph: Graph,
+  from: i32,
+  to: i32,
+  index: i32
+) -> bool {
+  match index < Graph::edge_count(graph) {
+    true => vec.Vec::get(Edge, graph.edges, index)
+      \edge -> match edge.from == from {
+      true => match edge.to == to {
+        true => true,
+        false => Graph::has_edge_loop(
+          graph,
+          from,
+          to,
+          index + 1
+        ),
+      },
+      false => Graph::has_edge_loop(
+        graph,
+        from,
+        to,
+        index + 1
+      ),
+    },
+    false => false,
+  }
+}
+
+fn Graph::out_degree(graph: Graph, node: i32) -> i32 {
+  Graph::out_degree_loop(graph, node, 0, 0)
+}
+
+fn Graph::out_degree_loop(
+  graph: Graph,
+  node: i32,
+  index: i32,
+  total: i32
+) -> i32 {
+  match index < Graph::edge_count(graph) {
+    true => vec.Vec::get(Edge, graph.edges, index)
+      \edge -> match edge.from == node {
+      true => Graph::out_degree_loop(
+        graph,
+        node,
+        index + 1,
+        total + 1
+      ),
+      false => Graph::out_degree_loop(
+        graph,
+        node,
+        index + 1,
+        total
+      ),
+    },
+    false => total,
+  }
+}
+
+fn Graph::reachable(
+  graph: Graph,
+  start: i32,
+  target: i32
+) -> bool {
+  let initial_pending = queue.Queue::push_back(
+    i32,
+    queue.Queue::empty(i32),
+    start
+  );
+  let initial_seen = set.Set::insert(
+    i32,
+    set.Set::empty(i32),
+    start,
+    map.compare_i32
+  );
+  Graph::reachable_loop(
+    graph,
+    target,
+    initial_pending,
+    initial_seen
+  )
+}
+
+fn Graph::reachable_loop(
+  graph: Graph,
+  target: i32,
+  pending: queue.Queue(i32),
+  seen: set.Set(i32)
+) -> bool {
+  match queue.Queue::pop_front(i32, pending) {
+    None => false,
+    Some(step) => match step.value == target {
+      true => true,
+      false => Graph::enqueue_neighbors(
+        graph,
+        target,
+        step.value,
+        step.queue,
+        seen
+      )
+        \next -> Graph::reachable_loop(
+        graph,
+        target,
+        next.pending,
+        next.seen
+      ),
+    },
+  }
+}
+
+fn Graph::enqueue_neighbors(
+  graph: Graph,
+  target: i32,
+  current: i32,
+  pending: queue.Queue(i32),
+  seen: set.Set(i32)
+) -> SearchState {
+  Graph::enqueue_neighbors_loop(
+    graph,
+    target,
+    current,
+    0,
+    SearchState {pending, seen}
+  )
+}
+
+fn Graph::enqueue_neighbors_loop(
+  graph: Graph,
+  target: i32,
+  current: i32,
+  index: i32,
+  state: SearchState
+) -> SearchState {
+  match index < Graph::edge_count(graph) {
+    true => vec.Vec::get(Edge, graph.edges, index)
+      \edge -> match edge.from == current {
+      true => match set.Set::contains(
+        i32,
+        state.seen,
+        edge.to,
+        map.compare_i32
+      ) {
+        true => Graph::enqueue_neighbors_loop(
+          graph,
+          target,
+          current,
+          index + 1,
+          state
+        ),
+        false => Graph::enqueue_neighbors_loop(
+          graph,
+          target,
+          current,
+          index + 1,
+          SearchState {
+            pending: queue.Queue::push_back(
+              i32,
+              state.pending,
+              edge.to
+            ),
+            seen: set.Set::insert(
+              i32,
+              state.seen,
+              edge.to,
+              map.compare_i32
+            ),
+          }
+        ),
+      },
+      false => Graph::enqueue_neighbors_loop(
+        graph,
+        target,
+        current,
+        index + 1,
+        state
+      ),
+    },
+    false => state,
+  }
+}

@@ -24,7 +24,7 @@ export interface ResolvedTypeHole {
   replacement: string;
 }
 
-export type Declaration = FnDecl | ContractDecl | LetDecl | ConstDecl | OperatorDecl | TypeDecl;
+export type Declaration = FnDecl | LetDecl | ConstDecl | OperatorDecl | TypeDecl;
 export type BranchHint = string;
 
 export interface EffectImport extends AstNodeMeta {
@@ -65,27 +65,13 @@ export interface FnDecl extends AstNodeMeta {
   returnTypeHoles?: TypeAnnotationHole[];
   effects: string[];
   body: BlockExpr;
+  matchBody?: boolean;
   generated?: boolean;
   generatedInlineable?: boolean;
   imported?: boolean;
   rootPublic?: boolean;
   primitiveId?: string;
   branchHint?: BranchHint;
-}
-
-export interface ContractDecl extends AstNodeMeta {
-  kind: "contract";
-  doc?: string;
-  name: string;
-  memberOf?: {
-    owner: string;
-    member: string;
-    span?: Span;
-    nameSpan?: Span;
-  };
-  params: Param[];
-  resultKind: "rewrite";
-  body: BlockExpr;
 }
 
 export interface LetDecl extends AstNodeMeta {
@@ -150,6 +136,7 @@ export interface TypeDecl extends AstNodeMeta {
   resultKind: TypeResultKind;
   paramPatterns?: ParamPattern[];
   body: TypeBlock;
+  enum?: EnumTypeBody;
   normalized?: TypeBody;
   paramKinds?: Record<string, TypeParamKind>;
   clauses?: TypeDecl[];
@@ -213,6 +200,17 @@ export interface TypeVariant extends AstNodeMeta {
   shape?: ShapeType;
 }
 
+export interface EnumTypeBody extends AstNodeMeta {
+  backing: string;
+  variants: EnumVariant[];
+}
+
+export interface EnumVariant extends AstNodeMeta {
+  doc?: string;
+  name: string;
+  value: string;
+}
+
 export interface ShapeType extends AstNodeMeta {
   slots: ShapeTypeSlot[];
 }
@@ -238,7 +236,7 @@ export type TypeExpr =
     & AstNodeMeta
   )
   | (
-    & { kind: "type_binary"; op: "==" | "!=" | "|"; left: TypeExpr; right: TypeExpr }
+    & { kind: "type_binary"; op: string; left: TypeExpr; right: TypeExpr }
     & AstNodeMeta
   )
   | ({ kind: "type_bool"; value: boolean } & AstNodeMeta)
@@ -327,7 +325,9 @@ export type ParamPattern =
   )
   | ({ kind: "tuple"; items: ParamPattern[] } & AstNodeMeta)
   | ({ kind: "constructor"; name: string; args: ParamPattern[] } & AstNodeMeta)
-  | ({ kind: "type"; name: string } & AstNodeMeta);
+  | ({ kind: "enum_member"; name: string } & AstNodeMeta)
+  | ({ kind: "type"; name: string } & AstNodeMeta)
+  | ({ kind: "typed"; pattern: ParamPattern; type: string } & AstNodeMeta);
 
 export interface BlockExpr extends AstNodeMeta {
   kind: "block";
@@ -373,7 +373,7 @@ export type Expr =
     }
     & AstNodeMeta
   )
-  | ({ kind: "call"; callee: Expr; args: Expr[] } & AstNodeMeta)
+  | ({ kind: "call"; callee: Expr; args: Expr[]; tailRec?: true } & AstNodeMeta)
   | ({ kind: "index"; target: Expr; index: Expr } & AstNodeMeta)
   | ({ kind: "binary"; op: string; left: Expr; right: Expr } & AstNodeMeta)
   | (
@@ -388,7 +388,10 @@ export type Expr =
     & {
       kind: "match";
       value: Expr;
-      arms: ({ pattern: ParamPattern; value: Expr; branchHint?: BranchHint } & AstNodeMeta)[];
+      arms: (
+        & { pattern: ParamPattern; guard?: Expr; value: Expr; branchHint?: BranchHint }
+        & AstNodeMeta
+      )[];
     }
     & AstNodeMeta
   )

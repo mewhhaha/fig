@@ -6,6 +6,7 @@ import {
 import { fail, type Span } from "./diagnostics.ts";
 
 export type GeneratedTokenKind =
+  | "_"
   | "import"
   | "external"
   | "type"
@@ -13,7 +14,18 @@ export type GeneratedTokenKind =
   | "fn"
   | "let"
   | "match"
+  | "if"
+  | "else"
+  | "do"
   | "pub"
+  | "struct"
+  | "union"
+  | "i32"
+  | "i64"
+  | "u32"
+  | "u64"
+  | "f32"
+  | "f64"
   | "bool"
   | "identifier"
   | "number"
@@ -59,6 +71,7 @@ function normalizeKind(kind: TokenKind | string): GeneratedTokenKind {
   if (
     kind === "Ident" || kind === "LowerIdent" || kind === "PascalIdent" || kind === "identifier"
   ) return "identifier";
+  if (kind === "OperatorSymbol") return "symbol";
   if (kind === "symbol") return "symbol";
   return kind as GeneratedTokenKind;
 }

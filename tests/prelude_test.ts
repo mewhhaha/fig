@@ -252,7 +252,10 @@ Deno.test("prelude std exposes pure fixed collection helpers", async () => {
       let zipped = array.zip_with4_i32(add, mapped, xs);
       let folded = array.fold4_i32(sum, 0, xs);
       let reduced = array.reduce4_i32(add, xs);
-      let get_value: i32 = array.get(xs, 2);
+      let get_value = match array.get(xs, 2) {
+        Some(value) => value,
+        None => 0,
+      };
       let collected: array.CompactArray(4, i32) = array.Iter::collect(array.Iter::map(array.Iter::filter(layout.InlineArray::Iter(xs), keep), inc));
       let range_sum = array.RangeIter::fold(array.RangeI32::Iter(0 .. 4), 0, sum);
       let bounds_value = match array.in_bounds(xs, 3) { true => 1, false => 0 };
@@ -672,6 +675,45 @@ Deno.test("prelude std exposes functor map and monad bind operators", async () =
   );
 });
 
+Deno.test("prelude std exposes companion functional operators", async () => {
+  await wasmFromSource(
+    `
+    const merge = @import("prelude.std");
+
+    type fn Box(a: type) -> type {
+      let Box = {value: a};
+      struct(Box)
+    }
+
+    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+      Box {value: f(v.value)}
+    }
+
+    fn Box::pure(value: a) -> Box(a) {
+      Box {value}
+    }
+
+    fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
+      Box {value: v.value(x.value)}
+    }
+
+    fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
+      f(v.value)
+    }
+
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn wrap(x: i32) -> Box(i32) { Box {value: x + 10} }
+
+    pub fn map_flip() -> Box(i32) { Box {value: 1} <&> inc }
+    pub fn apply_flip(f: Box(fn(x: i32) -> i32), x: Box(i32)) -> Box(i32) { x <**> f }
+    pub fn bind_flip() -> Box(i32) { wrap =<< Box {value: 1} }
+    pub fn kleisli_forward() -> Box(i32) { (wrap >=> wrap)(1) }
+    pub fn kleisli_reverse() -> Box(i32) { (wrap <=< wrap)(1) }
+    `,
+    { resolveModule },
+  );
+});
+
 Deno.test("prelude std rejects functional operators without matching members", async () => {
   await assertThrowsCompile(
     `
@@ -734,21 +776,129 @@ Deno.test("prelude monad inherits applicative requirements", async () => {
   );
 });
 
-Deno.test("prelude std keeps heap collection APIs out of the pure surface", async () => {
-  const std = await Deno.readTextFile("prelude/std.fig");
-  const array = await Deno.readTextFile("prelude/array_static.fig");
-  const purePrelude = `${std}\n${array}`;
+Deno.test("prelude exposes heap-backed compiler collection modules", async () => {
+  const programs = new Map<string, { source: string; expected: number }>([
+    [
+      "vec",
+      {
+        expected: 5,
+        source: `
+          const vec = @import("prelude.vec");
 
-  for (const name of ["list", "vector", "vec", "pop", "reserve", "append"]) {
-    assert(
-      !new RegExp(`\\b(fn|type fn)\\s+(?:[a-z_]+\\.)?${name}\\b`).test(purePrelude),
-      `unexpected dynamic collection helper ${name}`,
-    );
+          fn inc(x: i32) -> i32 { x + 1 }
+          fn add(acc: i32, x: i32) -> i32 { acc + x }
+
+          pub fn main() -> i32 {
+            let xs0 = vec.Vec::empty(i32);
+            let xs1 = vec.Vec::push(i32, xs0, 1);
+            let xs2 = vec.Vec::push(i32, xs1, 2);
+            let ys = vec.Vec::map(i32, i32, xs2, inc);
+            vec.Vec::fold(i32, i32, ys, 0, add)
+          }
+        `,
+      },
+    ],
+    [
+      "list",
+      {
+        expected: 3,
+        source: `
+          const list = @import("prelude.list");
+
+          fn add(acc: i32, x: i32) -> i32 { acc + x }
+
+          pub fn main() -> i32 {
+            let xs0 = list.List::empty(i32);
+            let xs1 = list.List::cons(i32, 1, xs0);
+            let xs2 = list.List::cons(i32, 2, xs1);
+            list.List::fold(i32, i32, xs2, 0, add)
+          }
+        `,
+      },
+    ],
+    [
+      "queue",
+      {
+        expected: 5,
+        source: `
+          const queue = @import("prelude.queue");
+
+          pub fn main() -> i32 {
+            let q0 = queue.Queue::empty(i32);
+            let q1 = queue.Queue::push_back(i32, q0, 4);
+            let q2 = queue.Queue::push_back(i32, q1, 5);
+            match queue.Queue::pop_front(i32, q2) {
+              Some(step) => step.value + queue.Queue::len(i32, step.queue),
+              None => 0,
+            }
+          }
+        `,
+      },
+    ],
+    [
+      "tree_zipper",
+      {
+        expected: 1,
+        source: `
+          const tree = @import("prelude.tree");
+          const zipper = @import("prelude.zipper");
+
+          pub fn main() -> i32 {
+            let t0 = tree.Tree::empty(i32);
+            let t1 = tree.Tree::push_node(i32, t0, 1, -1, -1);
+            let t2 = tree.Tree::push_node(i32, t1, 2, 0, -1);
+            let z = zipper.TreeZipper::from_tree(i32, t2);
+            match zipper.TreeZipper::go_left(i32, z) {
+              Some(left) => match zipper.TreeZipper::value(i32, left) {
+                Some(value) => value,
+                None => 0,
+              },
+              None => 0,
+            }
+          }
+        `,
+      },
+    ],
+    [
+      "map_set_graph",
+      {
+        expected: 6,
+        source: `
+          const graph = @import("prelude.graph");
+          const map = @import("prelude.map");
+          const set = @import("prelude.set");
+
+          fn fold(acc: i32, key: i32, value: i32) -> i32 {
+            acc + key + value
+          }
+
+          pub fn main() -> i32 {
+            let m0 = map.Map::empty(i32, i32);
+            let m1 = map.Map::insert(i32, i32, m0, 2, 10, map.compare_i32);
+            let m2 = map.Map::insert(i32, i32, m1, 1, 7, map.compare_i32);
+            let map_sum = map.Map::fold_in_order(i32, i32, i32, m2, 0, fold);
+            let s0 = set.Set::empty(i32);
+            let s1 = set.Set::insert(i32, s0, 2, set.Set::compare_i32);
+            let g0 = graph.Graph::empty(4);
+            let g1 = graph.Graph::add_edge(g0, 0, 1);
+            let g2 = graph.Graph::add_edge(g1, 1, 2);
+            let reachable = match graph.Graph::reachable(g2, 0, 2) { true => 1, false => 0 };
+            map_sum / 10 + set.Set::len(i32, s1) + reachable + graph.Graph::edge_count(g2)
+          }
+        `,
+      },
+    ],
+  ]);
+
+  for (const [name, program] of programs) {
+    const wasm = await wasmFromSource(program.source, { resolveModule });
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
+    assertEquals((instance.exports.main as CallableFunction)(), program.expected, name);
   }
 });
 
 Deno.test("prelude option concept methods construct map bind append and unwrap", async () => {
-  await checkSource(
+  const wasm = await wasmFromSource(
     `
     const option = @import("prelude.option");
     const core = @import("prelude.core");
@@ -767,6 +917,8 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
     `,
     { resolveModule },
   );
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
+  assertEquals((instance.exports.main as () => number)(), 12);
 });
 
 Deno.test("prelude result methods construct map bind and unwrap", async () => {
@@ -1406,7 +1558,10 @@ Deno.test("generic compact_array supports bounded literals and push overflow", a
         false => 0,
       };
       let overflow_value = array.CompactArray::len(2, bool, overflowed) * 10;
-      let item: i32 = array.CompactArray::get(5, i32, pushed, 3);
+      let item = match array.CompactArray::get(5, i32, pushed, 3) {
+        Some(value) => value,
+        None => 0,
+      };
       item + array.CompactArray::len(5, i32, pushed) + overflow_value + full_value
     }
   `;

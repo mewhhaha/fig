@@ -6,6 +6,8 @@ import {
   assertStringIncludes,
 } from "jsr:@std/assert@1";
 import {
+  compileArtifactsFromSource as compileArtifactsFromSourceRaw,
+  type CompileTraceEvent,
   type CompileSourceOptions,
   createFigHost,
   instantiateFig,
@@ -17,6 +19,7 @@ const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
   watFromSourceRaw(source, options);
 const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
   wasmFromSourceRaw(source, options);
+const compileArtifactsFromSource = compileArtifactsFromSourceRaw;
 
 const resolveModule = async (moduleName: string) => {
   try {
@@ -179,6 +182,183 @@ Deno.test("debug is the default opt mode and emits wasm name section", async () 
   assert(!hasCustomSection(await wasmFromSource(source, { optMode: "release" }), "name"));
 });
 
+Deno.test("release scalar tail-loop inline keeps varying product fields dynamic", async () => {
+  const source = `
+    type State = struct {cursor: i32, limit: i32}
+    fn bump(state: State) -> State {
+      State {cursor: state.cursor + 1, limit: state.limit}
+    }
+    fn scan(state: State) -> i32 {
+      match state.cursor < state.limit {
+        true => scan(bump(state)),
+        false => state.limit,
+      }
+    }
+    fn run(limit: i32) -> i32 {
+      scan(State {cursor: 0, limit: limit})
+    }
+    pub fn main(limit: i32) -> i32 { run(limit) }
+  `;
+  const compileTrace: CompileTraceEvent[] = [];
+  const artifact = await compileArtifactsFromSource(source, {
+    optMode: "release",
+    compileTrace,
+  });
+  const inline = compileTrace.find((event) =>
+    event.name === "backend.inline.scalar_tail_loop_call" &&
+    event.counters?.callee === "scan"
+  );
+  assert(inline);
+  assertEquals(inline.counters?.productFieldSubstitutions, 0);
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as CallableFunction)(4), 4);
+});
+
+Deno.test("release product inliner keeps large product calls out of tail loops", async () => {
+  const fields = Array.from({ length: 20 }, (_, index) => `f${index}: i32`).join(", ");
+  const values = Array.from({ length: 20 }, (_, index) => `f${index}: x + ${index}`).join(", ");
+  const source = `
+    type Many = struct {${fields}}
+    fn make_many(x: i32) -> Many { Many {${values}} }
+    fn sum_loop(i: i32, limit: i32, total: i32) -> i32 {
+      match i < limit {
+        true => make_many(i) \\many -> sum_loop(
+          i + 1,
+          limit,
+          total + many.f0 + many.f19
+        ),
+        false => total,
+      }
+    }
+    pub fn main(limit: i32) -> i32 { sum_loop(0, limit, 0) }
+  `;
+  const compileTrace: CompileTraceEvent[] = [];
+  const artifact = await compileArtifactsFromSource(source, {
+    optMode: "release",
+    includeWat: true,
+    compileTrace,
+  });
+  const inlinedLargeProduct = compileTrace.some((event) =>
+    event.name === "backend.inline.product_call" &&
+    event.counters?.callee === "make_many"
+  );
+  assertEquals(inlinedLargeProduct, false);
+  assertStringIncludes(artifact.wat ?? "", "call $make_many");
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(artifact.wasm));
+  assertEquals((instance.exports.main as CallableFunction)(3), 63);
+});
+
+Deno.test("payload union function match bodies lower with bound payload values", async () => {
+  const source = `
+    type Result(a) = union {Ok(value: a), Err(error: i32)}
+    fn unwrap(value: Result(i32)) -> i32 match {
+      Ok(value) => value,
+      Err(error) => error,
+    }
+    pub fn main() -> i32 {
+      let matched = match Ok(4) { Ok(value) => value, Err(error) => error };
+      matched + unwrap(Ok(5))
+    }
+  `;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 9);
+});
+
+Deno.test("non-niche option-like sums preserve tags and zero payloads", async () => {
+  const source = `
+    type Option(a) = union {None, Some(value: a)}
+    fn some(value: i32) -> Option(i32) { Some(value) }
+    fn none() -> Option(i32) { None }
+    fn score(value: Option(i32)) -> i32 match {
+      Some(inner) => inner + 10,
+      None => 1,
+    }
+    pub fn main() -> i32 {
+      score(some(0)) + score(some(1)) + score(none())
+    }
+  `;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 22);
+});
+
+Deno.test("pipe-bound sum values match through flattened tag locals", async () => {
+  const source = `
+    type Punctuation = union {Other, Semicolon}
+    fn punctuation_at(index: i32) -> Punctuation {
+      match index == 6 {
+        true => Semicolon,
+        false => Other,
+      }
+    }
+    fn scan_direct(index: i32, limit: i32) -> i32 {
+      match index >= limit {
+        true => limit,
+        false => match punctuation_at(index) {
+          Semicolon => index,
+          _ => scan_direct(index + 1, limit),
+        },
+      }
+    }
+    fn scan_pipe(index: i32, limit: i32) -> i32 {
+      match index >= limit {
+        true => limit,
+        false => punctuation_at(index) \\punctuation -> match true {
+          true => match punctuation {
+            Semicolon => index,
+            _ => scan_pipe(index + 1, limit),
+          },
+          false => scan_pipe(index + 1, limit),
+        },
+      }
+    }
+    pub fn main(mode: i32) -> i32 {
+      match mode {
+        1 => scan_direct(0, 20),
+        2 => scan_pipe(0, 20),
+        _ => 0,
+      }
+    }
+  `;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(1), 6);
+  assertEquals((instance.exports.main as CallableFunction)(2), 6);
+});
+
+Deno.test("sum match payload bindings shadow matched value type", async () => {
+  const source = `
+    type WasmInstr = union {
+      InstrNop, InstrConst(value: i32), InstrDrop
+    }
+    fn instr_score(value: WasmInstr) -> i32 match {
+      InstrNop => 0,
+      InstrConst(value) => value + 11,
+      InstrDrop => 31,
+    }
+    pub fn main() -> i32 {
+      instr_score(InstrNop) + instr_score(InstrConst(5)) + instr_score(InstrDrop)
+    }
+  `;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 47);
+});
+
+Deno.test("multi-parameter function match bodies test nullary sum constructors", async () => {
+  const source = `
+    type AbiClass = union {AbiVoid, AbiScalar}
+    fn score(value: AbiClass, seed: i32) -> i32 match {
+      AbiVoid, _ => 10,
+      AbiScalar, seed => seed,
+    }
+    pub fn main() -> i32 {
+      score(AbiVoid, 7) + score(AbiScalar, 5)
+    }
+  `;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 15);
+});
+
 Deno.test("private calls inside field projections stay reachable", async () => {
   const source = `
     type fn Pair() -> type { let Pair = {x: i32, y: i32}; struct(Pair) }
@@ -263,10 +443,12 @@ Deno.test("branch hints emit release custom section and WAT annotations", async 
   );
 });
 
-Deno.test("function clause branch hints lower to dispatcher branch metadata", async () => {
+Deno.test("function match branch hints lower to dispatcher branch metadata", async () => {
   const clauses = `
-    @likely fn score(true: bool) -> i32 { 1 }
-    fn score(false: bool) -> i32 { 0 }
+    fn score(x: bool) -> i32 match {
+      @likely true => 1,
+      false => 0,
+    }
     pub fn main(x: bool) -> i32 { score(x) }
   `;
   const handwritten = `
@@ -284,13 +466,11 @@ Deno.test("function clause branch hints lower to dispatcher branch metadata", as
   assertEquals(matchHints.flatMap((fn) => fn.hints.map((hint) => hint.hint)), [1]);
 });
 
-Deno.test("large refined recursive function clauses lower to a loop", async () => {
+Deno.test("large refined recursive function match bodies lower to a loop", async () => {
   const source = `
-    fn sum_go(i: i32(1000), acc: i32) -> i32 {
-      acc
-    }
-    fn sum_go(i: i32(0..1000), acc: i32) -> i32 {
-      sum_go(i + 1, acc + i)
+    fn sum_go(i: i32, acc: i32) -> i32 match {
+      i: i32(1000), acc => acc,
+      i: i32(0..1000), acc => sum_go(i + 1, acc + i),
     }
     pub fn main() -> i32 {
       sum_go(0, 0)
@@ -1113,10 +1293,27 @@ Deno.test("tail-recursive self calls lower to loops by default", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 5050);
 });
 
-Deno.test("public exports inline single-use private scalar tail loops", async () => {
+Deno.test("explicit rec tail steps lower to loops by default", async () => {
   const source = `
     fn sum(n: i32, acc: i32) -> i32 {
-      match n { 0 => acc, _ => sum(n - 1, acc + n) }
+      match n { 0 => acc, _ => rec(n - 1, acc + n) }
+    }
+    pub fn main() -> i32 { sum(100, 0) }
+  `;
+  const wat = await watFromSource(source);
+  const sum = wat.match(/\(func \$sum[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(sum, "loop");
+  assert(!sum.includes("call $sum"));
+  assert(!sum.includes("return_call $sum"));
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 5050);
+});
+
+Deno.test("public exports inline explicit private scalar tail loops", async () => {
+  const source = `
+    fn sum(n: i32, acc: i32) -> i32 {
+      match n { 0 => acc, _ => rec(n - 1, acc + n) }
     }
     pub fn main() -> i32 { sum(100, 0) }
   `;
@@ -2742,6 +2939,42 @@ Deno.test("tail-recursive match arms can emit return_call when requested", async
   );
 });
 
+Deno.test("tail-recursive sum payload match binds product payloads", async () => {
+  const source = `
+    type Cursor = struct {index: i32, offset: i32}
+    type Step = union {Done, More(value: Cursor, next: Cursor)}
+
+    fn next(cursor: Cursor) -> Step {
+      match cursor.index < 3 {
+        true => More(
+          Cursor {index: cursor.index, offset: cursor.offset},
+          Cursor {index: cursor.index + 1, offset: cursor.offset + 2}
+        ),
+        false => Done,
+      }
+    }
+
+    fn walk(cursor: Cursor, total: i32) -> Cursor {
+      match next(cursor) {
+        More(value, next_cursor) => walk(next_cursor, total + value.index),
+        Done => cursor,
+      }
+    }
+
+    pub fn main() -> i32 {
+      let out = walk(Cursor {index: 0, offset: 0}, 0);
+      out.index + out.offset
+    }
+  `;
+  const wat = await watFromSource(source);
+  const walk = wat.match(/\(func \$walk[\s\S]*?\n  \)/)?.[0] ?? "";
+  assertStringIncludes(walk, "loop");
+  assert(!walk.includes("call $walk"));
+
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as CallableFunction)(), 9);
+});
+
 Deno.test("opcode mode rejects non-tail self recursion", async () => {
   await assertTailCallRejected(
     "arithmetic operand",
@@ -2880,30 +3113,26 @@ Deno.test("SIMD dot product lowers matrix multiply kernel", async () => {
     [5, 6, 7, 8],
     [9, 10, 11, 12],
     [13, 14, 15, 16],
-    [1, 5, 9, 13],
-    [2, 6, 10, 14],
-    [3, 7, 11, 15],
-    [4, 8, 12, 16],
   );
   assertEquals(
     numericFields(result),
     [
-      90,
-      100,
+      30,
+      70,
       110,
-      120,
-      202,
-      228,
-      254,
-      280,
-      314,
-      356,
-      398,
-      440,
-      426,
-      484,
-      542,
-      600,
+      150,
+      70,
+      174,
+      278,
+      382,
+      110,
+      278,
+      446,
+      614,
+      150,
+      382,
+      614,
+      846,
     ],
   );
 });
@@ -2922,38 +3151,8 @@ Deno.test("scalar matrix multiply baseline stays scalar", async () => {
     numericFields(
       host.call(
         "main",
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        12,
-        13,
-        14,
-        15,
-        16,
-        1,
-        5,
-        9,
-        13,
-        2,
-        6,
-        10,
-        14,
-        3,
-        7,
-        11,
-        15,
-        4,
-        8,
-        12,
-        16,
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        [1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 4, 8, 12, 16],
       ),
     ),
     [

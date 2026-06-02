@@ -1,7 +1,16 @@
 # Fig Syntax
 
-Fig source files use the `.fig` extension. A program is a sequence of `type`, `type fn`,
-`contract fn`, `const`, `fn`, `pub fn`, and top-level `let` declarations.
+Fig source files use the `.fig` extension. A program is a sequence of `type`, `type fn`, `const`,
+`fn`, `pub fn`, and top-level `let` declarations.
+
+Fixed type declarations use these forms:
+
+```fig
+type Point = struct {x: i32, y: i32}
+type Option(a) = union {None, Some(value: a)}
+type Mode = enum(i32) {Read = 1, Write = 2, Back = -1}
+type Count = i32
+```
 
 ## Names
 
@@ -26,35 +35,12 @@ There is no implicit typeclass search. Generic behavior is carried by visible co
 constants, attached members, or fully spelled do-strategy types such as `State(World, _)`.
 Compiler-owned `@...` forms are valid only in their documented contexts.
 
-## Contract Rewrites
+## Rewrite Facts
 
-Compiler-facing rewrite facts use `contract fn ... -> rewrite`. This is the only rewrite declaration
-form; ordinary `fn ... -> rewrite`, `type fn ... -> rewrite`, and `rewrite` type annotations are
-rejected.
-
-```fig
-contract fn Option::bind_left_zero() -> rewrite {
-  @assume(
-    \f -> Option::bind(Option::zero(), f),
-    \f -> Option::zero()
-  )
-}
-
-contract fn MonadZero::bind_left_zero(
-  const M: type fn(a: type) -> type
-) -> rewrite {
-  const proof = MonadZero(M);
-
-  @assume(
-    \f -> M::bind(M::zero(), f),
-    \f -> M::zero()
-  )
-}
-```
-
-`@assume(lhs_template, rhs_template)` is valid only as the final expression of a
-`contract fn ... -> rewrite` body. Contract rewrite parameters must be `const`; proof constants may
-appear before the final `@assume`.
+Fig source no longer declares optimizer rewrite facts. Rewrites are compiler-plugin facts, and the
+default prelude rewrite plugin provides the standard `Eq`, `Functor`, `Applicative`, `Monad`, and
+`Monoid` laws. Source `contract fn ... -> rewrite`, `@assume(...)`, and `rewrite` type annotations
+are rejected.
 
 ## Doc Comments
 
@@ -115,9 +101,9 @@ const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");
 ```
 
 Destructured import entries are plain declaration names. Aliases, dotted names, annotations, and
-non-`@import` right-hand sides are rejected. Namespace imports qualify only the declarations owned by
-the imported module. Transitive dependency names keep their own namespace, so import `prelude.layout`
-directly when you want names such as `layout.Lane4I32`.
+non-`@import` right-hand sides are rejected. Namespace imports qualify only the declarations owned
+by the imported module. Transitive dependency names keep their own namespace, so import
+`prelude.layout` directly when you want names such as `layout.Lane4I32`.
 
 Host imports are top-level consts whose value is `@external("name", fn(...))`. The function type
 takes the compiler primitive `io` executor as its first parameter and returns an `io(T)` action:
@@ -160,12 +146,16 @@ the initializer.
 
 ## Functions and Parameters
 
-Functions use `fn name(params) -> Type { ... }`. `pub fn` exports through the WebAssembly backend
+Functions use either a block body or a match body. `pub fn` exports through the WebAssembly backend
 and must include an explicit return annotation; `-> _` is accepted when the body resolves to a
 concrete exportable type.
 
 ```fig
 fn add(a: i32, b: i32) -> i32 { a + b }
+fn choose(flag: bool) -> i32 match {
+  true => 1,
+  false => 0,
+}
 fn inferred() -> _ { 1 }
 pub fn main() -> i32 { add(40, 2) }
 ```
@@ -176,13 +166,20 @@ Attached member functions use `::` names and are visible to type reflection:
 fn Point::eql(a: Point, b: Point) -> bool { a.x == b.x }
 ```
 
-Repeated functions with the same name are ordered clauses. Clauses must keep compatible visibility,
-arity, return type, and runtime parameter representation. Refined `i32(...)` domains may vary by
-clause because they all lower to runtime `i32`. The first matching clause wins.
+Match-body functions dispatch over runtime parameters with the same pattern syntax as `match`.
+Multiple runtime parameters are matched positionally, so a two-parameter function can use two
+patterns per arm:
 
 ```fig
-fn score(true: bool, true: bool) -> i32 { 3 }
-fn score(_: bool, _: bool) -> i32 { 0 }
+fn score(left: bool, right: bool) -> i32 match {
+  true, true => 3,
+  _, _ => 0,
+}
+
+fn unwrap(value: Option(i32)) -> i32 match {
+  Some(inner) => inner,
+  None => 0,
+}
 ```
 
 Parameter forms include:
@@ -190,17 +187,21 @@ Parameter forms include:
 ```fig
 fn f(x: i32) -> i32 { x }
 fn g(const f: fn(x: i32) -> i32, x: i32) -> i32 { f(x) }
-fn h(1: i32) -> i32 { 10 }
 fn ignore(_: i32) -> i32 { 0 }
-fn variant(Some(value): Option(i32)) -> i32 { value }
-fn tuple([left, right]: Pair) -> i32 { left + right }
 ```
 
-Refined scalar domains can be used for recursive and overloaded clause selection:
+Runtime functions are limited to five non-`const` parameters. Group related trailing values into a
+small product when a function needs more runtime inputs:
 
 ```fig
-fn go(i: i32(4), acc: i32) -> i32 { acc }
-fn go(i: i32(0..4), acc: i32) -> i32 { go(i + 1, acc + i) }
+fn weighted_sum(
+  a: i32,
+  b: i32,
+  c: i32,
+  rest: struct({d: i32, e: i32})
+) -> i32 {
+  a + b + c + rest.d + rest.e
+}
 ```
 
 `const` parameters are compile-time parameters. They specialize at call sites and are erased from
@@ -239,13 +240,22 @@ let first, second = make_pair();
 let [head, tail] = make_pair();
 ```
 
-Patterns are `_`, lowercase bindings, literals, tuple patterns, and PascalCase variants with
-optional payload args:
+Patterns are `_`, lowercase bindings, literals, tuple patterns, enum members such as
+`Status::Ready`, bare enum variants when the matched value has a known enum type, PascalCase
+variants with optional payload args, and typed patterns. Guard expressions run after the pattern has
+matched and can use names bound by that pattern. Typed patterns are useful for refined scalar-domain
+cases:
 
 ```fig
 match maybe {
   Some(value) => value,
   None => 0,
+}
+
+match n {
+  small: i32(0..4 | 8) => small,
+  _ if n > 20 => 20,
+  _ => n,
 }
 ```
 
@@ -263,6 +273,7 @@ Literal forms are:
 
 ```fig
 42
+-1
 42i32
 1u32
 1i64

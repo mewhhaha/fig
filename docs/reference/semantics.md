@@ -83,24 +83,26 @@ forms report focused diagnostics.
 
 Source-level static `for` forms are rejected, including statement blocks, record/product static
 slots, and array-comprehension-style `[for ...]` literals. Fixed repetition is expressed with
-recursive functions over refined domains, leaving unrolling or loop lowering to the compiler.
+recursive helpers over refined domains, leaving unrolling or loop lowering to the compiler.
 
 ## Recurrence Analysis
 
 The compiler records recursive functions as recurrence summaries before backend lowering. A
-recurrence summary groups generated function clauses, records refined `i32(...)` parameter domains,
-tracks direct recursive call sites, and classifies the shape as finite static, tail-linear,
-structural, or general.
+recurrence summary records refined `i32(...)` parameter domains, tracks direct recursive call sites,
+and classifies the shape as finite static, tail-linear, structural, or general.
 
-Domain-refined clauses such as `i32(4)` and `i32(0..4)` share the same runtime `i32` representation,
-so dispatch remains ordinary value dispatch while the optimizer still has finite domain evidence.
+Domain-refined patterns such as `i32(4)` and `i32(0..4)` share the same runtime `i32`
+representation, so dispatch remains ordinary value dispatch while the optimizer still has finite
+domain evidence.
 Finite static classification, including tiny non-tail cases, requires a measured refined-domain
 parameter whose recursive argument progresses monotonically, remains covered by the clause domains,
 and has a non-recursive exit domain. Tail recursion without that proof remains tail-linear. In
 release mode, small proven finite-static recurrences with constant measured arguments may be
 expanded before the normal optimizer folds the result. Proven direct self-tail recursion may lower
-to a Wasm loop or tail-call opcode; broader unrolling, branch-folding, and SIMD decisions should
-consume the recurrence summary rather than reconstructing recursion from cloned source bodies.
+to a Wasm loop or tail-call opcode. A tail-position `rec(...)` expression is an explicit current
+function step with the same lowering eligibility and an additional checker guarantee that the step
+is actually in tail position. Broader unrolling, branch-folding, and SIMD decisions should consume
+the recurrence summary rather than reconstructing recursion from cloned source bodies.
 
 ## Lowering Policy
 
@@ -128,9 +130,10 @@ representation decision and Wasm shape modulo names.
 Fig targets WebAssembly 3.0 features supported by current Chromium- and Firefox-family engines and
 Deno. Safari/WebKit support is not required unless a task explicitly asks for it.
 
-Prefer the browser and Deno supported subset when adding backend behavior. Heap-backed growable
-collections and allocation-backed append APIs are intentionally not part of the current standard
-prelude. Use fixed inline arrays and host IO imports for lower-level work.
+Prefer the browser and Deno supported subset when adding backend behavior. Use fixed inline arrays
+when a collection has static size and heap-backed prelude modules such as `prelude.vec`,
+`prelude.list`, `prelude.map`, and `prelude.set` when a workload needs growth or persistent
+structure. Host IO imports remain the boundary for browser- or environment-specific behavior.
 
 The public Wasm ABI is the stable Fig memory ABI. Scalar values stay in ordinary Wasm params and
 results. Products, fixed inline arrays, strings, heap arrays, sums, and any other value that needs
@@ -147,6 +150,13 @@ buffer. `fig_buffers` uses the same header shape for byte buffers with layout id
 exports `fig_abi_version`, `fig_alloc_object`, `fig_alloc_buffer`, `fig_retain`, and `fig_release`
 when a module needs ABI heap passing. The allocators are bump allocators and grow the target memory
 when the next object no longer fits.
+
+The TypeScript host helper `createFigHost.call` treats arguments and return values as a scoped host
+call. It encodes JS values into ABI handles, invokes the export, decodes any result back into JS,
+then restores the temporary object and buffer arena cursors. Direct `encodeFigValue`/raw Wasm calls
+remain available when a host needs to manage handles manually, but ordinary repeated host calls
+should use `createFigHost.call` so large heap-array or string arguments do not accumulate across
+calls.
 
 Internally, Branch-Bit code can still use flattened locals and branch heap handles. Branch code
 emits `fig_objects` and `fig_buffers` memories and currently packs internal branch handles as an

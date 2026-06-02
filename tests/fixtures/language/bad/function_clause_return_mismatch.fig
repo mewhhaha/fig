@@ -1,3 +1,0 @@
-// expect: fn.clause_return
-fn Choose(true: bool) -> i32 { 1 }
-fn Choose(false: bool) -> bool { false }

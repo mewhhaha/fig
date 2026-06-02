@@ -1,0 +1,4550 @@
+const ast = @import("./ast.fig");
+const combinator = @import("./combinator.fig");
+const core = @import("prelude.core");
+const diagnostic = @import("./diagnostic.fig");
+const layout = @import("prelude.layout");
+const option = @import("prelude.option");
+const parser = @import("./parser.fig");
+const span = @import("./span.fig");
+const textlex = @import("./textlex.fig");
+const textmodel = @import("./textmodel.fig");
+const textsummary = @import("./textsummary.fig");
+
+type CheckedFactKind = enum(i32) {
+  CheckedDeclarationType = 1,
+  CheckedDiagnostic = 2,
+  LoweredDeclaration = 3,
+  CheckedDeclarationRecord = 4,
+  CheckedExpressionRecord = 5,
+  CheckedLocalEnvironment = 6,
+  CheckedExpressionShape = 7,
+  CheckedExpressionChildRecord = 8,
+  LoweredExportRecord = 9,
+  WasmFunctionRecord = 10,
+  WasmSectionRecord = 11,
+  WasmByteRecord = 12
+}
+
+type CheckedLocalFactKind = enum(i32) {
+  LocalLet = 1,
+  LocalProofConst = 2
+}
+
+type FactContext = struct {
+  source: textlex.TextTokenStream,
+}
+
+type CheckedLocalScan = struct {
+  index: i32,
+  limit: i32,
+  brace_depth: i32,
+  paren_depth: i32,
+  total: i32,
+  function_name_hash: i32,
+}
+
+type CheckedDeclFact = struct {
+  kind_tag: i32,
+  name_hash: i32,
+  symbol_type_class: i32,
+  symbol_payload: i32,
+  expected_type_class: i32,
+  actual_type_class: i32,
+  check_status: i32,
+  diagnostic_code: i32,
+  lowered_abi_class: i32,
+}
+
+type CheckedExprFact = struct {
+  kind_tag: i32,
+  name_hash: i32,
+  root_kind: i32,
+  root_hash: i32,
+  root_child_count: i32,
+  root_child_signature_hash: i32,
+  root_grandchild_count: i32,
+  root_grandchild_signature_hash: i32,
+  root_descendant_count: i32,
+  root_descendant_signature_hash: i32,
+  root_type_class: i32,
+  resolved_type_class: i32,
+  expected_type_class: i32,
+  check_status: i32,
+  diagnostic_code: i32,
+  lowered_value_tag: i32,
+  lowered_value_primary: i32,
+  lowered_value_secondary: i32,
+}
+
+type CheckedLocalFact = struct {
+  function_name_hash: i32,
+  local_kind_tag: i32,
+  local_name_hash: i32,
+  value_root_kind: i32,
+  value_root_hash: i32,
+  expected_type_class: i32,
+  actual_type_class: i32,
+  check_status: i32,
+  diagnostic_code: i32,
+}
+
+type CheckedExprShapeFact = struct {
+  kind_tag: i32,
+  name_hash: i32,
+  root_kind: i32,
+  root_hash: i32,
+  root_selector_count: i32,
+  root_slot_count: i32,
+  root_call_arg_count: i32,
+  root_field_count: i32,
+  root_operator_count: i32,
+  operator_count: i32,
+  operator_signature_hash: i32,
+  match_count: i32,
+  match_arm_count: i32,
+  do_count: i32,
+  do_bind_count: i32,
+  pipe_bind_count: i32,
+  call_count: i32,
+  function_match_body_count: i32,
+  name_token_count: i32,
+  name_token_signature_hash: i32,
+  literal_token_count: i32,
+  literal_token_signature_hash: i32,
+  diagnostic_code: i32,
+}
+
+type LoweredExportFact = struct {
+  name_hash: i32,
+  param_count: i32,
+  return_abi_class: i32,
+}
+
+type WasmFunctionFact = struct {
+  name_hash: i32,
+  export_tag: i32,
+  runtime_param_count: i32,
+  local_count: i32,
+  result_val_type: i32,
+  body_opcode: i32,
+  body_immediate: i32,
+  terminator_opcode: i32,
+  body_size: i32,
+  diagnostic_code: i32,
+}
+
+type WasmBodyInstruction = struct {
+  opcode: i32,
+  immediate: i32,
+}
+
+type WasmBodyPlan = struct {
+  first_opcode: i32,
+  first_immediate: i32,
+  byte_size: i32,
+  instructions: layout.HeapArray(WasmBodyInstruction),
+}
+
+type WasmFunctionLookup = struct {
+  index: i32,
+  runtime_param_count: i32,
+  found: bool,
+}
+
+type WasmSectionFact = struct {
+  section_id: i32,
+  item_count: i32,
+  payload_size: i32,
+  payload_signature: i32,
+  diagnostic_signature: i32,
+}
+
+type WasmByteSectionFact = struct {
+  section_id: i32,
+  payload_size: i32,
+  payload_leb_size: i32,
+  section_size: i32,
+  header_signature: i32,
+  payload_signature: i32,
+  diagnostic_signature: i32,
+}
+
+type WasmByteModuleFact = struct {
+  magic_signature: i32,
+  version_signature: i32,
+  section_count: i32,
+  byte_size: i32,
+  section_signature: i32,
+  diagnostic_signature: i32,
+}
+
+type WasmSectionScan = struct {
+  function_count: i32,
+  export_count: i32,
+  type_payload_size: i32,
+  type_payload_signature: i32,
+  function_payload_size: i32,
+  function_payload_signature: i32,
+  export_payload_size: i32,
+  export_payload_signature: i32,
+  code_payload_size: i32,
+  code_payload_signature: i32,
+  diagnostic_signature: i32,
+}
+
+type WasmByteContext = struct {
+  source: textlex.TextTokenStream,
+  base_offset: i32,
+}
+
+fn wasm_byte_context(
+  source: textlex.TextTokenStream,
+  base_offset: i32
+) -> WasmByteContext {
+  WasmByteContext {
+    source: source,
+    base_offset: base_offset,
+  }
+}
+
+type WasmCallLowering = struct {
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+}
+
+type WasmBytePayloadKind = enum(i32) {
+  TypePayload = 1,
+  FunctionPayload = 2,
+  ExportPayload = 3,
+  CodePayload = 4
+}
+
+type WasmBytePayloadState = struct {
+  kind: WasmBytePayloadKind,
+  current: combinator.ParseState,
+  function_index: i32,
+}
+
+type WasmByteCursor = struct {
+  current: combinator.ParseState,
+  function_index: i32,
+}
+
+fn context(source: textlex.TextTokenStream) -> FactContext {
+  FactContext {source: source}
+}
+
+fn FactContext::summary(
+  context_value: FactContext,
+  kind: textmodel.SummaryKind
+) -> i32 {
+  textsummary.run(context_value.source, kind, 0)
+}
+
+fn fact_pair_signature(
+  kind: CheckedFactKind,
+  first: i32,
+  second: i32
+) -> i32 {
+  let with_kind = textmodel.signature_mix(kind, first);
+  textmodel.signature_mix(with_kind, second)
+}
+
+fn fact_triple_signature(
+  kind: CheckedFactKind,
+  first: i32,
+  second: i32,
+  third: i32
+) -> i32 {
+  let with_pair = fact_pair_signature(kind, first, second);
+  textmodel.signature_mix(with_pair, third)
+}
+
+fn checked_type_status_diagnostic_code(status: i32) -> i32 {
+  match status == parser.text_type_check_mismatch_tag() {
+    true => diagnostic.code_score(diagnostic.CodeTypeMismatch),
+    false => 0,
+  }
+}
+
+fn checked_decl_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> CheckedDeclFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let name_hash = textlex.text_hash_at(
+    source,
+    parser.text_declaration_name_index(source, current.cursor, decl)
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let check_status = parser.text_simple_body_type_check_status(expected, actual);
+  CheckedDeclFact {
+    kind_tag: kind_tag,
+    name_hash: name_hash,
+    symbol_type_class: parser.text_declaration_resolved_type_class_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    symbol_payload: parser.text_declaration_resolved_type_class_payload(
+      source,
+      current.cursor,
+      decl
+    ),
+    expected_type_class: expected,
+    actual_type_class: actual,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+    lowered_abi_class: parser.text_declaration_resolved_abi_class_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+  }
+}
+
+fn checked_decl_fact_signature(fact: CheckedDeclFact) -> i32 {
+  let with_kind = textmodel.signature_mix(
+    53,
+    fact.kind_tag
+  );
+  let with_name = textmodel.signature_mix(with_kind, fact.name_hash);
+  let with_symbol = textmodel.signature_mix(
+    with_name,
+    fact.symbol_type_class
+  );
+  let with_payload = textmodel.signature_mix(
+    with_symbol,
+    fact.symbol_payload
+  );
+  let with_expected = textmodel.signature_mix(
+    with_payload,
+    fact.expected_type_class
+  );
+  let with_actual = textmodel.signature_mix(
+    with_expected,
+    fact.actual_type_class
+  );
+  let with_status = textmodel.signature_mix(with_actual, fact.check_status);
+  let with_diagnostic = textmodel.signature_mix(
+    with_status,
+    fact.diagnostic_code
+  );
+  textmodel.signature_mix(with_diagnostic, fact.lowered_abi_class)
+}
+
+fn lowered_value_tag_for_abi(abi_class: i32) -> i32 {
+  abi_class
+}
+
+fn lowered_value_has_primary(abi_class: i32) -> bool {
+  let is_scalar = abi_class == parser.text_abi_class_scalar_tag();
+  match is_scalar {
+    true => true,
+    false => match abi_class == parser.text_abi_class_handle_tag() {
+      true => true,
+      false => abi_class == parser.text_abi_class_function_tag(),
+    },
+  }
+}
+
+fn lowered_value_primary(
+  abi_class: i32,
+  resolved_type_class: i32
+) -> i32 {
+  match lowered_value_has_primary(abi_class) {
+    true => resolved_type_class,
+    _ => 0,
+  }
+}
+
+fn lowered_value_secondary() -> i32 {
+  0
+}
+
+fn checked_expr_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> CheckedExprFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let name_hash = textlex.text_hash_at(
+    source,
+    parser.text_declaration_name_index(source, current.cursor, decl)
+  );
+  let root_type = parser.text_declaration_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let resolved = parser.text_declaration_resolved_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let abi = parser.text_abi_class_tag_for_type_class(resolved);
+  let check_status = parser.text_simple_body_type_check_status(expected, resolved);
+  CheckedExprFact {
+    kind_tag: kind_tag,
+    name_hash: name_hash,
+    root_kind: parser.text_declaration_root_head_kind_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_hash: parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_child_count: parser.text_declaration_root_child_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_child_signature_hash: parser.text_declaration_root_child_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_grandchild_count: parser.text_declaration_root_grandchild_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_grandchild_signature_hash: parser.text_declaration_root_grandchild_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_descendant_count: parser.text_declaration_root_descendant_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_descendant_signature_hash: parser.text_declaration_root_descendant_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_type_class: root_type,
+    resolved_type_class: resolved,
+    expected_type_class: expected,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+    lowered_value_tag: lowered_value_tag_for_abi(abi),
+    lowered_value_primary: lowered_value_primary(abi, resolved),
+    lowered_value_secondary: lowered_value_secondary(),
+  }
+}
+
+fn checked_expr_fact_signature(fact: CheckedExprFact) -> i32 {
+  let with_kind = textmodel.signature_mix(59, fact.kind_tag);
+  let with_name = textmodel.signature_mix(with_kind, fact.name_hash);
+  let with_root_kind = textmodel.signature_mix(with_name, fact.root_kind);
+  let with_root_hash = textmodel.signature_mix(with_root_kind, fact.root_hash);
+  let with_child_count = textmodel.signature_mix(
+    with_root_hash,
+    fact.root_child_count
+  );
+  let with_child_signature = textmodel.signature_mix(
+    with_child_count,
+    fact.root_child_signature_hash
+  );
+  let with_grandchild_count = textmodel.signature_mix(
+    with_child_signature,
+    fact.root_grandchild_count
+  );
+  let with_grandchild_signature = textmodel.signature_mix(
+    with_grandchild_count,
+    fact.root_grandchild_signature_hash
+  );
+  let with_descendant_count = textmodel.signature_mix(
+    with_grandchild_signature,
+    fact.root_descendant_count
+  );
+  let with_descendant_signature = textmodel.signature_mix(
+    with_descendant_count,
+    fact.root_descendant_signature_hash
+  );
+  let with_root_type = textmodel.signature_mix(
+    with_descendant_signature,
+    fact.root_type_class
+  );
+  let with_resolved = textmodel.signature_mix(
+    with_root_type,
+    fact.resolved_type_class
+  );
+  let with_expected = textmodel.signature_mix(
+    with_resolved,
+    fact.expected_type_class
+  );
+  let with_status = textmodel.signature_mix(with_expected, fact.check_status);
+  let with_diagnostic = textmodel.signature_mix(
+    with_status,
+    fact.diagnostic_code
+  );
+  let with_value_tag = textmodel.signature_mix(
+    with_diagnostic,
+    fact.lowered_value_tag
+  );
+  let with_primary = textmodel.signature_mix(
+    with_value_tag,
+    fact.lowered_value_primary
+  );
+  textmodel.signature_mix(with_primary, fact.lowered_value_secondary)
+}
+
+fn checked_expr_shape_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> CheckedExprShapeFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let check_status = parser.text_simple_body_type_check_status(
+    expected,
+    actual
+  );
+  CheckedExprShapeFact {
+    kind_tag: kind_tag,
+    name_hash: textlex.text_hash_at(
+      source,
+      parser.text_declaration_name_index(source, current.cursor, decl)
+    ),
+    root_kind: parser.text_declaration_root_head_kind_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_hash: parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_selector_count: parser.text_declaration_root_head_selector_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_slot_count: parser.text_declaration_root_slot_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_call_arg_count: parser.text_declaration_root_call_arg_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_field_count: parser.text_declaration_root_field_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_operator_count: parser.text_declaration_root_operator_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    operator_count: parser.text_declaration_value_operator_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    operator_signature_hash: parser.text_declaration_value_operator_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    match_count: parser.text_declaration_value_match_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    match_arm_count: parser.text_declaration_value_match_arm_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    do_count: parser.text_declaration_value_do_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    do_bind_count: parser.text_declaration_value_do_bind_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    pipe_bind_count: parser.text_declaration_value_pipe_bind_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    call_count: parser.text_declaration_value_call_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    function_match_body_count: parser.text_declaration_function_match_body_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    name_token_count: parser.text_declaration_value_name_token_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    name_token_signature_hash: parser.text_declaration_value_name_token_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    literal_token_count: parser.text_declaration_value_literal_token_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    literal_token_signature_hash: parser.text_declaration_value_literal_token_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn checked_expr_shape_fact_signature(fact: CheckedExprShapeFact) -> i32 {
+  let with_kind = textmodel.signature_mix(67, fact.kind_tag);
+  let with_name = textmodel.signature_mix(with_kind, fact.name_hash);
+  let with_root_kind = textmodel.signature_mix(with_name, fact.root_kind);
+  let with_root_hash = textmodel.signature_mix(
+    with_root_kind,
+    fact.root_hash
+  );
+  let with_root_selector = textmodel.signature_mix(
+    with_root_hash,
+    fact.root_selector_count
+  );
+  let with_root_slot = textmodel.signature_mix(
+    with_root_selector,
+    fact.root_slot_count
+  );
+  let with_root_call = textmodel.signature_mix(
+    with_root_slot,
+    fact.root_call_arg_count
+  );
+  let with_root_field = textmodel.signature_mix(
+    with_root_call,
+    fact.root_field_count
+  );
+  let with_root_operator = textmodel.signature_mix(
+    with_root_field,
+    fact.root_operator_count
+  );
+  let with_operator = textmodel.signature_mix(
+    with_root_operator,
+    fact.operator_count
+  );
+  let with_operator_signature = textmodel.signature_mix(
+    with_operator,
+    fact.operator_signature_hash
+  );
+  let with_match = textmodel.signature_mix(
+    with_operator_signature,
+    fact.match_count
+  );
+  let with_arms = textmodel.signature_mix(with_match, fact.match_arm_count);
+  let with_do = textmodel.signature_mix(with_arms, fact.do_count);
+  let with_do_bind = textmodel.signature_mix(
+    with_do,
+    fact.do_bind_count
+  );
+  let with_pipe = textmodel.signature_mix(
+    with_do_bind,
+    fact.pipe_bind_count
+  );
+  let with_call = textmodel.signature_mix(with_pipe, fact.call_count);
+  let with_function_match = textmodel.signature_mix(
+    with_call,
+    fact.function_match_body_count
+  );
+  let with_name_count = textmodel.signature_mix(
+    with_function_match,
+    fact.name_token_count
+  );
+  let with_name_signature = textmodel.signature_mix(
+    with_name_count,
+    fact.name_token_signature_hash
+  );
+  let with_literal_count = textmodel.signature_mix(
+    with_name_signature,
+    fact.literal_token_count
+  );
+  let with_literal_signature = textmodel.signature_mix(
+    with_literal_count,
+    fact.literal_token_signature_hash
+  );
+  textmodel.signature_mix(with_literal_signature, fact.diagnostic_code)
+}
+
+fn lowered_export_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> LoweredExportFact {
+  let return_type = parser.text_function_return_resolved_type_class_tag(
+    source,
+    current.cursor
+  );
+  LoweredExportFact {
+    name_hash: textlex.text_hash_at(
+      source,
+      parser.text_declaration_name_index(source, current.cursor, result.value.decl)
+    ),
+    param_count: ast.decl_param_count(result.value.decl),
+    return_abi_class: parser.text_abi_class_tag_for_type_class(return_type),
+  }
+}
+
+fn lowered_export_fact_signature(fact: LoweredExportFact) -> i32 {
+  let with_name = textmodel.signature_mix(71, fact.name_hash);
+  let with_params = textmodel.signature_mix(with_name, fact.param_count);
+  textmodel.signature_mix(with_params, fact.return_abi_class)
+}
+
+fn wasm_no_val_type() -> i32 {
+  64
+}
+
+fn wasm_i32_val_type() -> i32 {
+  127
+}
+
+fn wasm_externref_val_type() -> i32 {
+  111
+}
+
+fn wasm_const_opcode() -> i32 {
+  65
+}
+
+fn wasm_local_get_opcode() -> i32 {
+  32
+}
+
+fn wasm_local_set_opcode() -> i32 {
+  33
+}
+
+fn wasm_call_opcode() -> i32 {
+  16
+}
+
+fn wasm_if_opcode() -> i32 {
+  4
+}
+
+fn wasm_else_opcode() -> i32 {
+  5
+}
+
+fn wasm_end_opcode() -> i32 {
+  11
+}
+
+fn wasm_i32_eq_opcode() -> i32 {
+  70
+}
+
+fn wasm_i32_ne_opcode() -> i32 {
+  71
+}
+
+fn wasm_i32_lt_s_opcode() -> i32 {
+  72
+}
+
+fn wasm_i32_gt_s_opcode() -> i32 {
+  74
+}
+
+fn wasm_i32_le_s_opcode() -> i32 {
+  76
+}
+
+fn wasm_i32_ge_s_opcode() -> i32 {
+  78
+}
+
+fn wasm_i32_add_opcode() -> i32 {
+  106
+}
+
+fn wasm_i32_sub_opcode() -> i32 {
+  107
+}
+
+fn wasm_i32_mul_opcode() -> i32 {
+  108
+}
+
+fn wasm_i32_div_s_opcode() -> i32 {
+  109
+}
+
+fn wasm_i32_rem_s_opcode() -> i32 {
+  111
+}
+
+fn wasm_return_opcode() -> i32 {
+  15
+}
+
+fn wasm_drop_opcode() -> i32 {
+  26
+}
+
+fn wasm_type_section_id() -> i32 {
+  1
+}
+
+fn wasm_function_section_id() -> i32 {
+  3
+}
+
+fn wasm_export_section_id() -> i32 {
+  7
+}
+
+fn wasm_code_section_id() -> i32 {
+  10
+}
+
+fn wasm_module_header_size() -> i32 {
+  8
+}
+
+fn wasm_emitted_section_count() -> i32 {
+  4
+}
+
+fn wasm_u32_leb_byte(value: i32) -> i32 {
+  let payload = value % 128;
+  let remaining = value / 128;
+  match remaining > 0 {
+    true => payload + 128,
+    false => payload,
+  }
+}
+
+fn wasm_byte_value(value: i32) -> i32 {
+  let reduced = value % 256;
+  match reduced < 0 {
+    true => reduced + 256,
+    false => reduced,
+  }
+}
+
+fn wasm_byte_buffer_empty(capacity: i32) -> layout.HeapArray(i32) {
+  layout.HeapArray::new(i32, capacity)
+}
+
+fn wasm_push_byte(
+  bytes: layout.HeapArray(i32),
+  value: i32
+) -> layout.HeapArray(i32) {
+  layout.HeapArray::push(i32, bytes, wasm_byte_value(value))
+}
+
+fn wasm_push_u32_leb(
+  bytes: layout.HeapArray(i32),
+  value: i32
+) -> layout.HeapArray(i32) {
+  let byte_value = wasm_u32_leb_byte(value);
+  let remaining = value / 128;
+  let next = wasm_push_byte(bytes, byte_value);
+  match remaining > 0 {
+    true => rec(next, remaining),
+    false => next,
+  }
+}
+
+fn wasm_push_repeated_byte(
+  bytes: layout.HeapArray(i32),
+  count: i32,
+  value: i32
+) -> layout.HeapArray(i32) {
+  match count > 0 {
+    true => rec(
+      wasm_push_byte(bytes, value),
+      count - 1,
+      value
+    ),
+    false => bytes,
+  }
+}
+
+fn wasm_push_nonempty_local_decls(
+  bytes: layout.HeapArray(i32),
+  local_count: i32
+) -> layout.HeapArray(i32) {
+  let with_group_count = wasm_push_u32_leb(bytes, 1);
+  let with_local_count = wasm_push_u32_leb(with_group_count, local_count);
+  wasm_push_byte(with_local_count, wasm_i32_val_type())
+}
+
+fn wasm_push_local_decls(
+  bytes: layout.HeapArray(i32),
+  local_count: i32
+) -> layout.HeapArray(i32) {
+  match local_count <= 0 {
+    true => wasm_push_u32_leb(bytes, 0),
+    false => wasm_push_nonempty_local_decls(bytes, local_count),
+  }
+}
+
+fn wasm_source_code_at(
+  codes: layout.HeapArray(i32),
+  base_offset: i32,
+  offset: i32
+) -> i32 {
+  let index = offset - base_offset;
+  let in_bounds = match index >= 0 {
+    true => index < layout.HeapArray::len(i32, codes),
+    false => false,
+  };
+  match in_bounds {
+    true => layout.HeapArray::get(i32, codes, index),
+    false => 0,
+  }
+}
+
+fn wasm_small_immediate_limit() -> i32 {
+  128
+}
+
+fn wasm_source_digit_value(code: i32) -> core.Option(i32) {
+  let above_lower = code >= textlex.TextCharCode::Digit0;
+  match above_lower {
+    true => match code <= textlex.TextCharCode::Digit9 {
+      true => option.some(code - textlex.TextCharCode::Digit0),
+      false => option.none(),
+    },
+    false => option.none(),
+  }
+}
+
+fn wasm_next_small_u7_decimal_total(
+  total: i32,
+  digit: i32
+) -> core.Option(i32) {
+  let next_total = total * 10 + digit;
+  match next_total < wasm_small_immediate_limit() {
+    true => option.some(next_total),
+    false => option.none(),
+  }
+}
+
+fn wasm_small_u7_decimal_scan(
+  codes: layout.HeapArray(i32),
+  base_offset: i32,
+  offset: i32,
+  limit: i32,
+  total: i32
+) -> core.Option(i32) {
+  match offset >= limit {
+    true => option.some(total),
+    false => match wasm_source_digit_value(
+      wasm_source_code_at(codes, base_offset, offset)
+    ) {
+      Some(digit) => match wasm_next_small_u7_decimal_total(total, digit) {
+        Some(next_total) => rec(codes, base_offset, offset + 1, limit, next_total),
+        None => option.none(),
+      },
+      None => option.none(),
+    },
+  }
+}
+
+fn wasm_small_u7_decimal_literal(
+  codes: layout.HeapArray(i32),
+  base_offset: i32,
+  token_span: span.Span
+) -> core.Option(i32) {
+  match span.width(token_span) > 0 {
+    true => wasm_small_u7_decimal_scan(
+      codes,
+      base_offset,
+      token_span.start,
+      token_span.end,
+      0
+    ),
+    false => option.none(),
+  }
+}
+
+fn wasm_bool_literal_immediate(
+  codes: layout.HeapArray(i32),
+  base_offset: i32,
+  token_span: span.Span
+) -> core.Option(i32) {
+  let first_code = wasm_source_code_at(codes, base_offset, token_span.start);
+  match first_code == textlex.TextCharCode::LowerT {
+    true => option.some(1),
+    false => match first_code == textlex.TextCharCode::LowerF {
+      true => option.some(0),
+      false => option.none(),
+    },
+  }
+}
+
+fn wasm_scalar_body_immediate_from_root(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl
+) -> core.Option(i32) {
+  let raw_start = parser.text_function_body_value_start_index(
+    context_value.source,
+    current.cursor
+  );
+  let limit = parser.text_declaration_end_from_index(
+    context_value.source,
+    current.cursor
+  );
+  let start = parser.text_expression_start_skip_trivia(
+    context_value.source,
+    raw_start,
+    limit
+  );
+  let token_span = textlex.token_at(context_value.source, start).span;
+  let root_kind = parser.text_declaration_root_head_kind_tag(
+    context_value.source,
+    current.cursor,
+    decl
+  );
+  match root_kind == parser.text_expression_root_number_tag() {
+    true => wasm_small_u7_decimal_literal(
+      codes,
+      context_value.base_offset,
+      token_span
+    ),
+    false => match root_kind == parser.text_expression_root_bool_tag() {
+      true => wasm_bool_literal_immediate(
+        codes,
+        context_value.base_offset,
+        token_span
+      ),
+      false => option.none(),
+    },
+  }
+}
+
+fn wasm_push_source_bytes(
+  codes: layout.HeapArray(i32),
+  base_offset: i32,
+  offset: i32,
+  limit: i32,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match offset < limit {
+    true => rec(
+      codes,
+      base_offset,
+      offset + 1,
+      limit,
+      wasm_push_byte(bytes, wasm_source_code_at(codes, base_offset, offset))
+    ),
+    false => bytes,
+  }
+}
+
+fn wasm_u32_leb_size_scan(value: i32, size: i32) -> i32 {
+  let remaining = value / 128;
+  match remaining > 0 {
+    true => rec(remaining, size + 1),
+    false => size,
+  }
+}
+
+fn wasm_u32_leb_size(value: i32) -> i32 {
+  wasm_u32_leb_size_scan(value, 1)
+}
+
+fn wasm_u32_leb_signature_scan(value: i32, total: i32) -> i32 {
+  let byte_value = wasm_u32_leb_byte(value);
+  let next_total = textmodel.signature_mix(total, byte_value);
+  let remaining = value / 128;
+  match remaining > 0 {
+    true => rec(remaining, next_total),
+    false => next_total,
+  }
+}
+
+fn wasm_u32_leb_signature(value: i32) -> i32 {
+  wasm_u32_leb_signature_scan(value, 0)
+}
+
+fn wasm_fixed_byte4_signature(
+  seed: i32,
+  first: i32,
+  second: i32,
+  third: i32,
+  fourth: i32
+) -> i32 {
+  let with_first = textmodel.signature_mix(seed, first);
+  let with_second = textmodel.signature_mix(with_first, second);
+  let with_third = textmodel.signature_mix(with_second, third);
+  textmodel.signature_mix(with_third, fourth)
+}
+
+fn wasm_magic_signature() -> i32 {
+  wasm_fixed_byte4_signature(101, 0, 97, 115, 109)
+}
+
+fn wasm_version_signature() -> i32 {
+  wasm_fixed_byte4_signature(103, 1, 0, 0, 0)
+}
+
+fn wasm_section_header_signature(section_id: i32, payload_size: i32) -> i32 {
+  let with_id = textmodel.signature_mix(107, section_id);
+  textmodel.signature_mix(with_id, wasm_u32_leb_signature(payload_size))
+}
+
+fn wasm_section_total_size(payload_size: i32) -> i32 {
+  1 + wasm_u32_leb_size(payload_size) + payload_size
+}
+
+fn wasm_val_type_for_abi(abi_class: i32) -> i32 {
+  match abi_class == parser.text_abi_class_scalar_tag() {
+    true => wasm_i32_val_type(),
+    false => match abi_class == parser.text_abi_class_handle_tag() {
+      true => wasm_externref_val_type(),
+      false => match abi_class == parser.text_abi_class_function_tag() {
+        true => wasm_i32_val_type(),
+        false => wasm_no_val_type(),
+      },
+    },
+  }
+}
+
+fn wasm_body_opcode_for_abi(abi_class: i32) -> i32 {
+  match abi_class == parser.text_abi_class_scalar_tag() {
+    true => wasm_const_opcode(),
+    false => match abi_class == parser.text_abi_class_handle_tag() {
+      true => wasm_const_opcode(),
+      false => match abi_class == parser.text_abi_class_function_tag() {
+        true => wasm_call_opcode(),
+        false => wasm_drop_opcode(),
+      },
+    },
+  }
+}
+
+fn wasm_body_immediate(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> i32 {
+  match body_abi == parser.text_abi_class_void_tag() {
+    true => 0,
+    false => parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+  }
+}
+
+fn wasm_body_instruction(opcode: i32, immediate: i32) -> WasmBodyInstruction {
+  WasmBodyInstruction {opcode: opcode, immediate: immediate}
+}
+
+fn wasm_single_instruction_body_plan(
+  instruction: WasmBodyInstruction
+) -> WasmBodyPlan {
+  wasm_body_plan_push_instruction(
+    wasm_body_plan_empty(1),
+    instruction
+  )
+}
+
+fn wasm_body_plan_empty(capacity: i32) -> WasmBodyPlan {
+  WasmBodyPlan {
+    first_opcode: wasm_drop_opcode(),
+    first_immediate: 0,
+    byte_size: 0,
+    instructions: layout.HeapArray::new(WasmBodyInstruction, capacity),
+  }
+}
+
+fn wasm_body_plan_push_instruction(
+  plan: WasmBodyPlan,
+  instruction: WasmBodyInstruction
+) -> WasmBodyPlan {
+  let is_first = layout.HeapArray::len(WasmBodyInstruction, plan.instructions) == 0;
+  WasmBodyPlan {
+    first_opcode: match is_first {
+      true => instruction.opcode,
+      false => plan.first_opcode,
+    },
+    first_immediate: match is_first {
+      true => instruction.immediate,
+      false => plan.first_immediate,
+    },
+    byte_size: plan.byte_size + wasm_instruction_size(instruction.opcode),
+    instructions: layout.HeapArray::push(
+      WasmBodyInstruction,
+      plan.instructions,
+      instruction
+    ),
+  }
+}
+
+fn wasm_body_plan_append_plan_at(
+  target: WasmBodyPlan,
+  source: WasmBodyPlan,
+  index: i32
+) -> WasmBodyPlan {
+  match index < layout.HeapArray::len(WasmBodyInstruction, source.instructions) {
+    true => rec(
+      wasm_body_plan_push_instruction(
+        target,
+        layout.HeapArray::get(WasmBodyInstruction, source.instructions, index)
+      ),
+      source,
+      index + 1
+    ),
+    false => target,
+  }
+}
+
+fn wasm_body_plan_append_plan(
+  target: WasmBodyPlan,
+  source: WasmBodyPlan
+) -> WasmBodyPlan {
+  wasm_body_plan_append_plan_at(target, source, 0)
+}
+
+fn wasm_scalar_runtime_param_body_instruction(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState
+) -> core.Option(WasmBodyInstruction) {
+  let param_count = parser.text_function_runtime_param_count(
+    source,
+    current.cursor
+  );
+  let param_index = parser.text_function_body_runtime_param_index(
+    source,
+    current.cursor
+  );
+  match param_index < param_count {
+    true => option.some(wasm_body_instruction(
+      wasm_local_get_opcode(),
+      param_index
+    )),
+    false => option.none(),
+  }
+}
+
+fn wasm_scalar_local_let_body_instruction(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState
+) -> core.Option(WasmBodyInstruction) {
+  let param_count = parser.text_function_runtime_param_count(
+    source,
+    current.cursor
+  );
+  let local_count = parser.text_function_local_let_count(
+    source,
+    current.cursor
+  );
+  let local_index = parser.text_function_body_local_let_index(
+    source,
+    current.cursor
+  );
+  let wasm_index = param_count + local_index;
+  match local_index < local_count {
+    true => match wasm_index < wasm_small_immediate_limit() {
+      true => option.some(wasm_body_instruction(
+        wasm_local_get_opcode(),
+        wasm_index
+      )),
+      false => option.none(),
+    },
+    false => option.none(),
+  }
+}
+
+fn wasm_scalar_identifier_body_instruction(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState
+) -> core.Option(WasmBodyInstruction) {
+  match wasm_scalar_runtime_param_body_instruction(source, current) {
+    Some(value) => option.some(value),
+    None => wasm_scalar_local_let_body_instruction(source, current),
+  }
+}
+
+fn wasm_type_class_is_scalar(type_class: i32) -> bool {
+  match type_class == parser.text_type_class_i32_tag() {
+    true => true,
+    false => type_class == parser.text_type_class_bool_tag(),
+  }
+}
+
+fn wasm_call_lowering(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState
+) -> WasmCallLowering {
+  WasmCallLowering {
+    context_value: context_value,
+    codes: codes,
+    current: current,
+  }
+}
+
+fn WasmCallLowering::segment_arg_segment(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  arg_index: i32
+) -> parser.TextArgumentSegment {
+  parser.text_expression_root_call_arg_segment_between(
+    lowering.context_value.source,
+    start,
+    limit,
+    arg_index
+  )
+}
+
+fn wasm_instruction_plan(
+  instruction: WasmBodyInstruction
+) -> WasmBodyPlan {
+  wasm_single_instruction_body_plan(instruction)
+}
+
+fn WasmCallLowering::number_segment_plan(
+  lowering: WasmCallLowering,
+  start: i32
+) -> core.Option(WasmBodyPlan) {
+  let token_span = textlex.token_at(
+    lowering.context_value.source,
+    start
+  ).span;
+  match wasm_small_u7_decimal_literal(
+    lowering.codes,
+    lowering.context_value.base_offset,
+    token_span
+  ) {
+    Some(value) => option.some(wasm_instruction_plan(
+      wasm_body_instruction(
+        wasm_const_opcode(),
+        value
+      )
+    )),
+    None => option.none(),
+  }
+}
+
+fn WasmCallLowering::bool_segment_plan(
+  lowering: WasmCallLowering,
+  start: i32
+) -> core.Option(WasmBodyPlan) {
+  let token_span = textlex.token_at(
+    lowering.context_value.source,
+    start
+  ).span;
+  match wasm_bool_literal_immediate(
+    lowering.codes,
+    lowering.context_value.base_offset,
+    token_span
+  ) {
+    Some(value) => option.some(wasm_instruction_plan(
+      wasm_body_instruction(
+        wasm_const_opcode(),
+        value
+      )
+    )),
+    None => option.none(),
+  }
+}
+
+fn WasmCallLowering::identifier_segment_plan(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodyPlan) {
+  let target_hash = parser.text_expression_root_identifier_hash_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let param_count = parser.text_function_runtime_param_count(
+    lowering.context_value.source,
+    lowering.current.cursor
+  );
+  let param_index = parser.text_function_runtime_param_index_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let param_type = parser.text_function_param_resolved_type_class_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let is_param = param_index < param_count;
+  let is_scalar = wasm_type_class_is_scalar(param_type);
+  let is_small = param_index < wasm_small_immediate_limit();
+  match target_hash == 0 {
+    true => option.none(),
+    false => match is_param {
+      false => WasmCallLowering::local_segment_plan(
+        lowering,
+        target_hash
+      ),
+      true => match is_scalar {
+        false => option.none(),
+        true => match is_small {
+          true => option.some(wasm_instruction_plan(
+            wasm_body_instruction(
+              wasm_local_get_opcode(),
+              param_index
+            )
+          )),
+          false => option.none(),
+        },
+      },
+    },
+  }
+}
+
+fn WasmCallLowering::local_segment_plan(
+  lowering: WasmCallLowering,
+  target_hash: i32
+) -> core.Option(WasmBodyPlan) {
+  let param_count = parser.text_function_runtime_param_count(
+    lowering.context_value.source,
+    lowering.current.cursor
+  );
+  let local_count = parser.text_function_local_let_count(
+    lowering.context_value.source,
+    lowering.current.cursor
+  );
+  let local_index = parser.text_function_local_let_index_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let local_type = parser.text_function_local_let_resolved_type_class_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let wasm_index = param_count + local_index;
+  let is_local = local_index < local_count;
+  let is_scalar = wasm_type_class_is_scalar(local_type);
+  let is_small = wasm_index < wasm_small_immediate_limit();
+  match is_local {
+    false => option.none(),
+    true => match is_scalar {
+      false => option.none(),
+      true => match is_small {
+        true => option.some(wasm_instruction_plan(
+          wasm_body_instruction(
+            wasm_local_get_opcode(),
+            wasm_index
+          )
+        )),
+        false => option.none(),
+      },
+    },
+  }
+}
+
+fn WasmCallLowering::operator_segment_plan(
+  lowering: WasmCallLowering,
+  parts: parser.TextRootOperatorParts
+) -> core.Option(WasmBodyPlan) {
+  match wasm_scalar_operator_opcode(parts.operator_hash) {
+    None => option.none(),
+    Some(opcode) => wasm_scalar_operator_body_plan_from_parts(
+      lowering,
+      parts,
+      opcode
+    ),
+  }
+}
+
+fn WasmCallLowering::simple_segment_plan(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodyPlan) {
+  let root_kind = parser.text_expression_root_head_kind_tag_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let root_type = parser.text_expression_root_type_class_tag_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  match root_kind == parser.text_expression_root_number_tag() {
+    true => match root_type == parser.text_type_class_i32_tag() {
+      true => WasmCallLowering::number_segment_plan(lowering, start),
+      false => option.none(),
+    },
+    false => match root_kind == parser.text_expression_root_bool_tag() {
+      true => match root_type == parser.text_type_class_bool_tag() {
+        true => WasmCallLowering::bool_segment_plan(lowering, start),
+        false => option.none(),
+      },
+      false => match root_kind == parser.text_expression_root_identifier_tag() {
+        true => WasmCallLowering::identifier_segment_plan(
+          lowering,
+          start,
+          limit
+        ),
+        false => option.none(),
+      },
+    },
+  }
+}
+
+fn WasmCallLowering::segment_has_bare_call(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> bool {
+  let root_kind = parser.text_expression_root_head_kind_tag_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let call_arg_count = parser.text_expression_root_call_arg_count_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let selector_count = parser.text_expression_root_head_selector_count_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let field_count = parser.text_expression_root_field_count_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let operator_count = parser.text_expression_root_operator_count_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let pipe_bind_count = parser.text_value_pipe_bind_count_between(
+    lowering.context_value.source,
+    start,
+    limit,
+    0
+  );
+  match root_kind == parser.text_expression_root_identifier_tag() {
+    false => false,
+    true => match call_arg_count == parser.text_no_root_call_arg_count() {
+      true => false,
+      false => match selector_count > 0 {
+        true => false,
+        false => match field_count > 0 {
+          true => false,
+          false => match operator_count > 0 {
+            true => false,
+            false => pipe_bind_count == 0,
+          },
+        },
+      },
+    },
+  }
+}
+
+fn WasmCallLowering::append_segment_arg(
+  lowering: WasmCallLowering,
+  plan: WasmBodyPlan,
+  start: i32,
+  limit: i32,
+  arg_index: i32
+) -> core.Option(WasmBodyPlan) {
+  let segment = WasmCallLowering::segment_arg_segment(
+    lowering,
+    start,
+    limit,
+    arg_index
+  );
+  match WasmCallLowering::arg_plan(lowering, segment) {
+    Some(arg_plan) => option.some(wasm_body_plan_append_plan(plan, arg_plan)),
+    None => option.none(),
+  }
+}
+
+fn WasmCallLowering::append_segment_args(
+  lowering: WasmCallLowering,
+  plan: WasmBodyPlan,
+  start: i32,
+  limit: i32,
+  arg_index: i32,
+  arg_count: i32
+) -> core.Option(WasmBodyPlan) {
+  match arg_index >= arg_count {
+    true => option.some(plan),
+    false => match WasmCallLowering::append_segment_arg(
+      lowering,
+      plan,
+      start,
+      limit,
+      arg_index
+    ) {
+      Some(next_plan) => WasmCallLowering::append_segment_args(
+        lowering,
+        next_plan,
+        start,
+        limit,
+        arg_index + 1,
+        arg_count
+      ),
+      None => option.none(),
+    },
+  }
+}
+
+fn WasmCallLowering::call_segment_plan(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodyPlan) {
+  let encoded_arg_count = parser.text_expression_root_call_arg_count_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let arg_count = wasm_root_call_runtime_arg_count(encoded_arg_count);
+  let target_hash = parser.text_expression_root_head_hash_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let lookup = wasm_function_lookup_for_hash(
+    lowering.context_value.source,
+    target_hash
+  );
+  let return_type = parser.text_function_return_type_class_for_hash(
+    lowering.context_value.source,
+    target_hash
+  );
+  match WasmCallLowering::segment_has_bare_call(lowering, start, limit) {
+    false => option.none(),
+    true => match lookup.found {
+      false => option.none(),
+      true => match lookup.index < wasm_small_immediate_limit() {
+        false => option.none(),
+        true => match lookup.runtime_param_count == arg_count {
+          false => option.none(),
+          true => match wasm_type_class_is_scalar(return_type) {
+            false => option.none(),
+            true => match arg_count <= 5 {
+              false => option.none(),
+              true => match WasmCallLowering::append_segment_args(
+                lowering,
+                wasm_body_plan_empty(arg_count + 1),
+                start,
+                limit,
+                0,
+                arg_count
+              ) {
+                None => option.none(),
+                Some(args_plan) => option.some(wasm_body_plan_push_instruction(
+                  args_plan,
+                  wasm_body_instruction(wasm_call_opcode(), lookup.index)
+                )),
+              },
+            },
+          },
+        },
+      },
+    },
+  }
+}
+
+fn WasmCallLowering::branch_segment_plan(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodyPlan) {
+  let segments = parser.text_bool_branch_segments_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let branch_type = parser.text_function_body_scalar_branch_type_class_between(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    start,
+    limit
+  );
+  match segments.found {
+    false => option.none(),
+    true => match wasm_type_class_is_scalar(branch_type) {
+      false => option.none(),
+      true => match WasmCallLowering::segment_plan(
+        lowering,
+        segments.condition_start,
+        segments.condition_limit,
+        true
+      ) {
+        None => option.none(),
+        Some(condition_plan) => match WasmCallLowering::segment_plan(
+          lowering,
+          segments.true_value_start,
+          segments.true_value_limit,
+          true
+        ) {
+          None => option.none(),
+          Some(true_plan) => match WasmCallLowering::segment_plan(
+            lowering,
+            segments.false_value_start,
+            segments.false_value_limit,
+            true
+          ) {
+            None => option.none(),
+            Some(false_plan) => wasm_body_plan_append_plan(
+              wasm_body_plan_empty(6),
+              condition_plan
+            ) \with_condition -> wasm_body_plan_push_instruction(
+              with_condition,
+              wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+            ) \with_if -> wasm_body_plan_append_plan(
+              with_if,
+              true_plan
+            ) \with_true -> wasm_body_plan_push_instruction(
+              with_true,
+              wasm_body_instruction(wasm_else_opcode(), 0)
+            ) \with_else -> wasm_body_plan_append_plan(
+              with_else,
+              false_plan
+            ) \with_false -> option.some(wasm_body_plan_push_instruction(
+              with_false,
+              wasm_body_instruction(wasm_end_opcode(), 0)
+            )),
+          },
+        },
+      },
+    },
+  }
+}
+
+fn WasmCallLowering::segment_plan(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  found: bool
+) -> core.Option(WasmBodyPlan) {
+  let parts = parser.text_expression_root_single_operator_parts_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  match found {
+    false => option.none(),
+    true => match WasmCallLowering::branch_segment_plan(
+      lowering,
+      start,
+      limit
+    ) {
+      Some(plan) => option.some(plan),
+      None => match parts.found {
+        true => WasmCallLowering::operator_segment_plan(lowering, parts),
+        false => match WasmCallLowering::segment_has_bare_call(
+          lowering,
+          start,
+          limit
+        ) {
+          true => WasmCallLowering::call_segment_plan(lowering, start, limit),
+          false => WasmCallLowering::simple_segment_plan(
+            lowering,
+            start,
+            limit
+          ),
+        },
+      },
+    },
+  }
+}
+
+fn wasm_scalar_expression_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32
+) -> core.Option(WasmBodyPlan) {
+  let source = context_value.source;
+  let start = parser.text_function_body_value_start_index(source, current.cursor);
+  let limit = parser.text_declaration_end_from_index(source, current.cursor);
+  match body_abi == parser.text_abi_class_scalar_tag() {
+    false => option.none(),
+    true => WasmCallLowering::segment_plan(
+      wasm_call_lowering(context_value, codes, current),
+      start,
+      limit,
+      true
+    ),
+  }
+}
+
+fn WasmCallLowering::arg_plan(
+  lowering: WasmCallLowering,
+  segment: parser.TextArgumentSegment
+) -> core.Option(WasmBodyPlan) {
+  WasmCallLowering::segment_plan(
+    lowering,
+    segment.start,
+    segment.limit,
+    segment.found
+  )
+}
+
+fn wasm_scalar_operator_opcode(operator_hash: i32) -> core.Option(i32) {
+  match operator_hash == parser.text_operator_hash_plus() {
+    true => option.some(wasm_i32_add_opcode()),
+    false => match operator_hash == parser.text_operator_hash_minus() {
+      true => option.some(wasm_i32_sub_opcode()),
+      false => match operator_hash == parser.text_operator_hash_asterisk() {
+        true => option.some(wasm_i32_mul_opcode()),
+        false => match operator_hash == parser.text_operator_hash_slash() {
+          true => option.some(wasm_i32_div_s_opcode()),
+          false => match operator_hash == parser.text_operator_hash_percent() {
+            true => option.some(wasm_i32_rem_s_opcode()),
+            false => match operator_hash == parser.text_operator_hash_equal_equal() {
+              true => option.some(wasm_i32_eq_opcode()),
+              false => match operator_hash == parser.text_operator_hash_not_equal() {
+                true => option.some(wasm_i32_ne_opcode()),
+                false => match operator_hash == parser.text_operator_hash_less() {
+                  true => option.some(wasm_i32_lt_s_opcode()),
+                  false => match operator_hash == parser.text_operator_hash_greater() {
+                    true => option.some(wasm_i32_gt_s_opcode()),
+                    false => match operator_hash == parser.text_operator_hash_less_equal() {
+                      true => option.some(wasm_i32_le_s_opcode()),
+                      false => match operator_hash == parser.text_operator_hash_greater_equal() {
+                        true => option.some(wasm_i32_ge_s_opcode()),
+                        false => option.none(),
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  }
+}
+
+fn wasm_scalar_operator_body_plan_from_parts(
+  lowering: WasmCallLowering,
+  parts: parser.TextRootOperatorParts,
+  opcode: i32
+) -> core.Option(WasmBodyPlan) {
+  match WasmCallLowering::segment_plan(
+    lowering,
+    parts.left_start,
+    parts.left_limit,
+    parts.found
+  ) {
+    None => option.none(),
+    Some(left) => match WasmCallLowering::segment_plan(
+      lowering,
+      parts.right_start,
+      parts.right_limit,
+      parts.found
+    ) {
+      None => option.none(),
+      Some(right) => wasm_body_plan_append_plan(
+        wasm_body_plan_empty(3),
+        left
+      ) \with_left -> wasm_body_plan_append_plan(
+        with_left,
+        right
+      ) \with_right -> option.some(wasm_body_plan_push_instruction(
+        with_right,
+        wasm_body_instruction(opcode, 0)
+      )),
+    },
+  }
+}
+
+fn wasm_semantic_scalar_body_immediate(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> core.Option(i32) {
+  match body_abi == parser.text_abi_class_scalar_tag() {
+    false => option.none(),
+    true => wasm_scalar_body_immediate_from_root(
+      context_value,
+      codes,
+      current,
+      decl
+    ),
+  }
+}
+
+fn wasm_semantic_scalar_body_instruction(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> core.Option(WasmBodyInstruction) {
+  let root_kind = parser.text_declaration_root_head_kind_tag(
+    context_value.source,
+    current.cursor,
+    decl
+  );
+  let is_scalar_abi = body_abi == parser.text_abi_class_scalar_tag();
+  match is_scalar_abi {
+    false => option.none(),
+    true => match root_kind == parser.text_expression_root_identifier_tag() {
+      true => wasm_scalar_identifier_body_instruction(
+        context_value.source,
+        current
+      ),
+      false => match wasm_semantic_scalar_body_immediate(
+        context_value,
+        codes,
+        current,
+        decl,
+        body_abi
+      ) {
+        Some(value) => option.some(wasm_body_instruction(
+          wasm_const_opcode(),
+          value
+        )),
+        None => option.none(),
+      },
+    },
+  }
+}
+
+fn wasm_byte_body_instruction(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> WasmBodyInstruction {
+  match wasm_semantic_scalar_body_instruction(
+    context_value,
+    codes,
+    current,
+    decl,
+    body_abi
+  ) {
+    Some(value) => value,
+    None => wasm_body_instruction(
+      wasm_body_opcode_for_abi(body_abi),
+      wasm_body_immediate(
+        context_value.source,
+        current,
+        decl,
+        body_abi
+      )
+    ),
+  }
+}
+
+fn wasm_root_call_runtime_arg_count(encoded_arg_count: i32) -> i32 {
+  encoded_arg_count - 1
+}
+
+fn wasm_scalar_call_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32
+) -> core.Option(WasmBodyPlan) {
+  let source = context_value.source;
+  let start = parser.text_function_body_value_start_index(
+    source,
+    current.cursor
+  );
+  let limit = parser.text_declaration_end_from_index(source, current.cursor);
+  match body_abi == parser.text_abi_class_scalar_tag() {
+    false => option.none(),
+    true => WasmCallLowering::call_segment_plan(
+      wasm_call_lowering(context_value, codes, current),
+      start,
+      limit
+    ),
+  }
+}
+
+fn wasm_scalar_operator_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32
+) -> core.Option(WasmBodyPlan) {
+  let parts = parser.text_function_body_root_operator_parts(
+    context_value.source,
+    current.cursor
+  );
+  let is_scalar_body = body_abi == parser.text_abi_class_scalar_tag();
+  match is_scalar_body {
+    false => option.none(),
+    true => match parts.found {
+      false => option.none(),
+      true => match wasm_scalar_operator_opcode(parts.operator_hash) {
+        None => option.none(),
+        Some(opcode) => wasm_scalar_operator_body_plan_from_parts(
+          wasm_call_lowering(context_value, codes, current),
+          parts,
+          opcode
+        ),
+      },
+    },
+  }
+}
+
+fn wasm_scalar_local_let_initializer_plan(
+  lowering: WasmCallLowering,
+  local_index: i32
+) -> core.Option(WasmBodyPlan) {
+  let segment = parser.text_function_local_let_value_segment_for_index(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    local_index
+  );
+  let param_count = parser.text_function_runtime_param_count(
+    lowering.context_value.source,
+    lowering.current.cursor
+  );
+  let wasm_index = param_count + local_index;
+  match wasm_index < wasm_small_immediate_limit() {
+    false => option.none(),
+    true => match WasmCallLowering::arg_plan(lowering, segment) {
+      None => option.none(),
+      Some(plan) => option.some(wasm_body_plan_push_instruction(
+        plan,
+        wasm_body_instruction(wasm_local_set_opcode(), wasm_index)
+      )),
+    },
+  }
+}
+
+fn wasm_scalar_local_let_initializer_plans(
+  lowering: WasmCallLowering,
+  plan: WasmBodyPlan,
+  local_index: i32,
+  local_count: i32
+) -> core.Option(WasmBodyPlan) {
+  match local_index >= local_count {
+    true => option.some(plan),
+    false => match wasm_scalar_local_let_initializer_plan(
+      lowering,
+      local_index
+    ) {
+      None => option.none(),
+      Some(local_plan) => wasm_scalar_local_let_initializer_plans(
+        lowering,
+        wasm_body_plan_append_plan(plan, local_plan),
+        local_index + 1,
+        local_count
+      ),
+    },
+  }
+}
+
+fn wasm_scalar_local_let_prefixed_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32,
+  body_plan: WasmBodyPlan
+) -> core.Option(WasmBodyPlan) {
+  let local_count = parser.text_function_local_let_count(
+    context_value.source,
+    current.cursor
+  );
+  match body_abi == parser.text_abi_class_scalar_tag() {
+    false => option.none(),
+    true => match local_count <= 0 {
+      true => option.some(body_plan),
+      false => match wasm_scalar_local_let_initializer_plans(
+        wasm_call_lowering(context_value, codes, current),
+        wasm_body_plan_empty(local_count + 1),
+        0,
+        local_count
+      ) {
+        None => option.none(),
+        Some(local_plan) => option.some(wasm_body_plan_append_plan(
+          local_plan,
+          body_plan
+        )),
+      },
+    },
+  }
+}
+
+fn wasm_byte_base_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> WasmBodyPlan {
+  match wasm_scalar_expression_body_plan(
+    context_value,
+    codes,
+    current,
+    body_abi
+  ) {
+    Some(plan) => plan,
+    None => match wasm_scalar_call_body_plan(
+      context_value,
+      codes,
+      current,
+      body_abi
+    ) {
+      Some(plan) => plan,
+      None => match wasm_scalar_operator_body_plan(
+        context_value,
+        codes,
+        current,
+        body_abi
+      ) {
+        Some(plan) => plan,
+        None => wasm_single_instruction_body_plan(
+          wasm_byte_body_instruction(
+            context_value,
+            codes,
+            current,
+            decl,
+            body_abi
+          )
+        ),
+      },
+    },
+  }
+}
+
+fn wasm_byte_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> WasmBodyPlan {
+  let base_plan = wasm_byte_base_body_plan(
+    context_value,
+    codes,
+    current,
+    decl,
+    body_abi
+  );
+  match wasm_scalar_local_let_prefixed_body_plan(
+    context_value,
+    codes,
+    current,
+    body_abi,
+    base_plan
+  ) {
+    Some(plan) => plan,
+    None => base_plan,
+  }
+}
+
+fn wasm_byte_body_immediate(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> i32 {
+  wasm_byte_body_instruction(
+    context_value,
+    codes,
+    current,
+    decl,
+    body_abi
+  ).immediate
+}
+
+fn wasm_terminator_opcode(result_val_type: i32) -> i32 {
+  match result_val_type == wasm_no_val_type() {
+    true => wasm_drop_opcode(),
+    false => wasm_return_opcode(),
+  }
+}
+
+fn wasm_instruction_size(opcode: i32) -> i32 {
+  match opcode == wasm_const_opcode() {
+    true => 2,
+    false => match opcode == wasm_local_get_opcode() {
+      true => 2,
+      false => match opcode == wasm_local_set_opcode() {
+        true => 2,
+        false => match opcode == wasm_call_opcode() {
+          true => 2,
+          false => match opcode == wasm_if_opcode() {
+            true => 2,
+            false => 1,
+          },
+        },
+      },
+    },
+  }
+}
+
+fn wasm_function_body_size(
+  local_count: i32,
+  body_byte_size: i32,
+  terminator_opcode: i32
+) -> i32 {
+  wasm_local_decl_vector_size(local_count)
+    + body_byte_size
+    + wasm_instruction_size(terminator_opcode)
+    + 1
+}
+
+fn wasm_local_decl_vector_size(local_count: i32) -> i32 {
+  match local_count <= 0 {
+    true => 1,
+    false => 1 + wasm_u32_leb_size(local_count) + 1,
+  }
+}
+
+fn wasm_result_arity(result_val_type: i32) -> i32 {
+  match result_val_type == wasm_no_val_type() {
+    true => 0,
+    false => 1,
+  }
+}
+
+fn wasm_type_entry_size(runtime_param_count: i32, result_val_type: i32) -> i32 {
+  1 + 1 + runtime_param_count + 1 + wasm_result_arity(result_val_type)
+}
+
+fn wasm_type_entry_signature(
+  runtime_param_count: i32,
+  result_val_type: i32
+) -> i32 {
+  let with_params = textmodel.signature_mix(83, runtime_param_count);
+  let with_result = textmodel.signature_mix(with_params, result_val_type);
+  textmodel.signature_mix(with_result, wasm_result_arity(result_val_type))
+}
+
+fn wasm_export_entry_size(name_width: i32) -> i32 {
+  1 + name_width + 1 + 1
+}
+
+fn wasm_export_entry_signature(name_hash: i32, function_index: i32) -> i32 {
+  let with_name = textmodel.signature_mix(89, name_hash);
+  textmodel.signature_mix(with_name, function_index)
+}
+
+fn wasm_code_entry_size(body_size: i32) -> i32 {
+  wasm_u32_leb_size(body_size) + body_size
+}
+
+fn wasm_code_entry_signature(
+  local_count: i32,
+  body_opcode: i32,
+  body_immediate: i32,
+  terminator_opcode: i32,
+  body_size: i32
+) -> i32 {
+  let with_locals = textmodel.signature_mix(97, local_count);
+  let with_opcode = textmodel.signature_mix(with_locals, body_opcode);
+  let with_immediate = textmodel.signature_mix(with_opcode, body_immediate);
+  let with_terminator = textmodel.signature_mix(
+    with_immediate,
+    terminator_opcode
+  );
+  textmodel.signature_mix(with_terminator, body_size)
+}
+
+fn wasm_push_instruction(
+  bytes: layout.HeapArray(i32),
+  opcode: i32,
+  immediate: i32
+) -> layout.HeapArray(i32) {
+  let with_opcode = wasm_push_byte(bytes, opcode);
+  match wasm_instruction_size(opcode) > 1 {
+    true => wasm_push_byte(with_opcode, immediate),
+    false => with_opcode,
+  }
+}
+
+fn wasm_push_module_header(bytes: layout.HeapArray(i32)) -> layout.HeapArray(i32) {
+  let magic0 = wasm_push_byte(bytes, 0);
+  let magic1 = wasm_push_byte(magic0, 97);
+  let magic2 = wasm_push_byte(magic1, 115);
+  let magic3 = wasm_push_byte(magic2, 109);
+  let version0 = wasm_push_byte(magic3, 1);
+  let version1 = wasm_push_byte(version0, 0);
+  let version2 = wasm_push_byte(version1, 0);
+  wasm_push_byte(version2, 0)
+}
+
+fn wasm_append_bytes(
+  target: layout.HeapArray(i32),
+  source: layout.HeapArray(i32),
+  index: i32
+) -> layout.HeapArray(i32) {
+  match index < layout.HeapArray::len(i32, source) {
+    true => rec(
+      wasm_push_byte(target, layout.HeapArray::get(i32, source, index)),
+      source,
+      index + 1
+    ),
+    false => target,
+  }
+}
+
+fn wasm_push_section(
+  bytes: layout.HeapArray(i32),
+  section_id: i32,
+  payload: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  let with_id = wasm_push_byte(bytes, section_id);
+  let with_size = wasm_push_u32_leb(
+    with_id,
+    layout.HeapArray::len(i32, payload)
+  );
+  wasm_append_bytes(with_size, payload, 0)
+}
+
+fn wasm_payload_count(kind: WasmBytePayloadKind, scan: WasmSectionScan) -> i32 {
+  match kind {
+    WasmBytePayloadKind::ExportPayload => scan.export_count,
+    _ => scan.function_count,
+  }
+}
+
+fn wasm_payload_capacity(kind: WasmBytePayloadKind, scan: WasmSectionScan) -> i32 {
+  match kind {
+    WasmBytePayloadKind::TypePayload => scan.type_payload_size
+      + scan.function_count
+      + 8,
+    WasmBytePayloadKind::FunctionPayload => scan.function_payload_size
+      + scan.function_count
+      + 8,
+    WasmBytePayloadKind::ExportPayload => scan.export_payload_size
+      + scan.export_count
+      + 8,
+    WasmBytePayloadKind::CodePayload => scan.code_payload_size
+      + scan.function_count
+      + 8,
+  }
+}
+
+fn wasm_push_type_payload_function(
+  context_value: WasmByteContext,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  let fact = wasm_function_fact(context_value.source, current, result);
+  let with_form = wasm_push_byte(bytes, 96);
+  let with_param_count = wasm_push_u32_leb(
+    with_form,
+    fact.runtime_param_count
+  );
+  let with_params = wasm_push_repeated_byte(
+    with_param_count,
+    fact.runtime_param_count,
+    wasm_i32_val_type()
+  );
+  let arity = wasm_result_arity(fact.result_val_type);
+  let with_result_count = wasm_push_u32_leb(with_params, arity);
+  match arity > 0 {
+    true => wasm_push_byte(with_result_count, fact.result_val_type),
+    false => with_result_count,
+  }
+}
+
+fn wasm_push_function_payload_function(
+  function_index: i32,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  wasm_push_u32_leb(bytes, function_index)
+}
+
+fn wasm_push_export_payload_function(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  state: WasmBytePayloadState,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match is_pub_function(context_value.source, state.current, result) {
+    false => bytes,
+    true => wasm_push_export_payload_bytes(
+      context_value,
+      codes,
+      state,
+      result,
+      bytes
+    ),
+  }
+}
+
+fn wasm_push_export_payload_bytes(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  state: WasmBytePayloadState,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  let decl = result.value.decl;
+  let name_index = parser.text_declaration_name_index(
+    context_value.source,
+    state.current.cursor,
+    decl
+  );
+  let name_span = textlex.token_at(context_value.source, name_index).span;
+  let with_name_size = wasm_push_u32_leb(bytes, span.width(name_span));
+  let with_name = wasm_push_source_bytes(
+    codes,
+    context_value.base_offset,
+    name_span.start,
+    name_span.end,
+    with_name_size
+  );
+  let with_kind = wasm_push_byte(with_name, 0);
+  wasm_push_u32_leb(with_kind, state.function_index)
+}
+
+fn wasm_push_body_plan_at(
+  bytes: layout.HeapArray(i32),
+  plan: WasmBodyPlan,
+  index: i32
+) -> layout.HeapArray(i32) {
+  match index < layout.HeapArray::len(WasmBodyInstruction, plan.instructions) {
+    true => layout.HeapArray::get(
+      WasmBodyInstruction,
+      plan.instructions,
+      index
+    ) \instruction -> rec(
+      wasm_push_instruction(
+        bytes,
+        instruction.opcode,
+        instruction.immediate
+      ),
+      plan,
+      index + 1
+    ),
+    false => bytes,
+  }
+}
+
+fn wasm_push_body_plan(
+  bytes: layout.HeapArray(i32),
+  plan: WasmBodyPlan
+) -> layout.HeapArray(i32) {
+  wasm_push_body_plan_at(bytes, plan, 0)
+}
+
+fn wasm_push_code_payload_function(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  let fact = wasm_byte_function_fact(
+    context_value,
+    codes,
+    current,
+    result
+  );
+  let body_plan = wasm_byte_function_body_plan(
+    context_value,
+    codes,
+    current,
+    result
+  );
+  let with_body_size = wasm_push_u32_leb(bytes, fact.body_size);
+  let with_local_decls = wasm_push_local_decls(with_body_size, fact.local_count);
+  let with_body = wasm_push_body_plan(with_local_decls, body_plan);
+  let with_terminator = wasm_push_instruction(
+    with_body,
+    fact.terminator_opcode,
+    0
+  );
+  wasm_push_byte(with_terminator, 11)
+}
+
+fn wasm_push_payload_bytes(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  state: WasmBytePayloadState,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match state.kind {
+    WasmBytePayloadKind::TypePayload => wasm_push_type_payload_function(
+      context_value,
+      state.current,
+      result,
+      bytes
+    ),
+    WasmBytePayloadKind::FunctionPayload => wasm_push_function_payload_function(
+      state.function_index,
+      bytes
+    ),
+    WasmBytePayloadKind::ExportPayload => wasm_push_export_payload_function(
+      context_value,
+      codes,
+      state,
+      result,
+      bytes
+    ),
+    WasmBytePayloadKind::CodePayload => wasm_push_code_payload_function(
+      context_value,
+      codes,
+      state.current,
+      result,
+      bytes
+    ),
+  }
+}
+
+fn wasm_payload_scan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  state: WasmBytePayloadState,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match state.current.cursor < textlex.length(context_value.source) {
+    false => bytes,
+    true => match parser.parse_text_declaration_stream(
+      state.current,
+      context_value.source,
+      state.function_index
+    ) {
+      Err(_) => bytes,
+      Ok(result) => rec(
+        context_value,
+        codes,
+        wasm_payload_next_state(context_value, state, result),
+        wasm_payload_next_bytes(context_value, codes, state, bytes, result)
+      ),
+    },
+  }
+}
+
+fn wasm_payload_next_bytes(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  state: WasmBytePayloadState,
+  bytes: layout.HeapArray(i32),
+  result: combinator.Reply(parser.DeclFrame)
+) -> layout.HeapArray(i32) {
+  let is_decl_function = is_function(context_value.source, state.current, result);
+  let next_bytes = match is_decl_function {
+    true => wasm_push_payload_bytes(
+      context_value,
+      codes,
+      state,
+      result,
+      bytes
+    ),
+    false => bytes,
+  };
+  next_bytes
+}
+
+fn wasm_payload_next_state(
+  context_value: WasmByteContext,
+  state: WasmBytePayloadState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> WasmBytePayloadState {
+  let is_decl_function = is_function(context_value.source, state.current, result);
+  let next_index = match is_decl_function {
+    true => state.function_index + 1,
+    false => state.function_index,
+  };
+  WasmBytePayloadState {
+    kind: state.kind,
+    current: parser.next_text_declaration_state(
+      result.state,
+      context_value.source
+    ),
+    function_index: next_index,
+  }
+}
+
+fn wasm_next_declaration_state(
+  context_value: WasmByteContext,
+  result: combinator.Reply(parser.DeclFrame)
+) -> combinator.ParseState {
+  parser.next_text_declaration_state(result.state, context_value.source)
+}
+
+fn wasm_next_function_index(
+  context_value: WasmByteContext,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  function_index: i32
+) -> i32 {
+  match is_function(context_value.source, current, result) {
+    true => function_index + 1,
+    false => function_index,
+  }
+}
+
+fn wasm_type_payload_next_bytes(
+  context_value: WasmByteContext,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match is_function(context_value.source, current, result) {
+    true => wasm_push_type_payload_function(context_value, current, result, bytes),
+    false => bytes,
+  }
+}
+
+fn wasm_type_payload_scan(
+  context_value: WasmByteContext,
+  current: combinator.ParseState,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match current.cursor < textlex.length(context_value.source) {
+    false => bytes,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      0
+    ) {
+      Err(_) => bytes,
+      Ok(result) => rec(
+        context_value,
+        wasm_next_declaration_state(context_value, result),
+        wasm_type_payload_next_bytes(context_value, current, result, bytes)
+      ),
+    },
+  }
+}
+
+fn wasm_function_payload_next_bytes(
+  context_value: WasmByteContext,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  function_index: i32,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match is_function(context_value.source, current, result) {
+    true => wasm_push_function_payload_function(function_index, bytes),
+    false => bytes,
+  }
+}
+
+fn wasm_function_payload_scan(
+  context_value: WasmByteContext,
+  current: combinator.ParseState,
+  function_index: i32,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match current.cursor < textlex.length(context_value.source) {
+    false => bytes,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      function_index
+    ) {
+      Err(_) => bytes,
+      Ok(result) => rec(
+        context_value,
+        wasm_next_declaration_state(context_value, result),
+        wasm_next_function_index(context_value, current, result, function_index),
+        wasm_function_payload_next_bytes(
+          context_value,
+          current,
+          result,
+          function_index,
+          bytes
+        )
+      ),
+    },
+  }
+}
+
+fn wasm_push_export_payload_direct(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  cursor: WasmByteCursor,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match is_pub_function(context_value.source, cursor.current, result) {
+    false => bytes,
+    true => wasm_push_export_payload_direct_bytes(
+      context_value,
+      codes,
+      cursor,
+      result,
+      bytes
+    ),
+  }
+}
+
+fn wasm_push_export_payload_direct_bytes(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  cursor: WasmByteCursor,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  let decl = result.value.decl;
+  let name_index = parser.text_declaration_name_index(
+    context_value.source,
+    cursor.current.cursor,
+    decl
+  );
+  let name_span = textlex.token_at(context_value.source, name_index).span;
+  let with_name_size = wasm_push_u32_leb(bytes, span.width(name_span));
+  let with_name = wasm_push_source_bytes(
+    codes,
+    context_value.base_offset,
+    name_span.start,
+    name_span.end,
+    with_name_size
+  );
+  let with_kind = wasm_push_byte(with_name, 0);
+  wasm_push_u32_leb(with_kind, cursor.function_index)
+}
+
+fn wasm_push_export_payload_by_name(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  name_index: i32,
+  function_index: i32,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  let name_span = textlex.token_at(context_value.source, name_index).span;
+  let with_name_size = wasm_push_u32_leb(bytes, span.width(name_span));
+  let with_name = wasm_push_source_bytes(
+    codes,
+    context_value.base_offset,
+    name_span.start,
+    name_span.end,
+    with_name_size
+  );
+  let with_kind = wasm_push_byte(with_name, 0);
+  wasm_push_u32_leb(with_kind, function_index)
+}
+
+fn wasm_export_payload_next_bytes(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  cursor: WasmByteCursor,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match is_function(context_value.source, cursor.current, result) {
+    true => match is_pub_function(context_value.source, cursor.current, result) {
+      true => wasm_push_export_payload_by_name(
+        context_value,
+        codes,
+        parser.text_declaration_name_index(
+          context_value.source,
+          cursor.current.cursor,
+          result.value.decl
+        ),
+        cursor.function_index,
+        bytes
+      ),
+      false => bytes,
+    },
+    false => bytes,
+  }
+}
+
+fn wasm_export_payload_scan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  function_index: i32,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match current.cursor < textlex.length(context_value.source) {
+    false => bytes,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      function_index
+    ) {
+      Err(_) => bytes,
+      Ok(result) => rec(
+        context_value,
+        codes,
+        wasm_next_declaration_state(context_value, result),
+        wasm_next_function_index(context_value, current, result, function_index),
+        wasm_export_payload_next_bytes(
+          context_value,
+          codes,
+          WasmByteCursor {
+            current: current,
+            function_index: function_index,
+          },
+          result,
+          bytes
+        )
+      ),
+    },
+  }
+}
+
+fn wasm_code_payload_next_bytes(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match is_function(context_value.source, current, result) {
+    true => wasm_push_code_payload_function(
+      context_value,
+      codes,
+      current,
+      result,
+      bytes
+    ),
+    false => bytes,
+  }
+}
+
+fn wasm_code_payload_scan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  bytes: layout.HeapArray(i32)
+) -> layout.HeapArray(i32) {
+  match current.cursor < textlex.length(context_value.source) {
+    false => bytes,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      0
+    ) {
+      Err(_) => bytes,
+      Ok(result) => rec(
+        context_value,
+        codes,
+        wasm_next_declaration_state(context_value, result),
+        wasm_code_payload_next_bytes(context_value, codes, current, result, bytes)
+      ),
+    },
+  }
+}
+
+fn wasm_export_count_scan(
+  context_value: WasmByteContext,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        wasm_next_declaration_state(context_value, result),
+        match is_pub_function(context_value.source, current, result) {
+          true => total + 1,
+          false => total,
+        }
+      ),
+    },
+  }
+}
+
+fn wasm_export_count(context_value: WasmByteContext) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  wasm_export_count_scan(
+    context_value,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn wasm_function_count(source: textlex.TextTokenStream) -> i32 {
+  textsummary.run(source, textmodel.SummaryKind::KindCount, 1)
+}
+
+fn wasm_payload_buffer(
+  codes: layout.HeapArray(i32),
+  item_count: i32
+) -> layout.HeapArray(i32) {
+  layout.HeapArray::new(
+    i32,
+    layout.HeapArray::len(i32, codes) + item_count * 16 + 64
+  )
+}
+
+fn wasm_section_payload_with_count(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  kind: WasmBytePayloadKind,
+  count: i32
+) -> layout.HeapArray(i32) {
+  let window = textmodel.full_window(context_value.source);
+  let with_count = wasm_push_u32_leb(wasm_payload_buffer(codes, count), count);
+  match kind {
+    WasmBytePayloadKind::TypePayload => wasm_type_payload_scan(
+      context_value,
+      textmodel.token_window_state(window),
+      with_count
+    ),
+    WasmBytePayloadKind::FunctionPayload => wasm_function_payload_scan(
+      context_value,
+      textmodel.token_window_state(window),
+      0,
+      with_count
+    ),
+    WasmBytePayloadKind::ExportPayload => wasm_export_payload_scan(
+      context_value,
+      codes,
+      textmodel.token_window_state(window),
+      0,
+      with_count
+    ),
+    WasmBytePayloadKind::CodePayload => wasm_code_payload_scan(
+      context_value,
+      codes,
+      textmodel.token_window_state(window),
+      with_count
+    ),
+  }
+}
+
+fn wasm_byte_buffer_from_counts(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  function_count: i32,
+  export_count: i32
+) -> layout.HeapArray(i32) {
+  let header = wasm_push_module_header(wasm_byte_buffer_empty(
+    layout.HeapArray::len(i32, codes) * 2 + function_count * 16 + 128
+  ));
+  let type_payload = wasm_section_payload_with_count(
+    context_value,
+    codes,
+    WasmBytePayloadKind::TypePayload,
+    function_count
+  );
+  let with_type = wasm_push_section(
+    header,
+    wasm_type_section_id(),
+    type_payload
+  );
+  let function_payload = wasm_section_payload_with_count(
+    context_value,
+    codes,
+    WasmBytePayloadKind::FunctionPayload,
+    function_count
+  );
+  let with_function = wasm_push_section(
+    with_type,
+    wasm_function_section_id(),
+    function_payload
+  );
+  let export_payload = wasm_section_payload_with_count(
+    context_value,
+    codes,
+    WasmBytePayloadKind::ExportPayload,
+    export_count
+  );
+  let with_export = wasm_push_section(
+    with_function,
+    wasm_export_section_id(),
+    export_payload
+  );
+  let code_payload = wasm_section_payload_with_count(
+    context_value,
+    codes,
+    WasmBytePayloadKind::CodePayload,
+    function_count
+  );
+  wasm_push_section(
+    with_export,
+    wasm_code_section_id(),
+    code_payload
+  )
+}
+
+fn wasm_section_payload(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  kind: WasmBytePayloadKind,
+  scan: WasmSectionScan
+) -> layout.HeapArray(i32) {
+  let window = textmodel.full_window(context_value.source);
+  let count = wasm_payload_count(kind, scan);
+  let with_count = wasm_push_u32_leb(
+    wasm_byte_buffer_empty(wasm_payload_capacity(kind, scan)),
+    count
+  );
+  match kind {
+    WasmBytePayloadKind::TypePayload => wasm_type_payload_scan(
+      context_value,
+      textmodel.token_window_state(window),
+      with_count
+    ),
+    WasmBytePayloadKind::FunctionPayload => wasm_function_payload_scan(
+      context_value,
+      textmodel.token_window_state(window),
+      0,
+      with_count
+    ),
+    WasmBytePayloadKind::ExportPayload => wasm_export_payload_scan(
+      context_value,
+      codes,
+      textmodel.token_window_state(window),
+      0,
+      with_count
+    ),
+    WasmBytePayloadKind::CodePayload => wasm_code_payload_scan(
+      context_value,
+      codes,
+      textmodel.token_window_state(window),
+      with_count
+    ),
+  }
+}
+
+fn wasm_byte_buffer_capacity(scan: WasmSectionScan) -> i32 {
+  wasm_module_header_size()
+    + scan.type_payload_size
+    + scan.function_payload_size
+    + scan.export_payload_size
+    + scan.code_payload_size
+    + scan.function_count * 4
+    + scan.export_count * 2
+    + 32
+}
+
+fn wasm_byte_buffer_from_scan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  scan: WasmSectionScan
+) -> layout.HeapArray(i32) {
+  let header = wasm_push_module_header(wasm_byte_buffer_empty(
+    wasm_byte_buffer_capacity(scan)
+  ));
+  let type_payload = wasm_section_payload(
+    context_value,
+    codes,
+    WasmBytePayloadKind::TypePayload,
+    scan
+  );
+  let with_type = wasm_push_section(
+    header,
+    wasm_type_section_id(),
+    type_payload
+  );
+  let function_payload = wasm_section_payload(
+    context_value,
+    codes,
+    WasmBytePayloadKind::FunctionPayload,
+    scan
+  );
+  let with_function = wasm_push_section(
+    with_type,
+    wasm_function_section_id(),
+    function_payload
+  );
+  let export_payload = wasm_section_payload(
+    context_value,
+    codes,
+    WasmBytePayloadKind::ExportPayload,
+    scan
+  );
+  let with_export = wasm_push_section(
+    with_function,
+    wasm_export_section_id(),
+    export_payload
+  );
+  let code_payload = wasm_section_payload(
+    context_value,
+    codes,
+    WasmBytePayloadKind::CodePayload,
+    scan
+  );
+  wasm_push_section(
+    with_export,
+    wasm_code_section_id(),
+    code_payload
+  )
+}
+
+fn wasm_export_tag(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> i32 {
+  match is_pub_function(source, current, result) {
+    true => 1,
+    false => 0,
+  }
+}
+
+fn wasm_function_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> WasmFunctionFact {
+  let decl = result.value.decl;
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let body_abi = parser.text_abi_class_tag_for_type_class(actual);
+  let body_opcode = wasm_body_opcode_for_abi(body_abi);
+  let result_val_type = wasm_val_type_for_abi(
+    parser.text_abi_class_tag_for_type_class(expected)
+  );
+  let terminator_opcode = wasm_terminator_opcode(result_val_type);
+  let check_status = parser.text_simple_body_type_check_status(expected, actual);
+  let local_count = parser.text_function_local_let_count(source, current.cursor);
+  WasmFunctionFact {
+    name_hash: textlex.text_hash_at(
+      source,
+      parser.text_declaration_name_index(source, current.cursor, decl)
+    ),
+    export_tag: wasm_export_tag(source, current, result),
+    runtime_param_count: parser.text_function_runtime_param_count(
+      source,
+      current.cursor
+    ),
+    local_count: local_count,
+    result_val_type: result_val_type,
+    body_opcode: body_opcode,
+    body_immediate: wasm_body_immediate(source, current, decl, body_abi),
+    terminator_opcode: terminator_opcode,
+    body_size: wasm_function_body_size(
+      local_count,
+      wasm_instruction_size(body_opcode),
+      terminator_opcode
+    ),
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn wasm_byte_function_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> WasmBodyPlan {
+  let decl = result.value.decl;
+  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+    context_value.source,
+    current.cursor,
+    decl
+  );
+  let body_abi = parser.text_abi_class_tag_for_type_class(actual);
+  wasm_byte_body_plan(
+    context_value,
+    codes,
+    current,
+    decl,
+    body_abi
+  )
+}
+
+fn wasm_byte_function_fact(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> WasmFunctionFact {
+  let decl = result.value.decl;
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    context_value.source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+    context_value.source,
+    current.cursor,
+    decl
+  );
+  let body_plan = wasm_byte_function_body_plan(
+    context_value,
+    codes,
+    current,
+    result
+  );
+  let result_val_type = wasm_val_type_for_abi(
+    parser.text_abi_class_tag_for_type_class(expected)
+  );
+  let terminator_opcode = wasm_terminator_opcode(result_val_type);
+  let check_status = parser.text_simple_body_type_check_status(expected, actual);
+  let local_count = parser.text_function_local_let_count(
+    context_value.source,
+    current.cursor
+  );
+  WasmFunctionFact {
+    name_hash: textlex.text_hash_at(
+      context_value.source,
+      parser.text_declaration_name_index(context_value.source, current.cursor, decl)
+    ),
+    export_tag: wasm_export_tag(context_value.source, current, result),
+    runtime_param_count: parser.text_function_runtime_param_count(
+      context_value.source,
+      current.cursor
+    ),
+    local_count: local_count,
+    result_val_type: result_val_type,
+    body_opcode: body_plan.first_opcode,
+    body_immediate: body_plan.first_immediate,
+    terminator_opcode: terminator_opcode,
+    body_size: wasm_function_body_size(
+      local_count,
+      body_plan.byte_size,
+      terminator_opcode
+    ),
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn wasm_function_fact_signature(fact: WasmFunctionFact) -> i32 {
+  let with_name = textmodel.signature_mix(73, fact.name_hash);
+  let with_export = textmodel.signature_mix(with_name, fact.export_tag);
+  let with_params = textmodel.signature_mix(
+    with_export,
+    fact.runtime_param_count
+  );
+  let with_locals = textmodel.signature_mix(with_params, fact.local_count);
+  let with_result = textmodel.signature_mix(with_locals, fact.result_val_type);
+  let with_opcode = textmodel.signature_mix(with_result, fact.body_opcode);
+  let with_immediate = textmodel.signature_mix(
+    with_opcode,
+    fact.body_immediate
+  );
+  let with_terminator = textmodel.signature_mix(
+    with_immediate,
+    fact.terminator_opcode
+  );
+  let with_size = textmodel.signature_mix(with_terminator, fact.body_size);
+  textmodel.signature_mix(with_size, fact.diagnostic_code)
+}
+
+fn text_token_width(source: textlex.TextTokenStream, index: i32) -> i32 {
+  span.width(textlex.token_at(source, index).span)
+}
+
+fn wasm_section_fact_signature(fact: WasmSectionFact) -> i32 {
+  let with_section = textmodel.signature_mix(79, fact.section_id);
+  let with_items = textmodel.signature_mix(with_section, fact.item_count);
+  let with_size = textmodel.signature_mix(with_items, fact.payload_size);
+  let with_signature = textmodel.signature_mix(
+    with_size,
+    fact.payload_signature
+  );
+  textmodel.signature_mix(with_signature, fact.diagnostic_signature)
+}
+
+fn wasm_byte_section_fact(
+  section_id: i32,
+  payload_size: i32,
+  payload_signature: i32,
+  diagnostic_signature: i32
+) -> WasmByteSectionFact {
+  WasmByteSectionFact {
+    section_id: section_id,
+    payload_size: payload_size,
+    payload_leb_size: wasm_u32_leb_size(payload_size),
+    section_size: wasm_section_total_size(payload_size),
+    header_signature: wasm_section_header_signature(section_id, payload_size),
+    payload_signature: payload_signature,
+    diagnostic_signature: diagnostic_signature,
+  }
+}
+
+fn wasm_byte_section_fact_signature(fact: WasmByteSectionFact) -> i32 {
+  let with_section = textmodel.signature_mix(109, fact.section_id);
+  let with_payload = textmodel.signature_mix(with_section, fact.payload_size);
+  let with_leb = textmodel.signature_mix(with_payload, fact.payload_leb_size);
+  let with_size = textmodel.signature_mix(with_leb, fact.section_size);
+  let with_header = textmodel.signature_mix(with_size, fact.header_signature);
+  let with_signature = textmodel.signature_mix(
+    with_header,
+    fact.payload_signature
+  );
+  textmodel.signature_mix(with_signature, fact.diagnostic_signature)
+}
+
+fn wasm_byte_module_fact_signature(fact: WasmByteModuleFact) -> i32 {
+  let with_magic = textmodel.signature_mix(113, fact.magic_signature);
+  let with_version = textmodel.signature_mix(with_magic, fact.version_signature);
+  let with_count = textmodel.signature_mix(with_version, fact.section_count);
+  let with_size = textmodel.signature_mix(with_count, fact.byte_size);
+  let with_sections = textmodel.signature_mix(
+    with_size,
+    fact.section_signature
+  );
+  textmodel.signature_mix(with_sections, fact.diagnostic_signature)
+}
+
+fn wasm_initial_section_scan() -> WasmSectionScan {
+  WasmSectionScan {
+    function_count: 0,
+    export_count: 0,
+    type_payload_size: 1,
+    type_payload_signature: 0,
+    function_payload_size: 1,
+    function_payload_signature: 0,
+    export_payload_size: 1,
+    export_payload_signature: 0,
+    code_payload_size: 1,
+    code_payload_signature: 0,
+    diagnostic_signature: 0,
+  }
+}
+
+fn wasm_section_export_count(scan: WasmSectionScan, fact: WasmFunctionFact) -> i32 {
+  scan.export_count + fact.export_tag
+}
+
+fn wasm_section_export_payload_size(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  scan: WasmSectionScan,
+  fact: WasmFunctionFact
+) -> i32 {
+  match fact.export_tag == 1 {
+    true => scan.export_payload_size
+      + wasm_export_entry_size(
+        text_token_width(
+          source,
+          parser.text_declaration_name_index(source, current.cursor, decl)
+        )
+      ),
+    false => scan.export_payload_size,
+  }
+}
+
+fn wasm_section_export_payload_signature(
+  scan: WasmSectionScan,
+  fact: WasmFunctionFact,
+  function_index: i32
+) -> i32 {
+  match fact.export_tag == 1 {
+    true => textmodel.signature_mix(
+      scan.export_payload_signature,
+      wasm_export_entry_signature(fact.name_hash, function_index)
+    ),
+    false => scan.export_payload_signature,
+  }
+}
+
+fn wasm_section_scan_function(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  scan: WasmSectionScan
+) -> WasmSectionScan {
+  let decl = result.value.decl;
+  let fact = wasm_byte_function_fact(context_value, codes, current, result);
+  let function_index = scan.function_count;
+  WasmSectionScan {
+    function_count: scan.function_count + 1,
+    export_count: wasm_section_export_count(scan, fact),
+    type_payload_size: scan.type_payload_size
+      + wasm_type_entry_size(fact.runtime_param_count, fact.result_val_type),
+    type_payload_signature: textmodel.signature_mix(
+      scan.type_payload_signature,
+      wasm_type_entry_signature(fact.runtime_param_count, fact.result_val_type)
+    ),
+    function_payload_size: scan.function_payload_size + 1,
+    function_payload_signature: textmodel.signature_mix(
+      scan.function_payload_signature,
+      function_index
+    ),
+    export_payload_size: wasm_section_export_payload_size(
+      context_value.source,
+      current,
+      decl,
+      scan,
+      fact
+    ),
+    export_payload_signature: wasm_section_export_payload_signature(
+      scan,
+      fact,
+      function_index
+    ),
+    code_payload_size: scan.code_payload_size + wasm_code_entry_size(fact.body_size),
+    code_payload_signature: textmodel.signature_mix(
+      scan.code_payload_signature,
+      wasm_code_entry_signature(
+        fact.local_count,
+        fact.body_opcode,
+        fact.body_immediate,
+        fact.terminator_opcode,
+        fact.body_size
+      )
+    ),
+    diagnostic_signature: textmodel.signature_mix(
+      scan.diagnostic_signature,
+      fact.diagnostic_code
+    ),
+  }
+}
+
+fn wasm_section_record_final_signature(scan: WasmSectionScan) -> i32 {
+  let type_total = textmodel.signature_mix(
+    0,
+    wasm_section_fact_signature(
+      WasmSectionFact {
+        section_id: wasm_type_section_id(),
+        item_count: scan.function_count,
+        payload_size: scan.type_payload_size,
+        payload_signature: scan.type_payload_signature,
+        diagnostic_signature: scan.diagnostic_signature,
+      }
+    )
+  );
+  let function_total = textmodel.signature_mix(
+    type_total,
+    wasm_section_fact_signature(
+      WasmSectionFact {
+        section_id: wasm_function_section_id(),
+        item_count: scan.function_count,
+        payload_size: scan.function_payload_size,
+        payload_signature: scan.function_payload_signature,
+        diagnostic_signature: scan.diagnostic_signature,
+      }
+    )
+  );
+  let export_total = textmodel.signature_mix(
+    function_total,
+    wasm_section_fact_signature(
+      WasmSectionFact {
+        section_id: wasm_export_section_id(),
+        item_count: scan.export_count,
+        payload_size: scan.export_payload_size,
+        payload_signature: scan.export_payload_signature,
+        diagnostic_signature: scan.diagnostic_signature,
+      }
+    )
+  );
+  textmodel.signature_mix(
+    export_total,
+    wasm_section_fact_signature(
+      WasmSectionFact {
+        section_id: wasm_code_section_id(),
+        item_count: scan.function_count,
+        payload_size: scan.code_payload_size,
+        payload_signature: scan.code_payload_signature,
+        diagnostic_signature: scan.diagnostic_signature,
+      }
+    )
+  )
+}
+
+fn wasm_byte_record_final_signature(scan: WasmSectionScan) -> i32 {
+  let type_section_size = wasm_section_total_size(scan.type_payload_size);
+  let function_section_size = wasm_section_total_size(scan.function_payload_size);
+  let export_section_size = wasm_section_total_size(scan.export_payload_size);
+  let code_section_size = wasm_section_total_size(scan.code_payload_size);
+  let byte_size = wasm_module_header_size()
+    + type_section_size
+    + function_section_size
+    + export_section_size
+    + code_section_size;
+  let type_total = textmodel.signature_mix(
+    0,
+    wasm_byte_section_fact_signature(
+      wasm_byte_section_fact(
+        wasm_type_section_id(),
+        scan.type_payload_size,
+        scan.type_payload_signature,
+        scan.diagnostic_signature
+      )
+    )
+  );
+  let function_total = textmodel.signature_mix(
+    type_total,
+    wasm_byte_section_fact_signature(
+      wasm_byte_section_fact(
+        wasm_function_section_id(),
+        scan.function_payload_size,
+        scan.function_payload_signature,
+        scan.diagnostic_signature
+      )
+    )
+  );
+  let export_total = textmodel.signature_mix(
+    function_total,
+    wasm_byte_section_fact_signature(
+      wasm_byte_section_fact(
+        wasm_export_section_id(),
+        scan.export_payload_size,
+        scan.export_payload_signature,
+        scan.diagnostic_signature
+      )
+    )
+  );
+  let section_total = textmodel.signature_mix(
+    export_total,
+    wasm_byte_section_fact_signature(
+      wasm_byte_section_fact(
+        wasm_code_section_id(),
+        scan.code_payload_size,
+        scan.code_payload_signature,
+        scan.diagnostic_signature
+      )
+    )
+  );
+  wasm_byte_module_fact_signature(
+    WasmByteModuleFact {
+      magic_signature: wasm_magic_signature(),
+      version_signature: wasm_version_signature(),
+      section_count: wasm_emitted_section_count(),
+      byte_size: byte_size,
+      section_signature: section_total,
+      diagnostic_signature: scan.diagnostic_signature,
+    }
+  )
+}
+
+fn is_function(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> bool {
+  parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    result.value.decl
+  ) == 1
+}
+
+fn wasm_function_lookup_not_found(function_index: i32) -> WasmFunctionLookup {
+  WasmFunctionLookup {
+    index: function_index,
+    runtime_param_count: 0,
+    found: false,
+  }
+}
+
+fn wasm_function_lookup_found(
+  function_index: i32,
+  runtime_param_count: i32
+) -> WasmFunctionLookup {
+  WasmFunctionLookup {
+    index: function_index,
+    runtime_param_count: runtime_param_count,
+    found: true,
+  }
+}
+
+fn wasm_function_lookup_next_index(
+  function_index: i32,
+  is_decl_function: bool
+) -> i32 {
+  match is_decl_function {
+    true => function_index + 1,
+    false => function_index,
+  }
+}
+
+fn wasm_function_lookup_for_hash_at(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  target_hash: i32,
+  function_index: i32
+) -> WasmFunctionLookup {
+  match current.cursor < textlex.length(source) {
+    false => wasm_function_lookup_not_found(function_index),
+    true => match parser.parse_text_declaration_stream(
+      current,
+      source,
+      function_index
+    ) {
+      Err(_) => wasm_function_lookup_not_found(function_index),
+      Ok(result) => match is_function(source, current, result) {
+        false => wasm_function_lookup_for_hash_at(
+          source,
+          parser.next_text_declaration_state(result.state, source),
+          target_hash,
+          function_index
+        ),
+        true => textlex.text_hash_at(
+          source,
+          parser.text_declaration_name_index(
+            source,
+            current.cursor,
+            result.value.decl
+          )
+        ) \name_hash -> match name_hash == target_hash {
+          true => wasm_function_lookup_found(
+            function_index,
+            parser.text_function_runtime_param_count(source, current.cursor)
+          ),
+          false => wasm_function_lookup_for_hash_at(
+            source,
+            parser.next_text_declaration_state(result.state, source),
+            target_hash,
+            wasm_function_lookup_next_index(function_index, true)
+          ),
+        },
+      },
+    },
+  }
+}
+
+fn wasm_function_lookup_for_hash(
+  source: textlex.TextTokenStream,
+  target_hash: i32
+) -> WasmFunctionLookup {
+  let window = textmodel.full_window(source);
+  wasm_function_lookup_for_hash_at(
+    source,
+    textmodel.token_window_state(window),
+    target_hash,
+    0
+  )
+}
+
+fn is_pub_function(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> bool {
+  let is_function = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    result.value.decl
+  ) == 1;
+  match is_function {
+    true => match textlex.token_at(source, current.cursor).kind {
+      PubKw => true,
+      _ => false,
+    },
+    false => false,
+  }
+}
+
+fn checked_local_fact_signature(fact: CheckedLocalFact) -> i32 {
+  let with_function = textmodel.signature_mix(61, fact.function_name_hash);
+  let with_kind = textmodel.signature_mix(with_function, fact.local_kind_tag);
+  let with_name = textmodel.signature_mix(with_kind, fact.local_name_hash);
+  let with_root_kind = textmodel.signature_mix(with_name, fact.value_root_kind);
+  let with_root_hash = textmodel.signature_mix(
+    with_root_kind,
+    fact.value_root_hash
+  );
+  let with_expected = textmodel.signature_mix(
+    with_root_hash,
+    fact.expected_type_class
+  );
+  let with_actual = textmodel.signature_mix(
+    with_expected,
+    fact.actual_type_class
+  );
+  let with_status = textmodel.signature_mix(with_actual, fact.check_status);
+  textmodel.signature_mix(with_status, fact.diagnostic_code)
+}
+
+fn checked_local_identifier_hash(
+  context_value: FactContext,
+  index: i32
+) -> i32 {
+  match textlex.token_at(context_value.source, index).kind {
+    Identifier => textlex.text_hash_at(context_value.source, index),
+    _ => 0,
+  }
+}
+
+fn checked_local_equal_index(
+  context_value: FactContext,
+  index: i32,
+  statement_end: i32
+) -> i32 {
+  parser.text_find_top_level_punctuation_score(
+    context_value.source,
+    index + 1,
+    statement_end,
+    0,
+    textlex.punctuation_score(textlex.PunctEqual)
+  )
+}
+
+fn checked_local_value_root_kind(
+  context_value: FactContext,
+  index: i32,
+  statement_end: i32
+) -> i32 {
+  let equal = checked_local_equal_index(context_value, index, statement_end);
+  match equal < statement_end {
+    true => parser.text_expression_root_head_kind_tag_between(
+      context_value.source,
+      equal + 1,
+      statement_end
+    ),
+    false => parser.text_expression_root_none_tag(),
+  }
+}
+
+fn checked_local_value_root_hash(
+  context_value: FactContext,
+  index: i32,
+  statement_end: i32
+) -> i32 {
+  let equal = checked_local_equal_index(context_value, index, statement_end);
+  match equal < statement_end {
+    true => parser.text_expression_root_head_hash_between(
+      context_value.source,
+      equal + 1,
+      statement_end
+    ),
+    false => 0,
+  }
+}
+
+fn checked_local_expected_type_class(
+  context_value: FactContext,
+  index: i32,
+  statement_end: i32
+) -> i32 {
+  let equal = checked_local_equal_index(context_value, index, statement_end);
+  let colon = parser.text_find_top_level_punctuation_score(
+    context_value.source,
+    index + 1,
+    equal,
+    0,
+    textlex.punctuation_score(textlex.PunctColon)
+  );
+  match colon < equal {
+    true => parser.text_annotation_resolved_type_class_tag_between(
+      context_value.source,
+      colon + 1,
+      equal
+    ),
+    false => parser.text_type_class_unknown_tag(),
+  }
+}
+
+fn checked_local_actual_type_class(
+  context_value: FactContext,
+  index: i32,
+  statement_end: i32
+) -> i32 {
+  let equal = checked_local_equal_index(context_value, index, statement_end);
+  match equal < statement_end {
+    true => parser.text_expression_root_type_class_tag_between(
+      context_value.source,
+      equal + 1,
+      statement_end
+    ),
+    false => parser.text_type_class_unknown_tag(),
+  }
+}
+
+fn checked_local_let_fact(
+  context_value: FactContext,
+  function_name_hash: i32,
+  index: i32,
+  statement_end: i32
+) -> CheckedLocalFact {
+  let expected = checked_local_expected_type_class(
+    context_value,
+    index,
+    statement_end
+  );
+  let actual = checked_local_actual_type_class(
+    context_value,
+    index,
+    statement_end
+  );
+  let check_status = parser.text_simple_body_type_check_status(expected, actual);
+  CheckedLocalFact {
+    function_name_hash: function_name_hash,
+    local_kind_tag: CheckedLocalFactKind::LocalLet,
+    local_name_hash: checked_local_identifier_hash(context_value, index + 1),
+    value_root_kind: checked_local_value_root_kind(
+      context_value,
+      index,
+      statement_end
+    ),
+    value_root_hash: checked_local_value_root_hash(
+      context_value,
+      index,
+      statement_end
+    ),
+    expected_type_class: expected,
+    actual_type_class: actual,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn checked_local_proof_const_fact(
+  context_value: FactContext,
+  function_name_hash: i32,
+  index: i32
+) -> CheckedLocalFact {
+  let type_value = parser.text_type_class_type_value_tag();
+  let check_status = parser.text_simple_body_type_check_status(type_value, type_value);
+  CheckedLocalFact {
+    function_name_hash: function_name_hash,
+    local_kind_tag: CheckedLocalFactKind::LocalProofConst,
+    local_name_hash: checked_local_identifier_hash(context_value, index + 1),
+    value_root_kind: parser.text_expression_root_none_tag(),
+    value_root_hash: 0,
+    expected_type_class: type_value,
+    actual_type_class: type_value,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn checked_local_statement_end(
+  context_value: FactContext,
+  scan: CheckedLocalScan
+) -> i32 {
+  match scan.index >= scan.limit {
+    true => scan.limit,
+    false => match parser.text_semicolon_boundary(
+      context_value.source,
+      scan.index,
+      scan.brace_depth,
+      scan.paren_depth
+    ) {
+      true => scan.index,
+      false => checked_local_statement_end(
+        context_value,
+        CheckedLocalScan {
+          index: scan.index + 1,
+          limit: scan.limit,
+          brace_depth: parser.brace_depth_after_token(
+            context_value.source,
+            scan.index,
+            scan.brace_depth
+          ),
+          paren_depth: parser.paren_depth_after_token(
+            context_value.source,
+            scan.index,
+            scan.paren_depth
+          ),
+          total: scan.total,
+          function_name_hash: scan.function_name_hash,
+        }
+      ),
+    },
+  }
+}
+
+fn checked_local_top_level_next_total(
+  context_value: FactContext,
+  scan: CheckedLocalScan
+) -> i32 {
+  match textlex.token_at(context_value.source, scan.index).kind {
+    LetKw => textmodel.signature_mix(
+      scan.total,
+      checked_local_fact_signature(
+        checked_local_let_fact(
+          context_value,
+          scan.function_name_hash,
+          scan.index,
+          checked_local_statement_end(context_value, scan)
+        )
+      )
+    ),
+    ConstKw => textmodel.signature_mix(
+      scan.total,
+      checked_local_fact_signature(
+        checked_local_proof_const_fact(
+          context_value,
+          scan.function_name_hash,
+          scan.index
+        )
+      )
+    ),
+    _ => scan.total,
+  }
+}
+
+fn checked_local_next_total(
+  context_value: FactContext,
+  scan: CheckedLocalScan
+) -> i32 {
+  match parser.text_depth_is_top_level(scan.brace_depth, scan.paren_depth) {
+    true => checked_local_top_level_next_total(context_value, scan),
+    false => scan.total,
+  }
+}
+
+fn checked_local_next_scan(
+  context_value: FactContext,
+  scan: CheckedLocalScan,
+  next_total: i32
+) -> CheckedLocalScan {
+  CheckedLocalScan {
+    index: scan.index + 1,
+    limit: scan.limit,
+    brace_depth: parser.brace_depth_after_token(
+      context_value.source,
+      scan.index,
+      scan.brace_depth
+    ),
+    paren_depth: parser.paren_depth_after_token(
+      context_value.source,
+      scan.index,
+      scan.paren_depth
+    ),
+    total: next_total,
+    function_name_hash: scan.function_name_hash,
+  }
+}
+
+fn checked_local_record_scan(
+  context_value: FactContext,
+  scan: CheckedLocalScan
+) -> i32 {
+  match scan.index >= scan.limit {
+    true => scan.total,
+    false => rec(
+      context_value,
+      checked_local_next_scan(
+        context_value,
+        scan,
+        checked_local_next_total(context_value, scan)
+      )
+    ),
+  }
+}
+
+fn checked_local_function_signature(
+  context_value: FactContext,
+  current: combinator.ParseState,
+  total: i32,
+  result: combinator.Reply(parser.DeclFrame)
+) -> i32 {
+  let source = context_value.source;
+  let next = parser.text_declaration_end_from_index(source, current.cursor);
+  let open_paren = parser.text_function_open_paren_index(
+    source,
+    current.cursor,
+    next
+  );
+  let close_paren = parser.text_function_close_paren_index(
+    source,
+    open_paren,
+    next
+  );
+  let arrow = parser.text_function_arrow_index(source, close_paren, next);
+  let left_brace = parser.text_function_left_brace_index(source, arrow, next);
+  let right_brace = parser.find_text_expression_limit(
+    source,
+    left_brace + 1,
+    next,
+    textlex.PunctRightBrace
+  );
+  let function_name_hash = textlex.text_hash_at(
+    source,
+    parser.text_declaration_name_index(source, current.cursor, result.value.decl)
+  );
+  checked_local_record_scan(
+    context_value,
+    CheckedLocalScan {
+      index: left_brace + 1,
+      limit: right_brace,
+      brace_depth: 0,
+      paren_depth: 0,
+      total: total,
+      function_name_hash: function_name_hash,
+    }
+  )
+}
+
+fn FactContext::checked_decl_record_scan(
+  context_value: FactContext,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        textmodel.signature_mix(
+          total,
+          checked_decl_fact_signature(
+            checked_decl_fact(context_value.source, current, result)
+          )
+        )
+      ),
+    },
+  }
+}
+
+fn FactContext::checked_expr_record_scan(
+  context_value: FactContext,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        textmodel.signature_mix(
+          total,
+          checked_expr_fact_signature(
+            checked_expr_fact(context_value.source, current, result)
+          )
+        )
+      ),
+    },
+  }
+}
+
+fn FactContext::checked_expr_child_record_scan(
+  context_value: FactContext,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        parser.text_declaration_root_child_record_signature(
+          context_value.source,
+          current.cursor,
+          result.value.decl,
+          total
+        )
+      ),
+    },
+  }
+}
+
+fn FactContext::checked_expr_shape_record_scan(
+  context_value: FactContext,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        textmodel.signature_mix(
+          total,
+          checked_expr_shape_fact_signature(
+            checked_expr_shape_fact(context_value.source, current, result)
+          )
+        )
+      ),
+    },
+  }
+}
+
+fn FactContext::lowered_export_record_scan(
+  context_value: FactContext,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        match is_pub_function(
+          context_value.source,
+          current,
+          result
+        ) {
+          true => textmodel.signature_mix(
+            total,
+            lowered_export_fact_signature(
+              lowered_export_fact(context_value.source, current, result)
+            )
+          ),
+          false => total,
+        }
+      ),
+    },
+  }
+}
+
+fn WasmByteContext::wasm_function_record_scan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        codes,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        match is_function(
+          context_value.source,
+          current,
+          result
+        ) {
+          true => textmodel.signature_mix(
+            total,
+            wasm_function_fact_signature(
+              wasm_byte_function_fact(context_value, codes, current, result)
+            )
+          ),
+          false => total,
+        }
+      ),
+    },
+  }
+}
+
+fn WasmByteContext::wasm_section_record_scan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  scan: WasmSectionScan
+) -> WasmSectionScan {
+  match current.cursor < textlex.length(context_value.source) {
+    false => scan,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      scan.function_count
+    ) {
+      Err(_) => scan,
+      Ok(result) => rec(
+        context_value,
+        codes,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        match is_function(context_value.source, current, result) {
+          true => wasm_section_scan_function(
+            context_value,
+            codes,
+            current,
+            result,
+            scan
+          ),
+          false => scan,
+        }
+      ),
+    },
+  }
+}
+
+fn FactContext::checked_local_record_scan(
+  context_value: FactContext,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        match parser.text_declaration_kind_tag(
+          context_value.source,
+          current.cursor,
+          result.value.decl
+        ) == 1 {
+          true => checked_local_function_signature(
+            context_value,
+            current,
+            total,
+            result
+          ),
+          false => total,
+        }
+      ),
+    },
+  }
+}
+
+fn FactContext::checked_declaration_type_signature(
+  context_value: FactContext
+) -> i32 {
+  let declared = FactContext::summary(
+    context_value,
+    textmodel.SummaryKind::ResolvedDeclaredTypeClassSignature
+  );
+  let body = FactContext::summary(
+    context_value,
+    textmodel.SummaryKind::ResolvedValueBodyTypeClassSignature
+  );
+  let check = FactContext::summary(
+    context_value,
+    textmodel.SummaryKind::ResolvedSimpleBodyTypeCheckSignature
+  );
+  fact_triple_signature(
+    CheckedFactKind::CheckedDeclarationType,
+    declared,
+    body,
+    check
+  )
+}
+
+fn FactContext::checked_diagnostic_signature(context_value: FactContext) -> i32 {
+  let declared = FactContext::summary(
+    context_value,
+    textmodel.SummaryKind::SimpleBodyTypeCheckSignature
+  );
+  let resolved = FactContext::summary(
+    context_value,
+    textmodel.SummaryKind::ResolvedSimpleBodyTypeCheckSignature
+  );
+  fact_pair_signature(CheckedFactKind::CheckedDiagnostic, declared, resolved)
+}
+
+fn FactContext::lowered_declaration_signature(
+  context_value: FactContext
+) -> i32 {
+  let declared = FactContext::summary(
+    context_value,
+    textmodel.SummaryKind::ResolvedDeclaredAbiClassSignature
+  );
+  let body = FactContext::summary(
+    context_value,
+    textmodel.SummaryKind::ResolvedValueBodyAbiClassSignature
+  );
+  let exports = FactContext::summary(
+    context_value,
+    textmodel.SummaryKind::ResolvedExportAbiSignature
+  );
+  fact_triple_signature(
+    CheckedFactKind::LoweredDeclaration,
+    declared,
+    body,
+    exports
+  )
+}
+
+fn FactContext::checked_declaration_record_signature(
+  context_value: FactContext
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  FactContext::checked_decl_record_scan(
+    context_value,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn FactContext::checked_expression_record_signature(
+  context_value: FactContext
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  FactContext::checked_expr_record_scan(
+    context_value,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn FactContext::checked_expression_child_record_signature(
+  context_value: FactContext
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  FactContext::checked_expr_child_record_scan(
+    context_value,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn FactContext::checked_local_environment_signature(
+  context_value: FactContext
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  FactContext::checked_local_record_scan(
+    context_value,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn FactContext::checked_expression_shape_signature(
+  context_value: FactContext
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  FactContext::checked_expr_shape_record_scan(
+    context_value,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn FactContext::lowered_export_record_signature(
+  context_value: FactContext
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  FactContext::lowered_export_record_scan(
+    context_value,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn WasmByteContext::wasm_function_record_signature(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  WasmByteContext::wasm_function_record_scan(
+    context_value,
+    codes,
+    textmodel.token_window_state(window),
+    0
+  )
+}
+
+fn WasmByteContext::wasm_section_record_signature(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  wasm_section_record_final_signature(
+    WasmByteContext::wasm_section_record_scan(
+      context_value,
+      codes,
+      textmodel.token_window_state(window),
+      wasm_initial_section_scan()
+    )
+  )
+}
+
+fn WasmByteContext::wasm_byte_record_signature(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  let window = textmodel.full_window(context_value.source);
+  wasm_byte_record_final_signature(
+    WasmByteContext::wasm_section_record_scan(
+      context_value,
+      codes,
+      textmodel.token_window_state(window),
+      wasm_initial_section_scan()
+    )
+  )
+}
+
+fn checked_declaration_type_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::checked_declaration_type_signature(context(source))
+}
+
+fn checked_diagnostic_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::checked_diagnostic_signature(context(source))
+}
+
+fn lowered_declaration_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::lowered_declaration_signature(context(source))
+}
+
+fn checked_declaration_record_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::checked_declaration_record_signature(context(source))
+}
+
+fn checked_expression_record_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::checked_expression_record_signature(context(source))
+}
+
+fn checked_expression_child_record_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::checked_expression_child_record_signature(context(source))
+}
+
+fn checked_local_environment_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::checked_local_environment_signature(context(source))
+}
+
+fn checked_expression_shape_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::checked_expression_shape_signature(context(source))
+}
+
+fn lowered_export_record_signature(source: textlex.TextTokenStream) -> i32 {
+  FactContext::lowered_export_record_signature(context(source))
+}
+
+fn wasm_function_record_signature(
+  source: textlex.TextTokenStream,
+  codes: layout.HeapArray(i32),
+  base_offset: i32
+) -> i32 {
+  WasmByteContext::wasm_function_record_signature(
+    wasm_byte_context(source, base_offset),
+    codes
+  )
+}
+
+fn wasm_section_record_signature(
+  source: textlex.TextTokenStream,
+  codes: layout.HeapArray(i32),
+  base_offset: i32
+) -> i32 {
+  WasmByteContext::wasm_section_record_signature(
+    wasm_byte_context(source, base_offset),
+    codes
+  )
+}
+
+fn wasm_byte_record_signature(
+  source: textlex.TextTokenStream,
+  codes: layout.HeapArray(i32),
+  base_offset: i32
+) -> i32 {
+  WasmByteContext::wasm_byte_record_signature(
+    wasm_byte_context(source, base_offset),
+    codes
+  )
+}
+
+fn wasm_byte_buffer(
+  source: textlex.TextTokenStream,
+  codes: layout.HeapArray(i32),
+  base_offset: i32
+) -> layout.HeapArray(i32) {
+  let byte_context = wasm_byte_context(source, base_offset);
+  wasm_byte_buffer_from_counts(
+    byte_context,
+    codes,
+    wasm_function_count(source),
+    wasm_export_count(byte_context)
+  )
+}
+
+fn entry(seed: i32) -> i32 {
+  seed
+    + CheckedFactKind::CheckedDeclarationType
+    + CheckedFactKind::CheckedDiagnostic
+    + CheckedFactKind::LoweredDeclaration
+    + CheckedFactKind::CheckedDeclarationRecord
+    + CheckedFactKind::CheckedExpressionRecord
+    + CheckedFactKind::CheckedExpressionChildRecord
+    + CheckedFactKind::CheckedLocalEnvironment
+    + CheckedFactKind::CheckedExpressionShape
+    + CheckedFactKind::LoweredExportRecord
+    + CheckedFactKind::WasmFunctionRecord
+    + CheckedFactKind::WasmSectionRecord
+    + CheckedFactKind::WasmByteRecord
+}

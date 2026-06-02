@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "fig-language": {
+      "source": "/home/mewhhaha/src/fig/docs",
+      "sourceType": "local",
+      "computedHash": "6416d115bcc1375165bbef2547cd116b2221285b5ca7af871d402914954b5798"
+    }
+  }
+}

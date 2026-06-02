@@ -1,13 +1,14 @@
 import type {
   AstNodeMeta,
+  BlockExpr,
   BranchHint,
   ConstDecl,
-  ContractDecl,
   DebugTraceStmt,
   Declaration,
   DestructureLetDecl,
   DoStatement,
   EffectImport,
+  EnumTypeBody,
   Expr,
   FnDecl,
   LetDecl,
@@ -144,8 +145,6 @@ function lowerDecl(node: Node): Declaration {
       return lowerTypeSugarDecl(decl);
     case "TypeFnDecl":
       return lowerTypeDecl(decl);
-    case "ContractFnDecl":
-      return lowerContractFn(decl);
     case "OperatorDecl":
       return lowerOperatorDecl(decl);
     case "ConstDecl":
@@ -188,25 +187,6 @@ function lowerOperatorDecl(node: Node): OperatorDecl {
   };
 }
 
-function lowerContractFn(node: Node): ContractDecl {
-  if (optional(node, "Visibility")) {
-    fail("rewrite.public", "contract fn declarations cannot be public", spanFor(node));
-  }
-  const loweredName = lowerFnName(only(node, "FnName"));
-  return {
-    kind: "contract",
-    ...meta(node, loweredName.nameNode),
-    ...doc(node),
-    name: loweredName.name,
-    ...(loweredName.memberOf ? { memberOf: loweredName.memberOf } : {}),
-    params: optional(node, "Params")
-      ? named(only(node, "Params")).filter(is("Param")).map(lowerParam)
-      : [],
-    resultKind: "rewrite",
-    body: lowerBlock(only(node, "Block")),
-  };
-}
-
 function lowerConst(node: Node): ConstDecl | TypeDecl {
   const nameNode = named(node).find((child) => isIdentifier(child) || isFieldName(child));
   const constValue = only(node, "ConstValue");
@@ -242,6 +222,10 @@ function lowerFn(node: Node): FnDecl {
       spanFor(only(fn, "ReturnSig")),
     );
   }
+  const params = optional(fn, "Params")
+    ? named(only(fn, "Params")).filter(is("Param")).map(lowerParam)
+    : [];
+  const fnBodyNode = optional(fn, "FnBody") ?? fn;
   return {
     kind: "fn",
     ...meta(node, loweredName.nameNode),
@@ -249,9 +233,7 @@ function lowerFn(node: Node): FnDecl {
     public: named(node).some(is("Visibility")),
     name: loweredName.name,
     ...(loweredName.memberOf ? { memberOf: loweredName.memberOf } : {}),
-    params: optional(fn, "Params")
-      ? named(only(fn, "Params")).filter(is("Param")).map(lowerParam)
-      : [],
+    params,
     returnType,
     ...(returnTypeMeta
       ? {
@@ -260,8 +242,37 @@ function lowerFn(node: Node): FnDecl {
       }
       : {}),
     effects: [],
-    body: lowerBlock(only(fn, "Block")),
-    ...(lowerBranchHint(optional(fn, "BranchHint")) ?? {}),
+    body: lowerFnBody(fnBodyNode, params),
+    ...(optional(fnBodyNode, "FnMatchBody") ? { matchBody: true } : {}),
+  };
+}
+
+function lowerFnBody(node: Node, params: Param[]): BlockExpr {
+  const body = optional(node, "FnBody") ?? node;
+  const block = optional(body, "Block") ?? optional(node, "Block");
+  if (block) return lowerBlock(block);
+  const matchBody = optional(body, "FnMatchBody") ?? optional(node, "FnMatchBody") ?? node;
+  const runtimeParams = params.filter((param) => !param.const);
+  const value: Expr = runtimeParams.length === 1 ? { kind: "var", name: runtimeParams[0]!.name } : {
+    kind: "shape",
+    syntax: "record",
+    ...spanOnly(matchBody),
+    slots: runtimeParams.map((param, position) => ({
+      ...(param.span ? { span: param.span } : {}),
+      position,
+      value: { kind: "var", name: param.name },
+    })),
+  };
+  return {
+    kind: "block",
+    ...spanOnly(matchBody),
+    statements: [],
+    expr: {
+      kind: "match",
+      ...spanOnly(matchBody),
+      value,
+      arms: named(matchBody).filter(is("Arm")).map(lowerMatchArm),
+    },
   };
 }
 
@@ -332,6 +343,9 @@ function lowerTypeSugarDecl(node: Node): TypeDecl {
     : bodyChild.type === "TypeSugarUnion"
     ? "union"
     : "type";
+  const enumBody = bodyChild.type === "TypeSugarEnum"
+    ? lowerTypeSugarEnumBody(bodyChild)
+    : undefined;
   return {
     kind: "type",
     ...meta(node, nameNode),
@@ -339,6 +353,7 @@ function lowerTypeSugarDecl(node: Node): TypeDecl {
     name,
     params,
     resultKind,
+    ...(enumBody ? { enum: enumBody } : {}),
     body: lowerTypeSugarBlock(name, bodyChild),
   };
 }
@@ -397,11 +412,38 @@ function lowerTypeSugarBlock(name: string, node: Node): TypeBlock {
       ),
     };
   }
+  if (node.type === "TypeSugarEnum") {
+    const backingNode = first(node, "ScalarCarrier");
+    const backing = text(backingNode, "enum backing type");
+    return {
+      kind: "type_block",
+      ...spanOnly(node),
+      statements: [],
+      expr: typeRef(backing, backingNode),
+    };
+  }
   return {
     kind: "type_block",
     ...spanOnly(node),
     statements: [],
     expr: lowerTypeExpr(node),
+  };
+}
+
+function lowerTypeSugarEnumBody(node: Node): EnumTypeBody {
+  const backingNode = first(node, "ScalarCarrier");
+  return {
+    ...spanOnly(node),
+    backing: text(backingNode, "enum backing type"),
+    variants: descendants(node, "TypeSugarEnumVariant").map((variant) => {
+      const nameNode = first(variant, "PascalIdent");
+      return {
+        ...meta(variant, nameNode),
+        ...doc(variant),
+        name: text(nameNode, "enum variant name"),
+        value: numberLiteralText(variant),
+      };
+    }),
   };
 }
 
@@ -612,7 +654,7 @@ function lowerTypeExpr(node: Node): TypeExpr {
         current = {
           kind: "type_binary",
           ...spanOnly(expr),
-          op: ops[index].text as "==" | "!=" | "|",
+          op: text(ops[index], "type operator"),
           left: current,
           right: lowerTypeExpr(calls[index + 1]),
         };
@@ -870,8 +912,8 @@ function lowerTypeLiteral(node: Node): TypeExpr {
   if (literal.type === "Multiline" || literal.type === "fenced_text") {
     return { kind: "type_string", ...spanOnly(literal), value: multilineContents(literal.text) };
   }
-  if (literal.type === "Number") {
-    return { kind: "type_number", ...spanOnly(literal), value: literal.text };
+  if (isNumberLiteralNode(literal)) {
+    return { kind: "type_number", ...spanOnly(literal), value: numberLiteralText(literal) };
   }
   if (literal.type === "LiteralType") {
     return { kind: "type_literal", ...spanOnly(literal), value: literal.text.slice(1) };
@@ -897,8 +939,8 @@ function lowerTypeLiteralPattern(node: Node): TypePattern {
       value: JSON.parse(`"${literal.text.slice(1, -1)}"`),
     };
   }
-  if (literal.type === "Number") {
-    return { kind: "number", ...spanOnly(literal), value: literal.text };
+  if (isNumberLiteralNode(literal)) {
+    return { kind: "number", ...spanOnly(literal), value: numberLiteralText(literal) };
   }
   return unreachable(literal, "type literal pattern");
 }
@@ -1014,7 +1056,8 @@ function lowerParam(node: Node): Param {
   const name = paramBindingName(pattern, nameNode);
   const explicitType = constTypeFnAnnotation(node.text) ??
     optional(node, "Type")?.text ??
-    optional(node, "TypeAnn")?.text.replace(/^\s*:\s*/, "");
+    optional(node, "TypeAnn")?.text.replace(/^\s*:\s*/, "") ??
+    paramTypeAnnotation(node.text);
   const annotation = annotationMetadata(optional(node, "Type"));
   return {
     ...meta(node, nameNode),
@@ -1026,6 +1069,12 @@ function lowerParam(node: Node): Param {
     ...(isConstParam && !explicitType ? { inferStaticType: true } : {}),
     ...(pattern.kind !== "binding" || pattern.name !== name ? { pattern } : {}),
   };
+}
+
+function paramTypeAnnotation(source: string): string | undefined {
+  const colon = source.indexOf(":");
+  if (colon < 0) return undefined;
+  return source.slice(colon + 1).trim().replace(/,$/, "").trim();
 }
 
 function constTypeFnAnnotation(source: string): string | undefined {
@@ -1045,6 +1094,20 @@ function lowerNameParamPattern(node: Node | undefined): ParamPattern {
 function lowerParamPattern(node: Node): ParamPattern {
   const source = node.text.trim();
   if (source === "_") return { kind: "wildcard", ...spanOnly(node) };
+  const typeAnn = optional(node, "PatternTypeAnn");
+  if (typeAnn) {
+    return {
+      kind: "typed",
+      ...spanOnly(node),
+      pattern: lowerParamPattern(first(node, "PatternBase")),
+      type: first(typeAnn, "Type").text,
+    };
+  }
+  if (node.type === "Pattern") return lowerParamPattern(first(node, "PatternBase"));
+  if (node.type === "PatternBase") {
+    const base = named(node)[0];
+    if (base) return lowerParamPattern(base);
+  }
   const child = named(node)[0];
   if (!child) return { kind: "wildcard", ...spanOnly(node) };
   if (node.type === "Literal" || child.type === "Literal") {
@@ -1068,6 +1131,14 @@ function lowerParamPattern(node: Node): ParamPattern {
       kind: "tuple",
       ...spanOnly(tuple),
       items: listTupleItems(tuple, "Pattern").map(lowerParamPattern),
+    };
+  }
+  if (node.type === "PatternMember" || child.type === "PatternMember") {
+    const patternMember = node.type === "PatternMember" ? node : child;
+    return {
+      kind: "enum_member",
+      ...spanOnly(patternMember),
+      name: patternMember.text.replace(/\s+/g, ""),
     };
   }
   if (node.type === "PatternIdent" || child.type === "PatternIdent") {
@@ -1295,15 +1366,7 @@ function lowerExpr(node: Node): Expr {
     }
     case "MatchExpr": {
       const value = first(expr, "MatchValues");
-      const arms = named(expr).filter(is("Arm")).map((arm) => {
-        const armExpr = first(arm, "Expr");
-        return {
-          ...spanOnly(arm),
-          ...(lowerBranchHint(optional(arm, "BranchHint")) ?? {}),
-          pattern: lowerMatchPatterns(first(arm, "MatchPatterns")),
-          value: lowerExpr(armExpr),
-        };
-      });
+      const arms = named(expr).filter(is("Arm")).map(lowerMatchArm);
       return { kind: "match", ...spanOnly(expr), value: lowerMatchValues(value), arms };
     }
     case "ConstFn": {
@@ -1338,6 +1401,21 @@ function lowerExpr(node: Node): Expr {
     default:
       return unreachable(expr, "expression");
   }
+}
+
+function lowerMatchArm(
+  arm: Node,
+): Extract<Expr, { kind: "match" }>["arms"][number] {
+  const guard = optional(arm, "MatchGuard");
+  const exprs = named(arm).filter(is("Expr"));
+  const valueExpr = guard ? exprs[exprs.length - 1] : exprs[0];
+  return {
+    ...spanOnly(arm),
+    ...(lowerBranchHint(optional(arm, "BranchHint")) ?? {}),
+    pattern: lowerMatchPatterns(first(arm, "MatchPatterns")),
+    ...(guard ? { guard: lowerExpr(first(guard, "Expr")) } : {}),
+    value: lowerExpr(valueExpr),
+  };
 }
 
 function lowerMatchValues(node: Node): Expr {
@@ -1470,30 +1548,27 @@ function lowerBinary(node: Node): Expr {
 
 function lowerPipeBind(node: Node): Expr {
   const children = named(node);
-  let current = lowerExpr(optional(node, "PipeBindAtom") ?? first(node, "CollectionPipeBindAtom"));
-  for (let index = 0; index < children.length; index++) {
-    const name = children[index];
-    if (name.type !== "PipeBindName") continue;
-    const body = children.slice(index + 1).find((child) =>
-      child.type === "PipeBindAtom" || child.type === "CollectionPipeBindAtom"
-    );
-    if (!body) return current;
+  const atoms = children
+    .filter((child) => child.type === "PipeBindAtom" || child.type === "CollectionPipeBindAtom")
+    .map((child) => lowerExpr(child));
+  const names = children.filter((child) => child.type === "PipeBindName");
+  let current = atoms.at(-1) ??
+    lowerExpr(optional(node, "PipeBindAtom") ?? first(node, "CollectionPipeBindAtom"));
+  for (let index = names.length - 1; index >= 0; index--) {
+    const name = names[index];
+    const value = atoms[index];
+    if (!name || !value) continue;
     const bindName = text(named(name)[0] ?? name, "pipe bind name");
-    const loweredBody = lowerPipeBindBody(body, bindName);
     current = {
       kind: "pipe_bind",
-      span: joinSpans(current.span, loweredBody.span),
-      value: current,
+      span: joinSpans(value.span, current.span),
+      value,
       name: bindName,
       ...doc(name),
-      body: loweredBody,
+      body: current,
     };
   }
   return current;
-}
-
-function lowerPipeBindBody(node: Node, _bindName: string): Expr {
-  return lowerExpr(node);
 }
 
 function lowerCall(node: Node): Expr {
@@ -1519,7 +1594,12 @@ function lowerCall(node: Node): Expr {
         };
         pendingMember = undefined;
       } else {
-        expr = { kind: "call", ...spanOnly(child), callee: expr, args: lowerArgs(child) };
+        expr = markTailRecCall({
+          kind: "call",
+          ...spanOnly(child),
+          callee: expr,
+          args: lowerArgs(child),
+        });
         if (expr.callee.kind === "var" && expr.callee.name === "@field" && expr.args.length === 2) {
           expr = { kind: "field", span: expr.span, value: expr.args[0], key: expr.args[1] };
         }
@@ -1574,7 +1654,7 @@ function lowerCall(node: Node): Expr {
       pendingMember = undefined;
     } else if (child.type === "Expr") {
       const index = lowerExpr(child);
-      if (index.kind === "literal" && index.literalKind === "number") {
+      if (expr.kind === "var" && index.kind === "literal" && index.literalKind === "number") {
         expr = {
           kind: "var",
           span: joinSpans(expr.span, index.span),
@@ -1598,7 +1678,14 @@ function lowerCall(node: Node): Expr {
     }
   }
   if (isZeroArgCall) {
-    return { kind: "call", ...spanOnly(node), callee: expr, args: [] };
+    return markTailRecCall({ kind: "call", ...spanOnly(node), callee: expr, args: [] });
+  }
+  return expr;
+}
+
+function markTailRecCall(expr: Extract<Expr, { kind: "call" }>): Extract<Expr, { kind: "call" }> {
+  if (expr.callee.kind === "var" && expr.callee.name === "rec") {
+    return { ...expr, tailRec: true };
   }
   return expr;
 }
@@ -1903,7 +1990,7 @@ function lowerLiteral(node: Node): Expr {
   const literal = named(node)[0] ?? node;
   const literalKind = literal.type === "Bool"
     ? "bool"
-    : literal.type === "Number"
+    : isNumberLiteralNode(literal)
     ? "number"
     : literal.type === "String"
     ? "string"
@@ -1915,9 +2002,25 @@ function lowerLiteral(node: Node): Expr {
   return {
     kind: "literal",
     ...spanOnly(literal),
-    value: literalKind === "multiline" ? multilineContents(literal.text) : literal.text,
+    value: literalKind === "number"
+      ? numberLiteralText(literal)
+      : literalKind === "multiline"
+      ? multilineContents(literal.text)
+      : literal.text,
     literalKind,
   };
+}
+
+function isNumberLiteralNode(node: Node): boolean {
+  return node.type === "Number" || node.type === "SignedNumber" ||
+    optional(node, "Number") !== undefined || optional(node, "SignedNumber") !== undefined;
+}
+
+function numberLiteralText(node: Node): string {
+  const signed = node.type === "SignedNumber" ? node : optional(node, "SignedNumber");
+  const number = node.type === "Number" ? node : first(signed ?? node, "Number");
+  const isNegative = signed?.text.trimStart().startsWith("-") ?? false;
+  return `${isNegative ? "-" : ""}${text(number, "number literal")}`;
 }
 
 function multilineContents(source: string): string {
