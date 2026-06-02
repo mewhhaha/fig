@@ -281,7 +281,7 @@ function exprChildren(expr: Expr): Expr[] {
     case "do":
       return [
         ...expr.statements.flatMap((stmt) => {
-          if (stmt.kind === "proof_const") return [];
+          if (stmt.kind === "type_assert") return [];
           if ("value" in stmt) return [stmt.value];
           if (stmt.kind === "debug_trace") return stmt.args;
           return [];
@@ -304,7 +304,7 @@ function blockChildren(block: BlockExpr): Expr[] {
 }
 
 function collectStatementChildren(stmt: Statement, children: Expr[]) {
-  if (stmt.kind === "proof_const") return;
+  if (stmt.kind === "type_assert") return;
   if (stmt.kind === "debug_trace") {
     children.push(...stmt.args);
     return;

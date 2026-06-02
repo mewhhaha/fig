@@ -297,6 +297,84 @@ export const coreAnnotationsPlugin: CompilerPlugin = {
   ],
 };
 
+export const primitiveScalarIntrinsicIds = [
+  "i32_add",
+  "i32_sub",
+  "i32_mul",
+  "i32_div",
+  "i32_rem",
+  "i32_eql",
+  "i32_neq",
+  "i32_lt",
+  "i32_lte",
+  "i32_gt",
+  "i32_gte",
+  "u32_add",
+  "u32_sub",
+  "u32_mul",
+  "u32_div",
+  "u32_rem",
+  "u32_eql",
+  "u32_neq",
+  "u32_lt",
+  "u32_lte",
+  "u32_gt",
+  "u32_gte",
+  "i64_add",
+  "i64_sub",
+  "i64_mul",
+  "i64_div",
+  "i64_rem",
+  "i64_eql",
+  "i64_neq",
+  "i64_lt",
+  "i64_lte",
+  "i64_gt",
+  "i64_gte",
+  "u64_add",
+  "u64_sub",
+  "u64_mul",
+  "u64_div",
+  "u64_rem",
+  "u64_eql",
+  "u64_neq",
+  "u64_lt",
+  "u64_lte",
+  "u64_gt",
+  "u64_gte",
+  "f32_add",
+  "f32_sub",
+  "f32_mul",
+  "f32_div",
+  "f32_eql",
+  "f32_neq",
+  "f32_lt",
+  "f32_lte",
+  "f32_gt",
+  "f32_gte",
+  "f64_add",
+  "f64_sub",
+  "f64_mul",
+  "f64_div",
+  "f64_eql",
+  "f64_neq",
+  "f64_lt",
+  "f64_lte",
+  "f64_gt",
+  "f64_gte",
+  "bool_and",
+  "bool_or",
+  "bool_xor",
+  "bool_eql",
+  "bool_neq",
+] as const;
+
+const primitiveScalarIntrinsicIdSet = new Set<string>(primitiveScalarIntrinsicIds);
+
+export function isPrimitiveScalarIntrinsicId(id: string | undefined): boolean {
+  return id !== undefined && primitiveScalarIntrinsicIdSet.has(id);
+}
+
 export const coreIntrinsicsPlugin: CompilerPlugin = {
   apiVersion: COMPILER_PLUGIN_API_VERSION,
   id: "core-intrinsics",
@@ -316,6 +394,7 @@ export const coreIntrinsicsPlugin: CompilerPlugin = {
     { id: "inline_array_builder_start" },
     { id: "inline_array_builder_push" },
     { id: "inline_array_builder_finish" },
+    ...primitiveScalarIntrinsicIds.map((id) => ({ id })),
   ],
 };
 
@@ -519,7 +598,6 @@ const exactCompilerSpecialForms = [
   { name: "unlikely", kind: "annotation", sourceFacing: true },
   { name: "trace", kind: "instrumentation", sourceFacing: true },
   { name: "profile", kind: "instrumentation", sourceFacing: true },
-  { name: "satisfies", kind: "static", sourceFacing: true },
   { name: "field", kind: "internal", sourceFacing: false },
   { name: "replace_field", kind: "internal", sourceFacing: false },
   { name: "empty", kind: "internal", sourceFacing: false },
@@ -551,32 +629,9 @@ for (const form of exactCompilerSpecialForms) {
   });
 }
 
-const prefixedCompilerSpecialForms = [
-  { prefix: "type_", kind: "static", sourceFacing: true },
-  { prefix: "shape_", kind: "static", sourceFacing: true },
-  { prefix: "type_list_", kind: "static", sourceFacing: true },
-  { prefix: "wgsl_", kind: "static", sourceFacing: true },
-  { prefix: "inline_array_", kind: "internal", sourceFacing: false },
-  { prefix: "branch_", kind: "internal", sourceFacing: false },
-] as const satisfies readonly {
-  prefix: string;
-  kind: CompilerSpecialFormKind;
-  sourceFacing: boolean;
-}[];
-
 export function compilerSpecialForm(name: string): CompilerSpecialForm | undefined {
   const normalized = name === "$" ? "$" : staticBuiltinName(name);
-  const exact = compilerSpecialFormsByName.get(normalized);
-  if (exact) return exact;
-  const prefixed = prefixedCompilerSpecialForms.find((item) => normalized.startsWith(item.prefix));
-  return prefixed
-    ? {
-      name: normalized,
-      spelling: `@${normalized}`,
-      kind: prefixed.kind,
-      sourceFacing: prefixed.sourceFacing,
-    }
-    : undefined;
+  return compilerSpecialFormsByName.get(normalized);
 }
 
 export function compilerSpecialFormKind(name: string): CompilerSpecialFormKind | undefined {

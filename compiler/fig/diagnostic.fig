@@ -1,5 +1,6 @@
 const combinator = @import("./combinator.fig");
 const span = @import("./span.fig");
+const vec = @import("prelude.vec");
 
 type Severity = union {
   Error, Warning, Note
@@ -13,7 +14,8 @@ type SeverityScore = enum(i32) {
 
 type DiagnosticCode = union {
   CodeUnexpectedEnd, CodeUnexpectedToken, CodeAmbiguousParse,
-  CodeUnknownSymbol, CodeTypeMismatch, CodeMissingModule
+  CodeUnknownSymbol, CodeTypeMismatch, CodeMissingModule,
+  CodeDependencyCycle, CodeMissingImportEdge
 }
 
 type DiagnosticCodeScore = enum(i32) {
@@ -22,7 +24,9 @@ type DiagnosticCodeScore = enum(i32) {
   AmbiguousParse = 17,
   UnknownSymbol = 19,
   TypeMismatch = 23,
-  MissingModule = 29
+  MissingModule = 29,
+  DependencyCycle = 31,
+  MissingImportEdge = 37
 }
 
 type Diagnostic = struct {
@@ -34,9 +38,7 @@ type Diagnostic = struct {
 }
 
 type DiagnosticBag = struct {
-  first: Diagnostic,
-  second: Diagnostic,
-  count: i32,
+  diagnostics: vec.Vec(Diagnostic),
   error_count: i32,
 }
 
@@ -53,6 +55,8 @@ fn code_score(value: DiagnosticCode) -> i32 match {
   CodeUnknownSymbol => DiagnosticCodeScore::UnknownSymbol,
   CodeTypeMismatch => DiagnosticCodeScore::TypeMismatch,
   CodeMissingModule => DiagnosticCodeScore::MissingModule,
+  CodeDependencyCycle => DiagnosticCodeScore::DependencyCycle,
+  CodeMissingImportEdge => DiagnosticCodeScore::MissingImportEdge,
 }
 
 fn make(
@@ -83,9 +87,7 @@ fn placeholder() -> Diagnostic {
 
 fn empty() -> DiagnosticBag {
   DiagnosticBag {
-    first: placeholder(),
-    second: placeholder(),
-    count: 0,
+    diagnostics: vec.Vec::new(Diagnostic, 0),
     error_count: 0,
   }
 }
@@ -97,25 +99,12 @@ fn is_error(value: Severity) -> i32 match {
 }
 
 fn push(bag: DiagnosticBag, diagnostic: Diagnostic) -> DiagnosticBag {
-  match bag.count {
-    0 => DiagnosticBag {
-      first: diagnostic,
-      second: bag.second,
-      count: 1,
-      error_count: bag.error_count + is_error(diagnostic.severity),
-    },
-    1 => DiagnosticBag {
-      first: bag.first,
-      second: diagnostic,
-      count: 2,
-      error_count: bag.error_count + is_error(diagnostic.severity),
-    },
-    _ => DiagnosticBag {
-      first: bag.first,
-      second: bag.second,
-      count: bag.count + 1,
-      error_count: bag.error_count + is_error(diagnostic.severity),
-    },
+  DiagnosticBag {
+    diagnostics: vec.Vec::push(
+      bag.diagnostics,
+      diagnostic
+    ),
+    error_count: bag.error_count + is_error(diagnostic.severity),
   }
 }
 
@@ -145,23 +134,51 @@ fn diagnostic_score(diagnostic: Diagnostic) -> i32 {
     - diagnostic.secondary
 }
 
-fn bag_score(bag: DiagnosticBag) -> i32 {
-  diagnostic_score(bag.first)
-    + diagnostic_score(bag.second)
-    + bag.count
-    + bag.error_count
-}
-
-fn merge(left: DiagnosticBag, right: DiagnosticBag) -> DiagnosticBag {
-  match right.count {
-    0 => left,
-    1 => push(left, right.first),
-    _ => push(push(left, right.first), right.second),
+fn bag_diagnostic_score_loop(
+  diagnostics: vec.Vec(Diagnostic),
+  index: i32,
+  total: i32
+) -> i32 {
+  match index < vec.Vec::len(diagnostics) {
+    true => rec(
+      diagnostics,
+      index + 1,
+      total + diagnostic_score(vec.Vec::get_t(Diagnostic, diagnostics, index))
+    ),
+    false => total,
   }
 }
 
+fn bag_score(bag: DiagnosticBag) -> i32 {
+  bag_diagnostic_score_loop(bag.diagnostics, 0, 0)
+    + count(bag)
+    + bag.error_count
+}
+
+fn merge_loop(
+  left: DiagnosticBag,
+  right: DiagnosticBag,
+  index: i32
+) -> DiagnosticBag {
+  match index < count(right) {
+    true => rec(
+      push(
+        left,
+        vec.Vec::get_t(Diagnostic, right.diagnostics, index)
+      ),
+      right,
+      index + 1
+    ),
+    false => left,
+  }
+}
+
+fn merge(left: DiagnosticBag, right: DiagnosticBag) -> DiagnosticBag {
+  merge_loop(left, right, 0)
+}
+
 fn count(bag: DiagnosticBag) -> i32 {
-  bag.count
+  vec.Vec::len(bag.diagnostics)
 }
 
 fn entry(seed: i32) -> i32 {

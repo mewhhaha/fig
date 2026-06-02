@@ -176,11 +176,11 @@ pub fn compile_function_local_let_count(codes: layout.HeapArray(i32)) -> i32 {
   )
 }
 
-pub fn compile_function_local_proof_const_count(codes: layout.HeapArray(i32)) -> i32 {
+pub fn compile_function_local_type_assert_count(codes: layout.HeapArray(i32)) -> i32 {
   frontend.compile_code_summary(
     codes,
     0,
-    textmodel.SummaryKind::FunctionLocalProofConsts,
+    textmodel.SummaryKind::FunctionLocalTypeAsserts,
     0
   )
 }
@@ -377,6 +377,48 @@ pub fn compile_named_type_environment_signature_hash(codes: layout.HeapArray(i32
     codes,
     0,
     textmodel.SummaryKind::NamedTypeEnvironmentSignature,
+    0
+  )
+}
+
+pub fn compile_source_import_edge_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::SourceImportEdgeSignature,
+    0
+  )
+}
+
+pub fn compile_source_import_graph_diagnostic_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::SourceImportGraphDiagnosticSignature,
+    0
+  )
+}
+
+pub fn compile_declaration_dependency_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::DeclarationDependencySignature,
+    0
+  )
+}
+
+pub fn compile_declaration_dependency_diagnostic_signature_hash(
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::DeclarationDependencyDiagnosticSignature,
     0
   )
 }

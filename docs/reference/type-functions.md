@@ -59,16 +59,15 @@ match a { i32 => bool, _ => a }
 `struct(ShapeBinding)` creates a product type. `union(a, b, ...)` creates a sum type.
 `enum(i32) {Name = value}` creates a scalar alias with named integer members. Enum members are
 referenced with associated value syntax, for example `Color::Red`.
-Current expression syntax resolves user-defined binary operators through visible operator
-declarations:
+Current expression syntax resolves runtime binary operators through visible operator declarations:
 
 ```fig
 fn append(a: Box, b: Box) -> Box { Box::append(a, b) }
-const (<>) = @operator(#infixr, 55, append);
+infixr 55 (<>) = append;
 ```
 
-Operator declarations are compile-time-only top-level constants. The operator target is a function
-reference, and the supported fixities are `#infix`, `#infixl`, and `#infixr`.
+Operator declarations are compile-time-only top-level declarations. The operator target is a
+function reference, and the supported fixities are `infix`, `infixl`, and `infixr`.
 
 ## Attached Members and Contracts
 
@@ -119,32 +118,34 @@ Use these patterns when choosing how to express static intent:
 | Compute a runtime data layout                  | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
 | Require behavior on a concrete type            | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`. |
 | Call required behavior carried by a value      | Annotate a value as `contract(t)` and call the attached member as `t::member(...)`.             |
-| Call required behavior without a runtime value | Pass `const _proof: contract(t)` as an explicit erased proof fallback.                          |
+| Call required behavior without a runtime value | Write `@assert(contract(t));` or use a small wrapper type in an annotation.                   |
 | Abstract over a unary type constructor         | Accept `t: type fn(a: type) -> type`, use values as `t(a)`, and reflect members on `t`.         |
 | Choose dispatch from a type value              | Pass the type as `const t` or `const t: type`; do not model types as runtime Values.            |
 | Specialize layout or counts                    | Pass static shape data as `const n: count`, `const a: type`, or another `const` parameter.      |
 
 Prefer inference when ordinary value parameters already determine the type. Pass an explicit
 `const t` only when the function needs a type that is otherwise not pinned by a value argument, such
-as empty-value construction, explicit `pure(t, ...)` construction, or type-directed static dispatch.
+as empty-value construction or type-directed static dispatch.
 
 ```fig
 fn append(a: Semigroup(t), b: t) -> t {
   t::append(a, b)
 }
 
-fn fmap(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
+fn fmap(v: t(a), const f: fn(x: a) -> b) -> t(b) {
+  @assert(Functor(t));
   t::map(f, v)
 }
 
-fn empty(const t: type) -> Monoid(t) {
+fn empty() -> Monoid(t) {
   t::empty()
 }
 ```
 
 Use contracted parameters when a value carries the type, contracted returns when constructing a
-value through a contract, local proof constants when a proof is needed only inside one body, and
-explicit `const` proof parameters when the caller must select or provide the proof.
+value through a contract, local `@assert(Contract(t));` statements when only the checks matter, and
+wrapper annotation types when a contract-only test needs to force validation. Use a named local
+top-level `const` only when later compile-time code needs the returned value.
 
 Prelude contracts such as `Eq(t)`, `Functor(t)`, `Applicative(t)`, `Monad(t)`, and `Monoid(t)` are
 law-bearing proofs. Their optimizer laws come from the default prelude rewrite compiler plugin;
@@ -174,18 +175,18 @@ pub fn main(env: Env, seed: Store) -> i32 {
 }
 ```
 
-Static proof parameters are still valid when a function is only checking a typed row label:
+Local discarded type-level const calls also work when a function is only checking a typed row label:
 
 ```fig
 fn low_level(
   const effects: const,
-  const _proof: effect.Member(#debug, effects),
   value: i32
 ) -> effect.Eff(effects, i32) {
+  @assert(effect.Member(#debug, effects));
   value
 }
 
 fn example(value: i32) -> effect.Eff({debug: i32}, i32) {
-  low_level({debug: i32}, effect.Member(#debug, {debug: i32}), value)
+  low_level({debug: i32}, value)
 }
 ```

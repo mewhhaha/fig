@@ -4,6 +4,7 @@ const core = @import("prelude.core");
 const diagnostic = @import("./diagnostic.fig");
 const layout = @import("prelude.layout");
 const option = @import("prelude.option");
+const vec = @import("prelude.vec");
 const parser = @import("./parser.fig");
 const span = @import("./span.fig");
 const textlex = @import("./textlex.fig");
@@ -27,7 +28,7 @@ type CheckedFactKind = enum(i32) {
 
 type CheckedLocalFactKind = enum(i32) {
   LocalLet = 1,
-  LocalProofConst = 2
+  LocalTypeAssert = 2
 }
 
 type FactContext = struct {
@@ -142,7 +143,7 @@ type WasmBodyPlan = struct {
   first_opcode: i32,
   first_immediate: i32,
   byte_size: i32,
-  instructions: layout.HeapArray(WasmBodyInstruction),
+  instructions: vec.Vec(WasmBodyInstruction),
 }
 
 type WasmFunctionLookup = struct {
@@ -1224,7 +1225,7 @@ fn wasm_body_plan_empty(capacity: i32) -> WasmBodyPlan {
     first_opcode: wasm_drop_opcode(),
     first_immediate: 0,
     byte_size: 0,
-    instructions: layout.HeapArray::new(WasmBodyInstruction, capacity),
+    instructions: vec.Vec::new(WasmBodyInstruction, capacity),
   }
 }
 
@@ -1232,7 +1233,7 @@ fn wasm_body_plan_push_instruction(
   plan: WasmBodyPlan,
   instruction: WasmBodyInstruction
 ) -> WasmBodyPlan {
-  let is_first = layout.HeapArray::len(WasmBodyInstruction, plan.instructions) == 0;
+  let is_first = vec.Vec::len(plan.instructions) == 0;
   WasmBodyPlan {
     first_opcode: match is_first {
       true => instruction.opcode,
@@ -1243,8 +1244,7 @@ fn wasm_body_plan_push_instruction(
       false => plan.first_immediate,
     },
     byte_size: plan.byte_size + wasm_instruction_size(instruction.opcode),
-    instructions: layout.HeapArray::push(
-      WasmBodyInstruction,
+    instructions: vec.Vec::push(
       plan.instructions,
       instruction
     ),
@@ -1256,11 +1256,11 @@ fn wasm_body_plan_append_plan_at(
   source: WasmBodyPlan,
   index: i32
 ) -> WasmBodyPlan {
-  match index < layout.HeapArray::len(WasmBodyInstruction, source.instructions) {
+  match index < vec.Vec::len(source.instructions) {
     true => rec(
       wasm_body_plan_push_instruction(
         target,
-        layout.HeapArray::get(WasmBodyInstruction, source.instructions, index)
+        vec.Vec::get_t(WasmBodyInstruction, source.instructions, index)
       ),
       source,
       index + 1
@@ -1793,6 +1793,71 @@ fn WasmCallLowering::branch_segment_plan(
   }
 }
 
+fn wasm_function_match_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32
+) -> core.Option(WasmBodyPlan) {
+  let source = context_value.source;
+  let start = parser.text_function_body_value_start_index(source, current.cursor);
+  let limit = parser.text_function_body_value_limit_index(source, current.cursor);
+  let result_type = parser.text_match_body_literal_result_type_class_between(
+    source,
+    start,
+    limit
+  );
+  let segments = parser.text_function_bool_match_body_segments(
+    source,
+    current.cursor
+  );
+  let lowering = wasm_call_lowering(context_value, codes, current);
+  match body_abi == parser.text_abi_class_scalar_tag() {
+    false => option.none(),
+    true => match wasm_type_class_is_scalar(result_type) {
+      false => option.none(),
+      true => match segments.found {
+        false => option.none(),
+        true => match WasmCallLowering::segment_plan(
+          lowering,
+          segments.true_value_start,
+          segments.true_value_limit,
+          true
+        ) {
+          None => option.none(),
+          Some(true_plan) => match WasmCallLowering::segment_plan(
+            lowering,
+            segments.false_value_start,
+            segments.false_value_limit,
+            true
+          ) {
+            None => option.none(),
+            Some(false_plan) => wasm_body_plan_push_instruction(
+              wasm_body_plan_empty(6),
+              wasm_body_instruction(wasm_local_get_opcode(), 0)
+            ) \with_condition -> wasm_body_plan_push_instruction(
+              with_condition,
+              wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+            ) \with_if -> wasm_body_plan_append_plan(
+              with_if,
+              true_plan
+            ) \with_true -> wasm_body_plan_push_instruction(
+              with_true,
+              wasm_body_instruction(wasm_else_opcode(), 0)
+            ) \with_else -> wasm_body_plan_append_plan(
+              with_else,
+              false_plan
+            ) \with_false -> option.some(wasm_body_plan_push_instruction(
+              with_false,
+              wasm_body_instruction(wasm_end_opcode(), 0)
+            )),
+          },
+        },
+      },
+    },
+  }
+}
+
 fn WasmCallLowering::segment_plan(
   lowering: WasmCallLowering,
   start: i32,
@@ -2155,36 +2220,44 @@ fn wasm_byte_base_body_plan(
   decl: ast.Decl,
   body_abi: i32
 ) -> WasmBodyPlan {
-  match wasm_scalar_expression_body_plan(
+  match wasm_function_match_body_plan(
     context_value,
     codes,
     current,
     body_abi
   ) {
     Some(plan) => plan,
-    None => match wasm_scalar_call_body_plan(
+    None => match wasm_scalar_expression_body_plan(
       context_value,
       codes,
       current,
       body_abi
     ) {
       Some(plan) => plan,
-      None => match wasm_scalar_operator_body_plan(
+      None => match wasm_scalar_call_body_plan(
         context_value,
         codes,
         current,
         body_abi
       ) {
         Some(plan) => plan,
-        None => wasm_single_instruction_body_plan(
-          wasm_byte_body_instruction(
-            context_value,
-            codes,
-            current,
-            decl,
-            body_abi
-          )
-        ),
+        None => match wasm_scalar_operator_body_plan(
+          context_value,
+          codes,
+          current,
+          body_abi
+        ) {
+          Some(plan) => plan,
+          None => wasm_single_instruction_body_plan(
+            wasm_byte_body_instruction(
+              context_value,
+              codes,
+              current,
+              decl,
+              body_abi
+            )
+          ),
+        },
       },
     },
   }
@@ -2483,8 +2556,8 @@ fn wasm_push_body_plan_at(
   plan: WasmBodyPlan,
   index: i32
 ) -> layout.HeapArray(i32) {
-  match index < layout.HeapArray::len(WasmBodyInstruction, plan.instructions) {
-    true => layout.HeapArray::get(
+  match index < vec.Vec::len(plan.instructions) {
+    true => vec.Vec::get_t(
       WasmBodyInstruction,
       plan.instructions,
       index
@@ -3859,7 +3932,7 @@ fn checked_local_let_fact(
   }
 }
 
-fn checked_local_proof_const_fact(
+fn checked_local_type_assert_fact(
   context_value: FactContext,
   function_name_hash: i32,
   index: i32
@@ -3868,8 +3941,8 @@ fn checked_local_proof_const_fact(
   let check_status = parser.text_simple_body_type_check_status(type_value, type_value);
   CheckedLocalFact {
     function_name_hash: function_name_hash,
-    local_kind_tag: CheckedLocalFactKind::LocalProofConst,
-    local_name_hash: checked_local_identifier_hash(context_value, index + 1),
+    local_kind_tag: CheckedLocalFactKind::LocalTypeAssert,
+    local_name_hash: 0,
     value_root_kind: parser.text_expression_root_none_tag(),
     value_root_hash: 0,
     expected_type_class: type_value,
@@ -3931,16 +4004,23 @@ fn checked_local_top_level_next_total(
         )
       )
     ),
-    ConstKw => textmodel.signature_mix(
-      scan.total,
-      checked_local_fact_signature(
-        checked_local_proof_const_fact(
-          context_value,
-          scan.function_name_hash,
-          scan.index
+    Symbol => match parser.text_type_assert_token_matches(
+      context_value.source,
+      scan.index,
+      scan.limit
+    ) {
+      true => textmodel.signature_mix(
+        scan.total,
+        checked_local_fact_signature(
+          checked_local_type_assert_fact(
+            context_value,
+            scan.function_name_hash,
+            scan.index
+          )
         )
-      )
-    ),
+      ),
+      false => scan.total,
+    },
     _ => scan.total,
   }
 }

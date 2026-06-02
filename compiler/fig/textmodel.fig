@@ -38,12 +38,16 @@ type SummaryKind = enum(i32) {
   ResolvedExportAbiSignature = 32,
   DirectImportTypeEnvironmentSignature = 33,
   ValueCallExpressions = 34,
-  FunctionLocalProofConsts = 35,
+  FunctionLocalTypeAsserts = 35,
   ResolvedValueBodyTypeClassSignature = 36,
   ResolvedValueBodyAbiClassSignature = 37,
   ValueDoBinds = 38,
   ValueOperators = 39,
-  ValueOperatorSignature = 40
+  ValueOperatorSignature = 40,
+  SourceImportEdgeSignature = 41,
+  SourceImportGraphDiagnosticSignature = 42,
+  DeclarationDependencySignature = 43,
+  DeclarationDependencyDiagnosticSignature = 44
 }
 
 type ImportResolutionMode = enum(i32) {

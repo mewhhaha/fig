@@ -89,7 +89,7 @@ type FigCompilerInput = {
   wasmByteRecordSignatureHash: number;
   wasmByteBuffer: number[];
   functionLocalLetCount: number;
-  functionLocalProofConstCount: number;
+  functionLocalTypeAssertCount: number;
   valueMatchExpressionCount: number;
   functionMatchBodyCount: number;
   valueDoExpressionCount: number;
@@ -99,6 +99,10 @@ type FigCompilerInput = {
   valueOperatorExpressionCount: number;
   valueOperatorSignatureHash: number;
   valueCallExpressionCount: number;
+  sourceImportEdgeSignatureHash: number;
+  sourceImportGraphDiagnosticSignatureHash: number;
+  declarationDependencySignatureHash: number;
+  declarationDependencyDiagnosticSignatureHash: number;
   directImportTypeEnvironmentInputs: FigDirectImportTypeEnvironmentInput[];
 };
 
@@ -614,6 +618,57 @@ async function compiledFigSourceRunner(
         );
       }
     }
+    const actualSourceImportEdgeSignatureHash = Number(
+      host.call("compile_source_import_edge_signature_hash", input.codes),
+    );
+    const sourceImportEdgeSignatureMatches =
+      actualSourceImportEdgeSignatureHash === input.sourceImportEdgeSignatureHash;
+    if (!sourceImportEdgeSignatureMatches) {
+      throw new Error(
+        `compiled Fig compiler produced source import-edge signature hash ` +
+          `${actualSourceImportEdgeSignatureHash} for ${input.sourceId}; ` +
+          `JS parser produced ${input.sourceImportEdgeSignatureHash}`,
+      );
+    }
+    const actualSourceImportGraphDiagnosticSignatureHash = Number(
+      host.call("compile_source_import_graph_diagnostic_signature_hash", input.codes),
+    );
+    const sourceImportGraphDiagnosticSignatureMatches =
+      actualSourceImportGraphDiagnosticSignatureHash ===
+        input.sourceImportGraphDiagnosticSignatureHash;
+    if (!sourceImportGraphDiagnosticSignatureMatches) {
+      throw new Error(
+        `compiled Fig compiler produced source import graph-diagnostic signature hash ` +
+          `${actualSourceImportGraphDiagnosticSignatureHash} for ${input.sourceId}; ` +
+          `JS parser produced ${input.sourceImportGraphDiagnosticSignatureHash}`,
+      );
+    }
+    const actualDeclarationDependencySignatureHash = Number(
+      host.call("compile_declaration_dependency_signature_hash", input.codes),
+    );
+    const declarationDependencySignatureMatches =
+      actualDeclarationDependencySignatureHash === input.declarationDependencySignatureHash;
+    if (!declarationDependencySignatureMatches) {
+      throw new Error(
+        `compiled Fig compiler produced declaration dependency signature hash ` +
+          `${actualDeclarationDependencySignatureHash} for ${input.sourceId}; ` +
+          `JS parser produced ${input.declarationDependencySignatureHash}`,
+      );
+    }
+    const actualDeclarationDependencyDiagnosticSignatureHash = Number(
+      host.call("compile_declaration_dependency_diagnostic_signature_hash", input.codes),
+    );
+    const declarationDependencyDiagnosticSignatureMatches =
+      actualDeclarationDependencyDiagnosticSignatureHash ===
+        input.declarationDependencyDiagnosticSignatureHash;
+    if (!declarationDependencyDiagnosticSignatureMatches) {
+      throw new Error(
+        `compiled Fig compiler produced declaration dependency diagnostic ` +
+          `signature hash ${actualDeclarationDependencyDiagnosticSignatureHash} ` +
+          `for ${input.sourceId}; JS parser produced ` +
+          `${input.declarationDependencyDiagnosticSignatureHash}`,
+      );
+    }
     const actualCount = Number(host.call("compile_code_count", input.codes));
     const countMatches = actualCount === input.declarationCount;
     if (!countMatches) {
@@ -781,16 +836,16 @@ async function compiledFigSourceRunner(
           `JS parser counted ${input.functionLocalLetCount}`,
       );
     }
-    const actualFunctionLocalProofConstCount = Number(
-      host.call("compile_function_local_proof_const_count", input.codes),
+    const actualFunctionLocalTypeAssertCount = Number(
+      host.call("compile_function_local_type_assert_count", input.codes),
     );
-    const functionLocalProofConstCountMatches =
-      actualFunctionLocalProofConstCount === input.functionLocalProofConstCount;
-    if (!functionLocalProofConstCountMatches) {
+    const functionLocalTypeAssertCountMatches =
+      actualFunctionLocalTypeAssertCount === input.functionLocalTypeAssertCount;
+    if (!functionLocalTypeAssertCountMatches) {
       throw new Error(
-        `compiled Fig compiler counted ${actualFunctionLocalProofConstCount} top-level ` +
-          `function local proof const statements in ${input.sourceId}; ` +
-          `JS parser counted ${input.functionLocalProofConstCount}`,
+        `compiled Fig compiler counted ${actualFunctionLocalTypeAssertCount} top-level ` +
+        `function local type assertion statements in ${input.sourceId}; ` +
+          `JS parser counted ${input.functionLocalTypeAssertCount}`,
       );
     }
     const actualValueMatchExpressionCount = Number(
@@ -1377,7 +1432,7 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
         typeEnvironment,
       ),
       functionLocalLetCount: programFunctionLocalLetCount(program),
-      functionLocalProofConstCount: programFunctionLocalProofConstCount(program),
+      functionLocalTypeAssertCount: programFunctionLocalTypeAssertCount(program),
       valueMatchExpressionCount: programValueMatchExpressionCount(program),
       functionMatchBodyCount: programFunctionMatchBodyCount(program),
       valueDoExpressionCount: programValueDoExpressionCount(program),
@@ -1387,6 +1442,12 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
       valueOperatorExpressionCount: programValueOperatorExpressionCount(program),
       valueOperatorSignatureHash: programValueOperatorSignatureHash(program, tokens),
       valueCallExpressionCount: programValueCallExpressionCount(program),
+      sourceImportEdgeSignatureHash: programSourceImportEdgeSignatureHash(program),
+      sourceImportGraphDiagnosticSignatureHash:
+        programSourceImportGraphDiagnosticSignatureHash(program),
+      declarationDependencySignatureHash: programDeclarationDependencySignatureHash(program),
+      declarationDependencyDiagnosticSignatureHash:
+        programDeclarationDependencyDiagnosticSignatureHash(program),
       directImportTypeEnvironmentInputs: await programDirectImportTypeEnvironmentInputs(
         program,
         sourceId,
@@ -2063,6 +2124,139 @@ function directImportResolutionRecordSignatureHash(
   total = signatureMix(total, resolvedSimpleBodyTypeCheckSignature);
   total = signatureMix(total, resolvedSymbolEnvironmentSignature);
   total = signatureMix(total, resolvedExportAbiSignature);
+  return total;
+}
+
+function programSourceImportEdgeSignatureHash(program: Program): number {
+  let total = 0;
+  for (const item of program.sourceImports ?? []) {
+    const alias = item.alias ?? "";
+    total = signatureMix(
+      total,
+      sourceImportEdgeHash(textHash(alias), textHash(JSON.stringify(item.module))),
+    );
+  }
+  return total;
+}
+
+function sourceImportSpanWidth(item: NonNullable<Program["sourceImports"]>[number]): number {
+  const span = item.span;
+  if (span === undefined) {
+    return 0;
+  }
+  return span.end - span.start;
+}
+
+function programSourceImportGraphDiagnosticSignatureHash(program: Program): number {
+  let total = 0;
+  for (const item of program.sourceImports ?? []) {
+    const alias = item.alias ?? "";
+    total = signatureMix(
+      total,
+      sourceImportGraphDiagnosticHash(
+        textHash(alias),
+        textHash(JSON.stringify(item.module)),
+        sourceImportSpanWidth(item),
+        sourceImportGraphNoDiagnosticCode(),
+      ),
+    );
+  }
+  return total;
+}
+
+function declarationDependencySpanWidth(decl: Program["declarations"][number]): number {
+  const span = decl.span;
+  if (span === undefined) {
+    return 0;
+  }
+  return span.end - span.start;
+}
+
+function declarationHasDependencyBody(decl: Program["declarations"][number]): boolean {
+  if (decl.kind === "fn") {
+    return true;
+  }
+  if (decl.kind === "let") {
+    return true;
+  }
+  return decl.kind === "const";
+}
+
+type DeclarationDependencyTarget = {
+  hash: number;
+  edgeTag: number;
+};
+
+function declarationSimpleDependencyTarget(
+  decl: Program["declarations"][number],
+): DeclarationDependencyTarget | undefined {
+  if (!declarationHasDependencyBody(decl)) {
+    return undefined;
+  }
+  const body = declarationExpressionShapeBody(decl);
+  const rootKind = expressionRootHeadKindTag(body);
+  if (rootKind !== expressionRootIdentifierTag()) {
+    return undefined;
+  }
+  if (expressionRootHeadSelectorCount(body) !== 0) {
+    const qualifiedHash = expressionRootQualifiedHeadHash(body);
+    if (qualifiedHash === undefined) {
+      return undefined;
+    }
+    return {
+      hash: qualifiedHash,
+      edgeTag: declarationDependencyQualifiedValueEdgeTag(),
+    };
+  }
+  return {
+    hash: expressionRootHeadHash(body),
+    edgeTag: declarationDependencyValueEdgeTag(),
+  };
+}
+
+function programDeclarationDependencySignatureHash(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    const target = declarationSimpleDependencyTarget(decl);
+    if (target === undefined) {
+      continue;
+    }
+    total = signatureMix(
+      total,
+      declarationDependencyHash(
+        declarationKindTag(decl.kind),
+        textHash(primaryDeclarationName(decl)),
+        target.hash,
+        target.edgeTag,
+        declarationDependencySpanWidth(decl),
+      ),
+    );
+  }
+  return total;
+}
+
+function programDeclarationDependencyDiagnosticSignatureHash(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    const target = declarationSimpleDependencyTarget(decl);
+    if (target === undefined) {
+      continue;
+    }
+    const fromHash = textHash(primaryDeclarationName(decl));
+    total = signatureMix(
+      total,
+      declarationDependencyDiagnosticHash(
+        declarationKindTag(decl.kind),
+        fromHash,
+        target.hash,
+        target.edgeTag,
+        declarationDependencySpanWidth(decl),
+        target.edgeTag === declarationDependencyValueEdgeTag()
+          ? declarationDependencyDiagnosticCode(program, fromHash, target.hash)
+          : declarationDependencyNoDiagnosticCode(),
+      ),
+    );
+  }
   return total;
 }
 
@@ -3015,12 +3209,12 @@ function checkedLocalEnvironmentFact(
       ),
     };
   }
-  if (statement.kind === "proof_const") {
+  if (statement.kind === "type_assert") {
     const typeValue = typeClassTypeValueTag();
     return {
       functionNameHash,
-      localKindTag: checkedLocalProofConstTag(),
-      localNameHash: textHash(statement.name),
+      localKindTag: checkedLocalTypeAssertTag(),
+      localNameHash: 0,
       valueRootKind: expressionRootNoneTag(),
       valueRootHash: 0,
       expectedTypeClass: typeValue,
@@ -3267,6 +3461,10 @@ function declarationResolvedBodyTypeClassTag(
     );
     const root = expressionRoot(decl.body);
     if (decl.matchBody === true && root?.kind === "match") {
+      const matchBodyTypeClass = declarationFunctionMatchBodyLiteralResultTypeClassTag(decl);
+      if (matchBodyTypeClass !== typeClassUnknownTag()) {
+        return matchBodyTypeClass;
+      }
       return typeClassUnknownTag();
     }
     const typeClass = expressionRootResolvedTypeClassTag(
@@ -3295,6 +3493,45 @@ function declarationResolvedBodyTypeClassTag(
     );
   }
   return typeClassUnknownTag();
+}
+
+function declarationFunctionMatchBodyLiteralResultTypeClassTag(
+  decl: Program["declarations"][number],
+): number {
+  if (decl.kind !== "fn") {
+    return typeClassUnknownTag();
+  }
+  if (decl.matchBody !== true) {
+    return typeClassUnknownTag();
+  }
+  const root = expressionRoot(decl.body);
+  if (root === undefined) {
+    return typeClassUnknownTag();
+  }
+  if (root.kind !== "match") {
+    return typeClassUnknownTag();
+  }
+  let resultTypeClass = typeClassUnknownTag();
+  let armCount = 0;
+  for (const arm of root.arms) {
+    if (arm.guard !== undefined) {
+      return typeClassUnknownTag();
+    }
+    const armTypeClass = expressionSimpleLiteralTypeClassTag(arm.value);
+    if (armTypeClass === typeClassUnknownTag()) {
+      return typeClassUnknownTag();
+    }
+    if (resultTypeClass === typeClassUnknownTag()) {
+      resultTypeClass = armTypeClass;
+    } else if (resultTypeClass !== armTypeClass) {
+      return typeClassUnknownTag();
+    }
+    armCount += 1;
+  }
+  if (armCount === 0) {
+    return typeClassUnknownTag();
+  }
+  return resultTypeClass;
 }
 
 function functionParamTypeEnvironment(
@@ -3471,6 +3708,67 @@ function expressionRootHeadHash(expr: Expr | undefined): number {
     return expressionRootHeadHash(root.start);
   }
   return 0;
+}
+
+function expressionRootQualifiedHeadHash(expr: Expr | undefined): number | undefined {
+  const root = expressionRoot(expr);
+  if (root === undefined) {
+    return undefined;
+  }
+  if (root.kind === "var") {
+    return expressionQualifiedHeadNameHash(root.name);
+  }
+  if (root.kind === "product_constructor") {
+    return expressionQualifiedHeadNameHash(root.constructor);
+  }
+  if (root.kind === "pipe_bind") {
+    return expressionRootQualifiedHeadHash(root.value);
+  }
+  if (root.kind === "call") {
+    const isParenthesizedExpression = root.args.length === 0 && root.callee.kind !== "var";
+    if (isParenthesizedExpression) {
+      return undefined;
+    }
+    return expressionRootQualifiedHeadHash(root.callee);
+  }
+  if (root.kind === "field") {
+    return expressionRootQualifiedHeadHash(root.value);
+  }
+  if (root.kind === "index") {
+    return expressionRootQualifiedHeadHash(root.target);
+  }
+  if (root.kind === "binary") {
+    return expressionRootQualifiedHeadHash(root.left);
+  }
+  if (root.kind === "operator_chain") {
+    return expressionRootQualifiedHeadHash(root.first);
+  }
+  if (root.kind === "range") {
+    return expressionRootQualifiedHeadHash(root.start);
+  }
+  return undefined;
+}
+
+function expressionQualifiedHeadNameHash(name: string): number | undefined {
+  const segments = name.split(/(?:::|\.)/);
+  if (!segments.length || segments[0] === "") {
+    return undefined;
+  }
+  let total = textHash(segments[0]);
+  const selectorPattern = /(::|\.)/g;
+  let selector: RegExpExecArray | null;
+  while ((selector = selectorPattern.exec(name)) !== null) {
+    const nextStart = selector.index + selector[0].length;
+    const nextSelector = name.slice(nextStart).search(/::|\./);
+    const nextEnd = nextSelector < 0 ? name.length : nextStart + nextSelector;
+    const segment = name.slice(nextStart, nextEnd);
+    if (!segment) {
+      return undefined;
+    }
+    const selectorTag = selector[0] === "." ? 1 : 2;
+    total = signatureMix(signatureMix(total, selectorTag), textHash(segment));
+  }
+  return total;
 }
 
 function expressionRootChildCount(expr: Expr | undefined): number {
@@ -4153,6 +4451,23 @@ function expressionRootResolvedTypeClassTag(
   return expressionRootTypeClassTag(root);
 }
 
+function expressionSimpleLiteralTypeClassTag(expr: Expr | undefined): number {
+  const root = expressionTypeRoot(expr);
+  if (root === undefined) {
+    return typeClassUnknownTag();
+  }
+  if (root.kind !== "literal") {
+    return typeClassUnknownTag();
+  }
+  if (root.literalKind === "number") {
+    return typeClassI32Tag();
+  }
+  if (root.literalKind === "bool") {
+    return typeClassBoolTag();
+  }
+  return typeClassUnknownTag();
+}
+
 type SimpleScalarOperatorExpr = {
   op: string;
   left: Expr;
@@ -4516,6 +4831,119 @@ function directImportTypeEnvironmentHash(
   return total;
 }
 
+function sourceImportEdgeHash(aliasHash: number, moduleHash: number): number {
+  let total = signatureMix(89, aliasHash);
+  total = signatureMix(total, moduleHash);
+  return total;
+}
+
+function sourceImportGraphNoDiagnosticCode(): number {
+  return 0;
+}
+
+function sourceImportGraphDiagnosticHash(
+  aliasHash: number,
+  moduleHash: number,
+  spanWidth: number,
+  diagnosticCode: number,
+): number {
+  let total = signatureMix(97, aliasHash);
+  total = signatureMix(total, moduleHash);
+  total = signatureMix(total, spanWidth);
+  total = signatureMix(total, diagnosticCode);
+  return total;
+}
+
+function declarationDependencyValueEdgeTag(): number {
+  return 11;
+}
+
+function declarationDependencyQualifiedValueEdgeTag(): number {
+  return 12;
+}
+
+function declarationDependencyNoDiagnosticCode(): number {
+  return 0;
+}
+
+function declarationDependencyCycleDiagnosticCode(): number {
+  return 31;
+}
+
+function declarationDependencyReaches(
+  program: Program,
+  currentHash: number,
+  targetHash: number,
+  budget: number,
+): boolean {
+  if (currentHash === targetHash) {
+    return true;
+  }
+  if (budget <= 0) {
+    return false;
+  }
+  for (const decl of program.declarations) {
+    const fromHash = textHash(primaryDeclarationName(decl));
+    if (fromHash !== currentHash) {
+      continue;
+    }
+    const nextTarget = declarationSimpleDependencyTarget(decl);
+    if (nextTarget === undefined) {
+      continue;
+    }
+    if (nextTarget.edgeTag !== declarationDependencyValueEdgeTag()) {
+      continue;
+    }
+    if (declarationDependencyReaches(program, nextTarget.hash, targetHash, budget - 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function declarationDependencyDiagnosticCode(
+  program: Program,
+  fromHash: number,
+  toHash: number,
+): number {
+  if (declarationDependencyReaches(program, toHash, fromHash, program.declarations.length)) {
+    return declarationDependencyCycleDiagnosticCode();
+  }
+  return declarationDependencyNoDiagnosticCode();
+}
+
+function declarationDependencyHash(
+  kindTag: number,
+  fromHash: number,
+  toHash: number,
+  edgeTag: number,
+  spanWidth: number,
+): number {
+  let total = signatureMix(103, kindTag);
+  total = signatureMix(total, fromHash);
+  total = signatureMix(total, toHash);
+  total = signatureMix(total, edgeTag);
+  total = signatureMix(total, spanWidth);
+  return total;
+}
+
+function declarationDependencyDiagnosticHash(
+  kindTag: number,
+  fromHash: number,
+  toHash: number,
+  edgeTag: number,
+  spanWidth: number,
+  diagnosticCode: number,
+): number {
+  let total = signatureMix(107, kindTag);
+  total = signatureMix(total, fromHash);
+  total = signatureMix(total, toHash);
+  total = signatureMix(total, edgeTag);
+  total = signatureMix(total, spanWidth);
+  total = signatureMix(total, diagnosticCode);
+  return total;
+}
+
 function simpleBodyTypeCheckHash(
   kindTag: number,
   expected: number,
@@ -4742,7 +5170,7 @@ function checkedLocalLetTag(): number {
   return 1;
 }
 
-function checkedLocalProofConstTag(): number {
+function checkedLocalTypeAssertTag(): number {
   return 2;
 }
 
@@ -5677,6 +6105,78 @@ function wasmScalarOperatorBodyInstructions(
   ];
 }
 
+function declarationSingleRuntimeParamTypeClass(
+  decl: Extract<Program["declarations"][number], { kind: "fn" }>,
+  typeEnvironment: Map<string, number>,
+): number {
+  let runtimeTypeClass = typeClassUnknownTag();
+  let runtimeCount = 0;
+  for (const param of decl.params) {
+    if (param.const === true) {
+      continue;
+    }
+    runtimeTypeClass = typeClassFromAnnotation(param.type, typeEnvironment);
+    runtimeCount += 1;
+  }
+  if (runtimeCount !== 1) {
+    return typeClassUnknownTag();
+  }
+  return runtimeTypeClass;
+}
+
+function wasmScalarFunctionMatchBodyInstructions(
+  decl: Extract<Program["declarations"][number], { kind: "fn" }>,
+  typeEnvironment: Map<string, number>,
+  functionIndexEnvironment: Map<string, number>,
+  functionRuntimeParamCountEnvironment: Map<string, number>,
+  functionReturnEnvironment: Map<string, number>,
+): WasmBodyInstruction[] | undefined {
+  if (decl.matchBody !== true) {
+    return undefined;
+  }
+  if (declarationSingleRuntimeParamTypeClass(decl, typeEnvironment) !== typeClassBoolTag()) {
+    return undefined;
+  }
+  const resultTypeClass = declarationFunctionMatchBodyLiteralResultTypeClassTag(decl);
+  if (!typeClassIsScalar(resultTypeClass)) {
+    return undefined;
+  }
+  const boolMatch = expressionSimpleBoolMatch(decl.body);
+  if (boolMatch === undefined) {
+    return undefined;
+  }
+  const trueInstructions = wasmScalarExpressionInstructions(
+    decl,
+    boolMatch.trueValue,
+    typeEnvironment,
+    functionIndexEnvironment,
+    functionRuntimeParamCountEnvironment,
+    functionReturnEnvironment,
+  );
+  if (trueInstructions === undefined) {
+    return undefined;
+  }
+  const falseInstructions = wasmScalarExpressionInstructions(
+    decl,
+    boolMatch.falseValue,
+    typeEnvironment,
+    functionIndexEnvironment,
+    functionRuntimeParamCountEnvironment,
+    functionReturnEnvironment,
+  );
+  if (falseInstructions === undefined) {
+    return undefined;
+  }
+  return [
+    { opcode: wasmLocalGetOpcode(), immediate: 0 },
+    { opcode: wasmIfOpcode(), immediate: wasmI32ValType() },
+    ...trueInstructions,
+    { opcode: wasmElseOpcode(), immediate: 0 },
+    ...falseInstructions,
+    { opcode: wasmEndOpcode(), immediate: 0 },
+  ];
+}
+
 function wasmInstructionSequenceByteSize(instructions: WasmBodyInstruction[]): number {
   let total = 0;
   for (const instruction of instructions) {
@@ -5705,8 +6205,18 @@ function wasmBodyPlanForDeclaration(
 ): WasmBodyPlan {
   let bodyPlan: WasmBodyPlan | undefined;
   if (abiClass === abiClassScalarTag()) {
+    const matchBodyInstructions = wasmScalarFunctionMatchBodyInstructions(
+      decl,
+      typeEnvironment,
+      functionIndexEnvironment,
+      functionRuntimeParamCountEnvironment,
+      functionReturnEnvironment,
+    );
+    if (matchBodyInstructions !== undefined) {
+      bodyPlan = wasmBodyPlanFromInstructions(matchBodyInstructions);
+    }
     const body = declarationExpressionShapeBody(decl);
-    if (body !== undefined && decl.matchBody !== true) {
+    if (bodyPlan === undefined && body !== undefined && decl.matchBody !== true) {
       const scalarInstructions = wasmScalarExpressionInstructions(
         decl,
         body,
@@ -5921,14 +6431,14 @@ function declarationRuntimeParamCount(
   return total;
 }
 
-function programFunctionLocalProofConstCount(program: Program): number {
+function programFunctionLocalTypeAssertCount(program: Program): number {
   let total = 0;
   for (const decl of program.declarations) {
     if (decl.kind !== "fn") {
       continue;
     }
     for (const statement of decl.body.statements) {
-      if (statement.kind === "proof_const") {
+      if (statement.kind === "type_assert") {
         total += 1;
       }
     }
@@ -7025,6 +7535,9 @@ function declarationKindTag(kind: Program["declarations"][number]["kind"]): numb
 }
 
 function primaryDeclarationName(decl: Program["declarations"][number]): string {
+  if (decl.kind === "type_assert") {
+    return "";
+  }
   if (decl.kind === "fn" && decl.memberOf) {
     return decl.memberOf.owner;
   }

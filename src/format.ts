@@ -60,7 +60,18 @@ const binaryOperators = new Set([
 const compactBefore = new Set([")", "]", ",", ";", ".", ":", "::"]);
 const compactAfter = new Set(["(", "[", ".", "::", "@", "\\"]);
 const spacedSymbols = new Set(["=", "->", "=>"]);
-const declarationKeywords = new Set(["pub", "fn", "type", "const", "let", "external", "import"]);
+const declarationKeywords = new Set([
+  "pub",
+  "fn",
+  "type",
+  "const",
+  "let",
+  "external",
+  "import",
+  "infix",
+  "infixl",
+  "infixr",
+]);
 
 export function formatSource(source: string): string {
   const normalized = source.replace(/\r\n?/g, "\n");
@@ -577,6 +588,7 @@ function opensBracketWithoutSpace(left: TokenItem): boolean {
 }
 
 function opensParenWithoutSpace(left: TokenItem): boolean {
+  if (left.token.kind === "Number") return false;
   return left.text !== "in" && left.text !== "..";
 }
 

@@ -1,4 +1,8 @@
 const source = @import("./source.fig");
+const core = @import("prelude.core");
+const graph_data = @import("prelude.graph");
+const map = @import("prelude.map");
+const vec = @import("prelude.vec");
 
 type ModuleRecord = struct {
   module_id: i32,
@@ -7,9 +11,9 @@ type ModuleRecord = struct {
 }
 
 type ModuleGraph = struct {
-  root: ModuleRecord,
-  dependency: ModuleRecord,
-  count: i32,
+  modules: vec.Vec(ModuleRecord),
+  module_index: map.Map(i32, i32),
+  topology: graph_data.Graph,
 }
 
 fn module_record(
@@ -24,6 +28,37 @@ fn module_record(
   }
 }
 
+fn empty_module_index() -> map.Map(i32, i32) {
+  map.Map::empty(i32, i32)
+}
+
+fn index_module(
+  index: map.Map(i32, i32),
+  module_index: i32,
+  value: ModuleRecord
+) -> map.Map(i32, i32) {
+  map.Map::insert(
+    i32,
+    i32,
+    index,
+    value.module_id,
+    module_index,
+    map.compare_i32
+  )
+}
+
+fn module_at(graph: ModuleGraph, index: i32) -> ModuleRecord {
+  vec.Vec::get_t(ModuleRecord, graph.modules, index)
+}
+
+fn root_record(graph: ModuleGraph) -> ModuleRecord {
+  module_at(graph, 0)
+}
+
+fn dependency_record(graph: ModuleGraph) -> ModuleRecord {
+  module_at(graph, 1)
+}
+
 fn from_seed(seed: i32) -> ModuleGraph {
   let dependency = module_record(
     seed + 1,
@@ -35,34 +70,107 @@ fn from_seed(seed: i32) -> ModuleGraph {
     dependency.module_id,
     source.from_seed(seed)
   );
+  let modules = vec.Vec::push(
+    vec.Vec::push(vec.Vec::new(ModuleRecord, 0), root),
+    dependency
+  );
+  let module_index = index_module(
+    index_module(empty_module_index(), 0, root),
+    1,
+    dependency
+  );
+  let topology = graph_data.Graph::add_edge(
+    graph_data.Graph::empty(vec.Vec::len(modules)),
+    root.module_id,
+    dependency.module_id
+  );
   ModuleGraph {
-    root: root,
-    dependency: dependency,
-    count: 2,
+    modules: modules,
+    module_index: module_index,
+    topology: topology,
   }
 }
 
 fn root_source(graph: ModuleGraph) -> source.SourceText {
-  graph.root.source
+  root_record(graph).source
 }
 
 fn root_id(graph: ModuleGraph) -> i32 {
-  graph.root.module_id
+  root_record(graph).module_id
+}
+
+fn dependency_id(graph: ModuleGraph) -> i32 {
+  dependency_record(graph).module_id
 }
 
 fn root_import_id(graph: ModuleGraph) -> i32 {
-  graph.root.import_id
+  root_record(graph).import_id
 }
 
 fn dependency_source(graph: ModuleGraph) -> source.SourceText {
-  graph.dependency.source
+  dependency_record(graph).source
 }
 
 fn resolve_import(graph: ModuleGraph, import_id: i32) -> source.SourceText {
-  match graph.dependency.module_id == import_id {
-    true => graph.dependency.source,
-    false => graph.root.source,
+  match find_module(graph, import_id) {
+    Some(module) => module.source,
+    None => root_source(graph),
   }
+}
+
+fn find_module(graph: ModuleGraph, module_id: i32) -> core.Option(ModuleRecord) {
+  match map.Map::get(
+    i32,
+    i32,
+    graph.module_index,
+    module_id,
+    map.compare_i32
+  ) {
+    Some(index) => Some(module_at(graph, index)),
+    None => None,
+  }
+}
+
+fn has_import_edge(
+  graph: ModuleGraph,
+  importer_id: i32,
+  import_id: i32
+) -> bool {
+  match importer_id == import_id {
+    true => true,
+    false => graph_data.Graph::has_edge(
+      graph.topology,
+      importer_id,
+      import_id
+    ),
+  }
+}
+
+fn import_cycle_count_loop(
+  graph: ModuleGraph,
+  index: i32,
+  total: i32
+) -> i32 {
+  match index < graph_data.Graph::edge_count(graph.topology) {
+    true => vec.Vec::get_t(
+      graph_data.Edge,
+      graph.topology.edges,
+      index
+    ) \edge -> match graph_data.Graph::reachable_bounded(
+      graph.topology,
+      edge.to,
+      edge.from,
+      graph_data.Graph::edge_count(graph.topology)
+    ) {
+      true => rec(graph, index + 1, total + 1),
+      false => rec(graph, index + 1, total),
+    },
+    false => total,
+  }
+}
+
+fn import_cycle_count(graph: ModuleGraph) -> i32 {
+  import_cycle_count_loop(graph, 0, 0)
 }
 
 fn module_score(module: ModuleRecord) -> i32 {
@@ -71,16 +179,23 @@ fn module_score(module: ModuleRecord) -> i32 {
     + source.source_score(module.source)
 }
 
+fn add_module_score(acc: i32, module: ModuleRecord) -> i32 {
+  acc + module_score(module)
+}
+
 fn graph_score(graph: ModuleGraph) -> i32 {
-  module_score(graph.root)
-    + module_score(graph.dependency)
-    + graph.count
+  vec.Vec::fold(graph.modules, 0, add_module_score)
+    + vec.Vec::len(graph.modules)
+    + map.Map::len(i32, i32, graph.module_index)
+    + graph_data.Graph::edge_count(graph.topology)
+    + graph_data.Graph::out_degree(graph.topology, root_id(graph))
+    + import_cycle_count(graph)
 }
 
 fn entry(seed: i32) -> i32 {
   let graph = from_seed(seed);
   graph_score(graph) + source.source_score(resolve_import(
     graph,
-    graph.root.import_id
+    root_import_id(graph)
   ))
 }

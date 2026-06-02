@@ -206,7 +206,9 @@ Prefer fixed inline arrays when:
 - You want the optimizer to see map/fold/update structure.
 - You do not need allocation-backed growth.
 
-Heap-backed growable vectors are not part of the standard prelude yet.
+When growth is required, import `prelude.vec` directly. Its `Vec(A)`, `Slice(A)`, and `Builder(A)`
+helpers are heap-backed ordinary Fig values; fixed inline arrays remain the better choice when the
+length is statically known and you want scalar-local lowering.
 
 ## Index Proofs and Bounds
 

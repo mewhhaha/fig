@@ -1113,7 +1113,7 @@ Deno.test("LSP hover covers checked AST syntax nodes without symbol hovers", asy
   expectHover("left, right", 1, "```fig\nleft: i32\n```");
   expectHover("\\value ->", 2, "```fig\nvalue: i32\n```");
   expectHover("value + right", "value ".length + 1, "binary expression");
-  expectHover("first: i32", 1, "```fig\nfirst: i32\n```");
+  expectHover("second: i32", 1, "```fig\nsecond: i32\n```");
   expectHover("_ => made.second", 0, "wildcard pattern");
 });
 

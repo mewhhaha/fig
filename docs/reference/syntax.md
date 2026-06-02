@@ -1,7 +1,7 @@
 # Fig Syntax
 
 Fig source files use the `.fig` extension. A program is a sequence of `type`, `type fn`, `const`,
-`fn`, `pub fn`, and top-level `let` declarations.
+operator, `fn`, `pub fn`, and top-level `let` declarations.
 
 Fixed type declarations use these forms:
 
@@ -21,8 +21,7 @@ type-level local shape bindings.
 
 Qualified names use `.` for namespace/module qualification and `::` for attached members or
 associated contracts, for example `prelude.option.Option`, `Point::eql`, or
-`Geometry.Layout::vertex2d_i32`. Literal tags begin with `#`, for example `#field`, `#Some`, and
-`#infixl`.
+`Geometry.Layout::vertex2d_i32`. Literal tags begin with `#`, for example `#field` and `#Some`.
 
 ## Surface Shape
 
@@ -133,6 +132,17 @@ const answer = 42;
 const eql: fn(a: i32, b: i32) -> bool = i32.eql;
 ```
 
+Top-level `@assert(TypeExpr);` evaluates a type-level expression and discards the result:
+
+```fig
+@assert(Monoid(Point));
+@assert(Functor(Vec));
+```
+
+The argument is a type expression. Contract type functions still run their `@require` checks
+while evaluating. Concrete arguments are checked immediately; generic arguments are checked when the
+surrounding generic code is instantiated.
+
 Top-level `let` binds a simple value:
 
 ```fig
@@ -222,12 +232,12 @@ They are compile-time templates, not runtime closure values.
 
 ## Blocks and Patterns
 
-Blocks contain `let` statements, local proof consts, and an optional final expression:
+Blocks contain `let` statements, local type assertions, and an optional final expression:
 
 ```fig
 {
   let x = 1;
-  const Proof = Eq(i32);
+  @assert(Eq(i32));
   x + 1
 }
 ```

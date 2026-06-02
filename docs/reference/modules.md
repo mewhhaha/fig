@@ -1,7 +1,8 @@
 # Fig Modules
 
 Prefer `const std = @import("prelude.std");` for ordinary programs. It collects common pure
-fragments and operator declarations. This page summarizes module roles, not full APIs.
+fragments and operator declarations. This page summarizes module roles and import behavior; see
+[Prelude Library](prelude.md) for the prelude API surface.
 
 Use a namespace import when you want the module surface qualified:
 

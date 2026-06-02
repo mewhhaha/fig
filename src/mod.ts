@@ -1088,6 +1088,7 @@ async function resolveSourceImports(
         const alias = nextHiddenImportAlias(reservedNames, hiddenImportIndex++);
         reservedNames.add(alias);
         for (const decl of materialized.declarations) {
+          if (decl.kind === "type_assert") continue;
           reservedNames.add(qualifyName(declarationName(decl), alias));
         }
         destructuredImports.push({
@@ -1252,6 +1253,7 @@ function mergePrograms(
   const importedDecls: Declaration[] = [];
   for (const importedProgram of imports) {
     for (const decl of importedProgram.declarations) {
+      if (decl.kind === "type_assert") continue;
       importedDecls.push(markImportedDeclaration(decl));
     }
   }
@@ -1354,12 +1356,14 @@ function mergePrograms(
           )
           : fullImportedProgram;
         const { localDecls, transitiveDecls } = splitModuleLocalDeclarations(prunedProgram);
-        const localNames = collectDeclarationNameSet(localDecls);
-        const supportNames = collectDeclarationNameSet(transitiveDecls);
+        const namedLocalDecls = localDecls.filter((decl) => decl.kind !== "type_assert");
+        const namedTransitiveDecls = transitiveDecls.filter((decl) => decl.kind !== "type_assert");
+        const localNames = collectDeclarationNameSet(namedLocalDecls);
+        const supportNames = collectDeclarationNameSet(namedTransitiveDecls);
         const publicNames = qualifyNameSet(localNames, alias);
         const declarations: Declaration[] = [];
         const cachedDeclarations: Declaration[] | undefined = closureCacheKey ? [] : undefined;
-        for (const decl of transitiveDecls) {
+        for (const decl of namedTransitiveDecls) {
           const importedDecl = markImportedDeclaration(decl);
           cachedDeclarations?.push(importedDecl);
           if (keepAliasedImportDeclaration(importedDecl)) {
@@ -1378,7 +1382,7 @@ function mergePrograms(
           }
         }
         const qualifiedLocalDecls = cachedQualifiedLocalDeclarations(
-          localDecls,
+          namedLocalDecls,
           alias,
           localNames,
           surface?.localSourceKey ?? sourceKey,
@@ -1393,7 +1397,7 @@ function mergePrograms(
         if (closureCacheKey) {
           cache?.importClosures?.set(closureCacheKey, {
             declarations: cachedDeclarations ?? declarations,
-            supportDeclarationCount: transitiveDecls.length,
+            supportDeclarationCount: namedTransitiveDecls.length,
             supportNames,
             publicNames,
             hasEffectImports: prunedProgram.imports.length > 0,
@@ -1719,6 +1723,43 @@ function filterDeclarationsByPrimaryNames(
   return kept;
 }
 
+function declarationAttachedMemberName(decl: Declaration): string | undefined {
+  if (decl.kind === "fn" && decl.memberOf) return decl.memberOf.member;
+  if (decl.kind === "type_assert") return undefined;
+  const index = decl.name.lastIndexOf("::");
+  if (index < 0) return undefined;
+  return decl.name.slice(index + 2);
+}
+
+function attachedMemberReferenceName(name: string): string | undefined {
+  const index = name.lastIndexOf("::");
+  if (index < 0) return undefined;
+  const member = name.slice(index + 2);
+  if (!member) return undefined;
+  return `member:${member}`;
+}
+
+function referencedAttachedMemberName(name: string): string | undefined {
+  if (!name.startsWith("member:")) return undefined;
+  const member = name.slice("member:".length);
+  if (!member) return undefined;
+  return member;
+}
+
+function typeMemberRequirementReference(expr: TypeExpr): string | undefined {
+  if (expr.kind !== "type_call") return undefined;
+  if (expr.callee.kind !== "type_static_ref") return undefined;
+  const name = expr.callee.name;
+  const checksMember = name === "type_has_member" || name === "type_member_type" ||
+    name === "type_member_target";
+  if (!checksMember) return undefined;
+  const member = expr.args[1];
+  if (!member || member.kind !== "type_literal") return undefined;
+  if (typeof member.value !== "string") return undefined;
+  if (!member.value) return undefined;
+  return `member:${member.value}`;
+}
+
 function declarationSourceId(decl: Declaration): string | undefined {
   const cached = DECLARATION_SOURCE_ID_CACHE.get(decl);
   if (cached !== undefined) return cached || undefined;
@@ -1804,6 +1845,10 @@ function addAliasReferenceRoot(
   roots: Set<string>,
 ) {
   if (!name || name.startsWith("@")) return;
+  if (name.startsWith("operator:")) {
+    if (importedNames.has(name)) roots.add(name);
+    return;
+  }
   const prefix = `${alias}.`;
   if (!name.startsWith(prefix)) return;
   const unqualified = name.slice(prefix.length);
@@ -1870,6 +1915,7 @@ function checkTransitiveSupportReferences(
   const reported = new Set<string>();
   for (const decl of localDeclarations) {
     for (const ref of referencedDeclarationNames(decl, nameIndex)) {
+      if (ref.startsWith("operator:")) continue;
       if (!supportNames.has(ref) || reported.has(ref)) continue;
       reported.add(ref);
       diagnostics.push({
@@ -1892,24 +1938,40 @@ function pruneUnusedImportedDeclarations(
   sourceText?: (sourceId: string) => string | undefined,
   referenceSummaryKey?: string,
 ): Declaration[] {
-  const { byName, ownerByName, nameIndex } = traceImportPhaseSync(
+  const { byName, ownerByName, ownersByMember, nameIndex } = traceImportPhaseSync(
     importTrace,
     "import.prune.collect_names",
     { declarationCount: declarations.length },
     () => {
-      const byName = new Map<string, Declaration[]>();
+      const byName = new Map<string, Array<Declaration & { name: string }>>();
       const ownerByName = new Map<string, string>();
+      const ownersByMember = new Map<string, Set<string>>();
       const declarationNames = new Set<string>();
       for (const decl of declarations) {
+        if (decl.kind === "type_assert") continue;
         const group = byName.get(decl.name) ?? [];
         group.push(decl);
         byName.set(decl.name, group);
+        const member = declarationAttachedMemberName(decl);
+        if (member) {
+          let owners = ownersByMember.get(member);
+          if (!owners) {
+            owners = new Set();
+            ownersByMember.set(member, owners);
+          }
+          owners.add(decl.name);
+        }
         visitDeclarationNames(decl, (name) => {
           ownerByName.set(name, decl.name);
           declarationNames.add(name);
         });
       }
-      return { byName, ownerByName, nameIndex: createDeclarationNameIndex(declarationNames) };
+      return {
+        byName,
+        ownerByName,
+        ownersByMember,
+        nameIndex: createDeclarationNameIndex(declarationNames),
+      };
     },
   );
   const keep = new Set<string>(localNames);
@@ -1939,6 +2001,15 @@ function pruneUnusedImportedDeclarations(
             referenceCount += refs.size;
           }
           for (const ref of refs) {
+            const member = referencedAttachedMemberName(ref);
+            if (member) {
+              for (const owner of ownersByMember.get(member) ?? []) {
+                if (keep.has(owner)) continue;
+                keep.add(owner);
+                work.push(owner);
+              }
+              continue;
+            }
             const owner = ownerByName.get(ref) ?? ref;
             const ownerWasKept = keep.has(owner);
             keep.add(ref);
@@ -1965,6 +2036,10 @@ function pruneUnusedImportedDeclarations(
   });
   const kept: Declaration[] = [];
   for (const decl of declarations) {
+    if (decl.kind === "type_assert") {
+      kept.push(decl);
+      continue;
+    }
     if (localNames.has(decl.name) || keep.has(decl.name)) kept.push(decl);
   }
   return kept;
@@ -2079,8 +2154,17 @@ function referencedDeclarationNames(
   const refs = new Set<string>();
   const add = (name: string | undefined) => {
     if (!name || name.startsWith("@")) return;
+    if (name.startsWith("operator:")) {
+      if (nameIndex.names.has(name)) refs.add(name);
+      return;
+    }
+    const member = attachedMemberReferenceName(name);
     const match = longestReferencedName(name, nameIndex);
-    if (match) refs.add(match);
+    if (match) {
+      refs.add(match);
+      return;
+    }
+    if (member) refs.add(member);
   };
   const addTypeSource = (source: string | undefined) => {
     if (!source) return;
@@ -2141,7 +2225,7 @@ function visitDeclarationReferenceNames(
             stmt.kind === "destructure_let"
           ) {
             visitExpr(stmt.value);
-          } else if (stmt.kind === "proof_const") visitTypeExpr(stmt.value);
+          } else if (stmt.kind === "type_assert") visitTypeExpr(stmt.value);
           else if (stmt.kind === "debug_trace") stmt.args.forEach(visitExpr);
         }
         visitExpr(expr.expr);
@@ -2161,6 +2245,7 @@ function visitDeclarationReferenceNames(
         visitExpr(expr.index);
         return;
       case "binary":
+        add(`operator:${expr.op}`);
         visitExpr(expr.left);
         visitExpr(expr.right);
         return;
@@ -2179,6 +2264,7 @@ function visitDeclarationReferenceNames(
         visitExpr(expr.value);
         for (const arm of expr.arms) {
           visitPattern(arm.pattern);
+          visitExpr(arm.guard);
           visitExpr(arm.value);
         }
         return;
@@ -2205,7 +2291,7 @@ function visitDeclarationReferenceNames(
         return;
       case "block":
         for (const stmt of expr.statements) {
-          if (stmt.kind === "proof_const") {
+          if (stmt.kind === "type_assert") {
             visitTypeExpr(stmt.value);
           } else if (stmt.kind === "let" || stmt.kind === "destructure_let") {
             if (stmt.kind === "let") addTypeSource(stmt.type);
@@ -2230,6 +2316,7 @@ function visitDeclarationReferenceNames(
       case "type_hole":
         return;
       case "type_call":
+        add(typeMemberRequirementReference(expr));
         visitTypeExpr(expr.callee);
         expr.args.forEach(visitTypeExpr);
         return;
@@ -2293,6 +2380,10 @@ function visitDeclarationReferenceNames(
     visitTypeExpr(block.expr);
   };
   const visitDecl = (item: Declaration) => {
+    if (item.kind === "type_assert") {
+      visitTypeExpr(item.value);
+      return;
+    }
     if (item.kind === "fn") {
       add(item.memberOf?.owner);
       for (const param of item.params) {
@@ -2437,7 +2528,8 @@ function destructureImportedDeclarations(
   for (const binding of bindings) {
     bindingNames.add(binding.name);
   }
-  const { localDecls } = splitModuleLocalDeclarations(program);
+  const { localDecls: allLocalDecls } = splitModuleLocalDeclarations(program);
+  const localDecls = allLocalDecls.filter((decl) => decl.kind !== "type_assert");
   const localDeclarationNames = declarationPrimaryNameSet(localDecls);
   for (const binding of bindings) {
     if (!localDeclarationNames.has(binding.name)) {
@@ -3307,6 +3399,7 @@ function recordCompileTrace(
 }
 
 function declarationName(decl: Declaration): string {
+  if (decl.kind === "type_assert") return "";
   return decl.kind === "operator" ? operatorDeclarationName(decl) : decl.name;
 }
 
@@ -3397,7 +3490,7 @@ function cachedQualifiedLocalDeclarations(
     ? qualifiedLocalDeclarationsCacheKey(declarations, alias, names, localSourceKey)
     : undefined;
   const cached = cacheKey ? cache?.get(cacheKey) : undefined;
-  if (cached) return cached;
+  if (cached) return cloneAstValue(cached) as Declaration[];
   const qualified = cachedQualifiedDeclarations(
     declarations,
     alias,
@@ -3405,7 +3498,7 @@ function cachedQualifiedLocalDeclarations(
     declarationCache,
     semanticHashes,
   );
-  if (cacheKey) cache?.set(cacheKey, qualified);
+  if (cacheKey) cache?.set(cacheKey, cloneAstValue(qualified) as Declaration[]);
   return qualified;
 }
 
@@ -3423,11 +3516,11 @@ function cachedQualifiedDeclarations(
     const cacheKey = qualifiedDeclarationCacheKey(decl, alias, namesKey, semanticHashes);
     const cached = cache.get(cacheKey);
     if (cached) {
-      qualified.push(cached);
+      qualified.push(cloneAstValue(cached) as Declaration);
       continue;
     }
     const next = qualifyDeclaration(decl, alias, names);
-    cache.set(cacheKey, next);
+    cache.set(cacheKey, cloneAstValue(next) as Declaration);
     qualified.push(next);
   }
   return qualified;
@@ -3482,6 +3575,7 @@ function collectDeclarationNames(decl: Declaration): string[] {
 }
 
 function visitDeclarationNames(decl: Declaration, add: (name: string) => void) {
+  if (decl.kind === "type_assert") return;
   if (decl.kind === "operator") {
     add(operatorDeclarationName(decl));
     return;
@@ -3515,6 +3609,7 @@ function collectDeclarationNameSet(declarations: Declaration[]): Set<string> {
 function declarationPrimaryNameSet(declarations: Declaration[]): Set<string> {
   const names = new Set<string>();
   for (const decl of declarations) {
+    if (decl.kind === "type_assert") continue;
     names.add(declarationName(decl));
   }
   return names;
@@ -3527,6 +3622,9 @@ function qualifyNameSet(names: Set<string>, alias: string): Set<string> {
 }
 
 function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>): Declaration {
+  if (decl.kind === "type_assert") {
+    return withMeta(decl, { ...decl, value: qualifyTypeExpr(decl.value, alias, names) });
+  }
   if (decl.kind === "fn") {
     const locals = paramLocalNames(decl.params);
     return withMeta(decl, {
@@ -3820,7 +3918,7 @@ function qualifyBlockBody(
       currentLocals = withLocals(currentLocals, stmt.names);
       return qualified;
     }
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
     }
     return stmt;
@@ -3871,7 +3969,7 @@ function qualifyDoBody(
       currentLocals = withLocals(currentLocals, stmt.names);
       return qualified;
     }
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       return withMeta(stmt, { ...stmt, value: qualifyTypeExpr(stmt.value, alias, names) });
     }
     return stmt;

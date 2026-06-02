@@ -18,20 +18,23 @@ type fn Dequeued(a: type) -> type {
   struct(Dequeued)
 }
 
-fn Queue::empty(const a: type) -> Queue(a) {
+fn Queue::empty() -> Queue(a) {
   Queue {items: layout.HeapArray::empty(a), front: 0}
 }
 
-fn Queue::len(const a: type, xs: Queue(a)) -> i32 {
-  layout.HeapArray::len(a, xs.items) - xs.front
+fn Queue::len(xs: Queue(a)) -> i32 {
+  xs.items.len - xs.front
 }
 
-fn Queue::is_empty(const a: type, xs: Queue(a)) -> bool {
-  Queue::len(a, xs) <= 0
+fn Queue::is_empty(xs: Queue(a)) -> bool {
+  Queue::len(xs) <= 0
+}
+
+fn Queue::get(xs: Queue(a), index: i32) -> a {
+  layout.HeapArray::get(a, xs.items, xs.front + index)
 }
 
 fn Queue::push_back(
-  const a: type,
   xs: Queue(a),
   value: a
 ) -> Queue(a) {
@@ -41,8 +44,8 @@ fn Queue::push_back(
   }
 }
 
-fn Queue::peek_front(const a: type, xs: Queue(a)) -> core.Option(a) {
-  match Queue::is_empty(a, xs) {
+fn Queue::peek_front(xs: Queue(a)) -> core.Option(a) {
+  match Queue::is_empty(xs) {
     true => None,
     false => option.some(layout.HeapArray::get(
       a,
@@ -52,8 +55,8 @@ fn Queue::peek_front(const a: type, xs: Queue(a)) -> core.Option(a) {
   }
 }
 
-fn Queue::pop_front(const a: type, xs: Queue(a)) -> core.Option(Dequeued(a)) {
-  match Queue::is_empty(a, xs) {
+fn Queue::pop_front(xs: Queue(a)) -> core.Option(Dequeued(a)) {
+  match Queue::is_empty(xs) {
     true => None,
     false => option.some(Dequeued {
       value: layout.HeapArray::get(
@@ -63,5 +66,134 @@ fn Queue::pop_front(const a: type, xs: Queue(a)) -> core.Option(Dequeued(a)) {
       ),
       queue: Queue {items: xs.items, front: xs.front + 1},
     }),
+  }
+}
+
+fn Queue::pure(value: a) -> Queue(a) {
+  Queue::push_back(Queue::empty(), value)
+}
+
+fn Queue::append(xs: Queue(a), ys: Queue(a)) -> Queue(a) {
+  Queue::append_loop(xs, ys, 0)
+}
+
+fn Queue::append_loop(
+  out: Queue(a),
+  ys: Queue(a),
+  index: i32
+) -> Queue(a) {
+  match index < Queue::len(ys) {
+    true => Queue::append_loop(
+      Queue::push_back(out, Queue::get(ys, index)),
+      ys,
+      index + 1
+    ),
+    false => out,
+  }
+}
+
+fn Queue::map(
+  const f: fn(x: a) -> b,
+  xs: Queue(a)
+) -> Queue(b) {
+  Queue::map_loop(xs, f, 0, Queue::empty())
+}
+
+fn Queue::map_loop(
+  xs: Queue(a),
+  const f: fn(x: a) -> b,
+  index: i32,
+  out: Queue(b)
+) -> Queue(b) {
+  match index < Queue::len(xs) {
+    true => Queue::map_loop(
+      xs,
+      f,
+      index + 1,
+      Queue::push_back(out, f(Queue::get(xs, index)))
+    ),
+    false => out,
+  }
+}
+
+fn Queue::apply(fns: Queue(fn(x: a) -> b), xs: Queue(a)) -> Queue(b) {
+  Queue::apply_loop(fns, xs, 0, Queue::empty())
+}
+
+fn Queue::apply_loop(
+  fns: Queue(fn(x: a) -> b),
+  xs: Queue(a),
+  index: i32,
+  out: Queue(b)
+) -> Queue(b) {
+  match index < Queue::len(fns) {
+    true => Queue::apply_loop(
+      fns,
+      xs,
+      index + 1,
+      Queue::apply_one(Queue::get(fns, index), xs, 0, out)
+    ),
+    false => out,
+  }
+}
+
+fn Queue::apply_one(
+  f: fn(x: a) -> b,
+  xs: Queue(a),
+  index: i32,
+  out: Queue(b)
+) -> Queue(b) {
+  match index < Queue::len(xs) {
+    true => Queue::apply_one(
+      f,
+      xs,
+      index + 1,
+      Queue::push_back(out, f(Queue::get(xs, index)))
+    ),
+    false => out,
+  }
+}
+
+fn Queue::bind(xs: Queue(a), const f: fn(x: a) -> Queue(b)) -> Queue(b) {
+  Queue::bind_loop(xs, f, 0, Queue::empty())
+}
+
+fn Queue::bind_loop(
+  xs: Queue(a),
+  const f: fn(x: a) -> Queue(b),
+  index: i32,
+  out: Queue(b)
+) -> Queue(b) {
+  match index < Queue::len(xs) {
+    true => Queue::get(xs, index)
+      \value -> f(value)
+      \next -> Queue::append(out, next)
+      \appended -> Queue::bind_loop(xs, f, index + 1, appended),
+    false => out,
+  }
+}
+
+fn Queue::fold(
+  xs: Queue(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  Queue::fold_loop(xs, acc, f, 0)
+}
+
+fn Queue::fold_loop(
+  xs: Queue(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b,
+  index: i32
+) -> b {
+  match index < Queue::len(xs) {
+    true => Queue::fold_loop(
+      xs,
+      f(acc, Queue::get(xs, index)),
+      f,
+      index + 1
+    ),
+    false => acc,
   }
 }

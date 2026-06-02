@@ -62,7 +62,7 @@ Type functions currently cover several compile-time concepts:
 - Static contracts: `@require`-checked proofs such as `Eq(t)`, `Functor(t)`, `Droppable(t)`, and
   layout predicates.
 - Constructor-polymorphic helpers: generic functions can infer type constructors at call sites and
-  use local proof consts such as `const Mapper = Functor(t);`.
+  evaluate local type-level checks such as `@assert(Functor(t));`.
 - Reader, state, and effect carriers: `prelude.monad` exposes compiler-lowered `Reader` and `State`
   computations with `run`, `eval`, and `exec`; `prelude.effect` supports typed reader/state rows
   such as `effect.Eff({state: Store, reader: Env}, A)` with explicit handlers.
@@ -73,7 +73,7 @@ Type functions currently cover several compile-time concepts:
   static constraints as compile-time type-function contracts.
 
 See `examples/type_fn_memory.fig` for a checked memory-model sketch that ties these pieces together
-without adding runtime proof parameters.
+without adding runtime evidence values.
 
 ## Branch-Bit Memory Model
 

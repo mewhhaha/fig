@@ -1,3 +1,5 @@
+const ops = @import("prelude.operators");
+
 type fn RangeI32() {
   let RangeI32 = {start: i32, end: i32};
   struct(RangeI32)

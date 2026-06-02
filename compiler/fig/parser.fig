@@ -2,6 +2,7 @@ const ast = @import("./ast.fig");
 const combinator = @import("./combinator.fig");
 const diagnostic = @import("./diagnostic.fig");
 const layout = @import("prelude.layout");
+const vec = @import("prelude.vec");
 const span = @import("./span.fig");
 const stream = @import("./stream.fig");
 const textlex = @import("./textlex.fig");
@@ -30,7 +31,7 @@ type ParamFrame = struct {
 }
 
 type ParamListFrame = struct {
-  params: layout.HeapArray(ParamFrame),
+  params: vec.Vec(ParamFrame),
   count: i32,
   consumed: i32,
 }
@@ -258,6 +259,14 @@ type TextBoolMatchTokenScan = struct {
   bracket_depth: i32,
 }
 
+type TextMatchLiteralResultScan = struct {
+  index: i32,
+  close_index: i32,
+  result_type: i32,
+  arm_count: i32,
+  failed: bool,
+}
+
 type TextMatchValuesSegments = struct {
   start: i32,
   limit: i32,
@@ -369,6 +378,22 @@ type TextNamedTypeLookupScan = struct {
   depth: i32,
 }
 
+type TextDependencyReachScan = struct {
+  index: i32,
+  limit: i32,
+  brace_depth: i32,
+  paren_depth: i32,
+  current_hash: i32,
+  target_hash: i32,
+  budget: i32,
+}
+
+type TextDeclarationDependencyTarget = struct {
+  found: bool,
+  hash: i32,
+  edge_tag: i32,
+}
+
 type TextDirectImportContext = struct {
   source: textlex.TextTokenStream,
   import_source: textlex.TextTokenStream,
@@ -415,7 +440,7 @@ fn param_frame(param: ast.Param, consumed: i32) -> ParamFrame {
 }
 
 fn param_list_frame(
-  params: layout.HeapArray(ParamFrame),
+  params: vec.Vec(ParamFrame),
   count: i32,
   consumed: i32
 ) -> ParamListFrame {
@@ -427,7 +452,7 @@ fn param_list_frame(
 }
 
 fn empty_param_list() -> ParamListFrame {
-  param_list_frame(layout.HeapArray::empty(ParamFrame), 0, 0)
+  param_list_frame(vec.Vec::new(ParamFrame, 0), 0, 0)
 }
 
 fn text_param_signature_scan(
@@ -586,7 +611,7 @@ fn push_param_frame(
   separator_width: i32
 ) -> ParamListFrame {
   param_list_frame(
-    layout.HeapArray::push(ParamFrame, value.params, param),
+    vec.Vec::push(value.params, param),
     value.count + 1,
     value.consumed + param.consumed + separator_width
   )
@@ -1436,32 +1461,6 @@ fn text_punctuation_scan_step(
   }
 }
 
-fn text_punctuation_scan_skip4(
-  source: textlex.TextTokenStream,
-  limit: i32,
-  scan: TextPunctuationScan
-) -> TextPunctuationScan {
-  let one = text_punctuation_scan_step(source, limit, scan);
-  let two = text_punctuation_scan_step(source, limit, one);
-  let three = text_punctuation_scan_step(source, limit, two);
-  text_punctuation_scan_step(source, limit, three)
-}
-
-fn text_punctuation_scan_skip32(
-  source: textlex.TextTokenStream,
-  limit: i32,
-  scan: TextPunctuationScan
-) -> TextPunctuationScan {
-  let four = text_punctuation_scan_skip4(source, limit, scan);
-  let eight = text_punctuation_scan_skip4(source, limit, four);
-  let twelve = text_punctuation_scan_skip4(source, limit, eight);
-  let sixteen = text_punctuation_scan_skip4(source, limit, twelve);
-  let twenty = text_punctuation_scan_skip4(source, limit, sixteen);
-  let twenty_four = text_punctuation_scan_skip4(source, limit, twenty);
-  let twenty_eight = text_punctuation_scan_skip4(source, limit, twenty_four);
-  text_punctuation_scan_skip4(source, limit, twenty_eight)
-}
-
 fn text_punctuation_scan_loop(
   source: textlex.TextTokenStream,
   limit: i32,
@@ -1469,10 +1468,10 @@ fn text_punctuation_scan_loop(
 ) -> i32 {
   match scan.done {
     true => scan.result,
-    false => text_punctuation_scan_loop(
+    false => rec(
       source,
       limit,
-      text_punctuation_scan_skip32(source, limit, scan)
+      text_punctuation_scan_step(source, limit, scan)
     ),
   }
 }
@@ -1548,32 +1547,6 @@ fn text_balanced_punctuation_scan_step(
   }
 }
 
-fn text_balanced_punctuation_scan_skip4(
-  source: textlex.TextTokenStream,
-  limit: i32,
-  scan: TextBalancedPunctuationScan
-) -> TextBalancedPunctuationScan {
-  let one = text_balanced_punctuation_scan_step(source, limit, scan);
-  let two = text_balanced_punctuation_scan_step(source, limit, one);
-  let three = text_balanced_punctuation_scan_step(source, limit, two);
-  text_balanced_punctuation_scan_step(source, limit, three)
-}
-
-fn text_balanced_punctuation_scan_skip32(
-  source: textlex.TextTokenStream,
-  limit: i32,
-  scan: TextBalancedPunctuationScan
-) -> TextBalancedPunctuationScan {
-  let four = text_balanced_punctuation_scan_skip4(source, limit, scan);
-  let eight = text_balanced_punctuation_scan_skip4(source, limit, four);
-  let twelve = text_balanced_punctuation_scan_skip4(source, limit, eight);
-  let sixteen = text_balanced_punctuation_scan_skip4(source, limit, twelve);
-  let twenty = text_balanced_punctuation_scan_skip4(source, limit, sixteen);
-  let twenty_four = text_balanced_punctuation_scan_skip4(source, limit, twenty);
-  let twenty_eight = text_balanced_punctuation_scan_skip4(source, limit, twenty_four);
-  text_balanced_punctuation_scan_skip4(source, limit, twenty_eight)
-}
-
 fn text_balanced_punctuation_scan_loop(
   source: textlex.TextTokenStream,
   limit: i32,
@@ -1581,10 +1554,10 @@ fn text_balanced_punctuation_scan_loop(
 ) -> i32 {
   match scan.done {
     true => scan.result,
-    false => text_balanced_punctuation_scan_loop(
+    false => rec(
       source,
       limit,
-      text_balanced_punctuation_scan_skip32(source, limit, scan)
+      text_balanced_punctuation_scan_step(source, limit, scan)
     ),
   }
 }
@@ -1711,77 +1684,18 @@ fn function_decl_from_signature(
 }
 
 fn text_function_decl_parser(seed: i32) -> textparser.TextParser(DeclFrame) {
-  \input_value -> match textparser.run(
-    textparser.expect_kind(token.FnKw, 1),
-    input_value
-  ) {
-    Err(error) => err_decl(error),
-    Ok(fn_token) => match textparser.run(
-      textparser.any_token(),
-      textparser.with_state(input_value, fn_token.state)
-    ) {
-      Err(error) => err_decl(error),
-      Ok(name) => match textparser.run(
-        textparser.expect_punctuation(textlex.PunctLeftParen),
-        textparser.with_state(input_value, name.state)
-      ) {
-        Err(error) => err_decl(error),
-        Ok(left_paren) => match textparser.run(
-          text_param_list_parser(),
-          textparser.with_state(input_value, left_paren.state)
-        ) {
-          Err(error) => err_decl(error),
-          Ok(params) => match textparser.run(
-            textparser.expect_punctuation(textlex.PunctRightParen),
-            textparser.with_state(input_value, params.state)
-          ) {
-            Err(error) => err_decl(error),
-            Ok(right_paren) => match textparser.run(
-              textparser.expect_punctuation(textlex.PunctArrow),
-              textparser.with_state(input_value, right_paren.state)
-            ) {
-              Err(error) => err_decl(error),
-              Ok(arrow) => match textparser.run(
-                text_type_annotation_parser(),
-                textparser.with_state(input_value, arrow.state)
-              ) {
-                Err(error) => err_decl(error),
-                Ok(return_type) => match textparser.run(
-                  textparser.expect_punctuation(textlex.PunctLeftBrace),
-                  textparser.with_state(input_value, return_type.state)
-                ) {
-                  Err(error) => err_decl(error),
-                  Ok(left_brace) => match textparser.run(
-                    text_expr_until_punctuation(seed, textlex.PunctRightBrace),
-                    textparser.with_state(input_value, left_brace.state)
-                  ) {
-                    Err(error) => err_decl(error),
-                    Ok(body) => match textparser.run(
-                      textparser.expect_punctuation(textlex.PunctRightBrace),
-                      textparser.with_state(
-                        input_value,
-                        combinator.state(body.state.cursor, input_value.state.limit)
-                      )
-                    ) {
-                      Err(error) => err_decl(error),
-                      Ok(done) => ok_decl(
-                        done.state,
-                        function_decl_from_parts(
-                          name.value,
-                          params.value,
-                          return_type.value,
-                          body.value
-                        )
-                      ),
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
+  do @applicative(textparser.TextParser(_)) {
+    textparser.expect_kind(token.FnKw, 1);
+    name <- textparser.any_token();
+    textparser.expect_punctuation(textlex.PunctLeftParen);
+    params <- text_param_list_parser();
+    textparser.expect_punctuation(textlex.PunctRightParen);
+    textparser.expect_punctuation(textlex.PunctArrow);
+    return_type <- text_type_annotation_parser();
+    textparser.expect_punctuation(textlex.PunctLeftBrace);
+    body <- text_expr_until_punctuation(seed, textlex.PunctRightBrace);
+    textparser.expect_punctuation(textlex.PunctRightBrace);
+    pure(function_decl_from_parts(name, params, return_type, body))
   }
 }
 
@@ -1861,32 +1775,6 @@ fn count_text_param_scan_continue(
   )
 }
 
-fn count_text_param_scan_skip4(
-  source: textlex.TextTokenStream,
-  close_index: i32,
-  scan: TextParamCountScan
-) -> TextParamCountScan {
-  let one = count_text_param_scan_step(source, close_index, scan);
-  let two = count_text_param_scan_step(source, close_index, one);
-  let three = count_text_param_scan_step(source, close_index, two);
-  count_text_param_scan_step(source, close_index, three)
-}
-
-fn count_text_param_scan_skip32(
-  source: textlex.TextTokenStream,
-  close_index: i32,
-  scan: TextParamCountScan
-) -> TextParamCountScan {
-  let four = count_text_param_scan_skip4(source, close_index, scan);
-  let eight = count_text_param_scan_skip4(source, close_index, four);
-  let twelve = count_text_param_scan_skip4(source, close_index, eight);
-  let sixteen = count_text_param_scan_skip4(source, close_index, twelve);
-  let twenty = count_text_param_scan_skip4(source, close_index, sixteen);
-  let twenty_four = count_text_param_scan_skip4(source, close_index, twenty);
-  let twenty_eight = count_text_param_scan_skip4(source, close_index, twenty_four);
-  count_text_param_scan_skip4(source, close_index, twenty_eight)
-}
-
 fn count_text_param_scan_loop(
   source: textlex.TextTokenStream,
   close_index: i32,
@@ -1894,10 +1782,10 @@ fn count_text_param_scan_loop(
 ) -> TextParamCountScan {
   match scan.index >= close_index {
     true => scan,
-    false => count_text_param_scan_loop(
+    false => rec(
       source,
       close_index,
-      count_text_param_scan_skip32(source, close_index, scan)
+      count_text_param_scan_step(source, close_index, scan)
     ),
   }
 }
@@ -2489,6 +2377,49 @@ fn text_runtime_param_count_between(
       }
     ),
   }
+}
+
+fn text_first_runtime_param_type_class_between(
+  source: textlex.TextTokenStream,
+  index: i32,
+  close_index: i32
+) -> i32 {
+  match index >= close_index {
+    true => text_type_class_unknown_tag(),
+    false => text_function_param_next_comma(
+      source,
+      index,
+      close_index
+    ) \comma -> match text_param_segment_is_runtime(source, index, comma) {
+      true => text_param_resolved_type_class_for_segment(
+        source,
+        index,
+        comma
+      ),
+      false => text_first_runtime_param_type_class_between(
+        source,
+        match comma < close_index {
+          true => comma + 1,
+          false => close_index,
+        },
+        close_index
+      ),
+    },
+  }
+}
+
+fn text_function_first_runtime_param_type_class(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  let next = text_declaration_end_from_index(source, index);
+  let open_paren = text_function_open_paren_index(source, index, next);
+  let close_paren = text_function_close_paren_index(source, open_paren, next);
+  text_first_runtime_param_type_class_between(
+    source,
+    open_paren + 1,
+    close_paren
+  )
 }
 
 fn text_runtime_param_index_next_index(
@@ -3226,6 +3157,103 @@ fn text_function_local_let_count(
   text_function_local_keyword_count(source, index, token.LetKw)
 }
 
+fn text_static_marker_hash() -> i32 {
+  textlex.TextCharCode::StaticMarker
+}
+
+fn text_require_hash() -> i32 {
+  994499709
+}
+
+fn text_type_assert_token_matches(
+  source: textlex.TextTokenStream,
+  index: i32,
+  limit: i32
+) -> bool {
+  let has_name = index + 1 < limit;
+  match has_name {
+    false => false,
+    true => match punctuation_matches(source, index, textlex.PunctOther) {
+      false => false,
+      true => match textlex.text_hash_at(source, index) == text_static_marker_hash() {
+        false => false,
+        true => match text_token_weight_matches(
+          source,
+          index + 1,
+          token.TokenKindWeight::Identifier
+        ) {
+          false => false,
+          true => textlex.text_hash_at(source, index + 1) == text_require_hash(),
+        },
+      },
+    },
+  }
+}
+
+fn text_function_local_type_assert_next_total(
+  source: textlex.TextTokenStream,
+  scan: TextFunctionLocalLetScan
+) -> i32 {
+  let top_level = text_depth_is_top_level(scan.brace_depth, scan.paren_depth);
+  match top_level {
+    false => scan.total,
+    true => match text_type_assert_token_matches(source, scan.index, scan.limit) {
+      true => scan.total + 1,
+      false => scan.total,
+    },
+  }
+}
+
+fn text_function_local_type_assert_count_between(
+  source: textlex.TextTokenStream,
+  scan: TextFunctionLocalLetScan
+) -> i32 {
+  if scan.index >= scan.limit {
+    scan.total
+  } else {
+    let next_total = text_function_local_type_assert_next_total(source, scan);
+    let next_brace_depth = brace_depth_after_token(source, scan.index, scan.brace_depth);
+    let next_paren_depth = paren_depth_after_token(source, scan.index, scan.paren_depth);
+    rec(
+      source,
+      text_function_local_let_scan(
+        scan.index + 1,
+        scan.limit,
+        next_brace_depth,
+        next_paren_depth,
+        next_total
+      )
+    )
+  }
+}
+
+fn text_function_local_type_assert_count(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  let next = text_declaration_end_from_index(source, index);
+  let open_paren = text_function_open_paren_index(source, index, next);
+  let close_paren = text_function_close_paren_index(source, open_paren, next);
+  let arrow = text_function_arrow_index(source, close_paren, next);
+  let left_brace = text_function_left_brace_index(source, arrow, next);
+  let right_brace = find_text_expression_limit(
+    source,
+    left_brace + 1,
+    next,
+    textlex.PunctRightBrace
+  );
+  text_function_local_type_assert_count_between(
+    source,
+    text_function_local_let_scan(
+      left_brace + 1,
+      right_brace,
+      0,
+      0,
+      0
+    )
+  )
+}
+
 fn text_local_let_name_hash(
   source: textlex.TextTokenStream,
   index: i32
@@ -3648,13 +3676,6 @@ fn text_function_local_let_resolved_type_class_for_name_hash(
     text_function_local_let_bounds_scan(source, index),
     target_hash
   )
-}
-
-fn text_function_local_proof_const_count(
-  source: textlex.TextTokenStream,
-  index: i32
-) -> i32 {
-  text_function_local_keyword_count(source, index, token.ConstKw)
 }
 
 fn text_value_match_token_matches(
@@ -5054,21 +5075,10 @@ fn text_declaration_function_match_body_delta(
 }
 
 fn text_pub_function_decl_parser(seed: i32) -> textparser.TextParser(DeclFrame) {
-  \input_value -> match textparser.run(
-    textparser.expect_kind(token.PubKw, 1),
-    input_value
-  ) {
-    Err(error) => err_decl(error),
-    Ok(pub_token) => match textparser.run(
-      text_function_decl_parser(seed),
-      textparser.with_state(input_value, pub_token.state)
-    ) {
-      Err(error) => err_decl(error),
-      Ok(fn_decl) => ok_decl(
-        fn_decl.state,
-        pub_function_decl_from_frame(fn_decl.value)
-      ),
-    },
+  do @applicative(textparser.TextParser(_)) {
+    textparser.expect_kind(token.PubKw, 1);
+    fn_decl <- text_function_decl_parser(seed);
+    pure(pub_function_decl_from_frame(fn_decl))
   }
 }
 
@@ -5516,53 +5526,14 @@ fn text_value_decl_parser(
   kind: token.DeclarationKind,
   seed: i32
 ) -> textparser.TextParser(DeclFrame) {
-  \input_value -> match textparser.run(
-    textparser.expect_kind(decl_keyword(kind), 1),
-    input_value
-  ) {
-    Err(error) => err_decl(error),
-    Ok(keyword) => match textparser.run(
-      textparser.any_token(),
-      textparser.with_state(input_value, keyword.state)
-    ) {
-      Err(error) => err_decl(error),
-      Ok(name) => match textparser.run(
-        text_optional_annotation_parser(),
-        textparser.with_state(input_value, name.state)
-      ) {
-        Err(error) => err_decl(error),
-        Ok(annotation) => match textparser.run(
-          textparser.expect_punctuation(textlex.PunctEqual),
-          textparser.with_state(input_value, annotation.state)
-        ) {
-          Err(error) => err_decl(error),
-          Ok(equal) => match textparser.run(
-            text_value_expr_parser(seed),
-            textparser.with_state(input_value, equal.state)
-          ) {
-            Err(error) => err_decl(error),
-            Ok(expr) => match textparser.run(
-              textparser.any_token(),
-              textparser.with_state(
-                input_value,
-                combinator.state(expr.state.cursor, input_value.state.limit)
-              )
-            ) {
-              Err(error) => err_decl(error),
-              Ok(done) => ok_decl(
-                done.state,
-                text_value_decl_frame(
-                  kind,
-                  name.value,
-                  annotation.value,
-                  expr.value
-                )
-              ),
-            },
-          },
-        },
-      },
-    },
+  do @applicative(textparser.TextParser(_)) {
+    textparser.expect_kind(decl_keyword(kind), 1);
+    name <- textparser.any_token();
+    annotation <- text_optional_annotation_parser();
+    textparser.expect_punctuation(textlex.PunctEqual);
+    expr <- text_value_expr_parser(seed);
+    textparser.any_token();
+    pure(text_value_decl_frame(kind, name, annotation, expr))
   }
 }
 
@@ -5580,66 +5551,17 @@ fn text_source_import_decl_frame(
 }
 
 fn text_source_import_decl_parser() -> textparser.TextParser(DeclFrame) {
-  \input_value -> match textparser.run(
-    textparser.expect_kind(token.ConstKw, 1),
-    input_value
-  ) {
-    Err(error) => err_decl(error),
-    Ok(const_token) => match textparser.run(
-      textparser.any_token(),
-      textparser.with_state(input_value, const_token.state)
-    ) {
-      Err(error) => err_decl(error),
-      Ok(alias) => match textparser.run(
-        textparser.expect_punctuation(textlex.PunctEqual),
-        textparser.with_state(input_value, alias.state)
-      ) {
-        Err(error) => err_decl(error),
-        Ok(equal) => match textparser.run(
-          textparser.any_token(),
-          textparser.with_state(input_value, equal.state)
-        ) {
-          Err(error) => err_decl(error),
-          Ok(at_token) => match textparser.run(
-            textparser.expect_kind(token.Import, 1),
-            textparser.with_state(input_value, at_token.state)
-          ) {
-            Err(error) => err_decl(error),
-            Ok(import_token) => match textparser.run(
-              textparser.expect_punctuation(textlex.PunctLeftParen),
-              textparser.with_state(input_value, import_token.state)
-            ) {
-              Err(error) => err_decl(error),
-              Ok(left_paren) => match textparser.run(
-                textparser.expect_kind(token.StringLiteral, 1),
-                textparser.with_state(input_value, left_paren.state)
-              ) {
-                Err(error) => err_decl(error),
-                Ok(module_name) => match textparser.run(
-                  textparser.expect_punctuation(textlex.PunctRightParen),
-                  textparser.with_state(input_value, module_name.state)
-                ) {
-                  Err(error) => err_decl(error),
-                  Ok(right_paren) => match textparser.run(
-                    textparser.any_token(),
-                    textparser.with_state(input_value, right_paren.state)
-                  ) {
-                    Err(error) => err_decl(error),
-                    Ok(done) => ok_decl(
-                      done.state,
-                      text_source_import_decl_frame(
-                        alias.value,
-                        module_name.value
-                      )
-                    ),
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
+  do @applicative(textparser.TextParser(_)) {
+    textparser.expect_kind(token.ConstKw, 1);
+    alias <- textparser.any_token();
+    textparser.expect_punctuation(textlex.PunctEqual);
+    textparser.any_token();
+    textparser.expect_kind(token.Import, 1);
+    textparser.expect_punctuation(textlex.PunctLeftParen);
+    module_name <- textparser.expect_kind(token.StringLiteral, 1);
+    textparser.expect_punctuation(textlex.PunctRightParen);
+    textparser.any_token();
+    pure(text_source_import_decl_frame(alias, module_name))
   }
 }
 
@@ -6004,46 +5926,6 @@ fn next_text_declaration_index(
   }
 }
 
-fn next_text_declaration_cursor_step(
-  source: textlex.TextTokenStream,
-  index: i32,
-  limit: i32
-) -> i32 {
-  match index < limit {
-    false => limit,
-    true => match is_text_declaration_start(source, index) {
-      true => index,
-      false => index + 1,
-    },
-  }
-}
-
-fn next_text_declaration_cursor_skip4(
-  source: textlex.TextTokenStream,
-  index: i32,
-  limit: i32
-) -> i32 {
-  let one = next_text_declaration_cursor_step(source, index, limit);
-  let two = next_text_declaration_cursor_step(source, one, limit);
-  let three = next_text_declaration_cursor_step(source, two, limit);
-  next_text_declaration_cursor_step(source, three, limit)
-}
-
-fn next_text_declaration_cursor_skip32(
-  source: textlex.TextTokenStream,
-  index: i32,
-  limit: i32
-) -> i32 {
-  let four = next_text_declaration_cursor_skip4(source, index, limit);
-  let eight = next_text_declaration_cursor_skip4(source, four, limit);
-  let twelve = next_text_declaration_cursor_skip4(source, eight, limit);
-  let sixteen = next_text_declaration_cursor_skip4(source, twelve, limit);
-  let twenty = next_text_declaration_cursor_skip4(source, sixteen, limit);
-  let twenty_four = next_text_declaration_cursor_skip4(source, twenty, limit);
-  let twenty_eight = next_text_declaration_cursor_skip4(source, twenty_four, limit);
-  next_text_declaration_cursor_skip4(source, twenty_eight, limit)
-}
-
 fn text_declaration_scan_step(
   source: textlex.TextTokenStream,
   limit: i32,
@@ -6126,116 +6008,6 @@ fn text_declaration_scan_advance(
   }
 }
 
-fn text_declaration_scan_skip4(
-  source: textlex.TextTokenStream,
-  limit: i32,
-  declaration_line: i32,
-  scan: TextDeclarationScan
-) -> TextDeclarationScan {
-  let one = text_declaration_scan_step(source, limit, declaration_line, scan);
-  let two = text_declaration_scan_step(source, limit, declaration_line, one);
-  let three = text_declaration_scan_step(source, limit, declaration_line, two);
-  text_declaration_scan_step(source, limit, declaration_line, three)
-}
-
-fn text_declaration_scan_skip32(
-  source: textlex.TextTokenStream,
-  limit: i32,
-  declaration_line: i32,
-  scan: TextDeclarationScan
-) -> TextDeclarationScan {
-  let four = text_declaration_scan_skip4(source, limit, declaration_line, scan);
-  let eight = text_declaration_scan_skip4(source, limit, declaration_line, four);
-  let twelve = text_declaration_scan_skip4(source, limit, declaration_line, eight);
-  let sixteen = text_declaration_scan_skip4(source, limit, declaration_line, twelve);
-  let twenty = text_declaration_scan_skip4(source, limit, declaration_line, sixteen);
-  let twenty_four = text_declaration_scan_skip4(source, limit, declaration_line, twenty);
-  let twenty_eight = text_declaration_scan_skip4(source, limit, declaration_line, twenty_four);
-  text_declaration_scan_skip4(source, limit, declaration_line, twenty_eight)
-}
-
-fn text_declaration_scan_skip256(
-  source: textlex.TextTokenStream,
-  limit: i32,
-  declaration_line: i32,
-  scan: TextDeclarationScan
-) -> TextDeclarationScan {
-  let thirty_two = text_declaration_scan_skip32(source, limit, declaration_line, scan);
-  let sixty_four = text_declaration_scan_skip32(source, limit, declaration_line, thirty_two);
-  let ninety_six = text_declaration_scan_skip32(source, limit, declaration_line, sixty_four);
-  let one_twenty_eight = text_declaration_scan_skip32(
-    source,
-    limit,
-    declaration_line,
-    ninety_six
-  );
-  let one_sixty = text_declaration_scan_skip32(
-    source,
-    limit,
-    declaration_line,
-    one_twenty_eight
-  );
-  let one_ninety_two = text_declaration_scan_skip32(
-    source,
-    limit,
-    declaration_line,
-    one_sixty
-  );
-  let two_twenty_four = text_declaration_scan_skip32(
-    source,
-    limit,
-    declaration_line,
-    one_ninety_two
-  );
-  text_declaration_scan_skip32(source, limit, declaration_line, two_twenty_four)
-}
-
-fn text_declaration_scan_skip2048(
-  source: textlex.TextTokenStream,
-  limit: i32,
-  declaration_line: i32,
-  scan: TextDeclarationScan
-) -> TextDeclarationScan {
-  let two_fifty_six = text_declaration_scan_skip256(source, limit, declaration_line, scan);
-  let five_twelve = text_declaration_scan_skip256(
-    source,
-    limit,
-    declaration_line,
-    two_fifty_six
-  );
-  let seven_sixty_eight = text_declaration_scan_skip256(
-    source,
-    limit,
-    declaration_line,
-    five_twelve
-  );
-  let ten_twenty_four = text_declaration_scan_skip256(
-    source,
-    limit,
-    declaration_line,
-    seven_sixty_eight
-  );
-  let twelve_eighty = text_declaration_scan_skip256(
-    source,
-    limit,
-    declaration_line,
-    ten_twenty_four
-  );
-  let fifteen_thirty_six = text_declaration_scan_skip256(
-    source,
-    limit,
-    declaration_line,
-    twelve_eighty
-  );
-  let seventeen_ninety_two = text_declaration_scan_skip256(
-    source,
-    limit,
-    declaration_line,
-    fifteen_thirty_six
-  );
-  text_declaration_scan_skip256(source, limit, declaration_line, seventeen_ninety_two)
-}
-
 fn text_declaration_end_index_loop(
   source: textlex.TextTokenStream,
   limit: i32,
@@ -6248,7 +6020,7 @@ fn text_declaration_end_index_loop(
       source,
       limit,
       declaration_line,
-      text_declaration_scan_skip2048(source, limit, declaration_line, scan)
+      text_declaration_scan_step(source, limit, declaration_line, scan)
     ),
   }
 }
@@ -6272,7 +6044,7 @@ fn next_text_declaration_state(
   source: textlex.TextTokenStream
 ) -> combinator.ParseState {
   combinator.state(
-    next_text_declaration_cursor_skip32(source, current.cursor, current.limit),
+    next_text_declaration_index(source, current.cursor, current.limit),
     current.limit
   )
 }
@@ -6394,7 +6166,7 @@ fn text_declaration_summary_delta(
       index,
       decl
     ),
-    35 => text_declaration_function_local_proof_const_delta(
+    35 => text_declaration_function_local_type_assert_delta(
       source,
       index,
       decl
@@ -6555,6 +6327,30 @@ fn text_declaration_summary_total(
       total,
       context.summary_arg
     ),
+    41 => text_declaration_source_import_edge_signature_total(
+      source,
+      index,
+      decl,
+      total
+    ),
+    42 => text_declaration_source_import_graph_diagnostic_signature_total(
+      source,
+      index,
+      decl,
+      total
+    ),
+    43 => text_declaration_dependency_signature_total(
+      source,
+      index,
+      decl,
+      total
+    ),
+    44 => text_declaration_dependency_diagnostic_signature_total(
+      source,
+      index,
+      decl,
+      total
+    ),
     29 => text_declaration_resolved_simple_body_type_check_signature_total(
       source,
       index,
@@ -6643,8 +6439,8 @@ fn text_summary_function_local_lets() -> textmodel.SummaryKind {
   textmodel.SummaryKind::FunctionLocalLets
 }
 
-fn text_summary_function_local_proof_consts() -> textmodel.SummaryKind {
-  textmodel.SummaryKind::FunctionLocalProofConsts
+fn text_summary_function_local_type_asserts() -> textmodel.SummaryKind {
+  textmodel.SummaryKind::FunctionLocalTypeAsserts
 }
 
 fn text_summary_type_result_kind() -> textmodel.SummaryKind {
@@ -6737,6 +6533,14 @@ fn text_summary_resolved_export_abi_signature() -> textmodel.SummaryKind {
 
 fn text_summary_direct_import_type_environment_signature() -> textmodel.SummaryKind {
   textmodel.SummaryKind::DirectImportTypeEnvironmentSignature
+}
+
+fn text_summary_source_import_edge_signature() -> textmodel.SummaryKind {
+  textmodel.SummaryKind::SourceImportEdgeSignature
+}
+
+fn text_summary_declaration_dependency_signature() -> textmodel.SummaryKind {
+  textmodel.SummaryKind::DeclarationDependencySignature
 }
 
 fn text_summary_resolved_simple_body_type_check_signature() -> textmodel.SummaryKind {
@@ -6968,13 +6772,13 @@ fn text_declaration_function_local_let_total(
   }
 }
 
-fn text_declaration_function_local_proof_const_delta(
+fn text_declaration_function_local_type_assert_delta(
   source: textlex.TextTokenStream,
   index: i32,
   _decl: ast.Decl
 ) -> i32 {
   match is_text_function_declaration_start(source, index) {
-    true => text_function_local_proof_const_count(source, index),
+    true => text_function_local_type_assert_count(source, index),
     false => 0,
   }
 }
@@ -7562,6 +7366,74 @@ fn text_expression_root_head_hash_between(
       true => textlex.text_hash_at(source, start),
       false => 0,
     },
+  }
+}
+
+fn text_expression_qualified_head_hash_after_segment(
+  source: textlex.TextTokenStream,
+  segment_index: i32,
+  limit: i32,
+  total: i32
+) -> i32 {
+  let next = segment_index + 1;
+  match next >= limit {
+    true => total,
+    false => match text_head_selector_is_dot(source, next) {
+      true => match next + 1 < limit {
+        true => match text_head_segment_token_matches(source, next + 1) {
+          true => text_expression_qualified_head_hash_after_segment(
+            source,
+            next + 1,
+            limit,
+            text_signature_mix(
+              text_signature_mix(total, 1),
+              textlex.text_hash_at(source, next + 1)
+            )
+          ),
+          false => total,
+        },
+        false => total,
+      },
+      false => match text_head_selector_is_colon_colon(source, next) {
+        true => match next + 2 < limit {
+          true => match text_head_segment_token_matches(source, next + 2) {
+            true => text_expression_qualified_head_hash_after_segment(
+              source,
+              next + 2,
+              limit,
+              text_signature_mix(
+                text_signature_mix(total, 2),
+                textlex.text_hash_at(source, next + 2)
+              )
+            ),
+            false => total,
+          },
+          false => total,
+        },
+        false => total,
+      },
+    },
+  }
+}
+
+fn text_expression_root_qualified_head_hash_between(
+  source: textlex.TextTokenStream,
+  index: i32,
+  limit: i32
+) -> i32 {
+  let start = text_expression_start_skip_trivia(source, index, limit);
+  let has_head = match start < limit {
+    true => text_head_segment_token_matches(source, start),
+    false => false,
+  };
+  match has_head {
+    true => text_expression_qualified_head_hash_after_segment(
+      source,
+      start,
+      limit,
+      textlex.text_hash_at(source, start)
+    ),
+    false => 0,
   }
 }
 
@@ -10892,6 +10764,204 @@ fn text_bool_match_arm_segment_between(
   }
 }
 
+fn text_match_arm_literal_result_type_class_between(
+  source: textlex.TextTokenStream,
+  index: i32,
+  limit: i32
+) -> i32 {
+  let root_kind = text_expression_root_head_kind_tag_between(
+    source,
+    index,
+    limit
+  );
+  let root_type = text_expression_root_type_class_tag_between(
+    source,
+    index,
+    limit
+  );
+  match root_kind == text_expression_root_number_tag() {
+    true => match root_type == text_type_class_i32_tag() {
+      true => text_type_class_i32_tag(),
+      false => text_type_class_unknown_tag(),
+    },
+    false => match root_kind == text_expression_root_bool_tag() {
+      true => match root_type == text_type_class_bool_tag() {
+        true => text_type_class_bool_tag(),
+        false => text_type_class_unknown_tag(),
+      },
+      false => text_type_class_unknown_tag(),
+    },
+  }
+}
+
+fn text_match_literal_result_scan_fail(
+  scan: TextMatchLiteralResultScan
+) -> TextMatchLiteralResultScan {
+  TextMatchLiteralResultScan {
+    index: scan.close_index,
+    close_index: scan.close_index,
+    result_type: text_type_class_unknown_tag(),
+    arm_count: scan.arm_count,
+    failed: true,
+  }
+}
+
+fn text_match_literal_result_next_index(
+  close_index: i32,
+  comma: i32
+) -> i32 {
+  match comma < close_index {
+    true => comma + 1,
+    false => close_index,
+  }
+}
+
+fn text_match_literal_result_scan_accept(
+  scan: TextMatchLiteralResultScan,
+  value_type: i32,
+  next_index: i32
+) -> TextMatchLiteralResultScan {
+  match value_type == text_type_class_unknown_tag() {
+    true => text_match_literal_result_scan_fail(scan),
+    false => match scan.arm_count == 0 {
+      true => TextMatchLiteralResultScan {
+        index: next_index,
+        close_index: scan.close_index,
+        result_type: value_type,
+        arm_count: 1,
+        failed: false,
+      },
+      false => match scan.result_type == value_type {
+        true => TextMatchLiteralResultScan {
+          index: next_index,
+          close_index: scan.close_index,
+          result_type: scan.result_type,
+          arm_count: scan.arm_count + 1,
+          failed: false,
+        },
+        false => text_match_literal_result_scan_fail(scan),
+      },
+    },
+  }
+}
+
+fn text_match_literal_result_scan_step(
+  source: textlex.TextTokenStream,
+  scan: TextMatchLiteralResultScan
+) -> TextMatchLiteralResultScan {
+  let arm_start = text_expression_start_skip_trivia(
+    source,
+    scan.index,
+    scan.close_index
+  );
+  match arm_start >= scan.close_index {
+    true => TextMatchLiteralResultScan {
+      index: scan.close_index,
+      close_index: scan.close_index,
+      result_type: scan.result_type,
+      arm_count: scan.arm_count,
+      failed: scan.failed,
+    },
+    false => text_bool_match_top_level_arrow(
+      source,
+      TextBoolMatchTokenScan {
+        index: arm_start,
+        limit: scan.close_index,
+        paren_depth: 0,
+        brace_depth: 0,
+        bracket_depth: 0,
+      }
+    ) \arrow -> match arrow >= scan.close_index {
+      true => text_match_literal_result_scan_fail(scan),
+      false => text_match_arm_guard_start_between(
+        source,
+        arm_start,
+        arrow
+      ) \guard_start -> match guard_start < arrow {
+        true => text_match_literal_result_scan_fail(scan),
+        false => text_bool_match_top_level_comma(
+          source,
+          TextBoolMatchTokenScan {
+            index: arrow + 2,
+            limit: scan.close_index,
+            paren_depth: 0,
+            brace_depth: 0,
+            bracket_depth: 0,
+          }
+        ) \comma -> text_expression_start_skip_trivia(
+          source,
+          arrow + 2,
+          comma
+        ) \value_start -> text_match_literal_result_scan_accept(
+          scan,
+          text_match_arm_literal_result_type_class_between(
+            source,
+            value_start,
+            comma
+          ),
+          text_match_literal_result_next_index(scan.close_index, comma)
+        ),
+      },
+    },
+  }
+}
+
+fn text_match_literal_result_scan_loop(
+  source: textlex.TextTokenStream,
+  scan: TextMatchLiteralResultScan
+) -> TextMatchLiteralResultScan {
+  match scan.failed {
+    true => scan,
+    false => match scan.index >= scan.close_index {
+      true => scan,
+      false => rec(source, text_match_literal_result_scan_step(source, scan)),
+    },
+  }
+}
+
+fn text_match_literal_result_scan_type_class(
+  scan: TextMatchLiteralResultScan
+) -> i32 {
+  match scan.failed {
+    true => text_type_class_unknown_tag(),
+    false => match scan.arm_count == 0 {
+      true => text_type_class_unknown_tag(),
+      false => scan.result_type,
+    },
+  }
+}
+
+fn text_match_body_literal_result_type_class_between(
+  source: textlex.TextTokenStream,
+  start: i32,
+  limit: i32
+) -> i32 {
+  let open_index = text_root_match_body_open_between(source, start, limit);
+  match open_index < limit {
+    false => text_type_class_unknown_tag(),
+    true => find_text_right_brace(
+      source,
+      open_index + 1,
+      limit,
+      0
+    ) \close_index -> match close_index < limit {
+      false => text_type_class_unknown_tag(),
+      true => text_match_literal_result_scan_type_class(
+        text_match_literal_result_scan_loop(
+          source,
+          TextMatchLiteralResultScan {
+            index: open_index + 1,
+            close_index: close_index,
+            result_type: text_type_class_unknown_tag(),
+            arm_count: 0,
+            failed: false,
+          }
+        )
+      ),
+    },
+  }
+}
+
 fn text_bool_match_after_second_arm_clean(
   source: textlex.TextTokenStream,
   index: i32,
@@ -10986,6 +11056,56 @@ fn text_bool_match_segments_between(
               first,
               second
             ),
+          },
+        },
+      },
+    },
+  }
+}
+
+fn text_function_bool_match_body_segments(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> TextBoolBranchSegments {
+  let runtime_count = text_function_runtime_param_count(source, index);
+  let param_type = text_function_first_runtime_param_type_class(source, index);
+  let start = text_function_body_value_start_index(source, index);
+  let limit = text_function_body_value_limit_index(source, index);
+  let open_index = text_root_match_body_open_between(source, start, limit);
+  match runtime_count == 1 {
+    false => text_bool_branch_segments_missing(limit),
+    true => match param_type == text_type_class_bool_tag() {
+      false => text_bool_branch_segments_missing(limit),
+      true => match open_index < limit {
+        false => text_bool_branch_segments_missing(limit),
+        true => find_text_right_brace(
+          source,
+          open_index + 1,
+          limit,
+          0
+        ) \close_index -> match close_index < limit {
+          false => text_bool_branch_segments_missing(limit),
+          true => text_bool_match_arm_segment_between(
+            source,
+            open_index + 1,
+            close_index
+          ) \first -> match first.found {
+            false => text_bool_branch_segments_missing(limit),
+            true => text_bool_match_arm_segment_between(
+              source,
+              first.next_index,
+              close_index
+            ) \second -> match second.found {
+              false => text_bool_branch_segments_missing(limit),
+              true => text_bool_match_segments_from_arms(
+                source,
+                start,
+                open_index,
+                close_index,
+                first,
+                second
+              ),
+            },
           },
         },
       },
@@ -14080,6 +14200,37 @@ fn text_declaration_root_head_hash(
   }
 }
 
+fn text_function_body_root_qualified_head_hash(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  let next = text_declaration_end_from_index(source, index);
+  let start = text_function_body_value_start_index(source, index);
+  text_expression_root_qualified_head_hash_between(source, start, next)
+}
+
+fn text_value_declaration_body_root_qualified_head_hash(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  let next = text_declaration_end_from_index(source, index);
+  let start = text_value_declaration_body_start_index(source, index);
+  text_expression_root_qualified_head_hash_between(source, start, next)
+}
+
+fn text_declaration_root_qualified_head_hash(
+  source: textlex.TextTokenStream,
+  index: i32,
+  decl: ast.Decl
+) -> i32 {
+  match text_declaration_kind_tag(source, index, decl) {
+    1 => text_function_body_root_qualified_head_hash(source, index),
+    2 => text_value_declaration_body_root_qualified_head_hash(source, index),
+    3 => text_value_declaration_body_root_qualified_head_hash(source, index),
+    _ => 0,
+  }
+}
+
 fn text_declaration_root_child_count(
   source: textlex.TextTokenStream,
   index: i32,
@@ -14298,24 +14449,34 @@ fn text_function_body_resolved_unknown_type_class_tag(
       identifier_hash
     ) \local_type -> match local_type == text_type_class_unknown_tag() {
       false => local_type,
-      true => text_function_body_simple_scalar_operator_type_class(
-        source,
-        index
-      ) \operator_type -> match operator_type == text_type_class_unknown_tag() {
-        false => operator_type,
-        true => text_function_body_scalar_branch_type_class_between(
+      true => match text_function_body_is_match_body(source, index) {
+        false => text_type_class_unknown_tag(),
+        true => text_match_body_literal_result_type_class_between(
           source,
-          index,
           body_start,
           body_end
-        ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
-          false => branch_type,
-          true => text_root_call_return_type_class_for_hash_between(
+        ),
+      } \match_body_type -> match match_body_type == text_type_class_unknown_tag() {
+        false => match_body_type,
+        true => text_function_body_simple_scalar_operator_type_class(
+          source,
+          index
+        ) \operator_type -> match operator_type == text_type_class_unknown_tag() {
+          false => operator_type,
+          true => text_function_body_scalar_branch_type_class_between(
             source,
+            index,
             body_start,
-            body_end,
-            text_expression_root_head_hash_between(source, body_start, body_end)
-          ),
+            body_end
+          ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
+            false => branch_type,
+            true => text_root_call_return_type_class_for_hash_between(
+              source,
+              body_start,
+              body_end,
+              text_expression_root_head_hash_between(source, body_start, body_end)
+            ),
+          },
         },
       },
     },
@@ -14738,6 +14899,506 @@ fn text_direct_import_type_environment_hash(
     ),
     type_class
   )
+}
+
+fn text_source_import_edge_hash(alias_hash: i32, module_hash: i32) -> i32 {
+  text_signature_mix(
+    text_signature_mix(89, alias_hash),
+    module_hash
+  )
+}
+
+fn text_source_import_graph_no_diagnostic_code() -> i32 {
+  0
+}
+
+fn text_source_import_declaration_span_width(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  let start = textlex.token_at(source, index).span;
+  let end_index = text_declaration_end_from_index(source, index) - 1;
+  let finish = textlex.token_at(source, end_index).span;
+  finish.end - start.start
+}
+
+fn text_source_import_graph_diagnostic_hash(
+  alias_hash: i32,
+  module_hash: i32,
+  span_width: i32,
+  diagnostic_code: i32
+) -> i32 {
+  text_signature_mix(
+    text_signature_mix(
+      text_signature_mix(
+        text_signature_mix(97, alias_hash),
+        module_hash
+      ),
+      span_width
+    ),
+    diagnostic_code
+  )
+}
+
+fn text_declaration_source_import_edge_signature_total(
+  source: textlex.TextTokenStream,
+  index: i32,
+  decl: ast.Decl,
+  total: i32
+) -> i32 {
+  match text_declaration_kind_tag(source, index, decl) {
+    5 => text_signature_mix(
+      total,
+      text_source_import_edge_hash(
+        textlex.text_hash_at(source, index + 1),
+        text_source_import_module_hash(source, index)
+      )
+    ),
+    _ => total,
+  }
+}
+
+fn text_declaration_source_import_graph_diagnostic_signature_total(
+  source: textlex.TextTokenStream,
+  index: i32,
+  decl: ast.Decl,
+  total: i32
+) -> i32 {
+  match text_declaration_kind_tag(source, index, decl) {
+    5 => text_signature_mix(
+      total,
+      text_source_import_graph_diagnostic_hash(
+        textlex.text_hash_at(source, index + 1),
+        text_source_import_module_hash(source, index),
+        text_source_import_declaration_span_width(source, index),
+        text_source_import_graph_no_diagnostic_code()
+      )
+    ),
+    _ => total,
+  }
+}
+
+fn text_declaration_dependency_value_edge_tag() -> i32 {
+  11
+}
+
+fn text_declaration_dependency_qualified_value_edge_tag() -> i32 {
+  12
+}
+
+fn text_declaration_span_width(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  let start = textlex.token_at(source, index).span;
+  let end_index = text_declaration_end_from_index(source, index) - 1;
+  let finish = textlex.token_at(source, end_index).span;
+  finish.end - start.start
+}
+
+fn text_declaration_dependency_hash(
+  kind_tag: i32,
+  from_hash: i32,
+  to_hash: i32,
+  edge_tag: i32,
+  span_width: i32
+) -> i32 {
+  text_signature_mix(
+    text_signature_mix(
+      text_signature_mix(
+        text_signature_mix(
+          text_signature_mix(103, kind_tag),
+          from_hash
+        ),
+        to_hash
+      ),
+      edge_tag
+    ),
+    span_width
+  )
+}
+
+fn text_declaration_dependency_no_diagnostic_code() -> i32 {
+  0
+}
+
+fn text_declaration_has_dependency_body_kind_tag(kind_tag: i32) -> bool {
+  match kind_tag == 1 {
+    true => true,
+    false => match kind_tag == 2 {
+      true => true,
+      false => kind_tag == 3,
+    },
+  }
+}
+
+fn text_declaration_no_dependency_target() -> TextDeclarationDependencyTarget {
+  TextDeclarationDependencyTarget {
+    found: false,
+    hash: 0,
+    edge_tag: 0,
+  }
+}
+
+fn text_declaration_dependency_target(
+  hash: i32,
+  edge_tag: i32
+) -> TextDeclarationDependencyTarget {
+  TextDeclarationDependencyTarget {
+    found: true,
+    hash: hash,
+    edge_tag: edge_tag,
+  }
+}
+
+fn text_declaration_simple_dependency_target(
+  source: textlex.TextTokenStream,
+  index: i32,
+  decl: ast.Decl
+) -> TextDeclarationDependencyTarget {
+  let kind_tag = text_declaration_kind_tag(source, index, decl);
+  match text_declaration_has_dependency_body_kind_tag(kind_tag) {
+    false => text_declaration_no_dependency_target(),
+    true => match text_declaration_root_head_kind_tag(source, index, decl) ==
+      text_expression_root_identifier_tag() {
+      false => text_declaration_no_dependency_target(),
+      true => match text_declaration_root_head_selector_count(source, index, decl) == 0 {
+        true => text_declaration_dependency_target(
+          text_declaration_root_head_hash(source, index, decl),
+          text_declaration_dependency_value_edge_tag()
+        ),
+        false => text_declaration_root_qualified_head_hash(source, index, decl)
+          \qualified_hash -> match qualified_hash == 0 {
+          true => text_declaration_no_dependency_target(),
+          false => text_declaration_dependency_target(
+            qualified_hash,
+            text_declaration_dependency_qualified_value_edge_tag()
+          ),
+        },
+      },
+    },
+  }
+}
+
+fn text_declaration_count_scan(
+  source: textlex.TextTokenStream,
+  index: i32,
+  limit: i32,
+  brace_depth: i32,
+  paren_depth: i32,
+  total: i32
+) -> i32 {
+  match index >= limit {
+    true => total,
+    false => rec(
+      source,
+      index + 1,
+      limit,
+      brace_depth_after_token(source, index, brace_depth),
+      paren_depth_after_token(source, index, paren_depth),
+      match is_text_top_level_declaration_start(
+        source,
+        index,
+        brace_depth,
+        paren_depth
+      ) {
+        true => total + 1,
+        false => total,
+      }
+    ),
+  }
+}
+
+fn text_declaration_dependency_reach_budget(
+  source: textlex.TextTokenStream
+) -> i32 {
+  text_declaration_count_scan(
+    source,
+    0,
+    textlex.length(source),
+    0,
+    0,
+    0
+  )
+}
+
+fn text_declaration_dependency_reaches(
+  source: textlex.TextTokenStream,
+  current_hash: i32,
+  target_hash: i32,
+  budget: i32
+) -> bool {
+  match current_hash == target_hash {
+    true => true,
+    false => match budget <= 0 {
+      true => false,
+      false => text_declaration_dependency_reach_scan(
+        source,
+        TextDependencyReachScan {
+          index: 0,
+          limit: textlex.length(source),
+          brace_depth: 0,
+          paren_depth: 0,
+          current_hash: current_hash,
+          target_hash: target_hash,
+          budget: budget,
+        }
+      ),
+    },
+  }
+}
+
+fn text_declaration_dependency_reach_scan_next(
+  source: textlex.TextTokenStream,
+  scan: TextDependencyReachScan
+) -> TextDependencyReachScan {
+  TextDependencyReachScan {
+    index: scan.index + 1,
+    limit: scan.limit,
+    brace_depth: brace_depth_after_token(source, scan.index, scan.brace_depth),
+    paren_depth: paren_depth_after_token(source, scan.index, scan.paren_depth),
+    current_hash: scan.current_hash,
+    target_hash: scan.target_hash,
+    budget: scan.budget,
+  }
+}
+
+fn text_declaration_dependency_reach_candidate(
+  source: textlex.TextTokenStream,
+  scan: TextDependencyReachScan
+) -> bool {
+  let next_target = text_declaration_simple_dependency_target(
+    source,
+    scan.index,
+    ast.empty_decl()
+  );
+  match next_target.found {
+    true => text_declaration_dependency_reach_found_candidate(source, scan, next_target),
+    false => false,
+  }
+}
+
+fn text_declaration_dependency_reach_found_candidate(
+  source: textlex.TextTokenStream,
+  scan: TextDependencyReachScan,
+  target: TextDeclarationDependencyTarget
+) -> bool {
+  match target.edge_tag == text_declaration_dependency_value_edge_tag() {
+    false => false,
+    true => text_declaration_dependency_reaches(
+      source,
+      target.hash,
+      scan.target_hash,
+      scan.budget - 1
+    ),
+  }
+}
+
+fn text_declaration_dependency_reach_scan(
+  source: textlex.TextTokenStream,
+  scan: TextDependencyReachScan
+) -> bool {
+  match scan.index >= scan.limit {
+    true => false,
+    false => match is_text_top_level_declaration_start(
+      source,
+      scan.index,
+      scan.brace_depth,
+      scan.paren_depth
+    ) {
+      true => match textlex.text_hash_at(
+        source,
+        text_declaration_name_index(source, scan.index, ast.empty_decl())
+      ) == scan.current_hash {
+        true => match text_declaration_dependency_reach_candidate(source, scan) {
+          true => true,
+          false => text_declaration_dependency_reach_scan(
+            source,
+            text_declaration_dependency_reach_scan_next(source, scan)
+          ),
+        },
+        false => text_declaration_dependency_reach_scan(
+          source,
+          text_declaration_dependency_reach_scan_next(source, scan)
+        ),
+      },
+      false => text_declaration_dependency_reach_scan(
+        source,
+        text_declaration_dependency_reach_scan_next(source, scan)
+      ),
+    },
+  }
+}
+
+fn text_declaration_dependency_diagnostic_code(
+  source: textlex.TextTokenStream,
+  from_hash: i32,
+  to_hash: i32
+) -> i32 {
+  match text_declaration_dependency_reaches(
+    source,
+    to_hash,
+    from_hash,
+    text_declaration_dependency_reach_budget(source)
+  ) {
+    true => diagnostic.DiagnosticCodeScore::DependencyCycle,
+    false => text_declaration_dependency_no_diagnostic_code(),
+  }
+}
+
+fn text_declaration_dependency_diagnostic_hash(
+  kind_tag: i32,
+  from_hash: i32,
+  to_hash: i32,
+  edge_tag: i32,
+  span_width: i32,
+  diagnostic_code: i32
+) -> i32 {
+  text_signature_mix(
+    text_signature_mix(
+      text_signature_mix(
+        text_signature_mix(
+          text_signature_mix(
+            text_signature_mix(107, kind_tag),
+            from_hash
+          ),
+          to_hash
+        ),
+        edge_tag
+      ),
+      span_width
+    ),
+    diagnostic_code
+  )
+}
+
+fn text_declaration_dependency_signature_total(
+  source: textlex.TextTokenStream,
+  index: i32,
+  decl: ast.Decl,
+  total: i32
+) -> i32 {
+  let kind_tag = text_declaration_kind_tag(source, index, decl);
+  match kind_tag == 1 {
+    true => text_declaration_dependency_signature_for_value_body(
+      source,
+      index,
+      decl,
+      kind_tag,
+      total
+    ),
+    false => match kind_tag == 2 {
+      true => text_declaration_dependency_signature_for_value_body(
+        source,
+        index,
+        decl,
+        kind_tag,
+        total
+      ),
+      false => match kind_tag == 3 {
+        true => text_declaration_dependency_signature_for_value_body(
+          source,
+          index,
+          decl,
+          kind_tag,
+          total
+        ),
+        false => total,
+      },
+    },
+  }
+}
+
+fn text_declaration_dependency_diagnostic_signature_total(
+  source: textlex.TextTokenStream,
+  index: i32,
+  decl: ast.Decl,
+  total: i32
+) -> i32 {
+  let kind_tag = text_declaration_kind_tag(source, index, decl);
+  match kind_tag == 1 {
+    true => text_declaration_dependency_diagnostic_signature_for_value_body(
+      source,
+      index,
+      decl,
+      kind_tag,
+      total
+    ),
+    false => match kind_tag == 2 {
+      true => text_declaration_dependency_diagnostic_signature_for_value_body(
+        source,
+        index,
+        decl,
+        kind_tag,
+        total
+      ),
+      false => match kind_tag == 3 {
+        true => text_declaration_dependency_diagnostic_signature_for_value_body(
+          source,
+          index,
+          decl,
+          kind_tag,
+          total
+        ),
+        false => total,
+      },
+    },
+  }
+}
+
+fn text_declaration_dependency_diagnostic_signature_for_value_body(
+  source: textlex.TextTokenStream,
+  index: i32,
+  decl: ast.Decl,
+  kind_tag: i32,
+  total: i32
+) -> i32 {
+  let target = text_declaration_simple_dependency_target(source, index, decl);
+  match target.found {
+    false => total,
+    true => textlex.text_hash_at(source, text_declaration_name_index(source, index, decl))
+      \from_hash -> text_signature_mix(
+      total,
+      text_declaration_dependency_diagnostic_hash(
+        kind_tag,
+        from_hash,
+        target.hash,
+        target.edge_tag,
+        text_declaration_span_width(source, index),
+        match target.edge_tag == text_declaration_dependency_value_edge_tag() {
+          true => text_declaration_dependency_diagnostic_code(
+            source,
+            from_hash,
+            target.hash
+          ),
+          false => text_declaration_dependency_no_diagnostic_code(),
+        }
+      )
+    ),
+  }
+}
+
+fn text_declaration_dependency_signature_for_value_body(
+  source: textlex.TextTokenStream,
+  index: i32,
+  decl: ast.Decl,
+  kind_tag: i32,
+  total: i32
+) -> i32 {
+  let target = text_declaration_simple_dependency_target(source, index, decl);
+  match target.found {
+    false => total,
+    true => text_signature_mix(
+      total,
+      text_declaration_dependency_hash(
+        kind_tag,
+        textlex.text_hash_at(source, text_declaration_name_index(source, index, decl)),
+        target.hash,
+        target.edge_tag,
+        text_declaration_span_width(source, index)
+      )
+    ),
+  }
 }
 
 fn text_declaration_named_type_environment_signature_total(
@@ -15791,28 +16452,38 @@ fn text_function_body_direct_import_resolved_unknown_type_class_tag(
       identifier_hash
     ) \local_type -> match local_type == text_type_class_unknown_tag() {
       false => local_type,
-      true => text_function_body_direct_import_simple_scalar_operator_type_class(
-        context,
-        index
-      ) \operator_type -> match operator_type == text_type_class_unknown_tag() {
-        false => operator_type,
-        true => text_function_body_direct_import_scalar_branch_type_class_between(
-          context,
-          index,
+      true => match text_function_body_is_match_body(context.source, index) {
+        false => text_type_class_unknown_tag(),
+        true => text_match_body_literal_result_type_class_between(
+          context.source,
           body_start,
           body_end
-        ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
-          false => branch_type,
-          true => text_root_call_direct_import_return_type_class_for_hash_between(
+        ),
+      } \match_body_type -> match match_body_type == text_type_class_unknown_tag() {
+        false => match_body_type,
+        true => text_function_body_direct_import_simple_scalar_operator_type_class(
+          context,
+          index
+        ) \operator_type -> match operator_type == text_type_class_unknown_tag() {
+          false => operator_type,
+          true => text_function_body_direct_import_scalar_branch_type_class_between(
             context,
+            index,
             body_start,
-            body_end,
-            text_expression_root_head_hash_between(
-              context.source,
+            body_end
+          ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
+            false => branch_type,
+            true => text_root_call_direct_import_return_type_class_for_hash_between(
+              context,
               body_start,
-              body_end
-            )
-          ),
+              body_end,
+              text_expression_root_head_hash_between(
+                context.source,
+                body_start,
+                body_end
+              )
+            ),
+          },
         },
       },
     },

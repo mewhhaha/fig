@@ -5,6 +5,14 @@ type BabaModule = {
 
 type BabaAdvancedModule = {
   createLexicalSpec(grammar: unknown, options: { skipValidation: boolean }): unknown;
+  generateAstTypesSource(
+    grammar: unknown,
+    options: { metadata: unknown; skipValidation: boolean },
+  ): string;
+  generateAstVisitorSource(
+    grammar: unknown,
+    options: { metadata: unknown; skipValidation: boolean },
+  ): string;
   generateLexicalManifest(grammar: unknown, options: { spec: unknown }): string;
   generateTokenizerSource(
     grammar: unknown,
@@ -26,6 +34,8 @@ const dynamicImport = new Function("specifier", "return import(specifier)") as <
 const { parseGrammar, parseMetadata } = await dynamicImport<BabaModule>("@mewhhaha/baba");
 const {
   createLexicalSpec,
+  generateAstTypesSource,
+  generateAstVisitorSource,
   generateLexicalManifest,
   generateTokenizerSource,
   generateTreeSitterGrammar,
@@ -59,6 +69,20 @@ const files: Array<{ path: string; content: string }> = [
     path: "grammar.js",
     content: generateTreeSitterGrammar(grammar, {
       name: "fig",
+      metadata,
+      skipValidation: true,
+    }),
+  },
+  {
+    path: "ast/types.ts",
+    content: generateAstTypesSource(grammar, {
+      metadata,
+      skipValidation: true,
+    }),
+  },
+  {
+    path: "ast/visitor.ts",
+    content: generateAstVisitorSource(grammar, {
       metadata,
       skipValidation: true,
     }),
@@ -130,7 +154,7 @@ for (const file of bundle.files) {
       .replace("(TypeFnDecl (LowerIdent) @type.definition)\n", "")
       .replace("(TypeFnDecl (PascalIdent) @type.definition)", "(TypeFnDecl (PascalIdent) @type)")
       .replace("(TypeLetDecl (PascalIdent) @type)\n", "")
-      .replace("(BlockProofConstDecl (PascalIdent) @type)\n", "")
+      .replace("(TypeAssertDecl (PascalIdent) @type)\n", "")
       .replace("(Placeholder) @operator\n", "")
       .replace(
         "(ImportBindingItems (PascalIdent) @type.definition)",

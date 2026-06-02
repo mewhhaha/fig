@@ -19,16 +19,20 @@ type fn List(a: type) -> type {
   struct(List)
 }
 
-fn List::empty(const a: type) -> List(a) {
+fn List::empty() -> List(a) {
   List {nodes: layout.HeapArray::empty(ListNode(a)), head:
     - 1, len: 0}
 }
 
-fn List::singleton(const a: type, value: a) -> List(a) {
-  List::cons(a, value, List::empty(a))
+fn List::singleton(value: a) -> List(a) {
+  List::cons(value, List::empty())
 }
 
-fn List::cons(const a: type, value: a, xs: List(a)) -> List(a) {
+fn List::pure(value: a) -> List(a) {
+  List::singleton(value)
+}
+
+fn List::cons(value: a, xs: List(a)) -> List(a) {
   let index = layout.HeapArray::len(
     ListNode(a),
     xs.nodes
@@ -44,15 +48,15 @@ fn List::cons(const a: type, value: a, xs: List(a)) -> List(a) {
   }
 }
 
-fn List::is_empty(const a: type, xs: List(a)) -> bool {
+fn List::is_empty(xs: List(a)) -> bool {
   xs.len == 0
 }
 
-fn List::len(const a: type, xs: List(a)) -> i32 {
+fn List::len(xs: List(a)) -> i32 {
   xs.len
 }
 
-fn List::head(const a: type, xs: List(a)) -> core.Option(a) {
+fn List::head(xs: List(a)) -> core.Option(a) {
   match xs.head < 0 {
     true => None,
     false => option.some(layout.HeapArray::get(
@@ -63,7 +67,7 @@ fn List::head(const a: type, xs: List(a)) -> core.Option(a) {
   }
 }
 
-fn List::tail(const a: type, xs: List(a)) -> List(a) {
+fn List::tail(xs: List(a)) -> List(a) {
   match xs.head < 0 {
     true => xs,
     false => layout.HeapArray::get(
@@ -80,18 +84,14 @@ fn List::tail(const a: type, xs: List(a)) -> List(a) {
 }
 
 fn List::fold(
-  const a: type,
-  const b: type,
   xs: List(a),
   acc: b,
   const f: fn(acc: b, x: a) -> b
 ) -> b {
-  List::fold_loop(a, b, xs.nodes, xs.head, acc, f)
+  List::fold_loop(xs.nodes, xs.head, acc, f)
 }
 
 fn List::fold_loop(
-  const a: type,
-  const b: type,
   nodes: layout.HeapArray(ListNode(a)),
   index: i32,
   acc: b,
@@ -105,8 +105,6 @@ fn List::fold_loop(
       index
     )
       \node -> List::fold_loop(
-      a,
-      b,
       nodes,
       node.next,
       f(acc, node.value),
@@ -115,42 +113,50 @@ fn List::fold_loop(
   }
 }
 
-fn List::reverse(const a: type, xs: List(a)) -> List(a) {
+fn List::reverse(xs: List(a)) -> List(a) {
   List::fold(
-    a,
-    List(a),
     xs,
-    List::empty(a),
+    List::empty(),
     List::reverse_step
   )
 }
 
 fn List::reverse_step(acc: List(a), value: a) -> List(a) {
-  List::cons(a, value, acc)
+  List::cons(value, acc)
+}
+
+fn List::append(xs: List(a), ys: List(a)) -> List(a) {
+  List::append_reversed(List::reverse(xs), ys)
+}
+
+fn List::append_reversed(
+  xs: List(a),
+  out: List(a)
+) -> List(a) {
+  match List::head(xs) {
+    Some(value) => List::append_reversed(
+      List::tail(xs),
+      List::cons(value, out)
+    ),
+    None => out,
+  }
 }
 
 fn List::map(
-  const a: type,
-  const b: type,
-  xs: List(a),
-  const f: fn(x: a) -> b
+  const f: fn(x: a) -> b,
+  xs: List(a)
 ) -> List(b) {
   List::reverse(
-    b,
     List::map_loop(
-      a,
-      b,
       xs.nodes,
       xs.head,
-      List::empty(b),
+      List::empty(),
       f
     )
   )
 }
 
 fn List::map_loop(
-  const a: type,
-  const b: type,
   nodes: layout.HeapArray(ListNode(a)),
   index: i32,
   out: List(b),
@@ -164,12 +170,67 @@ fn List::map_loop(
       index
     )
       \node -> List::map_loop(
-      a,
-      b,
       nodes,
       node.next,
-      List::cons(b, f(node.value), out),
+      List::cons(f(node.value), out),
       f
     ),
+  }
+}
+
+fn List::apply(fns: List(fn(x: a) -> b), xs: List(a)) -> List(b) {
+  List::apply_loop(fns, xs, List::empty())
+}
+
+fn List::apply_loop(
+  fns: List(fn(x: a) -> b),
+  xs: List(a),
+  out: List(b)
+) -> List(b) {
+  match List::head(fns) {
+    Some(f) => List::apply_loop(
+      List::tail(fns),
+      xs,
+      List::append(out, List::apply_one(f, xs))
+    ),
+    None => out,
+  }
+}
+
+fn List::apply_one(f: fn(x: a) -> b, xs: List(a)) -> List(b) {
+  List::reverse(List::apply_one_loop(f, xs, List::empty()))
+}
+
+fn List::apply_one_loop(
+  f: fn(x: a) -> b,
+  xs: List(a),
+  out: List(b)
+) -> List(b) {
+  match List::head(xs) {
+    Some(value) => List::apply_one_loop(
+      f,
+      List::tail(xs),
+      List::cons(f(value), out)
+    ),
+    None => out,
+  }
+}
+
+fn List::bind(xs: List(a), const f: fn(x: a) -> List(b)) -> List(b) {
+  List::bind_loop(xs, f, List::empty())
+}
+
+fn List::bind_loop(
+  xs: List(a),
+  const f: fn(x: a) -> List(b),
+  out: List(b)
+) -> List(b) {
+  match List::head(xs) {
+    Some(value) => List::bind_loop(
+      List::tail(xs),
+      f,
+      List::append(out, f(value))
+    ),
+    None => out,
   }
 }

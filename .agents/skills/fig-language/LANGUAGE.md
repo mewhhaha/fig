@@ -9,7 +9,7 @@ fixtures under `tests/fixtures/language` when behavior and prose disagree.
 1. [Syntax](reference/syntax.md) covers source files, declarations, imports, host IO, parameters,
    blocks, patterns, and literals.
 2. [Types](reference/types.md) covers primitive types, function types, shapes, products, unions,
-   repeats, and constructors.
+   numeric enums, repeats, and constructors.
 3. [Expressions](reference/expressions.md) covers calls, constructors, match, operators, pipe-bind,
    local bindings, and destructuring.
 4. [Type Functions](reference/type-functions.md) covers type blocks, result kinds, type parameters,
@@ -17,10 +17,13 @@ fixtures under `tests/fixtures/language` when behavior and prose disagree.
 5. [Builtins](reference/builtins.md) lists every compiler builtin and backend intrinsic.
 6. [Semantics](reference/semantics.md) covers Branch-Bit values, effects, const evaluation,
    reflection, and WebAssembly portability constraints.
-7. [Modules](reference/modules.md) summarizes the roles of prelude, web, and engine modules.
-8. [Examples](EXAMPLES.md) pairs tested good and bad examples with the reason each bad pattern
+7. [Modules](reference/modules.md) summarizes module import behavior and the roles of prelude,
+   web, and engine modules.
+8. [Prelude](reference/prelude.md) covers the standard prelude modules, contracts, data types,
+   operators, collections, and effect helpers.
+9. [Examples](EXAMPLES.md) pairs tested good and bad examples with the reason each bad pattern
    fails.
-9. [Pattern Guides](guides/README.md) explain how to reproduce idiomatic Rust, Haskell, and Zig
+10. [Pattern Guides](guides/README.md) explain how to reproduce idiomatic Rust, Haskell, and Zig
    patterns in Fig.
 
 For the longer-term type-system and optimizer direction around refined `i32(...)` domains, recursion

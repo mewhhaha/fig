@@ -1,6 +1,8 @@
 const ast = @import("./ast.fig");
 const diagnostic = @import("./diagnostic.fig");
 const span = @import("./span.fig");
+const map = @import("prelude.map");
+const vec = @import("prelude.vec");
 
 type Type = union {
   TypeUnknown, TypeI32, TypeBool, TypeFunction(
@@ -15,9 +17,8 @@ type Symbol = struct {
 }
 
 type CheckEnv = struct {
-  first: Symbol,
-  second: Symbol,
-  count: i32,
+  symbols: vec.Vec(Symbol),
+  symbol_index: map.Map(ast.SymbolId, i32),
   diagnostics: diagnostic.DiagnosticBag,
 }
 
@@ -108,15 +109,10 @@ fn symbol(name: ast.SymbolId, value_type: Type) -> Symbol {
   Symbol {name: name, value_type: value_type}
 }
 
-fn placeholder_symbol() -> Symbol {
-  symbol(0, unknown_type())
-}
-
 fn empty_env() -> CheckEnv {
   CheckEnv {
-    first: placeholder_symbol(),
-    second: placeholder_symbol(),
-    count: 0,
+    symbols: vec.Vec::new(Symbol, 0),
+    symbol_index: map.Map::empty(ast.SymbolId, i32),
     diagnostics: diagnostic.empty(),
   }
 }
@@ -134,43 +130,35 @@ fn define_symbol(
   name: ast.SymbolId,
   value_type: Type
 ) -> CheckEnv {
-  let next = symbol(name, value_type);
-  match env.count {
-    0 => CheckEnv {
-      first: next,
-      second: env.second,
-      count: 1,
-      diagnostics: env.diagnostics,
-    },
-    1 => CheckEnv {
-      first: env.first,
-      second: next,
-      count: 2,
-      diagnostics: env.diagnostics,
-    },
-    _ => CheckEnv {
-      first: env.first,
-      second: env.second,
-      count: env.count + 1,
-      diagnostics: env.diagnostics,
-    },
+  let next_index = vec.Vec::len(env.symbols);
+  let next_symbols = vec.Vec::push(
+    env.symbols,
+    symbol(name, value_type)
+  );
+  CheckEnv {
+    symbols: next_symbols,
+    symbol_index: map.Map::insert(
+      ast.SymbolId,
+      i32,
+      env.symbol_index,
+      name,
+      next_index,
+      map.compare_i32
+    ),
+    diagnostics: env.diagnostics,
   }
 }
 
 fn lookup_type(env: CheckEnv, name: ast.SymbolId) -> Type {
-  match env.count {
-    0 => unknown_type(),
-    1 => match env.first.name == name {
-      true => env.first.value_type,
-      false => unknown_type(),
-    },
-    _ => match env.first.name == name {
-      true => env.first.value_type,
-      false => match env.second.name == name {
-        true => env.second.value_type,
-        false => unknown_type(),
-      },
-    },
+  match map.Map::get(
+    ast.SymbolId,
+    i32,
+    env.symbol_index,
+    name,
+    map.compare_i32
+  ) {
+    Some(index) => vec.Vec::get_t(Symbol, env.symbols, index).value_type,
+    None => unknown_type(),
   }
 }
 
@@ -383,6 +371,17 @@ fn checked_program(
   }
 }
 
+fn env_with_diagnostics(
+  env: CheckEnv,
+  diagnostics: diagnostic.DiagnosticBag
+) -> CheckEnv {
+  CheckEnv {
+    symbols: env.symbols,
+    symbol_index: env.symbol_index,
+    diagnostics: diagnostics,
+  }
+}
+
 fn check_value_decl(
   env: CheckEnv,
   decl: ast.Decl,
@@ -400,12 +399,7 @@ fn check_value_decl(
     source_span
   );
   let next_env = define_symbol(
-    CheckEnv {
-      first: env.first,
-      second: env.second,
-      count: env.count,
-      diagnostics: diagnostics,
-    },
+    env_with_diagnostics(env, diagnostics),
     ast.decl_name(decl),
     expected
   );
@@ -433,12 +427,7 @@ fn check_function_decl(
     expected
   );
   let next_env = define_symbol(
-    CheckEnv {
-      first: env.first,
-      second: env.second,
-      count: env.count,
-      diagnostics: diagnostics,
-    },
+    env_with_diagnostics(env, diagnostics),
     ast.decl_name(decl),
     fn_type
   );
@@ -507,10 +496,25 @@ fn symbol_score(symbol: Symbol) -> i32 {
   symbol.name + type_score(symbol.value_type)
 }
 
+fn env_symbol_score_loop(
+  symbols: vec.Vec(Symbol),
+  index: i32,
+  total: i32
+) -> i32 {
+  match index < vec.Vec::len(symbols) {
+    true => rec(
+      symbols,
+      index + 1,
+      total + symbol_score(vec.Vec::get_t(Symbol, symbols, index))
+    ),
+    false => total,
+  }
+}
+
 fn env_score(env: CheckEnv) -> i32 {
-  symbol_score(env.first)
-    + symbol_score(env.second)
-    + env.count
+  env_symbol_score_loop(env.symbols, 0, 0)
+    + vec.Vec::len(env.symbols)
+    + map.Map::len(ast.SymbolId, i32, env.symbol_index)
     + diagnostic.bag_score(env.diagnostics)
 }
 

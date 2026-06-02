@@ -280,14 +280,21 @@ let ys: Layout.InlineArrayList(4, i32) = #[0, ...tail];
 
 The parser accepts operator symbols made from the operator character set
 `+ - * / % < > = ! & | ^ $`. Operator symbols are not compiler features by themselves; they become
-meaningful only through visible operator declarations, except for primitive operators implemented
-directly for primitive types.
+meaningful only through visible operator declarations.
 
 Ranges use dedicated `start .. end` syntax. `..` is not an overloadable operator.
 
-Primitive operators are available for primitive types where implemented. Other operator calls are
-resolved through visible operator declarations, commonly imported through `prelude.operators` or
-`prelude.std`.
+All runtime operator calls resolve through visible operator declarations, commonly imported through
+`prelude.operators` or `prelude.std`. The primitive arithmetic, comparison, and boolean operators in
+the prelude are ordinary declarations that call primitive attached members such as `i32::add` and
+`bool::and`; those members wrap backend intrinsics.
+
+Operator declarations are top-level declarations:
+
+```fig
+fn append(a: Box, b: Box) -> Box { Box::append(a, b) }
+infixr 55 (<>) = append;
+```
 
 Type expressions parse the same operator token. The checker currently evaluates only primitive
 type-level operators such as `==`, `!=`, and literal-type union `|`; other type-expression operators

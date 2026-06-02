@@ -10,8 +10,8 @@ The practical rule is:
 - Rust `enum` becomes a Fig `union`.
 - Rust inherent `impl Type` methods become attached member functions named `Type::method`.
 - Rust trait bounds become `type fn` contracts checked with `@require`.
-- Rust generic functions carry evidence explicitly, either as transparent annotations or erased
-  `const _proof` parameters.
+- Rust generic functions carry evidence explicitly, either as transparent annotations or local
+  `@assert(Contract(t));` checks.
 - Rust ownership and borrowing usually become ordinary value reuse plus fresh names for updates.
 
 ## Data Types
@@ -154,17 +154,18 @@ Rust often lets trait bounds stay implicit:
 fn draw_twice<T: Draw>(value: T) -> i32 { ... }
 ```
 
-Fig can also pass the proof explicitly:
+Fig can also assert the proof explicitly inside the helper:
 
 ```fig
-fn draw_twice_explicit(value: t, const _proof: Draw(t)) -> i32 {
+fn draw_twice_explicit(value: t) -> i32 {
+  @assert(Draw(t));
   t::draw(value) + t::draw(value)
 }
 ```
 
-`const _proof` is evaluated at compile time and erased from runtime calls. Use this style when the
-value type should remain visually plain, when the function has several independent constraints, or
-when you want to mirror Rust's `where` clause structure.
+`@assert(Draw(t));` is evaluated at compile time and erased from runtime code. Use this style when
+the value type should remain visually plain, when the function has several independent constraints,
+or when you want to mirror Rust's `where` clause structure.
 
 ## Standard Trait Equivalents
 
@@ -195,12 +196,12 @@ fn Point::append(a: Point, b: Point) -> Point {
 }
 
 fn add_points(a: Point, b: Point) -> Point {
-  append(Point, Semigroup(Point), a, b)
+  append(a, b)
 }
 ```
 
-The `append` helper comes from `prelude.core` through `prelude.std`. The proof parameter is explicit
-at the call site, so there is no hidden trait search.
+The `append` helper comes from `prelude.core` through `prelude.std`. The first value carries the
+concrete type, so the helper validates `Semigroup(Point)` without a separate proof argument.
 
 ## Generic Type Constructors
 
@@ -228,10 +229,11 @@ fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
 }
 ```
 
-Then generic code can require `Functor(Box)`:
+Then generic code can validate `Functor(t)` inside the helper body:
 
 ```fig
-fn mapped(v: t(a), const f: fn(x: a) -> b, const _proof: Functor(t)) -> t(b) {
+fn mapped(v: t(a), const f: fn(x: a) -> b) -> t(b) {
+  @assert(Functor(t));
   t::map(f, v)
 }
 ```
@@ -387,7 +389,7 @@ annotation; `-> _` is allowed when the checker resolves it before ABI checking.
 
 - Do not introduce source-level ownership markers. Fig has no `move`, `borrow`, `&`, `&mut`, or
   lifetime syntax.
-- Do not expect implicit trait solving. Carry contracts in annotations or proof parameters.
+- Do not expect implicit trait solving. Carry contracts in annotations or local `const _` checks.
 - Do not use Rust-style method receiver syntax. Use attached members such as `Point::add(a, b)`.
 - Do not model every Rust iterator as a heap object. Prefer fixed inline arrays, range iterators, or
   explicit state machines.
@@ -400,8 +402,8 @@ When porting Rust-shaped code to Fig:
 1. Define data first with `type` sugar or `type fn`.
 2. Attach behavior as `Type::member` functions.
 3. Define contracts with `type fn` and `@require`.
-4. Pick transparent annotations for simple bounds and erased `const _proof` parameters for explicit
-   generic evidence.
+4. Pick transparent annotations for simple bounds and local `@assert(Contract(t));` checks for
+   explicit generic evidence.
 5. Replace mutable updates with fresh values or `State`.
 6. Replace `Result`/`Option` flows with unions, `match`, or prelude methods.
 7. Inspect public boundary behavior with `fig wat`, `fig run`, and the stable memory ABI docs.

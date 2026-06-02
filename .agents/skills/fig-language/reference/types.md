@@ -56,6 +56,7 @@ Define fixed product and sum layouts with type declaration sugar:
 ```fig
 type Point = struct {x: i32, y: i32}
 type Option(a) = union {None, Some(value: a)}
+type Status = enum(i32) {Ready = 1, Done = 2}
 ```
 
 Use `type fn` when the layout is computed or needs type-level control flow:
@@ -71,6 +72,14 @@ type fn RuntimeDescriptor(row: type) -> struct {
 `struct(ShapeBinding)` creates a product type from one type-block shape binding. `union(a, b, ...)`
 creates a sum type from type-block shape bindings. For a union, each binding name becomes the
 variant constructor name and the bound shape becomes the payload shape.
+
+Numeric enums are scalar aliases with named integer members. `type Status = enum(i32) {Ready = 1}`
+normalizes to the backing type `i32`, and member references such as `Status::Ready` lower to the
+declared integer value while keeping the user-facing enum type in annotations. Enum members can also
+be used as match patterns. In a match over a known enum type, bare variants are inferred from the
+scrutinee type, so `match status { Ready => 1, _ => 0 }` is equivalent to matching the declared
+backing value. Signed numeric enum values such as `Back = -1` are accepted for signed backing
+types. Enum backing types must be integer scalar types: `i32`, `i64`, `u32`, or `u64`.
 
 ## Repeats and Constructors
 

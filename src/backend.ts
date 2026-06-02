@@ -1650,7 +1650,7 @@ function directCallExprs(expr: Expr | BlockExpr): Extract<Expr, { kind: "call" }
   const visit = (item: Expr | BlockExpr | Statement | undefined) => {
     if (!item) return;
     if (item.kind === "call") calls.push(item);
-    if (item.kind === "proof_const") return;
+    if (item.kind === "type_assert") return;
     if (item.kind === "debug_trace") {
       item.args.forEach(visit);
       return;
@@ -3001,7 +3001,7 @@ function dot4LaneUseCounts(block: BlockExpr): Map<string, number> {
       case "destructure_let":
         visit(item.value);
         return;
-      case "proof_const":
+      case "type_assert":
       case "literal":
       case "var":
         return;
@@ -3078,7 +3078,7 @@ function countDot4I32Exprs(block: BlockExpr): number {
       case "destructure_let":
         visit(item.value);
         return;
-      case "proof_const":
+      case "type_assert":
       case "literal":
       case "var":
         return;
@@ -4927,7 +4927,7 @@ function lowerStatement(
   usedLater: Set<string>,
   usedLaterExpr?: Expr,
 ): Instr[] {
-  if (stmt.kind === "proof_const") return [];
+  if (stmt.kind === "type_assert") return [];
   if (stmt.kind === "debug_trace") return lowerDebugTraceStatement(stmt, ctx);
   if (stmt.kind === "destructure_let") {
     const bindings = statementLocalBindings(stmt, ctx);
@@ -5178,7 +5178,7 @@ function fixedArrayProjectionUses(
     }
     if (ctx && item.kind === "block") {
       for (const [index, stmt] of item.statements.entries()) {
-        if (stmt.kind === "proof_const") continue;
+        if (stmt.kind === "type_assert") continue;
         if (stmt.kind === "let" && stmt.name === name) return;
         if (stmt.kind === "destructure_let" && stmt.names.includes(name)) return;
         if (stmt.kind === "let") {
@@ -5363,7 +5363,7 @@ function fixedArrayAliasForwardOnly(expr: Expr | undefined, name: string): boole
         return;
       case "block":
         for (const stmt of item.statements) {
-          if (stmt.kind === "proof_const") continue;
+          if (stmt.kind === "type_assert") continue;
           if (stmt.kind === "debug_trace") {
             stmt.args.forEach((arg) => visit(arg, false));
             continue;
@@ -5377,7 +5377,7 @@ function fixedArrayAliasForwardOnly(expr: Expr | undefined, name: string): boole
       case "do":
         for (const stmt of item.statements) {
           if (stmt.kind === "debug_trace") stmt.args.forEach((arg) => visit(arg, false));
-          else if (stmt.kind !== "proof_const") visit(stmt.value, false);
+          else if (stmt.kind !== "type_assert") visit(stmt.value, false);
         }
         visit(item.expr, false);
         return;
@@ -5939,7 +5939,7 @@ function foldScalarVarAliasesInTailBlock(block: BlockExpr, ctx: LowerContext): B
   const active = new Map<string, Expr>();
   const statements: Statement[] = [];
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       statements.push(stmt);
       continue;
     }
@@ -6884,7 +6884,7 @@ function retargetBackedProductAliases(
   const substitute = (expr: Expr) => aliases.size ? substituteExpr(expr, aliases) : expr;
   for (let index = 0; index < block.statements.length; index++) {
     const stmt = block.statements[index]!;
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       statements.push(stmt);
       continue;
     }
@@ -7719,6 +7719,19 @@ function lowerExpr(
       if (expr.callee.name === "@empty") {
         const emptyType = expectedType ??
           (expr.args[0] ? renderBackendTypeProofArg(expr.args[0]) : undefined);
+        const explicitEmpty = emptyType ? ctx.functions.get(`${emptyType}::empty`) : undefined;
+        if (explicitEmpty) {
+          return lowerExpr(
+            {
+              kind: "call",
+              callee: { kind: "var", name: explicitEmpty.name },
+              args: [],
+            },
+            ctx,
+            locals,
+            expectedType,
+          );
+        }
         return flattenType(emptyType, ctx.layouts).map((slot): Instr => ({
           op: "const",
           type: slot.wat,
@@ -7744,6 +7757,8 @@ function lowerExpr(
       if (heapArray) return heapArray;
       const branch = lowerBranchIntrinsic(expr, ctx, locals);
       if (branch) return branch;
+      const primitiveScalar = lowerPrimitiveScalarIntrinsic(expr, ctx, locals);
+      if (primitiveScalar) return primitiveScalar;
       const packedPrefixShift = lowerPackedPrefixShiftCall(expr, ctx, locals, expectedType);
       if (packedPrefixShift) return packedPrefixShift;
       const inlineArrayHelper = lowerInlineArrayHelperCall(expr, ctx, locals, expectedType);
@@ -7780,10 +7795,12 @@ function lowerExpr(
         throw new Error(`backend missing runtime callable value: ${expr.callee.name}`);
       }
       const trailingConstArgs = Math.max(0, expr.args.length - callee.params.length);
+      const generatedConstFnCall = callee.generated && callee.name.startsWith("__const_fn");
       const skipTrailingConstArgs = trailingConstArgs > 0 &&
-        expr.args.slice(callee.params.length).every((arg) =>
-          arg.kind === "var" && ctx.functions.has(arg.name)
-        );
+        (generatedConstFnCall ||
+          expr.args.slice(callee.params.length).every((arg) =>
+            arg.kind === "var" && ctx.functions.has(arg.name)
+          ));
       const argOffset = skipTrailingConstArgs ? 0 : trailingConstArgs;
       const callArgs = skipTrailingConstArgs ? expr.args.slice(0, callee.params.length) : expr.args;
       const loweredCall: Instr[] = [
@@ -9293,7 +9310,7 @@ function scalarFunctionMatchesUnionParam(fn: FnDecl, layouts: LayoutEnv): boolea
     for (const child of exprChildren(expr)) visit(child);
   };
   for (const stmt of fn.body.statements) {
-    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "type_assert") continue;
     if (stmt.kind === "debug_trace") {
       for (const arg of stmt.args) visit(arg);
       continue;
@@ -9467,6 +9484,10 @@ function lowerPrivateScalarCallInline(
     aliasedScalarParams: aliasedScalarParams.size,
     elidedProductParams: elidedProductParams.size,
   });
+  let inlineExpectedType = renamed.returnType;
+  if (expectedType && flattenedTypesMatch(renamed.returnType, expectedType, ctx.layouts)) {
+    inlineExpectedType = expectedType;
+  }
   return [
     ...productFieldTempInits,
     ...runtimeArgs.flatMap((arg, index) =>
@@ -9480,7 +9501,7 @@ function lowerPrivateScalarCallInline(
       op: "local.set",
       name: binding.name,
     })),
-    ...lowerBlock(renamed.body, inlineCtx, locals, expectedType ?? renamed.returnType),
+    ...lowerBlock(renamed.body, inlineCtx, locals, inlineExpectedType),
   ];
 }
 
@@ -9551,7 +9572,7 @@ function cachedBackendInlineBlockCost(block: BlockExpr, cache?: BackendCache): n
 }
 
 function backendInlineStatementCost(stmt: Statement): number {
-  if (stmt.kind === "proof_const") return 0;
+  if (stmt.kind === "type_assert") return 0;
   if (stmt.kind === "debug_trace") return 1;
   return 1 + backendInlineExprCost(stmt.value);
 }
@@ -11646,11 +11667,51 @@ function lowerTransientFixedArraySwap(
 }
 
 function varType(name: string, ctx: LowerContext): string | undefined {
+  const direct = ctx.localTypes?.get(name);
+  if (direct) return direct;
+  const projection = projectionSuffix(name);
+  if (projection) {
+    const projected = projectedLocalType(baseName(name), projection, ctx);
+    if (projected) return projected;
+  }
   const [base, ...fields] = name.split(".");
   let current = ctx.localTypes?.get(baseName(base));
   for (const field of fields) {
     const slot = productSlotsForType(current, ctx.layouts)?.find((slot) => slot.label === field);
     current = slot?.type;
+  }
+  return current;
+}
+
+function projectedLocalType(
+  base: string,
+  projection: string,
+  ctx: LowerContext,
+): string | undefined {
+  let current = ctx.localTypes?.get(base);
+  if (!current) return undefined;
+  for (const part of projection.split("$")) {
+    const slots = productSlotsForType(current, ctx.layouts);
+    if (!slots) return undefined;
+    let matched = slots.find((slot, index) => {
+      if (slot.label === part) return true;
+      if (String(slot.position ?? index) === part) return true;
+      return false;
+    });
+    if (!matched && /^[0-9]+$/.test(part)) {
+      const position = Number.parseInt(part, 10);
+      let offset = 0;
+      for (const slot of slots) {
+        const repeat = slot.repeat ? Number.parseInt(slot.repeat, 10) : 1;
+        if (position >= offset && position < offset + repeat) {
+          matched = slot;
+          break;
+        }
+        offset += repeat;
+      }
+    }
+    if (!matched) return undefined;
+    current = matched.type;
   }
   return current;
 }
@@ -11680,6 +11741,8 @@ function productSlotsForType(
   const resolved = resolveAlias(original, layouts) ?? original;
   const declSource = original ?? resolved;
   if (!declSource) return undefined;
+  const heapArraySlots = heapArrayProductSlotsForType(declSource);
+  if (heapArraySlots) return heapArraySlots;
   const directShape = constShapeFromTypeArg(declSource, layouts);
   if (directShape) {
     return directShape.slots.map((slot) => ({
@@ -11745,6 +11808,16 @@ function productSlotsForType(
     }));
   }
   return productSlotsForType(resolvedStructArgs.trim(), layouts);
+}
+
+function heapArrayProductSlotsForType(type: string): ShapeTypeSlot[] | undefined {
+  const args = typeCallArgs(type, "HeapArray");
+  if (args === undefined) return undefined;
+  return [
+    { label: "ptr", position: 0, type: "i32" },
+    { label: "len", position: 1, type: "i32" },
+    { label: "cap", position: 2, type: "i32" },
+  ];
 }
 
 function productSlotsFromTypeBlock(
@@ -12131,6 +12204,41 @@ function productConstructorType(constructor: string, layouts: LayoutEnv): string
   return found?.name;
 }
 
+function productConstructorResultType(
+  expr: Extract<Expr, { kind: "product_constructor" }>,
+  ctx: LowerContext,
+): string | undefined {
+  const constructor = terminalName(expr.constructor);
+  for (const decl of ctx.layouts.types.values()) {
+    if (decl.normalized?.kind !== "product") continue;
+    if (terminalName(decl.normalized.constructor) !== constructor) continue;
+    if (decl.params.length === 0) return decl.name;
+    const bindings = new Map<string, string>();
+    for (let index = 0; index < expr.slots.length; index++) {
+      const source = expr.slots[index]!;
+      const expected = findLastSlot(
+        decl.normalized.shape.slots,
+        (slot, slotIndex) =>
+          (slot.label ?? String(slotIndex)) === (source.label ?? String(index)),
+      )?.type;
+      const actual = exprRuntimeTypeWithLiteralDefault(source.value, ctx);
+      bindRuntimeTypePattern(expected, actual, bindings);
+    }
+    const args: string[] = [];
+    let complete = true;
+    for (const param of decl.params) {
+      const value = bindings.get(param.name);
+      if (!value) {
+        complete = false;
+        break;
+      }
+      args.push(value);
+    }
+    return complete ? `${decl.name}(${args.join(", ")})` : decl.name;
+  }
+  return undefined;
+}
+
 function constructorResultType(
   constructor: string,
   expectedType: string | undefined,
@@ -12143,6 +12251,16 @@ function constructorResultType(
     )
   ) {
     return expectedType;
+  }
+  if (expectedType) {
+    const resolved = resolveAlias(expectedType, layouts) ?? expectedType;
+    const decl = layouts.types.get(typeName(resolved));
+    if (
+      decl?.normalized?.kind === "product" &&
+      terminalName(decl.normalized.constructor) === terminalName(constructor)
+    ) {
+      return expectedType;
+    }
   }
   const product = productConstructorType(constructor, layouts);
   if (product) return product;
@@ -12422,9 +12540,15 @@ function lowerShapeStorage(
         return slot ? lowerExpr(slot.value, ctx, locals, lane.type) : [];
       });
     }
-    return slots.flatMap((slot, index) =>
-      lowerExpr(slot.value, ctx, locals, shapeSlotTypes(expectedType, ctx.layouts)[index])
-    );
+    const slotTypes = shapeSlotTypes(expectedType, ctx.layouts);
+    const useFlattenedSlotTypes = layout.length === slots.length;
+    return slots.flatMap((slot, index) => {
+      let slotType = slotTypes[index];
+      if (useFlattenedSlotTypes) {
+        slotType = layout[index]?.type ?? slotType;
+      }
+      return lowerExpr(slot.value, ctx, locals, slotType);
+    });
   }
   return layout.flatMap((lane) => {
     if (!lane.fields?.length) return [];
@@ -14514,6 +14638,7 @@ function privateReturnProjectionPlans(
   const privateProductFns = new Map(
     functions.filter((fn) =>
       !isCurrentModulePublic(fn) && fn.returnType &&
+      !isHeapArrayValueType(fn.returnType, layouts) &&
       !fn.params.some((param) => isRuntimeFunctionValueType(param.type, layouts)) &&
       !isRuntimeFunctionValueType(fn.returnType, layouts) &&
       flattenType(fn.returnType, layouts).length > 1
@@ -14547,7 +14672,7 @@ function privateReturnProjectionPlans(
   const visitBlock = (block: BlockExpr, currentFn: string) => {
     for (let index = 0; index < block.statements.length; index++) {
       const stmt = block.statements[index]!;
-      if (stmt.kind === "proof_const") continue;
+      if (stmt.kind === "type_assert") continue;
       if (stmt.kind === "debug_trace") {
         stmt.args.forEach((arg) => visitExpr(arg, currentFn));
         continue;
@@ -14595,6 +14720,14 @@ function privateReturnProjectionPlans(
   return plans;
 }
 
+function isHeapArrayValueType(type: string | undefined, layouts: LayoutEnv): boolean {
+  const stripped = stripBorrowType(type);
+  if (stripped && heapArrayItemType(stripped) !== undefined) return true;
+  const resolved = resolveAlias(stripped, layouts);
+  if (!resolved) return false;
+  return heapArrayItemType(resolved) !== undefined;
+}
+
 function isRuntimeFunctionValueType(type: string | undefined, layouts: LayoutEnv): boolean {
   const trimmed = stripBorrowType(type)?.trim();
   if (!trimmed) return false;
@@ -14628,7 +14761,7 @@ function exprChildren(expr: Expr): Expr[] {
     case "do":
       return [
         ...expr.statements.flatMap((stmt) =>
-          stmt.kind === "proof_const" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
+          stmt.kind === "type_assert" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
         ),
         ...(expr.expr ? [expr.expr] : []),
       ];
@@ -14669,7 +14802,7 @@ function exprChildren(expr: Expr): Expr[] {
     case "block":
       return [
         ...expr.statements.flatMap((stmt) =>
-          stmt.kind === "proof_const" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
+          stmt.kind === "type_assert" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
         ),
         ...(expr.expr ? [expr.expr] : []),
       ];
@@ -14816,7 +14949,7 @@ function statementHasSelfCall(stmt: Statement, name: string): boolean {
     case "let":
     case "destructure_let":
       return exprHasSelfCall(stmt.value, name);
-    case "proof_const":
+    case "type_assert":
     case "debug_trace":
       return false;
   }
@@ -14892,7 +15025,7 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
       case "do":
         for (const stmt of item.statements) {
           if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
-          else if (stmt.kind !== "proof_const") visit(stmt.value);
+          else if (stmt.kind !== "type_assert") visit(stmt.value);
         }
         visit(item.expr);
         return;
@@ -14902,7 +15035,7 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
       case "destructure_let":
         visit(item.value);
         return;
-      case "proof_const":
+      case "type_assert":
       case "literal":
       case "var":
         return;
@@ -14918,7 +15051,13 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
           for (const arg of item.args) visit(arg);
           return;
         }
-        if (item.callee.kind === "var") calls.add(item.callee.name);
+        if (item.callee.kind === "var") {
+          calls.add(item.callee.name);
+          if (item.callee.name === "@empty") {
+            const emptyType = item.args[0] ? renderBackendTypeProofArg(item.args[0]) : undefined;
+            if (emptyType) calls.add(`${emptyType}::empty`);
+          }
+        }
         visit(item.callee);
         for (const arg of item.args) visit(arg);
         return;
@@ -14940,7 +15079,10 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
         return;
       case "match":
         visit(item.value);
-        for (const arm of item.arms) visit(arm.value);
+        for (const arm of item.arms) {
+          visit(arm.guard);
+          visit(arm.value);
+        }
         return;
       case "shape":
       case "product_constructor":
@@ -16841,6 +16983,80 @@ function lowerBranchIntrinsic(
   return undefined;
 }
 
+function lowerPrimitiveScalarIntrinsic(
+  expr: Extract<Expr, { kind: "call" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] | undefined {
+  if (expr.callee.kind !== "var") return undefined;
+  const id = compilerCallId(expr.callee.name, ctx.intrinsicIdsByName);
+  const intrinsic = primitiveScalarIntrinsic(id);
+  if (!intrinsic) return undefined;
+  const callee = expr.callee.name.startsWith("@") ? undefined : ctx.functions.get(expr.callee.name);
+  const args = callee ? runtimeCallArgs(expr, callee) : expr.args;
+  const left = args[0] ?? { kind: "literal", literalKind: "number", value: "0" };
+  const right = args[1] ?? { kind: "literal", literalKind: "number", value: "0" };
+  return [
+    ...lowerExpr(left, ctx, locals, intrinsic.type),
+    ...lowerExpr(right, ctx, locals, intrinsic.type),
+    { op: "binary", wasm: intrinsic.wasm },
+  ];
+}
+
+function primitiveScalarIntrinsic(
+  id: string | undefined,
+): { type: string; wasm: string } | undefined {
+  const match = id?.match(/^(i32|u32|i64|u64|f32|f64|bool)_(.+)$/);
+  if (!match) return undefined;
+  const carrier = match[1]!;
+  const op = match[2]!;
+  if (carrier === "bool") {
+    const wasm = ({
+      and: "i32.and",
+      or: "i32.or",
+      xor: "i32.xor",
+      eql: "i32.eq",
+      neq: "i32.ne",
+    } as Record<string, string>)[op];
+    return wasm ? { type: "bool", wasm } : undefined;
+  }
+  const lane = carrier === "u32" ? "i32" : carrier === "u64" ? "i64" : carrier;
+  const unsigned = carrier === "u32" || carrier === "u64";
+  const wasmOp = primitiveScalarWasmOp(lane, op, unsigned);
+  return wasmOp ? { type: carrier, wasm: wasmOp } : undefined;
+}
+
+function primitiveScalarWasmOp(lane: string, op: string, unsigned: boolean): string | undefined {
+  if (lane === "f32" || lane === "f64") {
+    return ({
+      add: `${lane}.add`,
+      sub: `${lane}.sub`,
+      mul: `${lane}.mul`,
+      div: `${lane}.div`,
+      eql: `${lane}.eq`,
+      neq: `${lane}.ne`,
+      lt: `${lane}.lt`,
+      lte: `${lane}.le`,
+      gt: `${lane}.gt`,
+      gte: `${lane}.ge`,
+    } as Record<string, string>)[op];
+  }
+  const signedSuffix = unsigned ? "_u" : "_s";
+  return ({
+    add: `${lane}.add`,
+    sub: `${lane}.sub`,
+    mul: `${lane}.mul`,
+    div: `${lane}.div${signedSuffix}`,
+    rem: `${lane}.rem${signedSuffix}`,
+    eql: `${lane}.eq`,
+    neq: `${lane}.ne`,
+    lt: `${lane}.lt${signedSuffix}`,
+    lte: `${lane}.le${signedSuffix}`,
+    gt: `${lane}.gt${signedSuffix}`,
+    gte: `${lane}.ge${signedSuffix}`,
+  } as Record<string, string>)[op];
+}
+
 const BRANCH_HEADER_SIZE_OFFSET = 4;
 const BRANCH_HEADER_FLAGS_OFFSET = 8;
 const BRANCH_HEADER_SIZE = 16;
@@ -17313,6 +17529,8 @@ function statementLocalBindings(stmt: Statement, ctx: LowerContext): BackendLoca
 
 function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[] {
   type = stripBorrowType(type);
+  const heapArraySlots = flattenHeapArrayType(type);
+  if (heapArraySlots) return heapArraySlots;
   const ioItemType = ioActionItemType(type);
   if (ioItemType) return flattenType(ioItemType, layouts);
   const effectResultSlots = effectResultFlattenSlots(type, layouts);
@@ -17386,6 +17604,17 @@ function flattenType(type: string | undefined, layouts: LayoutEnv): LayoutSlot[]
     }
   }
   return [{ suffix: "", type: resolved, wat: watType(resolved) }];
+}
+
+function flattenHeapArrayType(type: string | undefined): LayoutSlot[] | undefined {
+  if (!type) return undefined;
+  const args = typeCallArgs(type, "HeapArray");
+  if (args === undefined) return undefined;
+  return [
+    { suffix: "ptr", type: "i32", wat: "i32" },
+    { suffix: "len", type: "i32", wat: "i32" },
+    { suffix: "cap", type: "i32", wat: "i32" },
+  ];
 }
 
 function rawSumLayoutForType(type: string | undefined, layouts: LayoutEnv): SumLayout | undefined {
@@ -17846,11 +18075,7 @@ function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
     if (first && types.every((type) => type === first)) return first;
   }
   if (expr.kind === "product_constructor") {
-    for (const type of ctx.layouts.types.values()) {
-      if (type.normalized?.kind === "product" && type.normalized.constructor === expr.constructor) {
-        return type.name;
-      }
-    }
+    return productConstructorResultType(expr, ctx);
   }
   if (expr.kind === "shape") {
     if (expr.inferredType) return expr.inferredType;
@@ -18044,7 +18269,7 @@ function bindRuntimeTypePattern(
   const pat = pattern?.trim();
   const act = actual?.trim();
   if (!pat || !act) return;
-  if (/^[a-z][A-Za-z0-9_]*$/.test(pat)) {
+  if (isRuntimeTypePatternVariable(pat)) {
     bindings.set(pat, act);
     return;
   }
@@ -18060,16 +18285,24 @@ function bindRuntimeTypePattern(
   const patCall = parseRuntimeTypeCall(pat);
   const actCall = parseRuntimeTypeCall(act);
   if (patCall && actCall) {
-    if (/^[a-z][A-Za-z0-9_]*$/.test(patCall.name)) bindings.set(patCall.name, actCall.name);
-    else if (typeName(patCall.name) !== typeName(actCall.name)) return;
+    if (isRuntimeTypePatternVariable(patCall.name)) {
+      bindings.set(patCall.name, actCall.name);
+    } else if (typeName(patCall.name) !== typeName(actCall.name)) return;
     for (let index = 0; index < Math.min(patCall.args.length, actCall.args.length); index++) {
       bindRuntimeTypePattern(patCall.args[index], actCall.args[index], bindings);
     }
     return;
   }
-  if (patCall && !actCall && /^[a-z][A-Za-z0-9_]*$/.test(patCall.name)) {
+  if (patCall && !actCall && isRuntimeTypePatternVariable(patCall.name)) {
     bindings.set(patCall.name, typeName(act));
   }
+}
+
+function isRuntimeTypePatternVariable(name: string): boolean {
+  if (!/^[a-z][A-Za-z0-9_]*$/.test(name)) return false;
+  if (isPrimitiveType(name)) return false;
+  if (name === "string" || name === "const" || name === "range_i32") return false;
+  return true;
 }
 
 function substituteRuntimeTypeBindings(
@@ -18143,7 +18376,7 @@ function topLevelEffectIndex(source: string): number {
 
 function isPrimitiveType(type: string): boolean {
   if (parseRefinedI32Type(type)) return true;
-  return ["i32", "u32", "i64", "u64", "f32", "f64", "bool", "io"].includes(type) ||
+  return ["i32", "u32", "i64", "u64", "f32", "f64", "bool", "io", "string"].includes(type) ||
     unsignedBitWidth(type) !== undefined;
 }
 
@@ -18286,7 +18519,7 @@ function usedNames(expr: Expr | BlockExpr): Set<string> {
         visit(item.value);
         for (const name of item.names) names.add(name);
         return;
-      case "proof_const":
+      case "type_assert":
         return;
       case "var":
         addName(item.name);
@@ -18351,7 +18584,7 @@ function countNameUses(expr: Expr | BlockExpr, name: string): number {
       case "destructure_let":
         visit(item.value);
         return;
-      case "proof_const":
+      case "type_assert":
         return;
       case "var":
         if (baseName(item.name) === target) count++;
@@ -18566,7 +18799,7 @@ function usesBranchIntrinsic(expr: Expr | BlockExpr, functions: Map<string, FnDe
         return visit(item.value);
       case "destructure_let":
         return visit(item.value);
-      case "proof_const":
+      case "type_assert":
       case "debug_trace":
       case "literal":
       case "var":
@@ -18626,7 +18859,7 @@ function usesHeapArrayIntrinsic(expr: Expr | BlockExpr, functions: Map<string, F
         return visit(item.value);
       case "destructure_let":
         return visit(item.value);
-      case "proof_const":
+      case "type_assert":
       case "debug_trace":
       case "literal":
       case "var":
@@ -18724,7 +18957,9 @@ function wasmBinaryOp(op: string): number {
     "i32.sub": 0x6b,
     "i32.mul": 0x6c,
     "i32.div_s": 0x6d,
+    "i32.div_u": 0x6e,
     "i32.rem_s": 0x6f,
+    "i32.rem_u": 0x70,
     "i32.and": 0x71,
     "i32.or": 0x72,
     "i32.xor": 0x73,
@@ -18734,19 +18969,57 @@ function wasmBinaryOp(op: string): number {
     "i64.and": 0x83,
     "i64.or": 0x84,
     "i64.xor": 0x85,
+    "i64.add": 0x7c,
+    "i64.sub": 0x7d,
     "i64.mul": 0x7e,
+    "i64.div_s": 0x7f,
+    "i64.div_u": 0x80,
+    "i64.rem_s": 0x81,
+    "i64.rem_u": 0x82,
     "i64.shl": 0x86,
     "i64.shr_u": 0x88,
     "i32.eq": 0x46,
     "i32.ne": 0x47,
     "i32.lt_s": 0x48,
     "i32.lt_u": 0x49,
+    "i32.gt_u": 0x4b,
     "i32.le_u": 0x4d,
     "i32.le_s": 0x4c,
     "i32.gt_s": 0x4a,
     "i32.ge_s": 0x4e,
+    "i32.ge_u": 0x4f,
     "i32.eqz": 0x45,
     "i64.eqz": 0x50,
+    "i64.eq": 0x51,
+    "i64.ne": 0x52,
+    "i64.lt_s": 0x53,
+    "i64.lt_u": 0x54,
+    "i64.gt_s": 0x55,
+    "i64.gt_u": 0x56,
+    "i64.le_s": 0x57,
+    "i64.le_u": 0x58,
+    "i64.ge_s": 0x59,
+    "i64.ge_u": 0x5a,
+    "f32.eq": 0x5b,
+    "f32.ne": 0x5c,
+    "f32.lt": 0x5d,
+    "f32.gt": 0x5e,
+    "f32.le": 0x5f,
+    "f32.ge": 0x60,
+    "f64.eq": 0x61,
+    "f64.ne": 0x62,
+    "f64.lt": 0x63,
+    "f64.gt": 0x64,
+    "f64.le": 0x65,
+    "f64.ge": 0x66,
+    "f32.add": 0x92,
+    "f32.sub": 0x93,
+    "f32.mul": 0x94,
+    "f32.div": 0x95,
+    "f64.add": 0xa0,
+    "f64.sub": 0xa1,
+    "f64.mul": 0xa2,
+    "f64.div": 0xa3,
   } as Record<string, number>)[op] ?? 0x6a;
 }
 

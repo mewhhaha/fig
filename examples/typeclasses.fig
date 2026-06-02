@@ -1,12 +1,12 @@
-fn eql_point(a: Point, b: Point) -> bool {
+type Point = struct {x: i32, y: i32}
+
+fn Point::eql(a: Point, b: Point) -> bool {
   a.x == b.x
 }
 
-fn neq_point(a: Point, b: Point) -> bool {
+fn Point::neq(a: Point, b: Point) -> bool {
   a.x != b.x
 }
-
-type Point = struct {x: i32, y: i32}
 
 type fn Eq(t: type) {
   let Expected = fn(a: t, b: t) -> bool;
@@ -43,7 +43,8 @@ fn inc(x: i32) -> i32 {
   x + 1
 }
 
-fn same(const t, const _proof: Eq(t), a: t, b: t) -> i32 {
+fn same(a: t, b: t) -> i32 {
+  @assert(Eq(t));
   match t::eql(a, b) {
     true => 1,
     false => 0,
@@ -52,21 +53,18 @@ fn same(const t, const _proof: Eq(t), a: t, b: t) -> i32 {
 
 fn Mapper(
   v: t(a),
-  const f: fn(x: a) -> b,
-  const _proof: Functor(t)
+  const f: fn(x: a) -> b
 ) -> t(b) {
+  @assert(Functor(t));
   t::map(f, v)
 }
 
 pub fn main() -> i32 {
   let mapped = Mapper(
     Box {value: 1},
-    inc,
-    Functor(Box)
+    inc
   );
   same(
-    Point,
-    Eq(Point),
     Point {x: 1, y: 2},
     Point {x: 1, y: 2}
   ) + mapped.value

@@ -9,7 +9,8 @@ type fn NonEmpty(a: type) -> type {
 }
 
 fn NonEmpty::singleton(value: a) -> NonEmpty(a) {
-  NonEmpty {head: value, tail: list.List::empty(a)}
+  let tail: list.List(a) = list.List::empty();
+  NonEmpty {head: value, tail}
 }
 
 fn NonEmpty::cons(value: a, xs: NonEmpty(a)) -> NonEmpty(a) {
@@ -25,9 +26,67 @@ fn NonEmpty::tail(xs: NonEmpty(a)) -> list.List(a) {
 }
 
 fn NonEmpty::len(xs: NonEmpty(a)) -> i32 {
-  1 + list.List::len(a, xs.tail)
+  1 + list.List::len(xs.tail)
 }
 
 fn NonEmpty::to_list(xs: NonEmpty(a)) -> list.List(a) {
-  list.List::cons(a, xs.head, xs.tail)
+  list.List::cons(xs.head, xs.tail)
+}
+
+fn NonEmpty::from_list_or(fallback: a, xs: list.List(a)) -> NonEmpty(a) {
+  match list.List::head(xs) {
+    Some(value) => NonEmpty {head: value, tail: list.List::tail(xs)},
+    None => NonEmpty::singleton(fallback),
+  }
+}
+
+fn NonEmpty::map(const f: fn(x: a) -> b, xs: NonEmpty(a)) -> NonEmpty(b) {
+  NonEmpty {
+    head: f(xs.head),
+    tail: list.List::map(f, xs.tail)
+  }
+}
+
+fn NonEmpty::pure(value: a) -> NonEmpty(a) {
+  NonEmpty::singleton(value)
+}
+
+fn NonEmpty::append(xs: NonEmpty(a), ys: NonEmpty(a)) -> NonEmpty(a) {
+  NonEmpty {
+    head: xs.head,
+    tail: list.List::append(xs.tail, NonEmpty::to_list(ys))
+  }
+}
+
+fn NonEmpty::apply(fns: NonEmpty(fn(x: a) -> b), xs: NonEmpty(a)) -> NonEmpty(b) {
+  NonEmpty::from_list_or(
+    fns.head(xs.head),
+    list.List::apply(NonEmpty::to_list(fns), NonEmpty::to_list(xs))
+  )
+}
+
+fn NonEmpty::bind(xs: NonEmpty(a), const f: fn(x: a) -> NonEmpty(b)) -> NonEmpty(b) {
+  let first = f(xs.head);
+  NonEmpty {
+    head: first.head,
+    tail: list.List::append(
+      first.tail,
+      NonEmpty::bind_tail(xs.tail, f, list.List::empty())
+    )
+  }
+}
+
+fn NonEmpty::bind_tail(
+  xs: list.List(a),
+  const f: fn(x: a) -> NonEmpty(b),
+  out: list.List(b)
+) -> list.List(b) {
+  match list.List::head(xs) {
+    Some(value) => NonEmpty::bind_tail(
+      list.List::tail(xs),
+      f,
+      list.List::append(out, NonEmpty::to_list(f(value)))
+    ),
+    None => out,
+  }
 }

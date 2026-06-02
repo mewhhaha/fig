@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 fn bool_not(value: bool) -> bool {
   if value { false } else { true }
 }
@@ -23,27 +25,31 @@ type fn Number(t: type) -> type {
   t
 }
 
-fn min(const t: type, const _number: Number(t), a: t, b: t) -> t {
+fn min(a: i32, b: i32) -> i32 {
   if a < b { a } else { b }
 }
 
-fn max(const t: type, const _number: Number(t), a: t, b: t) -> t {
+fn max(a: i32, b: i32) -> i32 {
   if a < b { b } else { a }
 }
 
-fn clamp(const t: type, const _number: Number(t), value: t, low: t, high: t) -> t {
-  max(t, Number(t), low, min(t, Number(t), value, high))
+fn clamp(value: i32, low: i32, high: i32) -> i32 {
+  if value < low {
+    low
+  } else {
+    if high < value { high } else { value }
+  }
 }
 
-fn between(const t: type, const _number: Number(t), value: t, low: t, high: t) -> bool {
+fn between(value: i32, low: i32, high: i32) -> bool {
   if low <= value { value <= high } else { false }
 }
 
-fn abs(const t: type, const _number: Number(t), value: t) -> t {
+fn abs(value: i32) -> i32 {
   if value < 0 { 0 - value } else { value }
 }
 
-fn signum(const t: type, const _number: Number(t), value: t) -> t {
+fn signum(value: i32) -> i32 {
   if value == 0 {
     0
   } else {
@@ -51,6 +57,6 @@ fn signum(const t: type, const _number: Number(t), value: t) -> t {
   }
 }
 
-fn square(const t: type, const _number: Number(t), value: t) -> t {
+fn square(value: i32) -> i32 {
   value * value
 }

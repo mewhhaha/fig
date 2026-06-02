@@ -16,7 +16,6 @@ import type {
   Param,
   ParamPattern,
   Program,
-  ProofConstDecl,
   ShapeType,
   SourceImport,
   Statement,
@@ -26,6 +25,7 @@ import type {
   TypeCountExpr,
   TypeDecl,
   TypeExpr,
+  TypeAssertDecl,
   TypeMemberExpr,
   TypeParam,
   TypePattern,
@@ -141,6 +141,8 @@ function isDeclarationBuiltinConst(node: Node, name: string): boolean {
 function lowerDecl(node: Node): Declaration {
   const decl = unwrap(node);
   switch (decl.type) {
+    case "TypeAssertDecl":
+      return lowerTypeAssert(decl);
     case "TypeSugarDecl":
       return lowerTypeSugarDecl(decl);
     case "TypeFnDecl":
@@ -169,12 +171,12 @@ function lowerDecl(node: Node): Declaration {
 
 function lowerOperatorDecl(node: Node): OperatorDecl {
   const nameNode = only(node, "OperatorBindingName");
-  const value = only(node, "OperatorValue");
   const symbol = text(first(nameNode, "Op"), "operator symbol");
-  const fixity = text(first(value, "LiteralType"), "operator fixity") as OperatorDecl["fixity"];
-  const precedenceText = text(first(value, "Number"), "operator precedence");
+  const fixityText = text(first(node, "OperatorFixity"), "operator fixity");
+  const fixity = `#${fixityText}` as OperatorDecl["fixity"];
+  const precedenceText = text(first(node, "Number"), "operator precedence");
   const precedence = Number.parseInt(precedenceText, 10);
-  const target = text(first(value, "OperatorTarget"), "operator target").replace(/\s+/g, "");
+  const target = text(first(node, "OperatorTarget"), "operator target").replace(/\s+/g, "");
   return {
     kind: "operator",
     ...meta(node, nameNode),
@@ -1253,14 +1255,11 @@ function lowerLet(node: Node): LetDecl | DestructureLetDecl {
   };
 }
 
-function lowerProofConst(node: Node): ProofConstDecl {
-  const nameNode = first(node, "LowerIdent");
-  const name = text(nameNode, "proof const name");
+function lowerTypeAssert(node: Node): TypeAssertDecl {
   return {
-    kind: "proof_const",
-    ...meta(node, nameNode),
+    kind: "type_assert",
+    ...spanOnly(node),
     ...doc(node),
-    name,
     value: lowerTypeExpr(first(node, "TypeExpr")),
   };
 }
@@ -1289,10 +1288,10 @@ function lowerBlock(node: Node): Extract<Expr, { kind: "block" }> {
     } else if (child.type === "BlockStmt") {
       const stmt = named(child)[0];
       if (stmt.type === "BlockLetDecl") statements.push(lowerLet(stmt));
-      else if (stmt.type === "BlockProofConstDecl") statements.push(lowerProofConst(stmt));
+      else if (stmt.type === "TypeAssertDecl") statements.push(lowerTypeAssert(stmt));
       else if (stmt.type === "DebugTraceStmt") statements.push(lowerDebugTrace(stmt));
-    } else if (child.type === "BlockProofConstDecl") {
-      statements.push(lowerProofConst(child));
+    } else if (child.type === "TypeAssertDecl") {
+      statements.push(lowerTypeAssert(child));
     } else if (child.type === "DebugTraceStmt") {
       statements.push(lowerDebugTrace(child));
     } else if (child.type === "Expr") {
@@ -1485,8 +1484,8 @@ function lowerDoExpr(node: Node): Expr {
       }
     } else if (child.type === "BlockLetDecl") {
       statements.push(lowerLet(child));
-    } else if (child.type === "BlockProofConstDecl") {
-      statements.push(lowerProofConst(child));
+    } else if (child.type === "TypeAssertDecl") {
+      statements.push(lowerTypeAssert(child));
     } else if (child.type === "DebugTraceStmt") {
       statements.push(lowerDebugTrace(child));
     } else if (child.type === "Expr") {

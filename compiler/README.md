@@ -152,6 +152,23 @@ hash, imported type-environment signature, qualified resolved declared type/ABI 
 qualified resolved value-body type/ABI signatures, qualified simple body type-check signature,
 qualified resolved symbol-environment signature, and qualified resolved export ABI signature. That
 keeps the individual two-source checks while also proving they belong to the same import edge.
+The importer source now also records an ordered source-import edge signature from each alias to its
+module hash, so the compiled slice has a whole-module graph-facing import summary in addition to
+per-edge resolution checks.
+It also records a source-derived module-graph diagnostic signature for each import edge, tying the
+alias/module edge to the source declaration span width and current graph diagnostic code. Current
+well-formed source imports carry the no-diagnostic code, but the record shape is ready for
+missing-module, missing-edge, and cycle diagnostics once cross-source graph construction moves from
+seed graphs into parsed sources.
+Declaration bodies now also produce a source-derived dependency edge signature for the simple graph
+cases the current Fig-source compiler can model cleanly: function, `let`, and `const` declarations
+whose body root is an unqualified identifier or bare same-module call. Each record ties the
+declaration kind, declaration name, dependency target, value-edge tag, and source declaration span
+width together, so same-module dependency graph parity can grow from parsed source facts instead of
+seed-only graph fixtures. The same dependency subset also has a diagnostic signature that includes a
+diagnostic code field. It now emits `DependencyCycle` when the target can reach the source through
+the current source-derived simple dependency graph, including direct self-dependencies and multi-edge
+cycles, and emits no-diagnostic for acyclic ordinary edges.
 
 This is not yet a self-hosting compiler. Keep adding compiler subsystems here as direct Fig source
 instead of generated benchmark filler. The compiler source may import prelude modules when that
@@ -200,6 +217,9 @@ Current parity status:
   from the callee return annotation, including direct-import summaries with imported qualified type
   annotations. The first pass intentionally excludes qualified/member calls, pipe-bind expressions,
   operator chains, and field projections so it matches the current AST root shape exactly.
+- Function match-body summaries now resolve to `i32` or `bool` when every arm returns a standalone
+  scalar literal of the same type and no arm has a guard. Other match-body forms remain unknown
+  until full pattern-match expression typing is implemented.
 - The semantic Wasm byte-buffer slice now emits real instruction tapes for bare same-module scalar
   calls when every argument is a locally proven scalar literal, runtime parameter, local `let`,
   single scalar-operator expression, or nested same-module scalar call and the callee arity/index
@@ -219,6 +239,10 @@ Current parity status:
   every local initializer in the function is supported by the current scalar lowerer. The byte
   model prefixes those initializer instructions with `local.set` before the final body expression,
   keeping the function facts and returned Wasm byte buffer aligned.
+- Simple boolean function match bodies now participate in the same emitted instruction-tape path
+  when the function has exactly one runtime `bool` parameter and two `true`/`false` arms whose
+  results are standalone scalar literals. The generated body reads parameter 0, emits a Wasm `if`
+  with scalar result type, then emits the true and false arm instruction tapes before `else`/`end`.
 - Resolved body-type facts now recognize final scalar local identifiers, scalar body operators over
   those locals, and scalar locals whose initializers are literals, parameter aliases, simple scalar
   operators, or bare same-module scalar calls. Scalar operator type facts now recurse through nested
@@ -228,6 +252,18 @@ Current parity status:
 - Wasm body plans are now backed by a `HeapArray(WasmBodyInstruction)` instead of fixed numbered
   prefix fields, so simple scalar operands can expand to multiple emitted instructions without
   changing the byte-buffer or fact-record path.
+- Prototype compiler subsystems now use prelude data structures where they model the intent:
+  diagnostics retain ordered entries in `Vec` values, artifact tables keep a `Vec` plus
+  `prelude.map.Map` module index, checker environments keep a symbol log plus `Map` lookup index,
+  resolver caches use `prelude.set.Set`, and declaration/module graph storage uses `Vec`, scalar
+  `Map` indexes, and `prelude.graph.Graph` instead of fixed numbered slots. Declaration resolution
+  order is represented as a `prelude.nonempty.NonEmpty` sequence, and small aggregate compiler
+  summaries use `Vec::fold` where the data path is a regular collection fold.
+- Declaration and module graphs now use `prelude.graph.Graph::reachable_bounded` for finite
+  cycle checks over their stored edges, while the general queue/set reachability helper remains
+  available for broader traversal. Module resolution also checks import-edge membership separately
+  from module presence, so an existing module without a declared importer edge produces a
+  missing-import-edge diagnostic instead of being treated as a valid resolution.
 - Code-section byte records now encode function local declarations as real Wasm local declaration
   vectors instead of placeholder zero bytes, with body and code-entry sizes derived from the emitted
   ULEB lengths.
@@ -245,6 +281,8 @@ The next useful additions are:
 1. Continue replacing compact Wasm body placeholders with semantically lowered instruction bytes for
    a broader expression subset, such as simple calls and scalar operators, while keeping the
    returned byte-buffer parity gate.
-2. A richer declaration graph with cross-module import edges and cycle diagnostics.
+2. Extend graph diagnostics from source-import and declaration dependency edge/diagnostic records
+   into full source-derived declaration and module graphs, including missing-module diagnostics and
+   richer dependency-edge classes for real import/dependency edges.
 3. Incremental artifact invalidation against full module graphs and import edges.
 4. Stable serialized compiler artifacts that can survive process restarts.

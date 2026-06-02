@@ -1,5 +1,6 @@
 const diagnostic = @import("./diagnostic.fig");
 const layout = @import("prelude.layout");
+const vec = @import("prelude.vec");
 const span = @import("./span.fig");
 const token = @import("./token.fig");
 
@@ -31,6 +32,7 @@ type TextCharCode = enum(i32) {
   Less = 60,
   Equal = 61,
   Greater = 62,
+  StaticMarker = 64,
   UpperA = 65,
   UpperB = 66,
   UpperI = 73,
@@ -99,7 +101,7 @@ type TextLexResult = union {
 }
 
 type TextTokenStream = struct {
-  tokens: layout.HeapArray(TextToken),
+  tokens: vec.Vec(TextToken),
   count: i32,
   diagnostics: diagnostic.DiagnosticBag,
   source_span: span.Span,
@@ -774,14 +776,14 @@ fn next_stream_span(
   }
 }
 
-fn text_token_array_empty() -> layout.HeapArray(TextToken) {
-  layout.HeapArray::empty(TextToken)
+fn text_token_array_empty() -> vec.Vec(TextToken) {
+  vec.Vec::new(TextToken, 0)
 }
 
 fn stream_step(
   text: TextBuffer,
   cursor: TextCursor,
-  tokens: layout.HeapArray(TextToken),
+  tokens: vec.Vec(TextToken),
   count: i32,
   diagnostics: diagnostic.DiagnosticBag,
   source_span: span.Span,
@@ -793,8 +795,7 @@ fn stream_step(
     cursor,
     fallback_cursor
   );
-  let next_tokens = layout.HeapArray::push(
-    TextToken,
+  let next_tokens = vec.Vec::push(
     tokens,
     text_token_from_result(result)
   );
@@ -818,7 +819,7 @@ fn stream_step(
 fn stream_loop(
   text: TextBuffer,
   cursor: TextCursor,
-  tokens: layout.HeapArray(TextToken),
+  tokens: vec.Vec(TextToken),
   count: i32,
   diagnostics: diagnostic.DiagnosticBag,
   source_span: span.Span
@@ -839,8 +840,7 @@ fn stream_loop(
           token_cursor,
           advance(token_cursor, 1)
         ),
-        layout.HeapArray::push(
-          TextToken,
+        vec.Vec::push(
           tokens,
           text_token_from_result(result)
         ),
@@ -895,7 +895,7 @@ fn text_token_at(source: TextTokenStream, index: i32) -> TextToken {
     false => false,
   };
   match in_bounds {
-    true => layout.HeapArray::get(
+    true => vec.Vec::get_t(
       TextToken,
       source.tokens,
       index

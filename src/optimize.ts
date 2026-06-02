@@ -586,7 +586,7 @@ function programHasRuntimeProfileExpressions(program: Program): boolean {
 
 function blockHasRuntimeProfileExpressions(block: BlockExpr): boolean {
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const" || stmt.kind === "debug_trace") continue;
+    if (stmt.kind === "type_assert" || stmt.kind === "debug_trace") continue;
     if (exprHasRuntimeProfileExpressions(stmt.value)) return true;
   }
   return block.expr ? exprHasRuntimeProfileExpressions(block.expr) : false;
@@ -600,7 +600,7 @@ function exprHasRuntimeProfileExpressions(expr: Expr): boolean {
       return blockHasRuntimeProfileExpressions(expr);
     case "do": {
       for (const stmt of expr.statements) {
-        if (stmt.kind === "proof_const" || stmt.kind === "debug_trace") continue;
+        if (stmt.kind === "type_assert" || stmt.kind === "debug_trace") continue;
         if (exprHasRuntimeProfileExpressions(stmt.value)) return true;
       }
       return expr.expr ? exprHasRuntimeProfileExpressions(expr.expr) : false;
@@ -1058,7 +1058,10 @@ function nextOptimizerPassState(
 
 function optimizerDeclarationIndexes(program: Program): Map<string, number> {
   const indexes = new Map<string, number>();
-  program.declarations.forEach((decl, index) => indexes.set(decl.name, index));
+  program.declarations.forEach((decl, index) => {
+    if (decl.kind === "type_assert") return;
+    indexes.set(decl.name, index);
+  });
   return indexes;
 }
 
@@ -1205,7 +1208,11 @@ function optimizerTraceCounters(
 }
 
 export function buildOptimizationScope(program: Program): OptimizationScope {
-  const declarations = new Map(program.declarations.map((decl) => [decl.name, decl]));
+  const declarations = new Map(
+    program.declarations
+      .filter((decl) => decl.kind !== "type_assert")
+      .map((decl) => [decl.name, decl]),
+  );
   const functions = new Map(
     program.declarations
       .filter((decl): decl is FnDecl => decl.kind === "fn")
@@ -1351,7 +1358,7 @@ function referencedRuntimeNames(expr: Expr | BlockExpr | undefined): string[] {
         item.statements.forEach(visit);
         visit(item.expr);
         return;
-      case "proof_const":
+      case "type_assert":
       case "literal":
         return;
     }
@@ -1399,12 +1406,6 @@ function applyAssumeRewrites(program: Program, options: OptimizeOptions): Progra
 
 function typeCallParts(expr: TypeExpr): { callee: string; args: string[] } | undefined {
   if (expr.kind !== "type_call") return undefined;
-  if (expr.callee.kind === "type_static_ref" && expr.callee.name === "satisfies") {
-    const [effect, contract] = expr.args;
-    const effectKey = effect ? typeExprKey(effect)[0] : undefined;
-    const contractKey = contract ? typeExprKey(contract)[0] : undefined;
-    return effectKey && contractKey ? { callee: contractKey, args: [effectKey] } : undefined;
-  }
   if (expr.callee.kind !== "type_ref") return undefined;
   const args = expr.args.flatMap(typeExprKey);
   return args.length === expr.args.length ? { callee: expr.callee.name, args } : undefined;
@@ -1461,7 +1462,7 @@ function instantiateGenericRewriteFacts(
     instantiateProofRewriteFacts(facts, proof, instantiated, pluginRegistry);
   }
   for (const stmt of block.statements) {
-    if (stmt.kind !== "proof_const") continue;
+    if (stmt.kind !== "type_assert") continue;
     const proof = typeCallParts(stmt.value);
     if (!proof || proof.args.length !== 1) continue;
     instantiateProofRewriteFacts(facts, proof, instantiated, pluginRegistry);
@@ -2477,7 +2478,7 @@ function blockCallsRecursiveFunction(
     for (const child of exprChildrenForPlanning(expr)) visit(child);
   };
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "type_assert") continue;
     if (stmt.kind === "debug_trace") {
       for (const arg of stmt.args) visit(arg);
       continue;
@@ -2509,7 +2510,7 @@ function functionMatchesUnionParam(fn: FnDecl, typeDecls: TypeDecl[]): boolean {
     for (const child of exprChildrenForPlanning(expr)) visit(child);
   };
   for (const stmt of fn.body.statements) {
-    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "type_assert") continue;
     if (stmt.kind === "debug_trace") {
       for (const arg of stmt.args) visit(arg);
       continue;
@@ -2728,7 +2729,7 @@ function foldableDomainBranchReasons(
     for (const child of exprChildrenForPlanning(expr)) visitExpr(child, scoped);
   };
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "type_assert") continue;
     if (stmt.kind === "debug_trace") continue;
     const value = abstractExpr(stmt.value, env);
     visitExpr(stmt.value, env);
@@ -3233,11 +3234,25 @@ function evaluateIntegerExpr(expr: Expr | undefined): number | undefined {
     const value = Number(expr.value);
     return Number.isSafeInteger(value) ? value : undefined;
   }
-  if (expr.kind !== "binary") return undefined;
-  const left = evaluateIntegerExpr(expr.left);
-  const right = evaluateIntegerExpr(expr.right);
+  let op: string | undefined;
+  let leftExpr: Expr | undefined;
+  let rightExpr: Expr | undefined;
+  if (expr.kind === "binary") {
+    op = expr.op;
+    leftExpr = expr.left;
+    rightExpr = expr.right;
+  } else {
+    const primitive = primitiveOperatorCall(expr);
+    if (!primitive) return undefined;
+    op = primitive.op;
+    leftExpr = primitive.left;
+    rightExpr = primitive.right;
+  }
+  if (!leftExpr || !rightExpr) return undefined;
+  const left = evaluateIntegerExpr(leftExpr);
+  const right = evaluateIntegerExpr(rightExpr);
   if (left === undefined || right === undefined) return undefined;
-  switch (expr.op) {
+  switch (op) {
     case "+":
       return left + right;
     case "-":
@@ -3247,6 +3262,76 @@ function evaluateIntegerExpr(expr: Expr | undefined): number | undefined {
     default:
       return undefined;
   }
+}
+
+function primitiveOperatorCall(
+  expr: Expr,
+): { op: string; owner: string; left: Expr; right: Expr } | undefined {
+  if (expr.kind !== "call" || expr.callee.kind !== "var" || expr.args.length !== 2) {
+    return undefined;
+  }
+  const info = primitiveOperatorCallInfo(expr.callee.name);
+  if (!info) return undefined;
+  const left = expr.args[0];
+  const right = expr.args[1];
+  if (!left || !right) return undefined;
+  return { ...info, left, right };
+}
+
+function primitiveOperatorCallInfo(name: string): { op: string; owner: string } | undefined {
+  const memberIndex = name.lastIndexOf("::");
+  if (memberIndex >= 0) {
+    const owner = terminalTypeName(name.slice(0, memberIndex));
+    if (!isPrimitiveOperatorOwner(owner)) return undefined;
+    const op = primitiveOperatorMember(name.slice(memberIndex + 2));
+    return op ? { op, owner } : undefined;
+  }
+  const generated = name.match(/(?:^|_)op_([A-Za-z0-9_]+?)__([A-Za-z0-9_]+)(?:__|$)/);
+  const member = generated?.[1];
+  const owner = generated?.[2];
+  if (!member || !owner || !isPrimitiveOperatorOwner(owner)) return undefined;
+  const op = primitiveOperatorMember(member);
+  return op ? { op, owner } : undefined;
+}
+
+function primitiveOperatorMember(member: string): string | undefined {
+  switch (member) {
+    case "add":
+      return "+";
+    case "sub":
+      return "-";
+    case "mul":
+      return "*";
+    case "div":
+      return "/";
+    case "rem":
+      return "%";
+    case "eql":
+      return "==";
+    case "neq":
+      return "!=";
+    case "lt":
+      return "<";
+    case "lte":
+      return "<=";
+    case "gt":
+      return ">";
+    case "gte":
+      return ">=";
+    case "and":
+      return "&&";
+    case "or":
+      return "||";
+    case "xor":
+      return "^^";
+    default:
+      return undefined;
+  }
+}
+
+function isPrimitiveOperatorOwner(owner: string): boolean {
+  return ["i32", "u32", "i64", "u64", "f32", "f64", "bool"].includes(owner) ||
+    /^u([1-9][0-9]*)$/.test(owner);
 }
 
 function integerLiteral(value: number): Expr {
@@ -3260,7 +3345,7 @@ function abstractBlock(
   const env = new Map(initialEnv);
   const locals = new Map<string, AbstractValue>();
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "type_assert") continue;
     if (stmt.kind === "debug_trace") continue;
     const value = abstractExpr(stmt.value, env);
     if (stmt.kind === "let") {
@@ -3291,6 +3376,13 @@ function abstractExpr(expr: Expr, env: Map<string, AbstractValue>): AbstractValu
       return abstractVar(expr.name, env);
     case "binary":
       return abstractBinary(expr, env);
+    case "call": {
+      const primitive = primitiveOperatorCall(expr);
+      if (primitive) {
+        return abstractPrimitiveOperator(primitive.op, primitive.left, primitive.right, env);
+      }
+      return { kind: "unknown" };
+    }
     case "operator_chain":
       return { kind: "unknown" };
     case "match":
@@ -3329,7 +3421,6 @@ function abstractExpr(expr: Expr, env: Map<string, AbstractValue>): AbstractValu
       return abstractExpr(expr.body, scoped);
     }
     case "index":
-    case "call":
     case "do":
     case "const_fn":
     case "static_for_slots":
@@ -3353,16 +3444,57 @@ function abstractBinary(
   expr: Extract<Expr, { kind: "binary" }>,
   env: Map<string, AbstractValue>,
 ): AbstractValue {
-  const left = abstractExpr(expr.left, env);
-  const right = abstractExpr(expr.right, env);
-  const folded = abstractFoldConstants(expr.op, left, right);
+  return abstractPrimitiveOperator(expr.op, expr.left, expr.right, env);
+}
+
+function abstractPrimitiveOperator(
+  op: string,
+  leftExpr: Expr,
+  rightExpr: Expr,
+  env: Map<string, AbstractValue>,
+): AbstractValue {
+  if (
+    (op === "==" || op === "!=") &&
+    stableExprKey(leftExpr) === stableExprKey(rightExpr) &&
+    isNonTrappingPureValueExpr(leftExpr)
+  ) {
+    return { kind: "constant", literalKind: "bool", value: String(op === "==") };
+  }
+  const left = abstractExpr(leftExpr, env);
+  const right = abstractExpr(rightExpr, env);
+  const folded = abstractFoldConstants(op, left, right);
   if (folded) return folded;
-  if (["==", "!=", "<", "<=", ">", ">="].includes(expr.op)) {
-    const bool = abstractCompareDomains(expr.op, left, right);
+  if (["==", "!=", "<", "<=", ">", ">="].includes(op)) {
+    const bool = abstractCompareDomains(op, left, right);
     return bool ?? { kind: "bool_domain", values: [false, true] };
   }
-  const range = abstractI32RangeForBinary(expr.op, left, right);
+  const range = abstractI32RangeForBinary(op, left, right);
   return range ? abstractI32Range(range.min, range.max) : { kind: "unknown" };
+}
+
+function isNonTrappingPureValueExpr(expr: Expr): boolean {
+  switch (expr.kind) {
+    case "literal":
+    case "var":
+      return true;
+    case "binary":
+      if (expr.op === "/" || expr.op === "%") return false;
+      return isNonTrappingPureValueExpr(expr.left) && isNonTrappingPureValueExpr(expr.right);
+    case "call": {
+      const primitive = primitiveOperatorCall(expr);
+      if (!primitive) return false;
+      if (primitive.op === "/" || primitive.op === "%") return false;
+      return isNonTrappingPureValueExpr(primitive.left) &&
+        isNonTrappingPureValueExpr(primitive.right);
+    }
+    case "field":
+      return isNonTrappingPureValueExpr(expr.value) && isNonTrappingPureValueExpr(expr.key);
+    case "block":
+      return expr.statements.length === 0 && Boolean(expr.expr) &&
+        isNonTrappingPureValueExpr(expr.expr!);
+    default:
+      return false;
+  }
 }
 
 function abstractFoldConstants(
@@ -3578,7 +3710,7 @@ function foldAbstractFactsInBlock(
 ): BlockExpr {
   const scoped = new Map(env);
   const statements = block.statements.map((stmt): Statement => {
-    if (stmt.kind === "proof_const") return stmt;
+    if (stmt.kind === "type_assert") return stmt;
     if (stmt.kind === "debug_trace") return stmt;
     const value = foldAbstractFactsInExpr(stmt.value, scoped);
     if (stmt.kind === "let") {
@@ -3679,11 +3811,18 @@ function foldAbstractFactsInExpr(expr: Expr, env: Map<string, AbstractValue>): E
         index: foldAbstractFactsInExpr(expr.index, env),
       };
     case "call":
-      return {
+      {
+        const folded = {
         ...expr,
         callee: foldAbstractFactsInExpr(expr.callee, env),
         args: expr.args.map((arg) => foldAbstractFactsInExpr(arg, env)),
-      };
+        };
+        const primitive = primitiveOperatorCall(folded);
+        if (!primitive) return folded;
+        return abstractConstantExpr(
+          abstractPrimitiveOperator(primitive.op, primitive.left, primitive.right, env),
+        ) ?? folded;
+      }
     case "const_fn":
       return { ...expr, body: foldAbstractFactsInExpr(expr.body, new Map()) };
     case "static_for_slots":
@@ -3842,6 +3981,7 @@ function programCallCounts(program: Program, scope?: OptimizationScope): Map<str
   const counts = new Map<string, number>();
   const add = (name: string) => counts.set(name, (counts.get(name) ?? 0) + 1);
   for (const decl of program.declarations) {
+    if (decl.kind === "type_assert") continue;
     if (scope && !scope.reachableDeclarations.has(decl.name)) continue;
     if (decl.kind === "fn") { for (const name of calledFunctionList(decl.body)) add(name); }
     if ((decl.kind === "let" || decl.kind === "const")) {
@@ -4081,7 +4221,7 @@ function pureLetValues(
 ): Map<string, Expr> {
   const values = new Map<string, Expr>();
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "type_assert") continue;
     if (stmt.kind === "debug_trace") continue;
     let value = stmt.value;
     for (const [name, replacement] of values) {
@@ -4101,7 +4241,7 @@ function pureLetValues(
 function substituteLocalLetUses(block: BlockExpr, replacements: Map<string, Expr>): BlockExpr {
   let active = new Map<string, Expr>();
   const statements = block.statements.map((stmt) => {
-    if (stmt.kind === "proof_const") return stmt;
+    if (stmt.kind === "type_assert") return stmt;
     if (stmt.kind === "debug_trace") return stmt;
     const value = substituteMany(stmt.value, active);
     const bindings = stmt.kind === "let" ? [stmt.name] : stmt.names;
@@ -4132,7 +4272,7 @@ function inlineSingleUsePureLets(block: BlockExpr, functions: Map<string, FnDecl
   const active = new Map<string, Expr>();
   const statements: Statement[] = [];
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       statements.push(stmt);
       continue;
     }
@@ -4206,7 +4346,7 @@ function foldStaticProjectionLets(
 ): BlockExpr {
   const active = new Map(initialActive);
   const statements = block.statements.map((stmt) => {
-    if (stmt.kind === "proof_const") return stmt;
+    if (stmt.kind === "type_assert") return stmt;
     if (stmt.kind === "debug_trace") return stmt;
     const value = optimizeExpr(
       rewriteStaticProjections(stmt.value, active, forwarding, inlineable, functions, config),
@@ -4872,6 +5012,19 @@ function optimizeExpr(
       }
       const staticValue = optimizeStaticShapeCall(callee, args);
       if (staticValue) return staticValue;
+      const primitive = primitiveOperatorCall({ ...expr, callee, args });
+      if (primitive?.owner === "i32") {
+        return optimizeBinary(
+          {
+            kind: "binary",
+            op: primitive.op,
+            left: primitive.left,
+            right: primitive.right,
+          },
+          functions,
+          config,
+        );
+      }
       if (callee.kind === "var") {
         const target = forwarding.get(callee.name);
         if (target) return { ...expr, callee: { kind: "var", name: target }, args };
@@ -5101,7 +5254,7 @@ function directCallsTo(program: Program, target: string): Extract<Expr, { kind: 
       case "destructure_let":
         visit(item.value);
         return;
-      case "proof_const":
+      case "type_assert":
       case "literal":
       case "var":
         return;
@@ -5181,7 +5334,7 @@ function functionValueUses(program: Program, functions: Map<string, FnDecl>): Se
       case "destructure_let":
         visit(item.value);
         return;
-      case "proof_const":
+      case "type_assert":
       case "literal":
         return;
     }
@@ -5722,7 +5875,7 @@ function stableExprKey(expr: Expr | BlockExpr): string {
     case "block":
       return `block:${
         expr.statements.map((stmt) =>
-          stmt.kind === "proof_const"
+          stmt.kind === "type_assert"
             ? "proof"
             : stmt.kind === "debug_trace"
             ? `debug_trace:${stmt.message ?? ""}`
@@ -5803,7 +5956,7 @@ function statementCost(stmt: Statement): number {
     case "let":
     case "destructure_let":
       return 1 + exprCost(stmt.value);
-    case "proof_const":
+    case "type_assert":
     case "debug_trace":
       return 0;
   }
@@ -6057,19 +6210,33 @@ function intervalRange(intervals: LiteralInterval[]): { min: number; max: number
 function affineDelta(expr: Expr | undefined, param: string): number | undefined {
   if (!expr) return undefined;
   if (expr.kind === "var" && expr.name === param) return 0;
-  if (expr.kind !== "binary") return undefined;
-  const leftLiteral = numericLiteralValue(expr.left);
-  const rightLiteral = numericLiteralValue(expr.right);
-  if (expr.op === "+") {
-    if (expr.left.kind === "var" && expr.left.name === param && rightLiteral !== undefined) {
+  let op: string | undefined;
+  let left: Expr | undefined;
+  let right: Expr | undefined;
+  if (expr.kind === "binary") {
+    op = expr.op;
+    left = expr.left;
+    right = expr.right;
+  } else {
+    const primitive = primitiveOperatorCall(expr);
+    if (!primitive) return undefined;
+    op = primitive.op;
+    left = primitive.left;
+    right = primitive.right;
+  }
+  if (!left || !right) return undefined;
+  const leftLiteral = numericLiteralValue(left);
+  const rightLiteral = numericLiteralValue(right);
+  if (op === "+") {
+    if (left.kind === "var" && left.name === param && rightLiteral !== undefined) {
       return rightLiteral;
     }
-    if (expr.right.kind === "var" && expr.right.name === param && leftLiteral !== undefined) {
+    if (right.kind === "var" && right.name === param && leftLiteral !== undefined) {
       return leftLiteral;
     }
   }
   if (
-    expr.op === "-" && expr.left.kind === "var" && expr.left.name === param &&
+    op === "-" && left.kind === "var" && left.name === param &&
     rightLiteral !== undefined
   ) {
     return -rightLiteral;
@@ -6148,7 +6315,7 @@ function recursiveCallDetails(
     case "do":
       return [
         ...expr.statements.flatMap((stmt) =>
-          stmt.kind === "proof_const"
+          stmt.kind === "type_assert"
             ? []
             : stmt.kind === "debug_trace"
             ? stmt.args.flatMap((arg) => recursiveCallDetails(arg, targets, clause, false))
@@ -6321,7 +6488,13 @@ function calledFunctionList(expr: Expr | BlockExpr | undefined): string[] {
           item.args.forEach(visit);
           return;
         }
-        if (item.callee.kind === "var") names.push(item.callee.name);
+        if (item.callee.kind === "var") {
+          names.push(item.callee.name);
+          if (item.callee.name === "@empty") {
+            const emptyType = item.args[0] ? renderOptimizerTypeProofArg(item.args[0]) : undefined;
+            if (emptyType) names.push(`${emptyType}::empty`);
+          }
+        }
         visit(item.callee);
         item.args.forEach(visit);
         return;
@@ -6376,7 +6549,7 @@ function calledFunctionList(expr: Expr | BlockExpr | undefined): string[] {
       case "do_bind":
         visit(item.value);
         return;
-      case "proof_const":
+      case "type_assert":
       case "literal":
       case "var":
         return;
@@ -6392,6 +6565,26 @@ function calledFunctionList(expr: Expr | BlockExpr | undefined): string[] {
   };
   visit(expr);
   return names;
+}
+
+function renderOptimizerTypeProofArg(expr: Expr): string | undefined {
+  if (expr.kind === "var") return expr.name;
+  if (expr.kind === "literal" && expr.literalKind === "number") return expr.value;
+  if (expr.kind === "call" && expr.callee.kind === "var") {
+    const args = expr.args.map(renderOptimizerTypeProofArg);
+    if (args.some((arg) => arg === undefined)) return undefined;
+    return `${expr.callee.name}(${args.join(", ")})`;
+  }
+  if (expr.kind === "shape") {
+    const slots = expr.slots.map((slot) => {
+      const type = renderOptimizerTypeProofArg(slot.value);
+      if (!type) return undefined;
+      return `${slot.label ? `${slot.label}: ` : ""}${type}`;
+    });
+    if (slots.some((slot) => slot === undefined)) return undefined;
+    return `{${slots.join(", ")}}`;
+  }
+  return undefined;
 }
 
 function exprHasKind(expr: Expr | BlockExpr | undefined, kind: Expr["kind"]): boolean {
@@ -6527,7 +6720,7 @@ function calledSubexpressions(expr: Expr | BlockExpr): Expr[] {
     case "block":
       return [
         ...expr.statements.flatMap((stmt) =>
-          stmt.kind === "proof_const" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
+          stmt.kind === "type_assert" ? [] : stmt.kind === "debug_trace" ? stmt.args : [stmt.value]
         ),
         ...(expr.expr ? [expr.expr] : []),
       ];
@@ -6616,7 +6809,7 @@ function renameBlockBindings(
   const env = new Map(outer);
   const statements: Statement[] = [];
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       statements.push(stmt);
       continue;
     }
@@ -6817,7 +7010,7 @@ function removeUnusedPureLets(block: BlockExpr, functions: Map<string, FnDecl>):
   const used = usedNames(block.expr);
   for (let index = block.statements.length - 1; index >= 0; index--) {
     const stmt = block.statements[index]!;
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       kept.unshift(stmt);
       continue;
     }
@@ -6994,7 +7187,7 @@ function usedNameCounts(block: BlockExpr): Map<string, number> {
               continue;
             }
             if (stmt.kind === "debug_trace") stmt.args.forEach(visit);
-            else if (stmt.kind !== "proof_const") visit(stmt.value);
+            else if (stmt.kind !== "type_assert") visit(stmt.value);
           }
           visit(item.expr);
           return;
@@ -7019,7 +7212,7 @@ function blockUsedNames(block: BlockExpr): Set<string> {
   const used = usedNames(block.expr);
   for (let index = block.statements.length - 1; index >= 0; index--) {
     const stmt = block.statements[index]!;
-    if (stmt.kind === "proof_const") continue;
+    if (stmt.kind === "type_assert") continue;
     if (stmt.kind === "debug_trace") {
       for (const arg of stmt.args) {
         for (const name of usedNames(arg)) used.add(name);
@@ -7267,7 +7460,7 @@ function substituteBlock(block: BlockExpr, name: string, value: Expr): BlockExpr
   const statements: Statement[] = [];
   let shadowed = false;
   for (const stmt of block.statements) {
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       statements.push(stmt);
       continue;
     }

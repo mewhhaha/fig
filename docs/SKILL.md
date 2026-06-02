@@ -24,6 +24,8 @@ summarizes the current supported surface.
 - Use `docs/reference/semantics.md` for Branch-Bit values, effects, const evaluation, reflection,
   and Wasm portability constraints.
 - Use `docs/reference/modules.md` for prelude/web/engine module roles.
+- Use `docs/reference/prelude.md` for standard prelude modules, contracts, operators, collections,
+  effect helpers, and available library APIs.
 - Use `docs/EXAMPLES.md` and `tests/fixtures/language` for tested good/bad reference examples.
 - Start with `grammar.ebnf` for accepted syntax.
 - Use `examples/all_features.fig` as the compact language tour.
@@ -74,8 +76,8 @@ type fn Point(
 ```
 
 Prefer `///` for top-level `fn`, `type fn`, `const`, and `let`; function params; type params;
-type-block lets; local lets and proof consts; and shape fields. Use ordinary `//` only for non-hover
-implementation notes.
+type-block lets; local lets and type-level const calls; and shape fields. Use ordinary `//` only for
+non-hover implementation notes.
 
 ## Verification
 
@@ -139,7 +141,7 @@ Use these literal forms:
 - Booleans: `true`, `false`.
 - Characters and strings: `'x'`, `"fig"`.
 - Fenced text: Triple backticks, useful for WGSL shader source.
-- Literal type tags: `#Tag`, `#field`, `#infixl`.
+- Literal type tags: `#Tag`, `#field`, `#Some`.
 - Tuple and repeat values: `[1, true]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
 - Target-typed collection literals: `#[1, 2, 3]`, including spread such as `#[0, ...rest]`.
 
@@ -189,12 +191,12 @@ fn Map4(const f: fn(i32) -> i32, xs: {4*i32}) -> {4*i32} {
 
 ## Blocks and Expressions
 
-Blocks contain `let` statements, local proof `const` declarations, and a final expression:
+Blocks contain `let` statements, local type assertions, and a final expression:
 
 ```fig
 pub fn main() -> i32 {
   let x = 1;
-  const Proof = Eq(Point);
+  @assert(Eq(Point));
   x + 1
 }
 ```
@@ -304,8 +306,8 @@ When choosing a type-function pattern:
   return `struct(Shape)` or `union(...)`.
 - If you intend to require behavior on a type, write a contract `type fn` with `@require` and
   attached members such as `t::eql`, `t::append`, or `t::map`.
-- If you intend generic runtime helpers with no runtime proof cost, pass `const _proof: contract(t)`
-  and call attached members through `t::member(...)`.
+- If you intend generic runtime helpers with no runtime evidence cost, evaluate the contract inside
+  the body with `@assert(contract(t));` and call attached members through `t::member(...)`.
 - If you intend to abstract over a unary type constructor, accept `t: type fn(a: type) -> type`, use
   values as `t(a)`, and reflect members on `t`.
 - If you intend type-directed construction or dispatch, pass the type as `const t` or
@@ -355,8 +357,8 @@ type fn Eq(t: type) -> type {
 ```
 
 Attached members use qualified function names, are discoverable through type reflection, and can be
-called statically as `t::map(...)` inside generic code. Local proof consts such as
-`const Mapper = Functor(t);` are erased after they prove the contract.
+called statically as `t::map(...)` inside generic code. Local `@assert(Functor(t));` calls evaluate
+the contract and discard the returned type-level value.
 
 Prelude contracts such as `Eq(t)`, `Functor(t)`, `Applicative(t)`, `Monad(t)`, and `Monoid(t)` get
 their optimizer law rewrites from the default prelude rewrite compiler plugin. Do not introduce or
@@ -402,7 +404,7 @@ fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
 fn inc(x: i32) -> i32 { x + 1 }
 
 pub fn main() -> i32 {
-  fmap(Box {value: 1}, inc, Functor(Box)).value
+  fmap(Box {value: 1}, inc).value
 }
 ```
 
@@ -418,7 +420,7 @@ fn wrap(x: i32) -> Box(i32) {
 }
 
 pub fn main() -> i32 {
-  bind(fmap(Box {value: 1}, inc, Functor(Box)), wrap, Monad(Box)).value
+  bind(fmap(Box {value: 1}, inc), wrap).value
 }
 ```
 
@@ -450,7 +452,10 @@ Define applicative-like types with `map`, `pure`, and `apply`:
 ```fig
 fn Box::pure(value: a) -> Box(a) { Box {value: value} }
 fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) { Box {value: v.value(x.value)} }
-fn Proof(const _proof: Applicative(Box)) -> i32 { 0 }
+fn inc(x: i32) -> i32 { x + 1 }
+pub fn main() -> i32 {
+  apply(Box {value: inc}, Box {value: 1}).value
+}
 ```
 
 Use semigroup/monoid patterns for append and empty operations on concrete types:
@@ -462,7 +467,7 @@ fn Point::append(a: Point, b: Point) -> Point {
 fn Point::empty() -> Point { Point {x: 0, y: 0} }
 
 pub fn main() -> i32 {
-  let total = append(Point, Semigroup(Point), Point {x: 1, y: 2}, Point {x: 3, y: 4});
+  let total = append(Point {x: 1, y: 2}, Point {x: 3, y: 4});
   total.x + total.y
 }
 ```
@@ -513,10 +518,10 @@ pub fn flipped() -> Box(i32) { wrap =<< Box {value: 1} }
 ```
 
 When implementing new abstractions, keep the contract as a `type fn`, attach runtime behavior with
-qualified member functions, pass proof values as `const _proof` parameters, and rely on
-specialization to erase proof and dispatch overhead. Const dictionaries are still useful for highly
-specialized static dispatch, but attached members plus erased proof parameters are the preferred
-default for typeclass-like APIs.
+qualified member functions, evaluate required contracts with local `@assert(Contract(t));` calls,
+and rely on specialization to erase the compile-time check and dispatch overhead. Const dictionaries
+are still useful for highly specialized static dispatch, but attached members plus local discarded
+type-level const calls are the preferred default for typeclass-like APIs.
 
 ## Operators
 
@@ -531,16 +536,18 @@ names, not compiler features by themselves:
 Ranges use dedicated `start .. end` syntax. `..` is not an overloadable operator.
 
 Runtime operator calls are resolved through visible operator declarations. Define an operator as a
-compile-time `const` binding that points at a normal function:
+top-level fixity declaration that points at a normal function:
 
 ```fig
 fn add_point(a: Point, b: Point) -> Point { Point::add(a, b) }
-const (+) = @operator(#infixl, 60, add_point);
+infixl 60 (+) = add_point;
 ```
 
-Current expression syntax resolves user-defined binary operators through visible declarations,
-usually `#infix`, `#infixl`, or `#infixr`. The prelude exposes common operator declarations in
-`prelude.operators` and through `prelude.std`.
+Current expression syntax resolves runtime binary operators through visible declarations,
+using `infix`, `infixl`, or `infixr`. The prelude exposes common operator declarations in
+`prelude.operators` and through `prelude.std`. Primitive scalar operators are also source-visible:
+`prelude.operators` defines attached members such as `i32::add` and `bool::and` as wrappers around
+backend intrinsics like `@i32_add` and `@bool_and`.
 
 Type expressions parse the same operator token, but only primitive type-level operators such as
 `==`, `!=`, and literal-type union `|` are currently type-evaluable.
@@ -643,7 +650,7 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
 - `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, and `prelude.schedule`.
 - `prelude.vec`, `prelude.list`, `prelude.nonempty`, `prelude.queue`, `prelude.tree`,
   `prelude.zipper`, `prelude.map`, `prelude.set`, and `prelude.graph`: heap-backed compiler data
-  structures.
+  structures, including graph reachability helpers for dependency checks.
 - `prelude.geometry2d`: Fixed 2D vector, color, vertex, quad, and geometry helpers.
 
 Prelude modules are pure and do not declare host IO imports. Fixed inline arrays remain preferred

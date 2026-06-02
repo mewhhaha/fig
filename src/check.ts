@@ -38,6 +38,7 @@ import {
   createCompilerPluginRegistry,
   defaultCompilerPluginRegistry,
   isCompilerSpecialForm,
+  isPrimitiveScalarIntrinsicId,
   isStaticBuiltinName,
   staticBuiltinName,
   staticBuiltinParamKind,
@@ -616,7 +617,7 @@ function checkReservedCompilerNames(program: Program, diagnostics: Diagnostic[])
     if (pattern?.kind === "typed") checkPattern(pattern.pattern);
   };
   const checkStatement = (stmt: Statement, allowProfile = true) => {
-    if (stmt.kind === "let" || stmt.kind === "proof_const") checkName(stmt.name, stmt);
+    if (stmt.kind === "let") checkName(stmt.name, stmt);
     if (stmt.kind === "destructure_let") {
       for (const name of stmt.names) checkName(name, { span: stmt.nameSpans?.[name] ?? stmt.span });
     }
@@ -625,11 +626,11 @@ function checkReservedCompilerNames(program: Program, diagnostics: Diagnostic[])
   };
   const checkDoStatement = (stmt: DoStatement) => {
     if (stmt.kind === "do_bind") checkName(stmt.name, stmt);
-    if (stmt.kind === "let" || stmt.kind === "proof_const") checkName(stmt.name, stmt);
+    if (stmt.kind === "let") checkName(stmt.name, stmt);
     if (stmt.kind === "destructure_let") {
       for (const name of stmt.names) checkName(name, { span: stmt.nameSpans?.[name] ?? stmt.span });
     }
-    if (stmt.kind !== "proof_const" && "value" in stmt) checkExpr(stmt.value);
+    if (stmt.kind !== "type_assert" && "value" in stmt) checkExpr(stmt.value);
     if (stmt.kind === "debug_trace") stmt.args.forEach(checkExpr);
   };
   const checkBlock = (block: BlockExpr) => {
@@ -717,11 +718,11 @@ function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
   const checkStatement = (stmt: Statement) => {
     if (stmt.kind === "let" || stmt.kind === "destructure_let") checkExpr(stmt.value);
     if (stmt.kind === "let") checkRemovedRewriteTypeText(stmt.type, diagnostics, stmt);
-    if (stmt.kind === "proof_const") checkTypeExpr(stmt.value);
+    if (stmt.kind === "type_assert") checkTypeExpr(stmt.value);
     if (stmt.kind === "debug_trace") stmt.args.forEach(checkExpr);
   };
   const checkDoStatement = (stmt: DoStatement) => {
-    if (stmt.kind === "proof_const") checkTypeExpr(stmt.value);
+    if (stmt.kind === "type_assert") checkTypeExpr(stmt.value);
     else if ("value" in stmt) checkExpr(stmt.value);
     if (stmt.kind === "debug_trace") stmt.args.forEach(checkExpr);
   };
@@ -790,6 +791,8 @@ function checkRemovedSyntax(program: Program, diagnostics: Diagnostic[]) {
     } else if (decl.kind === "let" || decl.kind === "const") {
       checkRemovedRewriteTypeText(decl.type, diagnostics, decl);
       checkExpr(decl.value);
+    } else if (decl.kind === "type_assert") {
+      checkTypeExpr(decl.value);
     } else if (decl.kind === "type") {
       for (const stmt of decl.body.statements) checkTypeExpr(stmt.value);
       checkTypeExpr(decl.body.expr);
@@ -961,7 +964,7 @@ function checkPreflightSyntax(program: Program, diagnostics: Diagnostic[]) {
     for (const arg of stmt.args) checkExpr(arg, allowProfile);
   };
   const checkStatement = (stmt: Statement, allowProfile: boolean) => {
-    if (stmt.kind === "let" || stmt.kind === "proof_const") checkName(stmt.name, stmt);
+    if (stmt.kind === "let") checkName(stmt.name, stmt);
     if (stmt.kind === "let") checkRemovedRewriteTypeText(stmt.type, diagnostics, stmt);
     if (stmt.kind === "destructure_let") {
       for (const name of stmt.names) checkName(name, { span: stmt.nameSpans?.[name] ?? stmt.span });
@@ -970,7 +973,7 @@ function checkPreflightSyntax(program: Program, diagnostics: Diagnostic[]) {
       checkExpr(stmt.value, allowProfile);
       return;
     }
-    if (stmt.kind === "proof_const") {
+    if (stmt.kind === "type_assert") {
       checkTypeExpr(stmt.value);
       return;
     }
@@ -1112,6 +1115,8 @@ function checkPreflightSyntax(program: Program, diagnostics: Diagnostic[]) {
     } else if (decl.kind === "const" || decl.kind === "let") {
       checkRemovedRewriteTypeText(decl.type, diagnostics, decl);
       checkExpr(decl.value, false);
+    } else if (decl.kind === "type_assert") {
+      checkTypeExpr(decl.value);
     } else if (decl.kind === "type") {
       for (const stmt of decl.body.statements) {
         checkName(stmt.name, stmt);
@@ -1432,6 +1437,38 @@ function checkProgramInternal(
     inferredStats3,
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+  const constStats3 = createSpecializationTrace();
+  const needsConstSpecialization3 = programNeedsConstSpecialization(
+    program,
+    fnDecls,
+    constValues,
+    typeDecls,
+    memo,
+  );
+  recordPhase(
+    "specializeConstParamCalls #3",
+    () => {
+      if (needsConstSpecialization3) {
+        specializeConstParamCalls(
+          program,
+          new Map(fnDecls.map((decl) => [decl.name, decl])),
+          constValues,
+          typeDecls,
+          addShader,
+          diagnostics,
+          false,
+          constStats3,
+        );
+      }
+    },
+    constStats3,
+  );
+  fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+  recordPhase(
+    "resolveAttachedMemberCalls #6",
+    () => resolveAttachedMemberCalls(program, typeDecls),
+  );
+  fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
   constValues = recordPhase("evaluateConstDecls #2", () =>
     evaluateConstDecls(
       program.declarations.filter((decl): decl is ConstDecl => decl.kind === "const"),
@@ -1463,10 +1500,65 @@ function checkProgramInternal(
       pluginRegistry,
       options.cache,
     ));
+  const needsOperatorSpecialization = programHasOperatorChains(program);
   recordPhase(
     "lowerResolvedOperators",
     () => lowerResolvedOperators(program, typeDecls, fnDecls, diagnostics, memo, options.cache),
   );
+  if (needsOperatorSpecialization) {
+    fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+    const operatorInferredStats = createSpecializationTrace();
+    recordPhase(
+      "specializeInferredTypeCalls #operators",
+      () => {
+        if (hasInferredTypeSpecializationTargets(fnDecls, constValues, true, memo)) {
+          specializeInferredTypeCalls(
+            program,
+            new Map(fnDecls.map((decl) => [decl.name, decl])),
+            constValues,
+            typeDecls,
+            diagnostics,
+            true,
+            operatorInferredStats,
+          );
+        }
+      },
+      operatorInferredStats,
+    );
+    fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+    const operatorConstStats = createSpecializationTrace();
+    const needsOperatorConstSpecialization = programNeedsConstSpecialization(
+      program,
+      fnDecls,
+      constValues,
+      typeDecls,
+      memo,
+    );
+    recordPhase(
+      "specializeConstParamCalls #operators",
+      () => {
+        if (needsOperatorConstSpecialization) {
+          specializeConstParamCalls(
+            program,
+            new Map(fnDecls.map((decl) => [decl.name, decl])),
+            constValues,
+            typeDecls,
+            addShader,
+            diagnostics,
+            false,
+            operatorConstStats,
+          );
+        }
+      },
+      operatorConstStats,
+    );
+    fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+    recordPhase(
+      "resolveAttachedMemberCalls #operators",
+      () => resolveAttachedMemberCalls(program, typeDecls),
+    );
+    fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
+  }
   recordPhase(
     "balanceAssociativeBinaryChains",
     () => balanceAssociativeBinaryChains(program, options.cache?.balancedBinaryDeclarations),
@@ -2273,8 +2365,13 @@ function lowerDoExpression(
   resolvedTypeHoles: ResolvedTypeHole[] = [],
 ): Expr {
   const proofEffect = renderTypeExpr(expr.strategy.effect);
-  const effect = doRuntimeEffectName(expr.strategy.effect, expr.strategy.name, functionNames) ??
-    proofEffect;
+  const effect = doRuntimeEffectName(
+    expr.strategy.effect,
+    expr.strategy.name,
+    functionNames,
+    types,
+    functions,
+  ) ?? proofEffect;
   const strategy = expr.strategy.name;
   if (!functionNames && types.length === 0 && functions.length === 0) {
     return mapDoExpressionChildren(expr, lowerExpr);
@@ -2297,6 +2394,7 @@ function lowerDoExpression(
     strategy,
     types,
     functionNames,
+    functions,
     diagnostics,
     expr.strategy.span,
   );
@@ -2305,6 +2403,8 @@ function lowerDoExpression(
     effect,
     strategy,
     functionNames,
+    types,
+    functions,
     diagnostics,
     expr.span,
   );
@@ -2671,21 +2771,23 @@ function validateDoStrategyEvidence(
   runtimeEffect: string,
   strategy: string,
   functionNames: Set<string> | undefined,
+  types: TypeDecl[],
+  functions: FnDecl[],
   diagnostics: Diagnostic[],
   span?: Span,
 ) {
   if (!functionNames) return;
   const required = strategy === "monad" ? ["bind", "pure"] : ["map", "pure", "apply"];
   const missing = required.filter((member) =>
-    !hasDoEffectMember(functionNames, runtimeEffect, member)
+    !hasDoEffectMember(functionNames, runtimeEffect, member, types, functions)
   );
   if (!missing.length) return;
   const contract = strategy === "monad" ? "Monad" : "Applicative";
   diagnostics.push({
     code: "do.missing_strategy_proof",
-    message: `@${strategy} do requires @satisfies(${
+    message: `@${strategy} do requires @assert(${contract}(${
       renderTypeExpr(effect)
-    }, ${contract}): missing ${missing.map((member) => `${runtimeEffect}::${member}`).join(", ")}`,
+    })): missing ${missing.map((member) => `${runtimeEffect}::${member}`).join(", ")}`,
     span,
   });
 }
@@ -2695,6 +2797,7 @@ function validateDoStrategyType(
   strategy: string,
   types: TypeDecl[],
   functionNames: Set<string> | undefined,
+  functions: FnDecl[],
   diagnostics: Diagnostic[],
   span?: Span,
 ) {
@@ -2729,7 +2832,7 @@ function validateDoStrategyType(
   const decl = findTypeDeclByName(types, effectName);
   if (!decl) {
     const member = strategy === "applicative" ? "map" : "bind";
-    if (!hasDoEffectMember(functionNames, effectName, member)) {
+    if (!hasDoEffectMember(functionNames, effectName, member, types, functions)) {
       diagnostics.push({
         code: "do.strategy_type",
         message: `unknown @${strategy} strategy effect ${effectName}`,
@@ -2753,11 +2856,14 @@ function doRuntimeEffectName(
   effect: TypeExpr,
   strategy: string,
   functionNames?: Set<string>,
+  types: TypeDecl[] = [],
+  functions: FnDecl[] = [],
 ): string | undefined {
   if (effect.kind !== "type_call") return undefined;
   const callee = renderTypeExpr(effect.callee);
   const member = strategy === "applicative" ? "map" : "bind";
-  if (hasDoEffectMember(functionNames, callee, member)) return callee;
+  if (hasDoEffectMember(functionNames, callee, member, types, functions)) return callee;
+  if (findTypeDeclByName(types, callee)) return callee;
   return undefined;
 }
 
@@ -2765,18 +2871,61 @@ function hasDoEffectMember(
   functionNames: Set<string> | undefined,
   effectName: string,
   member: string,
+  types: TypeDecl[] = [],
+  functions: FnDecl[] = [],
 ): boolean {
-  if (!functionNames) return false;
-  const candidates = [effectName];
-  const stripped = stripDoEffectTypeArgs(effectName);
-  if (stripped !== effectName) candidates.push(stripped);
+  return doEffectMemberTarget(functionNames, effectName, member, types, functions) !== undefined;
+}
+
+function doEffectMemberTarget(
+  functionNames: Set<string> | undefined,
+  effectName: string,
+  member: string,
+  types: TypeDecl[] = [],
+  functions: FnDecl[] = [],
+): string | undefined {
+  if (!functionNames) return undefined;
+  const candidates = doEffectOwnerCandidates(effectName);
   for (const candidate of candidates) {
-    if (functionNames.has(`${candidate}::${member}`)) return true;
-    const parts = candidate.split(".");
-    const localName = parts[parts.length - 1] ?? candidate;
-    if (functionNames.has(`${localName}::${member}`)) return true;
+    const direct = `${candidate}::${member}`;
+    if (functionNames.has(direct)) return direct;
   }
-  return false;
+  for (const fn of functions) {
+    if (fn.memberOf?.member !== member) continue;
+    if (candidates.includes(fn.memberOf.owner) && functionNames.has(fn.name)) return fn.name;
+  }
+  for (const candidate of candidates) {
+    const decl = findTypeDeclByName(types, typeNameOf(candidate));
+    const found = decl ? typeFragmentMembers(decl).find((item) => item.name === member) : undefined;
+    if (found && functionNames.has(found.target)) return found.target;
+    const normalized = decl?.normalized;
+    const members = normalized?.kind === "product" || normalized?.kind === "sum"
+      ? normalized.members ?? []
+      : [];
+    const normalizedMember = members.find((item) => item.name === member);
+    if (normalizedMember && functionNames.has(normalizedMember.target)) {
+      return normalizedMember.target;
+    }
+  }
+  return undefined;
+}
+
+function doEffectOwnerCandidates(effectName: string): string[] {
+  const candidates: string[] = [];
+  const push = (candidate: string | undefined) => {
+    if (!candidate) return;
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  };
+  push(effectName);
+  const stripped = stripDoEffectTypeArgs(effectName);
+  push(stripped);
+  for (const candidate of [...candidates]) {
+    push(typeNameOf(candidate));
+  }
+  for (const candidate of [...candidates]) {
+    push(terminalName(candidate));
+  }
+  return candidates;
 }
 
 function stripDoEffectTypeArgs(effectName: string): string {
@@ -3123,19 +3272,18 @@ function withDoStrategyProof(
 ): Expr {
   const proofEffect = doStrategyProofEffect(effect);
   if (!proofEffect || !needsDoStrategyProof(proofEffect, types)) return expr;
+  const contractName = strategy === "monad" ? "Monad" : "Applicative";
+  const contractDecl = findTypeDeclByName(types, contractName);
+  if (!contractDecl) return expr;
   const proofValue = {
     kind: "type_call" as const,
-    callee: { kind: "type_static_ref" as const, name: "satisfies" },
-    args: [
-      proofEffect,
-      { kind: "type_ref" as const, name: strategy === "monad" ? "Monad" : "Applicative" },
-    ],
+    callee: { kind: "type_ref" as const, name: contractDecl.name },
+    args: [proofEffect],
   };
   return {
     kind: "block",
     statements: [{
-      kind: "proof_const",
-      name: "__do_strategy_proof",
+      kind: "type_assert",
       value: proofValue,
     }],
     expr,
@@ -3593,9 +3741,6 @@ function lowerResolvedOperators(
           memo,
         );
         if (!resolved) {
-          if (isPrimitiveBinaryOperator(expr.op, leftType, rightType, typeDecls)) {
-            return unresolved;
-          }
           if (!leftType || !rightType) return unresolved;
           diagnostics.push(diagnosticAt(
             "operator.missing",
@@ -3706,7 +3851,8 @@ function lowerResolvedOperators(
           if (stmt.kind !== "let" && stmt.kind !== "destructure_let") return stmt;
           const value = lowerExpr(stmt.value, scoped);
           const explicit = stmt.kind === "let" ? explicitTypeAnnotation(stmt.type) : undefined;
-          if (stmt.kind === "let" && explicit) {
+          const explicitIsConcrete = explicit !== undefined && !typeHasFreeInferredVars(explicit);
+          if (stmt.kind === "let" && explicitIsConcrete) {
             scoped.set(stmt.name, explicit);
           } else if (stmt.kind === "let") {
             const inferred = inferRuntimeType(value, scoped, functions, undefined, memo);
@@ -3838,7 +3984,7 @@ function programHasExpr(
 }
 
 function programHasOperatorChains(program: Program): boolean {
-  return programHasExpr(program, (expr) => expr.kind === "operator_chain");
+  return programHasExpr(program, (expr) => expr.kind === "operator_chain" || expr.kind === "binary");
 }
 
 function programHasDoExpressions(program: Program, cache?: WeakMap<object, boolean>): boolean {
@@ -3958,66 +4104,6 @@ function builtinOperatorMetadata(symbol: string): Pick<OperatorDecl, "fixity" | 
     "%": { fixity: "#infixl", precedence: 70 },
   };
   return table[symbol] ?? { fixity: "#infixl", precedence: 50 };
-}
-
-function isPrimitiveBinaryOperator(
-  op: string,
-  left: string | undefined,
-  right: string | undefined,
-  types: TypeDecl[],
-): boolean {
-  if (left === "bool" && right === "bool" && ["&&", "||", "^^", "==", "!="].includes(op)) {
-    return true;
-  }
-  if (["==", "!="].includes(op) && (literalTypeCarrier(left) || literalTypeCarrier(right))) {
-    return (literalTypeCarrier(left) ?? left) === (literalTypeCarrier(right) ?? right);
-  }
-  const leftRuntime = primitiveNumericRuntimeType(left, types);
-  const rightRuntime = primitiveNumericRuntimeType(right, types);
-  if (
-    genericNumericOperatorOperands(left, right, leftRuntime, rightRuntime) &&
-    ["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">="].includes(op)
-  ) {
-    return true;
-  }
-  return leftRuntime === "i32" && rightRuntime === "i32" &&
-    ["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">="].includes(op);
-}
-
-function primitiveNumericRuntimeType(
-  type: string | undefined,
-  types: TypeDecl[],
-): string | undefined {
-  const effectValue = unwrapUnaryType("io", type);
-  const resolved = resolveAliasType(effectValue ?? type, types) ?? effectValue ?? type;
-  const runtime = scalarDomainRuntimeType(resolved);
-  if (runtime === "count") return "i32";
-  if (runtime && unsignedBitWidth(runtime) !== undefined) return "i32";
-  return runtime;
-}
-
-function unwrapUnaryType(name: string, type: string | undefined): string | undefined {
-  const trimmed = type?.trim();
-  if (!trimmed) return undefined;
-  const args = typeCallArgsForBase(trimmed, name);
-  if (args === undefined) return undefined;
-  const parts = splitTypeArgs(args);
-  return parts.length === 1 ? parts[0]?.trim() : undefined;
-}
-
-function genericNumericOperatorOperands(
-  left: string | undefined,
-  right: string | undefined,
-  leftRuntime: string | undefined,
-  rightRuntime: string | undefined,
-): boolean {
-  if (!left || !right) return false;
-  const leftGeneric = isInferredTypeVarName(left);
-  const rightGeneric = isInferredTypeVarName(right);
-  if (leftGeneric && rightGeneric) return left === right;
-  if (leftGeneric) return rightRuntime === "i32";
-  if (rightGeneric) return leftRuntime === "i32";
-  return false;
 }
 
 function lowerCollectorLiterals(
@@ -4540,18 +4626,52 @@ function operatorTargetMatches(
   memo?: CheckMemo,
 ): boolean {
   if (fn.params.length < 2 || fn.params.slice(2).some((param) => !param.const)) return false;
+  let leftMatchType = operatorOperandContractType(leftType, typeDecls) ?? leftType;
+  let rightMatchType = operatorOperandContractType(rightType, typeDecls) ?? rightType;
+  if (
+    left.kind === "literal" && left.literalKind === "number" && rightMatchType &&
+    numericLiteralCanMatchType(rightMatchType, typeDecls)
+  ) {
+    leftMatchType = rightMatchType;
+  }
+  if (
+    right.kind === "literal" && right.literalKind === "number" && leftMatchType &&
+    numericLiteralCanMatchType(leftMatchType, typeDecls)
+  ) {
+    rightMatchType = leftMatchType;
+  }
   const bindings = new Map<string, string>();
-  bindTypePattern(fn.params[0]!.type, leftType, bindings, typeDecls);
-  bindTypePattern(fn.params[1]!.type, rightType, bindings, typeDecls);
+  bindTypePattern(fn.params[0]!.type, leftMatchType, bindings, typeDecls);
+  bindTypePattern(fn.params[1]!.type, rightMatchType, bindings, typeDecls);
   if (left.kind === "var") inferFnTypeArgs(fn.params[0]!.type, functions.get(left.name), bindings);
   if (right.kind === "var") {
     inferFnTypeArgs(fn.params[1]!.type, functions.get(right.name), bindings);
   }
   const leftExpected = substituteTypeVars(fn.params[0]!.type, bindings);
   const rightExpected = substituteTypeVars(fn.params[1]!.type, bindings);
-  return operandMatchesParam(leftExpected, left, leftType, functions, memo) &&
-    operandMatchesParam(rightExpected, right, rightType, functions, memo) &&
+  return operandMatchesParam(leftExpected, left, leftMatchType, functions, typeDecls, memo) &&
+    operandMatchesParam(rightExpected, right, rightMatchType, functions, typeDecls, memo) &&
     operatorConstProofParamsSatisfied(fn.params.slice(2), bindings, typeDecls);
+}
+
+function operatorOperandContractType(
+  type: string | undefined,
+  typeDecls: TypeDecl[],
+): string | undefined {
+  const trimmed = type?.trim();
+  if (!trimmed) return undefined;
+  const backed = scalarBackedRuntimeType(trimmed, typeDecls);
+  if (backed) return backed;
+  if (trimmed === "count") return "i32";
+  const runtime = scalarDomainRuntimeType(trimmed);
+  if (runtime) return runtime;
+  const scalar = scalarReflection(trimmed);
+  if (!scalar) return undefined;
+  if (scalar.carrier === "i32" || scalar.carrier === "i64") return scalar.carrier;
+  if (scalar.carrier === "u32" || scalar.carrier === "u64") return scalar.carrier;
+  const width = scalar.bitWidth;
+  if (width === undefined) return undefined;
+  return width <= 32 ? "u32" : "u64";
 }
 
 function operatorConstProofParamsSatisfied(
@@ -4595,11 +4715,66 @@ function operandMatchesParam(
   expr: Expr,
   actual: string | undefined,
   functions: Map<string, FnDecl>,
+  typeDecls: TypeDecl[],
   memo?: CheckMemo,
 ): boolean {
   if (actual && typeMatches(expected, actual, memo)) return true;
+  if (actual && scalarBackedTypeMatches(expected, actual, typeDecls, memo)) return true;
+  if (expr.kind === "literal" && expr.literalKind === "number") {
+    if (numericLiteralCanMatchType(expected, typeDecls)) return true;
+  }
   if (expr.kind !== "var") return false;
   return fnTypeMatches(expected, functions.get(expr.name));
+}
+
+function numericLiteralCanMatchType(type: string, typeDecls: TypeDecl[]): boolean {
+  const trimmed = stripBorrowType(type).trim();
+  if (!trimmed) return false;
+  const scalar = scalarReflection(trimmed);
+  if (scalar) return true;
+  const backed = scalarBackedRuntimeType(trimmed, typeDecls);
+  if (backed) return true;
+  return trimmed === "i32" || trimmed === "u32" || trimmed === "i64" || trimmed === "u64" ||
+    trimmed === "f32" || trimmed === "f64" || trimmed === "count";
+}
+
+function scalarBackedTypeMatches(
+  expected: string,
+  actual: string,
+  typeDecls: TypeDecl[],
+  memo?: CheckMemo,
+): boolean {
+  const expectedScalar = scalarBackedRuntimeType(expected, typeDecls);
+  const actualScalar = scalarBackedRuntimeType(actual, typeDecls);
+  if (!expectedScalar || !actualScalar) return false;
+  return typeMatches(expectedScalar, actualScalar, memo);
+}
+
+function scalarBackedRuntimeType(
+  type: string | undefined,
+  typeDecls: TypeDecl[],
+  seen = new Set<string>(),
+): string | undefined {
+  const trimmed = stripBorrowType(type ?? "").trim();
+  if (!trimmed) return undefined;
+  const scalar = scalarReflection(trimmed);
+  if (scalar) return scalar.carrier;
+  if (trimmed === "count") return "i32";
+  if (seen.has(trimmed)) return undefined;
+  seen.add(trimmed);
+  const resolvedAlias = resolveAliasType(trimmed, typeDecls);
+  if (resolvedAlias && resolvedAlias !== trimmed) {
+    return scalarBackedRuntimeType(resolvedAlias, typeDecls, seen);
+  }
+  const name = typeNameOf(trimmed);
+  const decl = findTypeDecl(typeDecls, name);
+  if (decl?.enum) {
+    return scalarBackedRuntimeType(decl.enum.backing, typeDecls, seen);
+  }
+  if (decl?.normalized?.kind === "alias") {
+    return scalarBackedRuntimeType(decl.normalized.type, typeDecls, seen);
+  }
+  return undefined;
 }
 
 function typeMatches(expected: string, actual: string, memo?: CheckMemo): boolean {
@@ -5367,12 +5542,17 @@ function mergeTypeFragments(program: Program, diagnostics: Diagnostic[]): TypeDe
   return mergedDecls;
 }
 
+const TYPE_FRAGMENT_MEMBER_SHAPE = "__fig_type_members";
+
 function typeFragmentMembers(decl: TypeDecl) {
   const expr = decl.body.expr;
-  if (!expr) return [];
-  if (expr.kind === "type_shape") return expr.shape.members ?? [];
-  const target = builderPrimaryShape(decl, expr);
-  if (target) return target.shape.members ?? [];
+  if (expr) {
+    if (expr.kind === "type_shape") return expr.shape.members ?? [];
+    const target = builderPrimaryShape(decl, expr);
+    if (target) return target.shape.members ?? [];
+  }
+  const synthetic = syntheticMemberShape(decl);
+  if (synthetic) return synthetic.shape.members ?? [];
   return [];
 }
 
@@ -5390,9 +5570,24 @@ function ensureTypeFragmentMembers(decl: TypeDecl) {
     target.shape.members ??= [];
     return target.shape.members;
   }
+  const synthetic = syntheticMemberShape(decl);
+  if (synthetic) {
+    synthetic.shape.members ??= [];
+    return synthetic.shape.members;
+  }
   const replacement: TypeExpr = { kind: "type_shape", shape: { slots: [], members: [] } };
-  decl.body.expr = replacement;
+  decl.body.statements.push({
+    kind: "type_let",
+    name: TYPE_FRAGMENT_MEMBER_SHAPE,
+    value: replacement,
+  });
   return replacement.shape.members!;
+}
+
+function syntheticMemberShape(decl: TypeDecl): Extract<TypeExpr, { kind: "type_shape" }> | undefined {
+  const stmt = decl.body.statements.find((item) => item.name === TYPE_FRAGMENT_MEMBER_SHAPE);
+  if (stmt?.value.kind !== "type_shape") return undefined;
+  return stmt.value;
 }
 
 function builderPrimaryShape(decl: TypeDecl, expr: TypeExpr) {
@@ -5412,7 +5607,13 @@ function attachQualifiedTypeMembers(
   const typesByName = new Map(types.map((decl) => [decl.name, decl]));
   const attached = new Set<string>();
   for (const fn of functions) {
-    if (!fn.memberOf || fn.primitiveId || isIntrinsicWrapper(fn)) continue;
+    const intrinsicId = intrinsicWrapperId(fn);
+    if (
+      !fn.memberOf || fn.primitiveId ||
+      (intrinsicId !== undefined && !isPrimitiveScalarIntrinsicId(intrinsicId))
+    ) {
+      continue;
+    }
     const owner = typesByName.get(fn.memberOf.owner);
     if (!owner) {
       if (!fn.memberOf.owner.includes(".") && fn.params.length === 0) {
@@ -5486,6 +5687,11 @@ function resolveAttachedMemberCalls(program: Program, types: TypeDecl[]) {
       members.set(`${type.name}::${member.name}`, member.target);
     }
   }
+  for (const decl of program.declarations) {
+    if (decl.kind !== "fn" || !decl.memberOf) continue;
+    const key = `${decl.memberOf.owner}::${decl.memberOf.member}`;
+    if (!members.has(key)) members.set(key, decl.name);
+  }
   if (!members.size) return;
   for (const decl of program.declarations) {
     if (decl.kind === "fn") decl.body = rewriteAttachedMembersInBlock(decl.body, members);
@@ -5522,8 +5728,11 @@ function rewriteAttachedMembersInExpr(expr: Expr, members: Map<string, string>):
         args: expr.args.map((arg) => rewriteAttachedMembersInExpr(arg, members)),
         body: rewriteAttachedMembersInExpr(expr.body, members),
       };
-    case "var":
-      return members.has(expr.name) ? { kind: "var", name: members.get(expr.name)! } : expr;
+    case "var": {
+      const target = attachedMemberTargetName(expr.name, members);
+      if (target) return { kind: "var", name: target };
+      return expr;
+    }
     case "call":
       return {
         ...expr,
@@ -5604,6 +5813,19 @@ function rewriteAttachedMembersInExpr(expr: Expr, members: Map<string, string>):
     case "literal":
       return expr;
   }
+}
+
+function attachedMemberTargetName(name: string, members: Map<string, string>): string | undefined {
+  const direct = members.get(name);
+  if (direct) return direct;
+  const match = name.match(/^(.+)::([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (!match) return undefined;
+  const owner = match[1];
+  const member = match[2];
+  if (!owner || !member) return undefined;
+  const carrierOwner = primitiveMemberOwnerTypeName(owner);
+  if (carrierOwner === owner) return undefined;
+  return members.get(`${carrierOwner}::${member}`);
 }
 
 function rewriteEnumMemberReferences(
@@ -6576,7 +6798,7 @@ class ConstEvaluator {
     locals: Map<string, ConstValue>,
     callStack: string[],
   ): ConstValue | undefined {
-    if (block.statements.some((stmt) => stmt.kind !== "let" && stmt.kind !== "proof_const")) {
+    if (block.statements.some((stmt) => stmt.kind !== "let" && stmt.kind !== "type_assert")) {
       return this.unsupported("const.unsupported_expr", "unsupported const block statement");
     }
     const ordered = orderBlockStatements(block.statements, this.diagnostics);
@@ -7884,16 +8106,24 @@ function specializeInferredExpr(
     }
     case "match": {
       const value = specializeInferredExpr(expr.value, context, env);
+      const valueType = inferExprType(value, context, env);
       let arms = expr.arms;
       let changed = value !== expr.value;
       const nextArms: typeof expr.arms = [];
       for (const arm of expr.arms) {
-        const armValue = specializeInferredExpr(arm.value, context, env, expectedType);
-        if (armValue === arm.value) {
+        const scoped = envWithPatternBindings(arm.pattern, valueType, env, context.types);
+        let guard: Expr | undefined;
+        if (arm.guard) {
+          guard = specializeInferredExpr(arm.guard, context, scoped, "bool", reportAmbiguous);
+        }
+        const armValue = specializeInferredExpr(arm.value, context, scoped, expectedType);
+        if (guard === arm.guard && armValue === arm.value) {
           nextArms.push(arm);
         } else {
           changed = true;
-          nextArms.push({ ...arm, value: armValue });
+          const nextArm = { ...arm, value: armValue };
+          if (guard) nextArm.guard = guard;
+          nextArms.push(nextArm);
         }
       }
       if (changed) arms = nextArms;
@@ -8160,6 +8390,7 @@ function specializeInferredCall(
     const types = new Map<string, string>();
     const staticArgNames: string[] = [];
     const staticNames = new Map<string, string>();
+    const operatorContractVars = operatorContractTypeVars(fn);
     const nonConstParams = fn.params.filter((param) => !param.const);
     const omitConstArgs = false;
     let runtimeArgIndex = 0;
@@ -8168,39 +8399,14 @@ function specializeInferredCall(
       if (param.const) return undefined;
       return args[runtimeArgIndex++];
     });
-    for (let index = 0; index < fn.params.length; index++) {
-      const param = fn.params[index];
-      const arg = argsByParam[index];
-      if (!param.const || !arg) continue;
-      if (!staticConstArgValue(arg, substituteTypeVars(param.type, types), context)) {
-        return undefined;
-      }
-    }
     fn.params.forEach((param, index) => {
       const arg = argsByParam[index];
       inferFromValuePattern(param.type, arg, types, context, env);
       if (param.const) {
         if (!arg) return;
-        const staticArg = staticConstArgValue(arg, substituteTypeVars(param.type, types), context);
-        if (!staticArg) return;
-        const match = staticArg.name.match(/^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$/);
-        const expected = param.type.match(/^([A-Za-z_][A-Za-z0-9_]*)\(([a-z][A-Za-z0-9_]*)\)$/);
-        if (match && expected && match[1] === expected[1]) {
-          types.set(expected[2], match[2].trim());
-          staticArgNames.push(staticArg.name);
-          staticNames.set(param.name, staticArg.name);
-          return;
+        if (arg.kind === "const_fn") {
+          inferConstFnLiteralTypeArgs(substituteTypeVars(param.type, types), arg, types, context);
         }
-        if (staticArg.value.kind === "fn") {
-          inferFnTypeArgs(
-            param.type,
-            context.functions.get(staticArg.value.name),
-            types,
-            context.consts,
-          );
-        }
-        staticArgNames.push(staticArg.name);
-        staticNames.set(param.name, staticArg.name);
       }
     });
     fn.params.forEach((param, index) => {
@@ -8230,7 +8436,36 @@ function specializeInferredCall(
     );
     fn.params.forEach((param, index) => {
       inferFromValuePattern(param.type, argsByParam[index], types, context, env);
+      const arg = argsByParam[index];
+      if (param.const && arg?.kind === "const_fn") {
+        inferConstFnLiteralTypeArgs(substituteTypeVars(param.type, types), arg, types, context);
+      }
     });
+    canonicalizeOperatorContractTypeVars(types, operatorContractVars, context.types);
+    for (let index = 0; index < fn.params.length; index++) {
+      const param = fn.params[index];
+      const arg = argsByParam[index];
+      if (!param.const) continue;
+      if (!arg) return undefined;
+      const expectedConstType = substituteTypeVars(param.type, types);
+      const staticArg = staticConstArgValue(arg, expectedConstType, context);
+      if (!staticArg) return undefined;
+      const match = staticArg.name.match(/^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$/);
+      const expected = param.type.match(/^([A-Za-z_][A-Za-z0-9_]*)\(([a-z][A-Za-z0-9_]*)\)$/);
+      if (match && expected && match[1] === expected[1]) {
+        types.set(expected[2], match[2].trim());
+      }
+      if (staticArg.value.kind === "fn") {
+        inferFnTypeArgs(
+          expectedConstType,
+          context.functions.get(staticArg.value.name),
+          types,
+          context.consts,
+        );
+      }
+      staticArgNames.push(staticArg.name);
+      staticNames.set(param.name, staticArg.name);
+    }
     const missingTypeVars = [...collectTypeVars(fn, context.consts, context.memo)].filter((name) =>
       !types.has(name)
     );
@@ -8307,7 +8542,7 @@ function specializeInferredCall(
         arg,
         context,
         env,
-        runtimeSpecializedType(specializedType, context.types),
+        specializedType,
       );
     });
     return {
@@ -8319,6 +8554,36 @@ function specializeInferredCall(
     };
   } finally {
     context.diagnosticSpan = previousDiagnosticSpan;
+  }
+}
+
+function operatorContractTypeVars(fn: FnDecl): Set<string> {
+  const vars = new Set<string>();
+  for (const stmt of fn.body.statements) {
+    if (stmt.kind !== "type_assert") continue;
+    const value = stmt.value;
+    if (value.kind !== "type_call") continue;
+    let calleeName: string | undefined;
+    if (value.callee.kind === "type_ref" || value.callee.kind === "type_static_ref") {
+      calleeName = terminalName(value.callee.name);
+    }
+    if (!calleeName?.startsWith("Op")) continue;
+    for (const arg of value.args) {
+      if (arg.kind === "type_ref" && isInferredTypeVarName(arg.name)) vars.add(arg.name);
+    }
+  }
+  return vars;
+}
+
+function canonicalizeOperatorContractTypeVars(
+  types: Map<string, string>,
+  operatorContractVars: Set<string>,
+  typeDecls: TypeDecl[],
+) {
+  for (const name of operatorContractVars) {
+    const value = types.get(name);
+    const carrier = operatorOperandContractType(value, typeDecls);
+    if (carrier) types.set(name, carrier);
   }
 }
 
@@ -8350,7 +8615,10 @@ function inferFromValuePattern(
     return;
   }
   if (arg.kind === "literal") {
-    const literalType = arg.inferredType ?? (arg.literalKind === "number" ? "i32" : undefined);
+    let literalType = arg.inferredType;
+    if (!literalType) {
+      literalType = inferExprType(arg, context, env);
+    }
     bindTypePattern(runtimePattern, literalType, types, context.types ?? [], context.consts);
     return;
   }
@@ -8848,7 +9116,15 @@ function collectFreeTypeVars(
   consts?: Map<string, ConstValue>,
 ) {
   const parsed = parseAnnotationType(annotation);
-  if (!parsed) return;
+  if (!parsed) {
+    collectFunctionTypeTextVars(annotation, vars, staticTypeParams, consts);
+    return;
+  }
+  const visitSource = (source: string | undefined) => {
+    if (!source) return;
+    const parsedSource = parseAnnotationType(source);
+    if (parsedSource) visit(parsedSource);
+  };
   const visit = (expr: TypeExpr, callee = false) => {
     if (expr.kind === "type_ref") {
       if (
@@ -8871,10 +9147,36 @@ function collectFreeTypeVars(
       visit(expr.left);
       visit(expr.right);
     } else if (expr.kind === "type_fn") {
-      for (const item of parseAnnotationTypeCalls(expr.source)) visit(item);
+      const signature = parseFnSignature(expr.source);
+      if (signature) {
+        for (const param of signature.params) visitSource(param);
+        visitSource(signature.returnType);
+      } else {
+        for (const item of parseAnnotationTypeCalls(expr.source)) visit(item);
+      }
     }
   };
   visit(parsed);
+}
+
+function collectFunctionTypeTextVars(
+  annotation: string,
+  vars: Set<string>,
+  staticTypeParams: Set<string>,
+  consts?: Map<string, ConstValue>,
+) {
+  const pattern = /(?:->|:)\s*([a-z][A-Za-z0-9_]*)\b/g;
+  for (const match of annotation.matchAll(pattern)) {
+    const name = match[1];
+    if (!name) continue;
+    const end = (match.index ?? 0) + match[0].length;
+    const next = annotation[end];
+    if (name === "fn" || next === "." || next === "(") continue;
+    if (staticTypeParams.has(name)) continue;
+    if (consts?.has(name)) continue;
+    if (!isInferredTypeVarName(name)) continue;
+    vars.add(name);
+  }
 }
 
 function typeHasFreeInferredVars(annotation: string, consts?: Map<string, ConstValue>): boolean {
@@ -8984,6 +9286,7 @@ function bindTypePattern(
   seen.add(key);
   if (isInferredTypeVarName(pattern)) {
     if (isUnresolvedInferredBinding(actual) && !consts?.has(actual.trim())) return;
+    if (inferredBindingMentionsName(actual, pattern)) return;
     types.set(pattern, actual);
     return;
   }
@@ -9059,6 +9362,10 @@ function bindTypePattern(
 
 function isUnresolvedInferredBinding(actual: string): boolean {
   return isInferredTypeVarName(actual.trim());
+}
+
+function inferredBindingMentionsName(actual: string, name: string): boolean {
+  return new RegExp(`\\b${escapeRegExp(name)}\\b`).test(actual);
 }
 
 function substituteTypeVars(source: string, types: Map<string, string>): string {
@@ -9338,20 +9645,17 @@ function substituteInferredExpr(
       : undefined;
     const statements: Statement[] = [];
     for (const stmt of expr.statements) {
-      if (stmt.kind === "proof_const") {
+      if (stmt.kind === "type_assert") {
         const value = typeEvaluator?.eval(
           substituteTypeVarsInTypeExpr(stmt.value, types, staticNames),
           typeEvalLocals,
         );
         if (!value || value.kind === "never") {
           context?.diagnostics.push({
-            code: "type.proof_const",
-            message: `proof const ${stmt.name} could not be evaluated`,
+            code: "type.type_assert",
+            message: "type assertion could not be evaluated",
             span: context.diagnosticSpan,
           });
-        } else {
-          typeEvalLocals.set(stmt.name, value);
-          if (value.kind === "type") blockProofTypes.set(stmt.name, value);
         }
         continue;
       }
@@ -9559,7 +9863,7 @@ function specializeExpr(
         });
         if (!direct?.params.some((param) => param.const)) {
           if (direct && fnUsesInferredTypeVars(direct, context.consts, context.memo)) {
-            return specializeInferredCall(
+            const specialized = specializeInferredCall(
               direct,
               args,
               context,
@@ -9567,7 +9871,11 @@ function specializeExpr(
               callSiteSpan(expr),
               expectedType,
               false,
-            ) ?? { ...expr, callee, args };
+            );
+            if (specialized) {
+              return specializeConcreteCallArgs(specialized, context, env);
+            }
+            return { ...expr, callee, args };
           }
           return { ...expr, callee, args };
         }
@@ -9683,6 +9991,29 @@ function specializeExpr(
   } finally {
     context.runtimeEnv = previousRuntimeEnv;
   }
+}
+
+function specializeConcreteCallArgs(
+  expr: Expr,
+  context: ConstSpecializationContext,
+  env: Map<string, string>,
+): Expr {
+  if (expr.kind !== "call" || expr.callee.kind !== "var") return expr;
+  const direct = context.functions.get(expr.callee.name);
+  if (!direct) return expr;
+  let changed = false;
+  const args = expr.args.map((arg, index) => {
+    const param = direct.params[index];
+    const expected = param && !param.const && !typeHasFreeInferredVars(param.type, context.consts)
+      ? param.type
+      : undefined;
+    if (!expected) return arg;
+    const next = specializeExpr(arg, context, env, expected);
+    if (next !== arg) changed = true;
+    return next;
+  });
+  if (!changed) return expr;
+  return { ...expr, args };
 }
 
 function expectedFunctionType(
@@ -9918,7 +10249,20 @@ function specializeConstParamCallAttempt(
       if (!arg) {
         return undefined;
       }
-      runtimeArgs.push(arg);
+      const specializedParamType = substituteTypeVars(
+        substituteConstParamType(param.type, staticValues, staticArgNames),
+        inferredStaticBindings,
+      );
+      let runtimeArg = arg;
+      if (!typeHasFreeInferredVars(specializedParamType, context.consts)) {
+        runtimeArg = specializeExpr(
+          arg,
+          context,
+          context.runtimeEnv ?? new Map(),
+          specializedParamType,
+        );
+      }
+      runtimeArgs.push(runtimeArg);
     }
   }
   const key = `${fn.name}\0${constArgNames.join("\0")}\0${
@@ -10048,7 +10392,13 @@ function inferConstFnLiteralTypeArgs(
   expectedType: string,
   arg: Extract<Expr, { kind: "const_fn" }>,
   bindings: Map<string, string>,
-  context: ConstSpecializationContext,
+  context: {
+    functions: Map<string, FnDecl>;
+    consts: Map<string, ConstValue>;
+    types: TypeDecl[];
+    typeConstructors: Map<string, TypeDecl>;
+    runtimeEnv?: Map<string, string>;
+  },
 ) {
   const substitutedExpected = substituteTypeVars(expectedType, bindings);
   const signature = parseExpectedFnType(substitutedExpected);
@@ -10163,6 +10513,7 @@ function inferredStaticArgValue(
 }
 
 function isInlineableGeneratedSpecializationSource(fn: FnDecl): boolean {
+  if (operatorContractTypeVars(fn).size > 0) return true;
   const owner = fn.memberOf?.owner;
   const terminalOwner = owner ? terminalName(owner).toLowerCase() : undefined;
   return terminalOwner === "iter" || terminalOwner === "compactiter" ||
@@ -10499,7 +10850,7 @@ function synthesizeConstFnHelper(
   const paramNames = new Set(arg.params);
   const captureNames = [...exprRuntimeCaptures(arg.body)].filter((name) =>
     !paramNames.has(name) && !context.functions.has(name) && !context.consts.has(name) &&
-    !staticValues.has(name)
+    !staticValues.has(name) && !isKnownQualifiedGlobalRoot(name, context, staticValues)
   );
   const captures = captureNames.map((name) => {
     const type = context.runtimeEnv?.get(name);
@@ -10601,7 +10952,8 @@ function synthesizeRuntimeClosureExpr(
   }
   const paramNames = new Set(arg.params);
   const captureNames = [...exprRuntimeCaptures(body)].filter((name) =>
-    !paramNames.has(name) && !context.functions.has(name) && !context.consts.has(name)
+    !paramNames.has(name) && !context.functions.has(name) && !context.consts.has(name) &&
+    !isKnownQualifiedGlobalRoot(name, { ...context, runtimeEnv: env })
   );
   const captures = captureNames.map((name) => {
     const type = env.get(name) ?? context.runtimeEnv?.get(name);
@@ -10668,6 +11020,29 @@ function runtimeClosureMakeExpr(target: string, captures: Expr[]): Expr {
     callee: { kind: "var", name: `@closure_make/${target}` },
     args: captures,
   };
+}
+
+function isKnownQualifiedGlobalRoot(
+  name: string,
+  context: {
+    functions: Map<string, FnDecl>;
+    consts: Map<string, ConstValue>;
+    runtimeEnv?: Map<string, string>;
+  },
+  staticValues = new Map<string, ConstValue>(),
+): boolean {
+  if (context.runtimeEnv?.has(name)) return false;
+  const prefix = `${name}.`;
+  for (const key of context.functions.keys()) {
+    if (key.startsWith(prefix)) return true;
+  }
+  for (const key of context.consts.keys()) {
+    if (key.startsWith(prefix)) return true;
+  }
+  for (const key of staticValues.keys()) {
+    if (key.startsWith(prefix)) return true;
+  }
+  return false;
 }
 
 function parseExpectedFnType(
@@ -11488,7 +11863,7 @@ function substituteSpecializedExpr(
       context.runtimeEnv = previousRuntimeEnv ? new Map(previousRuntimeEnv) : undefined;
       try {
         const statements: Statement[] = expr.statements.flatMap((stmt): Statement[] => {
-          if (stmt.kind === "proof_const") return [];
+          if (stmt.kind === "type_assert") return [];
           if (stmt.kind === "debug_trace") return [stmt];
           for (const name of boundNames(stmt)) {
             scopedValues.delete(name);
@@ -11777,7 +12152,7 @@ function substituteStaticValueRefs(
     case "block": {
       let scoped = new Set(shadowed);
       const statements = expr.statements.map((stmt): Statement => {
-        if (stmt.kind === "proof_const") return stmt;
+        if (stmt.kind === "type_assert") return stmt;
         if (stmt.kind === "debug_trace") {
           return {
             ...stmt,
@@ -12718,7 +13093,7 @@ function prepareInferredTypeAnnotations(program: Program, diagnostics: Diagnosti
         visitExpr(stmt.value);
       } else if (stmt.kind === "destructure_let") {
         visitExpr(stmt.value);
-      } else if (stmt.kind === "proof_const") {
+      } else if (stmt.kind === "type_assert") {
         // Proof/type expressions keep the stricter type-expression validation path.
       }
     }
@@ -13923,6 +14298,17 @@ function checkTypeContracts(
         constTypeParams,
         pluginRegistry,
       );
+    } else if (decl.kind === "type_assert") {
+      validateProofConst(
+        decl.value,
+        byName,
+        byFn,
+        hostIoImports,
+        consts,
+        diagnostics,
+        decl.span,
+        pluginRegistry,
+      );
     }
     if (cacheKey && diagnostics.length === diagnosticStart) {
       cache?.typeContractChecks?.add(cacheKey);
@@ -13966,6 +14352,17 @@ function checkBlockTypeContracts(
         diagnostics,
         pluginRegistry,
       );
+    } else if (stmt.kind === "type_assert" && typeExprIsConcreteProofTarget(stmt.value)) {
+      validateProofConst(
+        stmt.value,
+        typesByName,
+        functions,
+        hostIoImports,
+        consts,
+        diagnostics,
+        stmt.span,
+        pluginRegistry,
+      );
     }
   }
   if (block.expr) {
@@ -13979,6 +14376,29 @@ function checkBlockTypeContracts(
       pluginRegistry,
     );
   }
+}
+
+function validateProofConst(
+  expr: TypeExpr,
+  typesByName: Map<string, TypeDecl>,
+  functions: Map<string, FnDecl>,
+  hostIoImports: Map<string, string[]>,
+  consts: Map<string, ConstValue>,
+  diagnostics: Diagnostic[],
+  diagnosticSpan: Span | undefined,
+  pluginRegistry: CompilerPluginRegistry,
+) {
+  instantiateTypeExpr(
+    expr,
+    typesByName,
+    functions,
+    hostIoImports,
+    consts,
+    diagnostics,
+    new Map(),
+    diagnosticSpan,
+    pluginRegistry,
+  );
 }
 
 function checkExprTypeContracts(
@@ -14026,6 +14446,42 @@ function checkExprTypeContracts(
     for (const slot of expr.slots) {
       checkExprTypeContracts(
         slot.value,
+        typesByName,
+        functions,
+        hostIoImports,
+        consts,
+        diagnostics,
+        pluginRegistry,
+      );
+    }
+  } else if (expr.kind === "do") {
+    for (const stmt of expr.statements) {
+      if (stmt.kind === "type_assert" && typeExprIsConcreteProofTarget(stmt.value)) {
+        validateProofConst(
+          stmt.value,
+          typesByName,
+          functions,
+          hostIoImports,
+          consts,
+          diagnostics,
+          stmt.span,
+          pluginRegistry,
+        );
+      } else if (stmt.kind !== "type_assert" && "value" in stmt) {
+        checkExprTypeContracts(
+          stmt.value,
+          typesByName,
+          functions,
+          hostIoImports,
+          consts,
+          diagnostics,
+          pluginRegistry,
+        );
+      }
+    }
+    if (expr.expr) {
+      checkExprTypeContracts(
+        expr.expr,
         typesByName,
         functions,
         hostIoImports,
@@ -14479,9 +14935,6 @@ class TypeEvaluator {
     if (!callee) {
       return this.unsupported("type.unsupported_expr", "type calls require a named callee");
     }
-    if (callee === "@satisfies") {
-      return this.evalSatisfiesRaw(expr, locals);
-    }
     const args = expr.args.map((arg) =>
       this.withSpan(this.eval(arg, locals) ?? { kind: "never" as const }, arg.span)
     );
@@ -14523,7 +14976,7 @@ class TypeEvaluator {
     }
     const fn = this.functions.get(callee);
     if (fn) return this.evalFunction(fn, args, locals, []);
-    const decl = this.typesByName.get(callee) ?? this.typesByName.get(terminalName(callee));
+    const decl = lookupTypeDecl(this.typesByName, callee);
     if (!decl) {
       return this.withSpan(
         this.namedType(`${callee}(${args.map(renderTypeEvalValue).join(", ")})`),
@@ -14536,7 +14989,7 @@ class TypeEvaluator {
         expr.span,
       );
     }
-    return this.evalTypeFunction(callee, decl, args);
+    return this.evalTypeFunction(decl.name, decl, args);
   }
 
   private evalTypeBuilder(
@@ -14760,7 +15213,42 @@ class TypeEvaluator {
         ? { kind: "bool", value: this.uniqueTypeList(list).slots.length === list.slots.length }
         : undefined;
     }
-    const type = args[0]?.kind === "type" ? this.resolveTypeValue(args[0]) : undefined;
+    const originalType = args[0]?.kind === "type" ? args[0] : undefined;
+    if (name === "type_has_member") {
+      if (!originalType) return undefined;
+      return { kind: "bool", value: !!this.typeMember(originalType, args[1]) };
+    }
+    if (name === "type_member_type") {
+      if (!originalType) return undefined;
+      const member = this.typeMember(originalType, args[1]);
+      if (!member) {
+        this.reportDiagnostic({
+          code: "type.unknown_type_member",
+          message: `unknown type member ${typeLiteralName(args[1]) ?? "<unknown>"}`,
+          span: args[1]?.span ?? args[0]?.span,
+        });
+        return { kind: "never" };
+      }
+      return this.namedType(member.type);
+    }
+    if (name === "type_members") {
+      if (!originalType) return undefined;
+      return this.typeMembers(originalType);
+    }
+    if (name === "type_member_target") {
+      if (!originalType) return undefined;
+      const member = this.typeMember(originalType, args[1]);
+      if (!member) {
+        this.reportDiagnostic({
+          code: "type.unknown_type_member",
+          message: `unknown type member ${typeLiteralName(args[1]) ?? "<unknown>"}`,
+          span: args[1]?.span ?? args[0]?.span,
+        });
+        return { kind: "never" };
+      }
+      return { kind: "string", value: member.target };
+    }
+    const type = originalType ? this.resolveTypeValue(originalType) : undefined;
     if (!type) return undefined;
     if (name === "type_is_product") {
       return { kind: "bool", value: type.normalized?.kind === "product" };
@@ -14782,34 +15270,6 @@ class TypeEvaluator {
         return { kind: "never" };
       }
       return this.namedType(slot.type);
-    }
-    if (name === "type_has_member") {
-      return { kind: "bool", value: !!this.typeMember(type, args[1]) };
-    }
-    if (name === "type_member_type") {
-      const member = this.typeMember(type, args[1]);
-      if (!member) {
-        this.reportDiagnostic({
-          code: "type.unknown_type_member",
-          message: `unknown type member ${typeLiteralName(args[1]) ?? "<unknown>"}`,
-          span: args[1]?.span ?? args[0]?.span,
-        });
-        return { kind: "never" };
-      }
-      return this.namedType(member.type);
-    }
-    if (name === "type_members") return this.typeMembers(type);
-    if (name === "type_member_target") {
-      const member = this.typeMember(type, args[1]);
-      if (!member) {
-        this.reportDiagnostic({
-          code: "type.unknown_type_member",
-          message: `unknown type member ${typeLiteralName(args[1]) ?? "<unknown>"}`,
-          span: args[1]?.span ?? args[0]?.span,
-        });
-        return { kind: "never" };
-      }
-      return { kind: "string", value: member.target };
     }
     const fn = parseFnSignatureDetailed(renderTypeEvalValue(args[0] ?? { kind: "never" }));
     if (name === "type_is_fn") return { kind: "bool", value: !!fn };
@@ -14924,29 +15384,6 @@ class TypeEvaluator {
     if (name === "type_variant_slots") return this.typeVariantSlots(type, args[1]);
     if (name === "type_variants") return this.typeVariants(type);
     return undefined;
-  }
-
-  private evalSatisfiesRaw(
-    expr: Extract<TypeExpr, { kind: "type_call" }>,
-    locals: Map<string, TypeEvalValue>,
-  ): TypeEvalValue | undefined {
-    const [effectExpr, contractExpr] = expr.args;
-    if (!effectExpr || !contractExpr) {
-      return this.unsupported("type.satisfies", "@satisfies requires an effect and contract");
-    }
-    const contract = renderTypeExpr(contractExpr);
-    const effect = renderTypeExpr(effectExpr);
-    const contractName = terminalName(contract);
-    const contractDecl = this.typesByName.get(contract) ?? this.typesByName.get(contractName) ??
-      [...this.typesByName.values()].find((type) => terminalName(type.name) === contractName);
-    if (contractDecl) {
-      this.evalTypeFunction(
-        contractDecl.name,
-        contractDecl,
-        [this.withSpan({ kind: "type", name: effect }, effectExpr.span)],
-      );
-    }
-    return this.namedType(`${contractName}(${effect})`);
   }
 
   private evalFunction(
@@ -15102,7 +15539,7 @@ class TypeEvaluator {
     locals: Map<string, TypeEvalValue>,
     callStack: string[],
   ): TypeEvalValue | undefined {
-    if (block.statements.some((stmt) => stmt.kind !== "let" && stmt.kind !== "proof_const")) {
+    if (block.statements.some((stmt) => stmt.kind !== "let" && stmt.kind !== "type_assert")) {
       return this.unsupported("type.unsupported_expr", "unsupported type block statement");
     }
     const ordered = orderBlockStatements(block.statements, this.diagnostics);
@@ -15664,20 +16101,24 @@ class TypeEvaluator {
     const members = normalized?.kind === "product" || normalized?.kind === "sum"
       ? normalized.members ?? []
       : [];
-    const decl = this.typesByName.get(typeNameOf(type.name));
+    const decl = lookupTypeDecl(this.typesByName, typeNameOf(type.name));
     const bindings = decl ? genericBindings(type.name, decl) : new Map<string, string>();
     const explicit = members.map((member) => ({
       ...member,
       type: substituteTypeVars(member.type, bindings),
     }));
+    const explicitNames = new Set(explicit.map((member) => member.name));
+    const functionMembers = this.functionTypeMembers(type.name)
+      .filter((member) => !explicitNames.has(member.name));
     const withDerivedEmpty = typeHasDerivedEmpty(type) &&
-        !explicit.some((member) => member.name === "empty")
-      ? [...explicit, {
+        !explicitNames.has("empty") &&
+        !functionMembers.some((member) => member.name === "empty")
+      ? [...explicit, ...functionMembers, {
         name: "empty",
         type: `fn() -> ${type.name}`,
         target: `${type.name}::empty`,
       }]
-      : explicit;
+      : [...explicit, ...functionMembers];
     return {
       kind: "shape",
       slots: withDerivedEmpty.map((member) => ({
@@ -15725,15 +16166,26 @@ class TypeEvaluator {
   private typeMember(type: TypeEvalValue, name: TypeEvalValue | undefined) {
     const memberName = typeLiteralName(name);
     if (type.kind !== "type") return undefined;
+    const ownerName = typeNameOf(type.name);
+    const directDecl = lookupTypeDecl(this.typesByName, ownerName);
+    const declared = directDecl
+      ? typeFragmentMembers(directDecl).find((member) => member.name === memberName)
+      : undefined;
+    if (declared && directDecl) {
+      const bindings = genericBindings(type.name, directDecl);
+      return { ...declared, type: substituteTypeVars(declared.type, bindings) };
+    }
     type = this.resolveTypeValue(type);
     if (type.normalized?.kind === "product" || type.normalized?.kind === "sum") {
       const member = type.normalized.members?.find((member) => member.name === memberName);
       if (member) {
-        const decl = this.typesByName.get(typeNameOf(type.name));
+        const decl = lookupTypeDecl(this.typesByName, typeNameOf(type.name));
         const bindings = decl ? genericBindings(type.name, decl) : new Map<string, string>();
         return { ...member, type: substituteTypeVars(member.type, bindings) };
       }
     }
+    const functionMember = this.functionTypeMember(type.name, memberName);
+    if (functionMember) return functionMember;
     if (memberName === "empty" && typeHasDerivedEmpty(type)) {
       return {
         name: "empty",
@@ -15742,6 +16194,34 @@ class TypeEvaluator {
       };
     }
     return undefined;
+  }
+
+  private functionTypeMembers(typeName: string) {
+    const members: TypeMember[] = [];
+    const seen = new Set<string>();
+    const carrierOwner = primitiveMemberOwnerTypeName(typeName);
+    for (const fn of this.functions.values()) {
+      if (!fn.memberOf) continue;
+      const matchesExactOwner = fn.memberOf.owner === typeName;
+      const matchesCarrierOwner = carrierOwner !== typeName && fn.memberOf.owner === carrierOwner;
+      if (!matchesExactOwner && !matchesCarrierOwner) continue;
+      if (seen.has(fn.memberOf.member)) continue;
+      seen.add(fn.memberOf.member);
+      let type = renderFnType(fn);
+      if (matchesCarrierOwner) type = renderFnTypeForMemberOwner(fn, typeName);
+      members.push({
+        ...(fn.doc ? { doc: fn.doc } : {}),
+        name: fn.memberOf.member,
+        type,
+        target: fn.name,
+      });
+    }
+    return members;
+  }
+
+  private functionTypeMember(typeName: string, memberName: string | undefined) {
+    if (!memberName) return undefined;
+    return this.functionTypeMembers(typeName).find((member) => member.name === memberName);
   }
 
   private resolveTypeValue(
@@ -15882,7 +16362,22 @@ class TypeEvaluator {
         }],
       });
     }
-    return resolved.name;
+    const fnKey = this.typeEvalFnTypeKey(resolved.name);
+    if (fnKey) return fnKey;
+    return resolved.name.trim();
+  }
+
+  private typeEvalFnTypeKey(source: string): string | undefined {
+    const fn = parseFnSignatureDetailed(source);
+    if (!fn) return undefined;
+    return JSON.stringify({
+      kind: "fn",
+      params: fn.params.map((param) => ({
+        isConst: parsedFnParamIsConst(param),
+        type: this.typeEvalTypeKey(this.namedType(param.type)),
+      })),
+      returnType: this.typeEvalTypeKey(this.namedType(fn.returnType)),
+    });
   }
 
   private typeBodyEvalKey(body: TypeBody): unknown {
@@ -15952,6 +16447,12 @@ interface ParsedFnSignature {
   params: { name?: string; type: string }[];
   returnType: string;
   effects: string[];
+}
+
+function parsedFnParamIsConst(param: ParsedFnSignature["params"][number]): boolean {
+  const name = param.name?.trim();
+  if (!name) return false;
+  return name === "const" || name.startsWith("const ");
 }
 
 function parseFnSignatureDetailed(source: string): ParsedFnSignature | undefined {
@@ -16105,6 +16606,31 @@ function scalarReflection(type: string): ScalarReflection | undefined {
   if (trimmed === "f32") return { carrier: "f32", bitWidth: 32, signed: true };
   if (trimmed === "f64") return { carrier: "f64", bitWidth: 64, signed: true };
   return undefined;
+}
+
+function primitiveMemberOwnerTypeName(type: string): string {
+  const scalar = scalarReflection(type);
+  if (!scalar) return type;
+  if (scalar.carrier === "bool") return "bool";
+  if (scalar.carrier === "f32" || scalar.carrier === "f64") return scalar.carrier;
+  const width = scalar.bitWidth;
+  if (scalar.signed) {
+    if (width === undefined || width <= 32) return "i32";
+    return "i64";
+  }
+  if (width === undefined || width <= 32) return "u32";
+  return "u64";
+}
+
+function renderFnTypeForMemberOwner(fn: FnDecl, owner: string): string {
+  const params = fn.params.map((param) => {
+    let type = param.type;
+    if (fn.memberOf && type === fn.memberOf.owner) type = owner;
+    return `${param.name}: ${type}`;
+  }).join(", ");
+  let returnType = fn.returnType ?? "i32";
+  if (fn.memberOf && returnType === fn.memberOf.owner) returnType = owner;
+  return `fn(${params}) -> ${returnType}`;
 }
 
 function scalarDomainTypeValue(scalar: ScalarReflection): TypeEvalValue {
@@ -17438,8 +17964,7 @@ function checkStatement(
     env.set(stmt.name, { moved: false, type: stmt.type });
     return;
   }
-  if (stmt.kind === "proof_const") {
-    env.set(stmt.name, { moved: false, type: "const" });
+  if (stmt.kind === "type_assert") {
     return;
   }
   if (stmt.kind === "destructure_let") {
@@ -17763,8 +18288,7 @@ function checkTypeVariableMemberProofs(
         active.push(
           ...(normalizeExpectedType(explicitTypeAnnotation(stmt.type), ctx)?.proofFacts ?? []),
         );
-      } else if (stmt.kind === "proof_const") {
-        validateSatisfiesProofConst(stmt.value, ctx);
+      } else if (stmt.kind === "type_assert") {
         active.push(...(normalizeExpectedType(renderTypeExpr(stmt.value), ctx)?.proofFacts ?? []));
       }
     }
@@ -17839,7 +18363,7 @@ function checkTypeVariableMemberProofs(
         return;
       case "do":
         for (const stmt of expr.statements) {
-          if (stmt.kind !== "proof_const" && "value" in stmt) visitExpr(stmt.value, proofs);
+          if (stmt.kind !== "type_assert" && "value" in stmt) visitExpr(stmt.value, proofs);
         }
         visitExpr(expr.expr, proofs);
         return;
@@ -17848,26 +18372,6 @@ function checkTypeVariableMemberProofs(
     }
   };
   visitBlock(block, initialProofs);
-}
-
-function validateSatisfiesProofConst(expr: TypeExpr, ctx: CheckContext) {
-  if (
-    expr.kind !== "type_call" ||
-    expr.callee.kind !== "type_static_ref" ||
-    expr.callee.name !== "satisfies"
-  ) return;
-  const effect = expr.args[0];
-  if (!effect || !typeExprIsConcreteProofTarget(effect)) return;
-  const typeEvaluator = new TypeEvaluator(
-    new Map(ctx.types.map((decl) => [decl.name, decl])),
-    new Map(ctx.functions.map((fn) => [fn.name, fn])),
-    new Map(),
-    new Map(),
-    ctx.diagnostics,
-    shaderManifestEntry,
-    defaultCompilerPluginRegistry,
-  );
-  typeEvaluator.eval(expr, new Map(), expr.span);
 }
 
 function typeExprIsConcreteProofTarget(expr: TypeExpr): boolean {
@@ -18324,6 +18828,16 @@ function checkExprImpl(
           options,
         );
       }
+      if (expectedType) {
+        const actual = exprBindingType(expr, env, types, functions, options);
+        if (actual && !runtimeValueTypeAssignable(expectedType, actual)) {
+          diagnostics.push(diagnosticAt(
+            "type.literal_mismatch",
+            `expected ${expectedType} but got ${actual}`,
+            expr,
+          ));
+        }
+      }
       return;
     }
     case "index":
@@ -18467,7 +18981,7 @@ function checkExprImpl(
       rewriteContextualEnumPatternsInMatch(expr, matchValueType, types, diagnostics);
       checkRuntimeMatchCoverage(expr, matchValueType, diagnostics, types);
       for (const arm of expr.arms) {
-        const armEnv = narrowedEnvForMatchPattern(expr.value, arm.pattern, env, types);
+        const armEnv = narrowedEnvForMatchPattern(expr.value, arm.pattern, env, types, functions);
         bindMatchPatternLocals(arm.pattern, matchValueType, armEnv, diagnostics, types);
         if (arm.guard) {
           checkExpr(
@@ -18775,7 +19289,7 @@ function exprBindingTypeImpl(
     );
   }
   if (expr.kind === "binary") {
-    if (["==", "!=", "<", "<=", ">", ">="].includes(expr.op)) return finish("bool");
+    if (comparisonBinaryOp(expr.op)) return finish("bool");
     const facts = exprI32Facts(expr, env, types, functions, options);
     if (facts) return finish(renderRefinedI32Domain(facts.domain));
     if (arithmeticBinaryOp(expr.op)) {
@@ -18789,6 +19303,10 @@ function exprBindingTypeImpl(
     }
   }
   if (expr.kind === "call") {
+    const operation = i32BinaryOperation(expr, functions, options);
+    if (operation && comparisonBinaryOp(operation.op)) return finish("bool");
+    const facts = exprI32Facts(expr, env, types, functions, options);
+    if (facts) return finish(renderRefinedI32Domain(facts.domain));
     const callee = expr.callee;
     if (callee.kind === "var") {
       const callKey = memo ? callCheckMemoKey(expr, env) : undefined;
@@ -18893,6 +19411,59 @@ function arithmeticBinaryOp(op: string): boolean {
   return op === "+" || op === "-" || op === "*" || op === "/" || op === "%";
 }
 
+function comparisonBinaryOp(op: string): boolean {
+  return op === "==" || op === "!=" || op === "<" || op === "<=" || op === ">" || op === ">=";
+}
+
+function i32BinaryOperation(
+  expr: Expr,
+  functions: FnDecl[],
+  options: boolean | RuntimeCheckOptions = false,
+): { op: string; left: Expr; right: Expr } | undefined {
+  if (expr.kind === "binary") return { op: expr.op, left: expr.left, right: expr.right };
+  if (expr.kind !== "call" || expr.callee.kind !== "var" || expr.args.length !== 2) {
+    return undefined;
+  }
+  let runtimeOptions: RuntimeCheckOptions;
+  if (typeof options === "boolean") {
+    runtimeOptions = { recoverTypes: options };
+  } else {
+    runtimeOptions = options;
+  }
+  const fn = functionDeclForName(expr.callee.name, functions, runtimeOptions);
+  if (!fn || fn.params.length !== 2) return undefined;
+  const leftParam = scalarDomainRuntimeType(fn.params[0]?.type) ?? fn.params[0]?.type;
+  const rightParam = scalarDomainRuntimeType(fn.params[1]?.type) ?? fn.params[1]?.type;
+  if (leftParam !== "i32" || rightParam !== "i32") return undefined;
+  const bodyExpr = fn.body.expr;
+  if (bodyExpr?.kind !== "call" || bodyExpr.callee.kind !== "var") return undefined;
+  const op = primitiveI32OperationName(bodyExpr.callee.name);
+  if (!op) return undefined;
+  return { op, left: expr.args[0]!, right: expr.args[1]! };
+}
+
+function primitiveI32OperationName(name: string): string | undefined {
+  let intrinsic: string | undefined;
+  if (name.startsWith("@i32_")) intrinsic = name.slice("@i32_".length);
+  let member: string | undefined;
+  if (name.includes("i32::")) {
+    member = name.slice(name.lastIndexOf("i32::") + "i32::".length);
+  }
+  const op = intrinsic ?? member;
+  if (op === "add") return "+";
+  if (op === "sub") return "-";
+  if (op === "mul") return "*";
+  if (op === "div") return "/";
+  if (op === "rem") return "%";
+  if (op === "eql") return "==";
+  if (op === "neq") return "!=";
+  if (op === "lt") return "<";
+  if (op === "lte") return "<=";
+  if (op === "gt") return ">";
+  if (op === "gte") return ">=";
+  return undefined;
+}
+
 function exprI32Facts(
   expr: Expr,
   env: Map<string, OwnershipBinding>,
@@ -18921,17 +19492,18 @@ function exprI32Facts(
       projectedBindingType(expr.name, env, types);
     return finish(scalarFactsFromRefinedI32Type(type));
   }
-  if (expr.kind !== "binary") return finish(undefined);
-  const left = exprI32Range(expr.left, env, types, functions, options);
-  const right = exprI32Range(expr.right, env, types, functions, options);
+  const operation = i32BinaryOperation(expr, functions, options);
+  if (!operation) return finish(undefined);
+  const left = exprI32Range(operation.left, env, types, functions, options);
+  const right = exprI32Range(operation.right, env, types, functions, options);
   if (!left || !right) return finish(undefined);
-  if (expr.op === "+") {
+  if (operation.op === "+") {
     return finish(i32FactsFromRangeBounds(left.min + right.min, left.max + right.max));
   }
-  if (expr.op === "-") {
+  if (operation.op === "-") {
     return finish(i32FactsFromRangeBounds(left.min - right.max, left.max - right.min));
   }
-  if (expr.op === "*") {
+  if (operation.op === "*") {
     const products = [
       left.min * right.min,
       left.min * right.max,
@@ -18940,12 +19512,12 @@ function exprI32Facts(
     ];
     return finish(i32FactsFromRangeBounds(Math.min(...products), Math.max(...products)));
   }
-  const divisor = staticIntegerLiteral(expr.right);
+  const divisor = staticIntegerLiteral(operation.right);
   if (divisor === undefined || divisor <= 0 || left.min < 0) return finish(undefined);
-  if (expr.op === "/") {
+  if (operation.op === "/") {
     return finish(scalarFactsFromI32Range({ min: 0, max: Math.floor(left.max / divisor) }));
   }
-  if (expr.op === "%") {
+  if (operation.op === "%") {
     return finish(scalarFactsFromI32Range({ min: 0, max: divisor - 1 }));
   }
   return finish(undefined);
@@ -19978,11 +20550,12 @@ function narrowedEnvForMatchPattern(
   pattern: ParamPattern,
   env: Map<string, OwnershipBinding>,
   types: TypeDecl[],
+  functions: FnDecl[],
 ): Map<string, OwnershipBinding> {
   const scoped = new Map(env);
   const truth = boolPatternValue(pattern);
   if (truth === undefined) return scoped;
-  const narrowed = conditionI32Narrowing(value, truth);
+  const narrowed = conditionI32Narrowing(value, truth, functions);
   if (!narrowed) return scoped;
   const binding = scoped.get(narrowed.name);
   const currentType = resolveAliasType(binding?.type, types) ?? binding?.type;
@@ -20014,35 +20587,37 @@ function isUpperOnlyI32Narrowing(interval: DomainInterval): boolean {
 function conditionI32Narrowing(
   expr: Expr,
   truth: boolean,
+  functions: FnDecl[],
 ): { name: string; domain: RefinedI32Domain } | undefined {
-  if (expr.kind !== "binary") return undefined;
-  if (expr.op === "==" && expr.left.kind === "var") {
-    const right = endpointForI32Condition(expr.right);
+  const operation = i32BinaryOperation(expr, functions);
+  if (!operation) return undefined;
+  if (operation.op === "==" && operation.left.kind === "var") {
+    const right = endpointForI32Condition(operation.right);
     if (right?.kind === "literal") {
       return {
-        name: expr.left.name,
+        name: operation.left.name,
         domain: equalityNarrowingDomain(right, truth),
       };
     }
   }
-  if (expr.op === "==" && expr.right.kind === "var") {
-    const left = endpointForI32Condition(expr.left);
+  if (operation.op === "==" && operation.right.kind === "var") {
+    const left = endpointForI32Condition(operation.left);
     if (left?.kind === "literal") {
       return {
-        name: expr.right.name,
+        name: operation.right.name,
         domain: equalityNarrowingDomain(left, truth),
       };
     }
   }
-  if (expr.left.kind === "var") {
-    const right = endpointForI32Condition(expr.right);
-    const domain = right ? leftVarComparisonDomain(expr.op, right, truth) : undefined;
-    if (domain) return { name: expr.left.name, domain };
+  if (operation.left.kind === "var") {
+    const right = endpointForI32Condition(operation.right);
+    const domain = right ? leftVarComparisonDomain(operation.op, right, truth) : undefined;
+    if (domain) return { name: operation.left.name, domain };
   }
-  if (expr.right.kind === "var") {
-    const left = endpointForI32Condition(expr.left);
-    const domain = left ? rightVarComparisonDomain(expr.op, left, truth) : undefined;
-    if (domain) return { name: expr.right.name, domain };
+  if (operation.right.kind === "var") {
+    const left = endpointForI32Condition(operation.left);
+    const domain = left ? rightVarComparisonDomain(operation.op, left, truth) : undefined;
+    if (domain) return { name: operation.right.name, domain };
   }
   return undefined;
 }
@@ -20509,7 +21084,7 @@ function collectDoStatementRefs(stmt: DoStatement, refs: Set<string>) {
     collectExprRefs(stmt.value, refs, new Set());
   } else if (stmt.kind === "do_expr") {
     collectExprRefs(stmt.value, refs, new Set());
-  } else if (stmt.kind === "proof_const") {
+  } else if (stmt.kind === "type_assert") {
     collectTypeExprRefs(stmt.value, refs);
   } else if (stmt.kind === "debug_trace") {
     for (const arg of stmt.args) collectExprRefs(arg, refs, new Set());
@@ -20518,7 +21093,7 @@ function collectDoStatementRefs(stmt: DoStatement, refs: Set<string>) {
 
 function boundNames(stmt: Statement): string[] {
   if (stmt.kind === "let") return [stmt.name];
-  if (stmt.kind === "proof_const") return [stmt.name];
+  if (stmt.kind === "type_assert") return [];
   if (stmt.kind === "debug_trace") return [];
   return stmt.names;
 }
@@ -20530,7 +21105,7 @@ function doBoundNames(stmt: DoStatement): string[] {
 }
 
 function spanForBoundName(stmt: Statement, name: string): { span?: Span; nameSpan?: Span } {
-  if (stmt.kind === "let" || stmt.kind === "proof_const") return stmt;
+  if (stmt.kind === "let") return stmt;
   if (stmt.kind === "destructure_let") {
     return { span: stmt.nameSpans?.[name] ?? stmt.span };
   }
@@ -20546,7 +21121,7 @@ function spanForDoBoundName(stmt: DoStatement, name: string): { span?: Span; nam
 function collectStatementRefs(stmt: Statement, refs: Set<string>) {
   if (stmt.kind === "let") collectExprRefs(stmt.value, refs, new Set());
   else if (stmt.kind === "destructure_let") collectExprRefs(stmt.value, refs, new Set());
-  else if (stmt.kind === "proof_const") collectTypeExprRefs(stmt.value, refs);
+  else if (stmt.kind === "type_assert") collectTypeExprRefs(stmt.value, refs);
   else if (stmt.kind === "debug_trace") {
     for (const arg of stmt.args) collectExprRefs(arg, refs, new Set());
   }

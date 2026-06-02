@@ -236,11 +236,11 @@ _=>2 // fallback
       'const canvas = @import("web.canvas");\nconst shader: string = ```wgsl\n@group(0) @binding(1) var<uniform> camera: mat4x4<f32>;\n```;\n\npub fn main(host: io) -> i32 {\n  canvas.gpu_create_shader(\n    host,\n    canvas.shader_id(shader)\n  )\n}\n',
   },
   {
-    name: "destructuring and local proof consts",
+    name: "destructuring and local type assertions",
     input:
-      "fn pair()->[i32,i32]{[1,2]} fn main(x:i32)->i32{let a,b=pair();const proof=Semigroup(i32);append(i32,proof,a,b)+x}",
+      "fn pair()->[i32,i32]{[1,2]} fn main(x:i32)->i32{let a,b=pair();@assert(Semigroup(i32));append(i32,a,b)+x}",
     expected:
-      "fn pair() -> [i32, i32] {\n  [1, 2]\n}\n\nfn main(x: i32) -> i32 {\n  let a, b = pair();\n  const proof = Semigroup(i32);\n  append(i32, proof, a, b) + x\n}\n",
+      "fn pair() -> [i32, i32] {\n  [1, 2]\n}\n\nfn main(x: i32) -> i32 {\n  let a, b = pair();\n  @assert(Semigroup(i32));\n  append(i32, a, b) + x\n}\n",
   },
   {
     name: "named pipe fluent chains",
@@ -286,9 +286,9 @@ _=>2 // fallback
   },
   {
     name: "operator declarations",
-    input: "fn append(a:Box,b:Box)->Box{a} const (<>)=@operator(#infixr,55,append);",
+    input: "fn append(a:Box,b:Box)->Box{a} infixr 55(<>)=append;",
     expected:
-      "fn append(a: Box, b: Box) -> Box {\n  a\n}\n\nconst (<>) = @operator(#infixr, 55, append);\n",
+      "fn append(a: Box, b: Box) -> Box {\n  a\n}\n\ninfixr 55 (<>) = append;\n",
   },
   {
     name: "type reflection helper surface",

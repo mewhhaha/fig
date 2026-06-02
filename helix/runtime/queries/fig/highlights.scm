@@ -26,6 +26,9 @@
 "type" @keyword.type
 "const" @keyword
 "fn" @keyword.function
+"infix" @keyword
+"infixl" @keyword
+"infixr" @keyword
 "let" @keyword
 "match" @keyword.control
 (Visibility) @keyword
@@ -58,8 +61,8 @@
 "=" @operator
 "=>" @operator
 "@" @operator
+"@assert" @operator
 "@external" @operator
-"@operator" @operator
 "@profile" @operator
 "@trace" @operator
 "[" @punctuation.bracket

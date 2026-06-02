@@ -1,4 +1,5 @@
 const map = @import("prelude.map");
+const layout = @import("prelude.layout");
 const queue = @import("prelude.queue");
 const set = @import("prelude.set");
 const vec = @import("prelude.vec");
@@ -19,14 +20,13 @@ type SearchState = struct {
 }
 
 fn Graph::empty(node_count: i32) -> Graph {
-  Graph {node_count, edges: vec.Vec::empty(Edge)}
+  Graph {node_count, edges: layout.HeapArray::empty(Edge)}
 }
 
 fn Graph::add_edge(graph: Graph, from: i32, to: i32) -> Graph {
   Graph {
     node_count: graph.node_count,
     edges: vec.Vec::push(
-      Edge,
       graph.edges,
       Edge {from, to}
     ),
@@ -34,7 +34,7 @@ fn Graph::add_edge(graph: Graph, from: i32, to: i32) -> Graph {
 }
 
 fn Graph::edge_count(graph: Graph) -> i32 {
-  vec.Vec::len(Edge, graph.edges)
+  vec.Vec::len(graph.edges)
 }
 
 fn Graph::has_edge(graph: Graph, from: i32, to: i32) -> bool {
@@ -48,7 +48,7 @@ fn Graph::has_edge_loop(
   index: i32
 ) -> bool {
   match index < Graph::edge_count(graph) {
-    true => vec.Vec::get(Edge, graph.edges, index)
+    true => vec.Vec::get_t(Edge, graph.edges, index)
       \edge -> match edge.from == from {
       true => match edge.to == to {
         true => true,
@@ -81,7 +81,7 @@ fn Graph::out_degree_loop(
   total: i32
 ) -> i32 {
   match index < Graph::edge_count(graph) {
-    true => vec.Vec::get(Edge, graph.edges, index)
+    true => vec.Vec::get_t(Edge, graph.edges, index)
       \edge -> match edge.from == node {
       true => Graph::out_degree_loop(
         graph,
@@ -106,7 +106,6 @@ fn Graph::reachable(
   target: i32
 ) -> bool {
   let initial_pending = queue.Queue::push_back(
-    i32,
     queue.Queue::empty(i32),
     start
   );
@@ -124,13 +123,71 @@ fn Graph::reachable(
   )
 }
 
+fn Graph::reachable_bounded(
+  graph: Graph,
+  start: i32,
+  target: i32,
+  budget: i32
+) -> bool {
+  match start == target {
+    true => true,
+    false => match budget <= 0 {
+      true => false,
+      false => Graph::reachable_bounded_edge_loop(
+        graph,
+        start,
+        target,
+        budget,
+        0
+      ),
+    },
+  }
+}
+
+fn Graph::reachable_bounded_edge_loop(
+  graph: Graph,
+  start: i32,
+  target: i32,
+  budget: i32,
+  index: i32
+) -> bool {
+  match index < Graph::edge_count(graph) {
+    true => vec.Vec::get_t(Edge, graph.edges, index)
+      \edge -> match edge.from == start {
+      true => match Graph::reachable_bounded(
+        graph,
+        edge.to,
+        target,
+        budget - 1
+      ) {
+        true => true,
+        false => Graph::reachable_bounded_edge_loop(
+          graph,
+          start,
+          target,
+          budget,
+          index + 1
+        ),
+      },
+      false => Graph::reachable_bounded_edge_loop(
+        graph,
+        start,
+        target,
+        budget,
+        index + 1
+      ),
+    },
+    false => false,
+  }
+}
+
 fn Graph::reachable_loop(
   graph: Graph,
   target: i32,
   pending: queue.Queue(i32),
   seen: set.Set(i32)
 ) -> bool {
-  match queue.Queue::pop_front(i32, pending) {
+  match queue.Queue::pop_front(pending) {
     None => false,
     Some(step) => match step.value == target {
       true => true,
@@ -175,7 +232,7 @@ fn Graph::enqueue_neighbors_loop(
   state: SearchState
 ) -> SearchState {
   match index < Graph::edge_count(graph) {
-    true => vec.Vec::get(Edge, graph.edges, index)
+    true => vec.Vec::get_t(Edge, graph.edges, index)
       \edge -> match edge.from == current {
       true => match set.Set::contains(
         i32,
@@ -197,7 +254,6 @@ fn Graph::enqueue_neighbors_loop(
           index + 1,
           SearchState {
             pending: queue.Queue::push_back(
-              i32,
               state.pending,
               edge.to
             ),

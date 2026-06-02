@@ -3,7 +3,7 @@ const list = @import("prelude.list");
 const option = @import("prelude.option");
 const tree = @import("prelude.tree");
 
-type fn Crumb(a: type) -> type {
+type fn Crumb() -> type {
   let Crumb = {
     parent: i32,
     from_left: bool,
@@ -15,16 +15,27 @@ type fn TreeZipper(a: type) -> type {
   let TreeZipper = {
     tree: tree.Tree(a),
     focus: i32,
-    crumbs: list.List(Crumb(a)),
+    crumbs: list.List(Crumb),
   };
   struct(TreeZipper)
 }
 
 fn TreeZipper::from_tree(
-  const a: type,
   value: tree.Tree(a)
 ) -> TreeZipper(a) {
-  TreeZipper {tree: value, focus: value.root, crumbs: list.List::empty(Crumb(a))}
+  let crumbs: list.List(Crumb) = list.List::empty();
+  TreeZipper {tree: value, focus: value.root, crumbs}
+}
+
+fn TreeZipper::map(
+  const f: fn(x: a) -> b,
+  zipper: TreeZipper(a)
+) -> TreeZipper(b) {
+  TreeZipper {
+    tree: tree.Tree::map(f, zipper.tree),
+    focus: zipper.focus,
+    crumbs: zipper.crumbs,
+  }
 }
 
 fn TreeZipper::value(
@@ -42,7 +53,6 @@ fn TreeZipper::value(
 }
 
 fn TreeZipper::go_left(
-  const a: type,
   zipper: TreeZipper(a)
 ) -> core.Option(TreeZipper(a)) {
   match tree.Tree::node_at(
@@ -56,7 +66,6 @@ fn TreeZipper::go_left(
         tree: zipper.tree,
         focus: node.left,
         crumbs: list.List::cons(
-          Crumb(a),
           Crumb {parent: zipper.focus, from_left: true},
           zipper.crumbs
         ),
@@ -67,7 +76,6 @@ fn TreeZipper::go_left(
 }
 
 fn TreeZipper::go_right(
-  const a: type,
   zipper: TreeZipper(a)
 ) -> core.Option(TreeZipper(a)) {
   match tree.Tree::node_at(
@@ -81,7 +89,6 @@ fn TreeZipper::go_right(
         tree: zipper.tree,
         focus: node.right,
         crumbs: list.List::cons(
-          Crumb(a),
           Crumb {parent: zipper.focus, from_left: false},
           zipper.crumbs
         ),
@@ -92,14 +99,13 @@ fn TreeZipper::go_right(
 }
 
 fn TreeZipper::go_up(
-  const a: type,
   zipper: TreeZipper(a)
 ) -> core.Option(TreeZipper(a)) {
-  match list.List::head(Crumb(a), zipper.crumbs) {
+  match list.List::head(zipper.crumbs) {
     Some(crumb) => option.some(TreeZipper {
       tree: zipper.tree,
       focus: crumb.parent,
-      crumbs: list.List::tail(Crumb(a), zipper.crumbs),
+      crumbs: list.List::tail(zipper.crumbs),
     }),
     None => None,
   }

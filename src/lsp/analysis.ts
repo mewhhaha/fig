@@ -427,6 +427,7 @@ export class AnalysisCache {
       const selected = new Set(context.selectedNames);
       const items: CompletionItem[] = [];
       for (const decl of program.declarations) {
+        if (decl.kind === "type_assert") continue;
         if (decl.kind === "operator") continue;
         const name = declarationCompletionName(decl);
         if (!name || selected.has(name)) continue;
@@ -1280,6 +1281,7 @@ function symbolForDecl(
   topLevelTypes: Map<string, string>,
   mapperForUri: (uri: string) => PositionMapper,
 ): IndexedSymbol[] {
+  if (decl.kind === "type_assert") return [];
   const symbolUri = sourceIdForSpan(decl.nameSpan ?? decl.span) ?? uri;
   const symbolMapper = mapperForUri(symbolUri);
   const symbolSource = symbolUri === uri ? source : undefined;
@@ -1288,7 +1290,9 @@ function symbolForDecl(
       ? rangeFromFound(findNameRange(symbolSource, decl.name, decl.kind), symbolMapper)
       : undefined) ??
     symbolMapper.range(0, 0);
-  const symbolKind: IndexedSymbol["kind"] = decl.kind === "operator" ? "const" : decl.kind;
+  const symbolKind: IndexedSymbol["kind"] = decl.kind === "operator"
+    ? "const"
+    : decl.kind;
   const base: IndexedSymbol = {
     name: decl.name,
     kind: symbolKind,
@@ -1653,7 +1657,7 @@ function symbolsForStatement(
   program?: Program,
   localTypes?: Map<string, string>,
 ): IndexedSymbol[] {
-  const names = stmt.kind === "let" || stmt.kind === "proof_const"
+  const names = stmt.kind === "let"
     ? [stmt.name]
     : stmt.kind === "destructure_let"
     ? stmt.names
@@ -1682,7 +1686,7 @@ function detailForStatementName(
   if (stmt.kind === "let") {
     return stmt.type ?? expressionTypeFromProgram(stmt.value, program, localTypes);
   }
-  if (stmt.kind === "proof_const") return undefined;
+  if (stmt.kind === "type_assert") return undefined;
   if (stmt.kind === "destructure_let") {
     const index = stmt.names.indexOf(name);
     return index >= 0 ? stmt.slotTypes?.[index] : undefined;
@@ -1727,7 +1731,9 @@ function expressionTypeFromProgram(
   if (expr.kind === "var") {
     const local = localTypes.get(expr.name);
     if (local) return local;
-    const decl = program?.declarations.find((item) => item.name === expr.name);
+    const decl = program?.declarations.find((item) =>
+      item.kind !== "type_assert" && item.name === expr.name
+    );
     if (decl?.kind === "fn" || decl?.kind === "type") {
       return detailForDecl(decl, program, localTypes);
     }
@@ -1780,7 +1786,7 @@ function spanForStatementName(
   stmt: Statement,
   name: string,
 ): CompileDiagnostic["span"] | undefined {
-  if (stmt.kind === "let" || stmt.kind === "proof_const") return stmt.nameSpan ?? stmt.span;
+  if (stmt.kind === "let") return stmt.nameSpan ?? stmt.span;
   if (stmt.kind === "destructure_let") {
     return stmt.nameSpans?.[name] ?? stmt.span;
   }
@@ -1969,6 +1975,9 @@ function detailForDecl(
   program?: Program,
   localTypes = new Map<string, string>(),
 ): string {
+  if (decl.kind === "type_assert") {
+    return `@assert(${renderTypeExprHover(decl.value)})`;
+  }
   if (decl.kind === "fn") {
     return `fn ${decl.name}(${
       decl.params.map((param) => `${param.name}: ${param.type}`).join(", ")
@@ -1980,7 +1989,7 @@ function detailForDecl(
     }) -> ${decl.resultKind}`;
   }
   if (decl.kind === "operator") {
-    return `const (${decl.symbol}) = @operator(${decl.fixity}, ${decl.precedence}, ${decl.target})`;
+    return `${decl.fixity.slice(1)} ${decl.precedence} (${decl.symbol}) = ${decl.target}`;
   }
   const type = decl.type ?? expressionTypeFromProgram(decl.value, program, localTypes);
   return `${decl.kind} ${decl.name}${type ? `: ${type}` : ""}`;
@@ -2782,14 +2791,7 @@ function checkedAstHoverAt(
         )
       );
       visitExpr(stmt.value, localTypes);
-    } else if (stmt.kind === "proof_const") {
-      add(
-        stmt.nameSpan ?? stmt.span,
-        stmt.name,
-        renderTypeExprHover(stmt.value),
-        "const",
-        stmt.doc,
-      );
+    } else if (stmt.kind === "type_assert") {
       visitTypeExpr(stmt.value);
     }
   };
@@ -2851,6 +2853,8 @@ function checkedAstHoverAt(
         "const",
         decl.doc,
       );
+    } else if (decl.kind === "type_assert") {
+      visitTypeExpr(decl.value);
     } else {
       add(
         decl.nameSpan ?? decl.span,

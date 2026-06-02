@@ -74,9 +74,9 @@ evaluated against a world value.
 
 ## Const Evaluation and Reflection
 
-Top-level constants, type-function bodies, const parameters, local proof consts, and static builtins
-are evaluated at compile time. Static reflection exposes product slots, sum variants, attached
-members, shape transforms, and selected WGSL metadata.
+Top-level constants, type-function bodies, const parameters, local type assertions, and
+static builtins are evaluated at compile time. Static reflection exposes product slots, sum
+variants, attached members, shape transforms, and selected WGSL metadata.
 
 Compile-time expressions are intentionally smaller than runtime expressions. Unsupported static
 forms report focused diagnostics.

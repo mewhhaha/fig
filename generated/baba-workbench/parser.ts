@@ -59,8 +59,8 @@ export type AstNode =
   | TypeBlockItemAstNode
   | TypeLetDeclAstNode
   | OperatorDeclAstNode
+  | OperatorFixityAstNode
   | OperatorBindingNameAstNode
-  | OperatorValueAstNode
   | OperatorTargetAstNode
   | TypeExprAstNode
   | TypeMatchAstNode
@@ -103,7 +103,7 @@ export type AstNode =
   | BlockStmtAstNode
   | BlockLetDeclAstNode
   | BlockLetTailAstNode
-  | BlockProofConstDeclAstNode
+  | TypeAssertDeclAstNode
   | DebugTraceStmtAstNode
   | ExprAstNode
   | DoExprAstNode
@@ -369,16 +369,16 @@ export interface OperatorDeclAstNode {
   children: AstNode[];
 }
 
-export interface OperatorBindingNameAstNode {
-  kind: "OperatorBindingName";
-  type: "OperatorBindingName";
+export interface OperatorFixityAstNode {
+  kind: "OperatorFixity";
+  type: "OperatorFixity";
   node: RuleParseNode;
   children: AstNode[];
 }
 
-export interface OperatorValueAstNode {
-  kind: "OperatorValue";
-  type: "OperatorValue";
+export interface OperatorBindingNameAstNode {
+  kind: "OperatorBindingName";
+  type: "OperatorBindingName";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -677,9 +677,9 @@ export interface BlockLetTailAstNode {
   children: AstNode[];
 }
 
-export interface BlockProofConstDeclAstNode {
-  kind: "BlockProofConstDecl";
-  type: "BlockProofConstDecl";
+export interface TypeAssertDeclAstNode {
+  kind: "TypeAssertDecl";
+  type: "TypeAssertDecl";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -1476,6 +1476,7 @@ const rules: Record<string, Expression> = {
   "Decl": {
     kind: "choice",
     options: [
+      { kind: "ref", name: "TypeAssertDecl" },
       { kind: "ref", name: "TypeSugarDecl" },
       { kind: "ref", name: "TypeFnDecl" },
       { kind: "ref", name: "OperatorDecl" },
@@ -1694,11 +1695,20 @@ const rules: Record<string, Expression> = {
   "OperatorDecl": {
     kind: "sequence",
     items: [
-      { kind: "literal", value: "const" },
+      { kind: "ref", name: "OperatorFixity" },
+      { kind: "ref", name: "Number" },
       { kind: "ref", name: "OperatorBindingName" },
       { kind: "literal", value: "=" },
-      { kind: "ref", name: "OperatorValue" },
+      { kind: "ref", name: "OperatorTarget" },
       { kind: "optional", expression: { kind: "literal", value: ";" } },
+    ],
+  },
+  "OperatorFixity": {
+    kind: "choice",
+    options: [
+      { kind: "literal", value: "infixl" },
+      { kind: "literal", value: "infixr" },
+      { kind: "literal", value: "infix" },
     ],
   },
   "OperatorBindingName": {
@@ -1707,19 +1717,6 @@ const rules: Record<string, Expression> = {
       kind: "literal",
       value: ")",
     }],
-  },
-  "OperatorValue": {
-    kind: "sequence",
-    items: [
-      { kind: "literal", value: "@operator" },
-      { kind: "literal", value: "(" },
-      { kind: "ref", name: "LiteralType" },
-      { kind: "literal", value: "," },
-      { kind: "ref", name: "Number" },
-      { kind: "literal", value: "," },
-      { kind: "ref", name: "OperatorTarget" },
-      { kind: "literal", value: ")" },
-    ],
   },
   "OperatorTarget": {
     kind: "sequence",
@@ -2119,29 +2116,44 @@ const rules: Record<string, Expression> = {
       { kind: "literal", value: "const" },
       {
         kind: "choice",
-        options: [{ kind: "ref", name: "ImportBindingList" }, {
+        options: [{
+          kind: "sequence",
+          items: [{ kind: "ref", name: "ImportBindingList" }, {
+            kind: "literal",
+            value: "=",
+          }, {
+            kind: "choice",
+            options: [{ kind: "ref", name: "ExternalConstValue" }, {
+              kind: "ref",
+              name: "ConstValue",
+            }],
+          }, { kind: "optional", expression: { kind: "literal", value: ";" } }],
+        }, {
           kind: "sequence",
           items: [{ kind: "ref", name: "FieldName" }, {
             kind: "ref",
             name: "Type",
-          }],
+          }, { kind: "literal", value: "=" }, {
+            kind: "choice",
+            options: [{ kind: "ref", name: "ExternalConstValue" }, {
+              kind: "ref",
+              name: "ConstValue",
+            }],
+          }, { kind: "optional", expression: { kind: "literal", value: ";" } }],
         }, {
           kind: "sequence",
           items: [{ kind: "ref", name: "LowerIdent" }, {
             kind: "optional",
             expression: { kind: "ref", name: "TypeAnn" },
-          }],
+          }, { kind: "literal", value: "=" }, {
+            kind: "choice",
+            options: [{ kind: "ref", name: "ExternalConstValue" }, {
+              kind: "ref",
+              name: "ConstValue",
+            }],
+          }, { kind: "optional", expression: { kind: "literal", value: ";" } }],
         }],
       },
-      { kind: "literal", value: "=" },
-      {
-        kind: "choice",
-        options: [{ kind: "ref", name: "ExternalConstValue" }, {
-          kind: "ref",
-          name: "ConstValue",
-        }],
-      },
-      { kind: "optional", expression: { kind: "literal", value: ";" } },
     ],
   },
   "ImportBindingList": {
@@ -2242,7 +2254,7 @@ const rules: Record<string, Expression> = {
     kind: "choice",
     options: [
       { kind: "ref", name: "BlockLetDecl" },
-      { kind: "ref", name: "BlockProofConstDecl" },
+      { kind: "ref", name: "TypeAssertDecl" },
       { kind: "ref", name: "DebugTraceStmt" },
     ],
   },
@@ -2306,14 +2318,14 @@ const rules: Record<string, Expression> = {
       ],
     }],
   },
-  "BlockProofConstDecl": {
+  "TypeAssertDecl": {
     kind: "sequence",
     items: [
-      { kind: "literal", value: "const" },
-      { kind: "ref", name: "LowerIdent" },
-      { kind: "literal", value: "=" },
+      { kind: "literal", value: "@assert" },
+      { kind: "literal", value: "(" },
       { kind: "ref", name: "TypeExpr" },
-      { kind: "literal", value: ";" },
+      { kind: "literal", value: ")" },
+      { kind: "optional", expression: { kind: "literal", value: ";" } },
     ],
   },
   "DebugTraceStmt": {
@@ -2393,7 +2405,7 @@ const rules: Record<string, Expression> = {
       },
       {
         kind: "sequence",
-        items: [{ kind: "ref", name: "BlockProofConstDecl" }, {
+        items: [{ kind: "ref", name: "TypeAssertDecl" }, {
           kind: "optional",
           expression: { kind: "ref", name: "DoBlockBody" },
         }],
@@ -3865,19 +3877,19 @@ export function projectParseNode(node: ParseNode): AstNode | null {
           child,
         ): child is AstNode => child !== null),
       };
-    case "OperatorBindingName":
+    case "OperatorFixity":
       return {
-        kind: "OperatorBindingName",
-        type: "OperatorBindingName",
+        kind: "OperatorFixity",
+        type: "OperatorFixity",
         node,
         children: node.children.map(projectParseNode).filter((
           child,
         ): child is AstNode => child !== null),
       };
-    case "OperatorValue":
+    case "OperatorBindingName":
       return {
-        kind: "OperatorValue",
-        type: "OperatorValue",
+        kind: "OperatorBindingName",
+        type: "OperatorBindingName",
         node,
         children: node.children.map(projectParseNode).filter((
           child,
@@ -4261,10 +4273,10 @@ export function projectParseNode(node: ParseNode): AstNode | null {
           child,
         ): child is AstNode => child !== null),
       };
-    case "BlockProofConstDecl":
+    case "TypeAssertDecl":
       return {
-        kind: "BlockProofConstDecl",
-        type: "BlockProofConstDecl",
+        kind: "TypeAssertDecl",
+        type: "TypeAssertDecl",
         node,
         children: node.children.map(projectParseNode).filter((
           child,

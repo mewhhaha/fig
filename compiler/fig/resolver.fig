@@ -2,6 +2,8 @@ const diagnostic = @import("./diagnostic.fig");
 const modgraph = @import("./modgraph.fig");
 const source = @import("./source.fig");
 const span = @import("./span.fig");
+const map = @import("prelude.map");
+const set = @import("prelude.set");
 
 type ResolveRequest = struct {
   importer_id: i32,
@@ -10,12 +12,12 @@ type ResolveRequest = struct {
 }
 
 type ResolveResult = union {
-  Resolved(module: modgraph.ModuleRecord), Missing(request: ResolveRequest)
+  Resolved(module: modgraph.ModuleRecord), Missing(request: ResolveRequest),
+  MissingImportEdge(request: ResolveRequest)
 }
 
 type ModuleCache = struct {
-  first_id: i32,
-  second_id: i32,
+  modules: set.Set(i32),
   hit_count: i32,
   miss_count: i32,
 }
@@ -45,8 +47,7 @@ fn request(
 
 fn empty_cache() -> ModuleCache {
   ModuleCache {
-    first_id: 0 - 1,
-    second_id: 0 - 1,
+    modules: set.Set::empty(i32),
     hit_count: 0,
     miss_count: 0,
   }
@@ -54,8 +55,12 @@ fn empty_cache() -> ModuleCache {
 
 fn seed_cache(graph: modgraph.ModuleGraph) -> ModuleCache {
   ModuleCache {
-    first_id: modgraph.root_id(graph),
-    second_id: 0 - 1,
+    modules: set.Set::insert(
+      i32,
+      set.Set::empty(i32),
+      modgraph.root_id(graph),
+      map.compare_i32
+    ),
     hit_count: 0,
     miss_count: 0,
   }
@@ -70,10 +75,7 @@ fn state(graph: modgraph.ModuleGraph) -> ResolveState {
 }
 
 fn cache_contains(cache: ModuleCache, module_id: i32) -> bool {
-  match cache.first_id == module_id {
-    true => true,
-    false => cache.second_id == module_id,
-  }
+  set.Set::contains(i32, cache.modules, module_id, map.compare_i32)
 }
 
 fn record_cache_probe(
@@ -82,14 +84,17 @@ fn record_cache_probe(
 ) -> ModuleCache {
   match cache_contains(cache, module_id) {
     true => ModuleCache {
-      first_id: cache.first_id,
-      second_id: cache.second_id,
+      modules: cache.modules,
       hit_count: cache.hit_count + 1,
       miss_count: cache.miss_count,
     },
     false => ModuleCache {
-      first_id: cache.first_id,
-      second_id: module_id,
+      modules: set.Set::insert(
+        i32,
+        cache.modules,
+        module_id,
+        map.compare_i32
+      ),
       hit_count: cache.hit_count,
       miss_count: cache.miss_count + 1,
     },
@@ -100,18 +105,32 @@ fn resolve_graph(
   graph: modgraph.ModuleGraph,
   request: ResolveRequest
 ) -> ResolveResult {
-  match graph.dependency.module_id == request.import_id {
-    true => Resolved(graph.dependency),
-    false => match graph.root.module_id == request.import_id {
-      true => Resolved(graph.root),
-      false => Missing(request),
+  match modgraph.find_module(graph, request.import_id) {
+    Some(module) => match modgraph.has_import_edge(
+      graph,
+      request.importer_id,
+      request.import_id
+    ) {
+      true => Resolved(module),
+      false => MissingImportEdge(request),
     },
+    None => Missing(request),
   }
 }
 
 fn missing_module_diagnostic(request: ResolveRequest) -> diagnostic.Diagnostic {
   diagnostic.make(
     diagnostic.CodeMissingModule,
+    diagnostic.Error,
+    request.span,
+    request.import_id,
+    request.importer_id
+  )
+}
+
+fn missing_import_edge_diagnostic(request: ResolveRequest) -> diagnostic.Diagnostic {
+  diagnostic.make(
+    diagnostic.CodeMissingImportEdge,
     diagnostic.Error,
     request.span,
     request.import_id,
@@ -128,11 +147,16 @@ fn diagnostics_after_result(
     diagnostics,
     missing_module_diagnostic(request)
   ),
+  diagnostics, MissingImportEdge(request) => diagnostic.push(
+    diagnostics,
+    missing_import_edge_diagnostic(request)
+  ),
 }
 
 fn result_module_id(value: ResolveResult) -> i32 match {
   Resolved(module) => module.module_id,
   Missing(request) => request.import_id,
+  MissingImportEdge(request) => request.import_id,
 }
 
 fn resolve(
@@ -162,6 +186,7 @@ fn result_source(
 ) -> source.SourceText match {
   Resolved(module), _graph => module.source,
   Missing(_), graph => modgraph.root_source(graph),
+  MissingImportEdge(_), graph => modgraph.root_source(graph),
 }
 
 fn step_source(step: ResolveStep) -> source.SourceText {
@@ -169,8 +194,7 @@ fn step_source(step: ResolveStep) -> source.SourceText {
 }
 
 fn cache_score(cache: ModuleCache) -> i32 {
-  cache.first_id
-    + cache.second_id
+  set.Set::len(i32, cache.modules)
     + cache.hit_count
     + cache.miss_count
 }
@@ -178,6 +202,7 @@ fn cache_score(cache: ModuleCache) -> i32 {
 fn result_score(value: ResolveResult) -> i32 match {
   Resolved(module) => modgraph.module_score(module),
   Missing(request) => 0 - request.import_id,
+  MissingImportEdge(request) => 0 - request.import_id - request.importer_id,
 }
 
 fn state_score(state: ResolveState) -> i32 {
@@ -209,5 +234,13 @@ fn entry(seed: i32) -> i32 {
       source_span
     )
   );
-  step_score(first) + step_score(second)
+  let third = resolve(
+    second.state,
+    request(
+      modgraph.dependency_id(graph),
+      modgraph.root_id(graph),
+      source_span
+    )
+  );
+  step_score(first) + step_score(second) + step_score(third)
 }

@@ -9,7 +9,7 @@ The practical rule is:
 
 - Haskell data declarations become Fig `struct` and `union` types.
 - Typeclasses become `type fn` contracts plus attached members.
-- Typeclass dictionaries become erased `const _proof` parameters or transparent annotations.
+- Typeclass dictionaries become transparent annotations or local discarded contract checks.
 - Higher-kinded constraints use type constructor parameters.
 - `fmap`, `<$>`, `<&>`, `<*>`, `<**>`, `>>=`, `=<<`, `>=>`, `<=<`, and `do`
   are available through explicit contracts and do strategies.
@@ -96,15 +96,18 @@ fn same(a: Eq(t), b: t) -> bool {
 }
 ```
 
-Use an erased proof when you want a Haskell-like constraint argument:
+Use an erased local assertion when you want a Haskell-like constraint without changing the runtime
+parameters:
 
 ```fig
-fn same_explicit(a: t, b: t, const _proof: Eq(t)) -> bool {
+fn same_explicit(a: t, b: t) -> bool {
+  @assert(Eq(t));
   t::eql(a, b)
 }
 ```
 
-`const _proof` is checked at compile time and removed from runtime calls.
+`@assert(Eq(t));` evaluates the contract at compile time and discards the returned type-level
+value.
 
 ## Functor
 
@@ -134,9 +137,9 @@ Generic use:
 ```fig
 fn mapped(
   v: t(a),
-  const f: fn(x: a) -> b,
-  const _proof: Functor(t)
+  const f: fn(x: a) -> b
 ) -> t(b) {
+  @assert(Functor(t));
   t::map(f, v)
 }
 ```
@@ -407,7 +410,8 @@ contracts where no local expression determines the type.
 
 ## What Not To Translate Literally
 
-- Do not rely on implicit typeclass search. Import helpers and pass proofs explicitly.
+- Do not rely on implicit typeclass search. Import helpers and state required contracts explicitly
+  with annotations or `@assert(Contract(t));`.
 - Do not assume laziness.
 - Do not write partially applied do strategies.
 - Do not use `|>` pipeline syntax.
@@ -422,7 +426,7 @@ When porting Haskell-shaped code to Fig:
 1. Translate data declarations to `struct` or `union`.
 2. Translate typeclasses to `type fn` contracts.
 3. Translate instances to attached members.
-4. Use erased proof parameters for generic functions.
+4. Use transparent annotations or local `@assert(Contract(t));` checks for generic functions.
 5. Use `do @applicative` only for independent steps.
 6. Use `do @monad` for dependent sequencing.
 7. Use `prelude.monad` or `prelude.effect` for Reader/State-style programs.

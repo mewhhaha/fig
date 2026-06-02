@@ -21,6 +21,9 @@ const keywords = new Set<string>([
   "i64",
   "if",
   "import",
+  "infix",
+  "infixl",
+  "infixr",
   "let",
   "match",
   "pub",
@@ -33,8 +36,8 @@ const keywords = new Set<string>([
 ]);
 const symbols: string[] = [
   "@external",
-  "@operator",
   "@profile",
+  "@assert",
   "@trace",
   "...",
   "->",

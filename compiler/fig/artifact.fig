@@ -10,6 +10,8 @@ const source = @import("./source.fig");
 const span = @import("./span.fig");
 const stream = @import("./stream.fig");
 const token = @import("./token.fig");
+const map = @import("prelude.map");
+const vec = @import("prelude.vec");
 
 type CompilePhase = union {
   PhaseSource, PhaseParsed, PhaseChecked, PhaseLowered
@@ -37,9 +39,8 @@ type ArtifactSummary = struct {
 }
 
 type ArtifactTable = struct {
-  first: ModuleArtifact,
-  second: ModuleArtifact,
-  count: i32,
+  artifacts: vec.Vec(ModuleArtifact),
+  artifact_index: map.Map(i32, i32),
   diagnostics: diagnostic.DiagnosticBag,
 }
 
@@ -108,9 +109,8 @@ fn placeholder_artifact() -> ModuleArtifact {
 
 fn empty_table() -> ArtifactTable {
   ArtifactTable {
-    first: placeholder_artifact(),
-    second: placeholder_artifact(),
-    count: 0,
+    artifacts: vec.Vec::new(ModuleArtifact, 0),
+    artifact_index: map.Map::empty(i32, i32),
     diagnostics: diagnostic.empty(),
   }
 }
@@ -153,34 +153,21 @@ fn compile_source(
 }
 
 fn insert(table: ArtifactTable, value: ModuleArtifact) -> ArtifactTable {
-  match table.count {
-    0 => ArtifactTable {
-      first: value,
-      second: table.second,
-      count: 1,
-      diagnostics: diagnostic.merge(
-        table.diagnostics,
-        value.diagnostics
-      ),
-    },
-    1 => ArtifactTable {
-      first: table.first,
-      second: value,
-      count: 2,
-      diagnostics: diagnostic.merge(
-        table.diagnostics,
-        value.diagnostics
-      ),
-    },
-    _ => ArtifactTable {
-      first: table.first,
-      second: table.second,
-      count: table.count + 1,
-      diagnostics: diagnostic.merge(
-        table.diagnostics,
-        value.diagnostics
-      ),
-    },
+  let artifact_index = vec.Vec::len(table.artifacts);
+  ArtifactTable {
+    artifacts: vec.Vec::push(table.artifacts, value),
+    artifact_index: map.Map::insert(
+      i32,
+      i32,
+      table.artifact_index,
+      value.module_id,
+      artifact_index,
+      map.compare_i32
+    ),
+    diagnostics: diagnostic.merge(
+      table.diagnostics,
+      value.diagnostics
+    ),
   }
 }
 
@@ -275,10 +262,14 @@ fn summary_score(value: ArtifactSummary) -> i32 {
     + value.checksum
 }
 
+fn add_artifact_score(acc: i32, value: ModuleArtifact) -> i32 {
+  acc + artifact_score(value)
+}
+
 fn table_score(table: ArtifactTable) -> i32 {
-  artifact_score(table.first)
-    + artifact_score(table.second)
-    + table.count
+  vec.Vec::fold(table.artifacts, 0, add_artifact_score)
+    + vec.Vec::len(table.artifacts)
+    + map.Map::len(i32, i32, table.artifact_index)
     + diagnostic.bag_score(table.diagnostics)
 }
 

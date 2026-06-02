@@ -38,15 +38,12 @@ fn wrap(x: i32) -> Box(i32) {
 
 pub fn main() -> i32 {
   let point_total = append(
-    Point,
-    Semigroup(Point),
     Point {x: 1, y: 2},
     Point {x: 3, y: 4}
   );
   let boxed = bind(
-    fmap(Box {value: 1}, inc, Functor(Box)),
-    wrap,
-    Monad(Box)
+    fmap(Box {value: 1}, inc),
+    wrap
   );
   point_total.x + point_total.y + boxed.value
 }

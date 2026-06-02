@@ -24,7 +24,7 @@ export interface ResolvedTypeHole {
   replacement: string;
 }
 
-export type Declaration = FnDecl | LetDecl | ConstDecl | OperatorDecl | TypeDecl;
+export type Declaration = FnDecl | LetDecl | ConstDecl | OperatorDecl | TypeDecl | TypeAssertDecl;
 export type BranchHint = string;
 
 export interface EffectImport extends AstNodeMeta {
@@ -114,10 +114,9 @@ export interface DestructureLetDecl extends AstNodeMeta {
   slotTypes?: string[];
 }
 
-export interface ProofConstDecl extends AstNodeMeta {
-  kind: "proof_const";
+export interface TypeAssertDecl extends AstNodeMeta {
+  kind: "type_assert";
   doc?: string;
-  name: string;
   value: TypeExpr;
 }
 
@@ -335,7 +334,7 @@ export interface BlockExpr extends AstNodeMeta {
   expr?: Expr;
 }
 
-export type Statement = LetDecl | DestructureLetDecl | ProofConstDecl | DebugTraceStmt;
+export type Statement = LetDecl | DestructureLetDecl | TypeAssertDecl | DebugTraceStmt;
 export type DoStatement =
   | Statement
   | ({ kind: "do_bind"; name: string; value: Expr } & AstNodeMeta)

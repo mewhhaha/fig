@@ -1,7 +1,8 @@
 # Fig Modules
 
 Prefer `const std = @import("prelude.std");` for ordinary programs. It collects common pure
-fragments and operator declarations. This page summarizes module roles, not full APIs.
+fragments and operator declarations. This page summarizes module roles and import behavior; see
+[Prelude Library](prelude.md) for the prelude API surface.
 
 Use a namespace import when you want the module surface qualified:
 
@@ -24,7 +25,7 @@ instead of spelling them through another module such as `array.layout`.
 
 | Import                 | Role                                                                                                         |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `prelude.std`          | Common merged pure surface for functions, monads, operators, options/results, tuples, arrays, and schedules. |
+| `prelude.std`          | Common umbrella for functions, monads, operators, options/results, tuples, arrays, heap collections, and schedules. |
 | `prelude.core`         | Core static contracts, option/result roots, tuples, and index proofs.                                        |
 | `prelude.fixed`        | Canonical fixed-size value arrays and direct spread/update/edit helpers.                                     |
 | `prelude.fixed_build`  | Builder fallback for constructing fixed values when direct slots are not convenient.                         |
@@ -32,6 +33,15 @@ instead of spelling them through another module such as `array.layout`.
 | `prelude.scalar`       | Tiny pure bool helpers and generic numeric scalar helpers guarded by `@type_is_number`.                      |
 | `prelude.layout`       | Scalar, lane, tile, matrix, fixed inline-array layouts, and collector members.                               |
 | `prelude.array_static` | Fixed inline array, lane, range iterator, map/zip/fold/reduce, checked get, and compact array helpers.       |
+| `prelude.vec`          | Heap-backed growable `Vec(A)`, `Slice(A)`, and builder helpers over `layout.HeapArray`.                      |
+| `prelude.list`         | Persistent cons-style `List(A)` with heap-backed nodes, head/tail, fold, reverse, and map.                   |
+| `prelude.nonempty`     | `NonEmpty(A)` wrapper for a guaranteed head plus list tail.                                                  |
+| `prelude.queue`        | FIFO `Queue(A)` with push, peek, and pop helpers.                                                           |
+| `prelude.tree`         | Heap-node binary `Tree(A)` with optional child views and preorder fold.                                      |
+| `prelude.zipper`       | `TreeZipper(A)` focus/crumb navigation for `prelude.tree`.                                                  |
+| `prelude.map`          | Ordered map helpers backed by a left-leaning red/black tree and explicit comparator functions.               |
+| `prelude.set`          | Ordered set helpers backed by `prelude.map`.                                                                |
+| `prelude.graph`        | Directed `i32` graph helpers using `Vec`, `Queue`, and `Set` for traversal.                                  |
 | `prelude.function`     | Function composition and typeclass-like `functor`, `applicative`, and `monad` helpers.                       |
 | `prelude.monad`        | Binary `State(S, A)` and explicit `Reader(R, A)` helpers for ordered flows.                                  |
 | `prelude.effect`       | Transparent capability-tag helpers such as `Eff`, `Reader`, `State`, `Debug`, `With`, and `WithAll`.         |
@@ -41,7 +51,7 @@ instead of spelling them through another module such as `array.layout`.
 | `prelude.tuple`        | Tuple and pair helpers.                                                                                      |
 | `prelude.bool`         | Compatibility namespace that imports `prelude.scalar`.                                                       |
 | `prelude.num`          | Compatibility namespace that imports `prelude.scalar`.                                                       |
-| `prelude.order`        | Compatibility namespace that imports `prelude.scalar`.                                                       |
+| `prelude.order`        | `Ordering` union plus comparison predicates and `compare_i32`.                                               |
 | `prelude.schedule`     | Static schedule metadata vocabulary.                                                                         |
 | `prelude.geometry2d`   | Pure fixed 2D geometry layout helpers.                                                                       |
 | `web.canvas`           | Browser canvas/GPU/event host IO imports plus WGSL shader metadata helpers.                                  |

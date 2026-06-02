@@ -5,11 +5,12 @@ type fn OpAdd(t: type) -> type {
   t
 }
 
-fn op_add(a: t, b: t, const _proof: OpAdd(t)) -> t {
+fn op_add(a: t, b: t) -> t {
+  @assert(OpAdd(t));
   t::add(a, b)
 }
 
-const (+) = @operator(#infixl, 60, op_add);
+infixl 60 (+) = op_add;
 
 type fn OpSub(t: type) -> type {
   let Expected = fn(a: t, b: t) -> t;
@@ -18,11 +19,12 @@ type fn OpSub(t: type) -> type {
   t
 }
 
-fn op_sub(a: t, b: t, const _proof: OpSub(t)) -> t {
+fn op_sub(a: t, b: t) -> t {
+  @assert(OpSub(t));
   t::sub(a, b)
 }
 
-const (-) = @operator(#infixl, 60, op_sub);
+infixl 60 (-) = op_sub;
 
 type fn OpMul(t: type) -> type {
   let Expected = fn(a: t, b: t) -> t;
@@ -31,11 +33,12 @@ type fn OpMul(t: type) -> type {
   t
 }
 
-fn op_mul(a: t, b: t, const _proof: OpMul(t)) -> t {
+fn op_mul(a: t, b: t) -> t {
+  @assert(OpMul(t));
   t::mul(a, b)
 }
 
-const (*) = @operator(#infixl, 70, op_mul);
+infixl 70 (*) = op_mul;
 
 type fn OpDiv(t: type) -> type {
   let Expected = fn(a: t, b: t) -> t;
@@ -44,11 +47,12 @@ type fn OpDiv(t: type) -> type {
   t
 }
 
-fn op_div(a: t, b: t, const _proof: OpDiv(t)) -> t {
+fn op_div(a: t, b: t) -> t {
+  @assert(OpDiv(t));
   t::div(a, b)
 }
 
-const (/) = @operator(#infixl, 70, op_div);
+infixl 70 (/) = op_div;
 
 type fn OpRem(t: type) -> type {
   let Expected = fn(a: t, b: t) -> t;
@@ -57,11 +61,12 @@ type fn OpRem(t: type) -> type {
   t
 }
 
-fn op_rem(a: t, b: t, const _proof: OpRem(t)) -> t {
+fn op_rem(a: t, b: t) -> t {
+  @assert(OpRem(t));
   t::rem(a, b)
 }
 
-const (%) = @operator(#infixl, 70, op_rem);
+infixl 70 (%) = op_rem;
 
 type fn OpEq(t: type) -> type {
   let Expected = fn(a: t, b: t) -> bool;
@@ -70,11 +75,12 @@ type fn OpEq(t: type) -> type {
   t
 }
 
-fn op_eql(a: t, b: t, const _proof: OpEq(t)) -> bool {
+fn op_eql(a: t, b: t) -> bool {
+  @assert(OpEq(t));
   t::eql(a, b)
 }
 
-const (==) = @operator(#infix, 40, op_eql);
+infix 40 (==) = op_eql;
 
 type fn OpNeq(t: type) -> type {
   let Expected = fn(a: t, b: t) -> bool;
@@ -83,11 +89,12 @@ type fn OpNeq(t: type) -> type {
   t
 }
 
-fn op_neq(a: t, b: t, const _proof: OpNeq(t)) -> bool {
+fn op_neq(a: t, b: t) -> bool {
+  @assert(OpNeq(t));
   t::neq(a, b)
 }
 
-const (!=) = @operator(#infix, 40, op_neq);
+infix 40 (!=) = op_neq;
 
 type fn OpLt(t: type) -> type {
   let Expected = fn(a: t, b: t) -> bool;
@@ -96,11 +103,12 @@ type fn OpLt(t: type) -> type {
   t
 }
 
-fn op_lt(a: t, b: t, const _proof: OpLt(t)) -> bool {
+fn op_lt(a: t, b: t) -> bool {
+  @assert(OpLt(t));
   t::lt(a, b)
 }
 
-const (<) = @operator(#infix, 50, op_lt);
+infix 50 (<) = op_lt;
 
 type fn OpLte(t: type) -> type {
   let Expected = fn(a: t, b: t) -> bool;
@@ -109,11 +117,12 @@ type fn OpLte(t: type) -> type {
   t
 }
 
-fn op_lte(a: t, b: t, const _proof: OpLte(t)) -> bool {
+fn op_lte(a: t, b: t) -> bool {
+  @assert(OpLte(t));
   t::lte(a, b)
 }
 
-const (<=) = @operator(#infix, 50, op_lte);
+infix 50 (<=) = op_lte;
 
 type fn OpGt(t: type) -> type {
   let Expected = fn(a: t, b: t) -> bool;
@@ -122,11 +131,12 @@ type fn OpGt(t: type) -> type {
   t
 }
 
-fn op_gt(a: t, b: t, const _proof: OpGt(t)) -> bool {
+fn op_gt(a: t, b: t) -> bool {
+  @assert(OpGt(t));
   t::gt(a, b)
 }
 
-const (>) = @operator(#infix, 50, op_gt);
+infix 50 (>) = op_gt;
 
 type fn OpGte(t: type) -> type {
   let Expected = fn(a: t, b: t) -> bool;
@@ -135,44 +145,206 @@ type fn OpGte(t: type) -> type {
   t
 }
 
-fn op_gte(a: t, b: t, const _proof: OpGte(t)) -> bool {
+fn op_gte(a: t, b: t) -> bool {
+  @assert(OpGte(t));
   t::gte(a, b)
 }
 
-const (>=) = @operator(#infix, 50, op_gte);
+infix 50 (>=) = op_gte;
 
-fn op_and_impl(a: bool, b: bool) -> bool {
-  match a { true => b, false => false }
+type fn OpAnd(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #and), "operator && requires and");
+  @require(@type_member_type(t, #and) == Expected, "operator && and has wrong type");
+  t
 }
 
-const (&&) = @operator(#infixr, 30, op_and_impl);
-
-fn op_or_impl(a: bool, b: bool) -> bool {
-  match a { true => true, false => b }
+fn op_and(a: t, b: t) -> t {
+  @assert(OpAnd(t));
+  t::and(a, b)
 }
 
-const (||) = @operator(#infixr, 20, op_or_impl);
+infixr 30 (&&) = op_and;
 
-fn op_xor_impl(a: bool, b: bool) -> bool {
-  match a {
-    true => match b { true => false, false => true },
-    false => b,
-  }
+type fn OpOr(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #or), "operator || requires or");
+  @require(@type_member_type(t, #or) == Expected, "operator || or has wrong type");
+  t
 }
 
-const (^^) = @operator(#infixr, 25, op_xor_impl);
-
-fn op_bool_eq_impl(a: bool, b: bool) -> bool {
-  match a { true => b, false => match b { true => false, false => true } }
+fn op_or(a: t, b: t) -> t {
+  @assert(OpOr(t));
+  t::or(a, b)
 }
 
-const (==) = @operator(#infix, 40, op_bool_eq_impl);
+infixr 20 (||) = op_or;
 
-fn op_bool_neq_impl(a: bool, b: bool) -> bool {
-  op_xor_impl(a, b)
+type fn OpXor(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> t;
+  @require(@type_has_member(t, #xor), "operator ^^ requires xor");
+  @require(@type_member_type(t, #xor) == Expected, "operator ^^ xor has wrong type");
+  t
 }
 
-const (!=) = @operator(#infix, 40, op_bool_neq_impl);
+fn op_xor(a: t, b: t) -> t {
+  @assert(OpXor(t));
+  t::xor(a, b)
+}
+
+infixr 25 (^^) = op_xor;
+
+fn i32::add(a: i32, b: i32) -> i32 { @i32_add(a, b) }
+fn i32::sub(a: i32, b: i32) -> i32 { @i32_sub(a, b) }
+fn i32::mul(a: i32, b: i32) -> i32 { @i32_mul(a, b) }
+fn i32::div(a: i32, b: i32) -> i32 { @i32_div(a, b) }
+fn i32::rem(a: i32, b: i32) -> i32 { @i32_rem(a, b) }
+fn i32::eql(a: i32, b: i32) -> bool { @i32_eql(a, b) }
+fn i32::neq(a: i32, b: i32) -> bool { @i32_neq(a, b) }
+fn i32::lt(a: i32, b: i32) -> bool { @i32_lt(a, b) }
+fn i32::lte(a: i32, b: i32) -> bool { @i32_lte(a, b) }
+fn i32::gt(a: i32, b: i32) -> bool { @i32_gt(a, b) }
+fn i32::gte(a: i32, b: i32) -> bool { @i32_gte(a, b) }
+
+fn u32::add(a: u32, b: u32) -> u32 { @u32_add(a, b) }
+fn u32::sub(a: u32, b: u32) -> u32 { @u32_sub(a, b) }
+fn u32::mul(a: u32, b: u32) -> u32 { @u32_mul(a, b) }
+fn u32::div(a: u32, b: u32) -> u32 { @u32_div(a, b) }
+fn u32::rem(a: u32, b: u32) -> u32 { @u32_rem(a, b) }
+fn u32::eql(a: u32, b: u32) -> bool { @u32_eql(a, b) }
+fn u32::neq(a: u32, b: u32) -> bool { @u32_neq(a, b) }
+fn u32::lt(a: u32, b: u32) -> bool { @u32_lt(a, b) }
+fn u32::lte(a: u32, b: u32) -> bool { @u32_lte(a, b) }
+fn u32::gt(a: u32, b: u32) -> bool { @u32_gt(a, b) }
+fn u32::gte(a: u32, b: u32) -> bool { @u32_gte(a, b) }
+
+fn i64::add(a: i64, b: i64) -> i64 { @i64_add(a, b) }
+fn i64::sub(a: i64, b: i64) -> i64 { @i64_sub(a, b) }
+fn i64::mul(a: i64, b: i64) -> i64 { @i64_mul(a, b) }
+fn i64::div(a: i64, b: i64) -> i64 { @i64_div(a, b) }
+fn i64::rem(a: i64, b: i64) -> i64 { @i64_rem(a, b) }
+fn i64::eql(a: i64, b: i64) -> bool { @i64_eql(a, b) }
+fn i64::neq(a: i64, b: i64) -> bool { @i64_neq(a, b) }
+fn i64::lt(a: i64, b: i64) -> bool { @i64_lt(a, b) }
+fn i64::lte(a: i64, b: i64) -> bool { @i64_lte(a, b) }
+fn i64::gt(a: i64, b: i64) -> bool { @i64_gt(a, b) }
+fn i64::gte(a: i64, b: i64) -> bool { @i64_gte(a, b) }
+
+fn u64::add(a: u64, b: u64) -> u64 { @u64_add(a, b) }
+fn u64::sub(a: u64, b: u64) -> u64 { @u64_sub(a, b) }
+fn u64::mul(a: u64, b: u64) -> u64 { @u64_mul(a, b) }
+fn u64::div(a: u64, b: u64) -> u64 { @u64_div(a, b) }
+fn u64::rem(a: u64, b: u64) -> u64 { @u64_rem(a, b) }
+fn u64::eql(a: u64, b: u64) -> bool { @u64_eql(a, b) }
+fn u64::neq(a: u64, b: u64) -> bool { @u64_neq(a, b) }
+fn u64::lt(a: u64, b: u64) -> bool { @u64_lt(a, b) }
+fn u64::lte(a: u64, b: u64) -> bool { @u64_lte(a, b) }
+fn u64::gt(a: u64, b: u64) -> bool { @u64_gt(a, b) }
+fn u64::gte(a: u64, b: u64) -> bool { @u64_gte(a, b) }
+
+fn f32::add(a: f32, b: f32) -> f32 { @f32_add(a, b) }
+fn f32::sub(a: f32, b: f32) -> f32 { @f32_sub(a, b) }
+fn f32::mul(a: f32, b: f32) -> f32 { @f32_mul(a, b) }
+fn f32::div(a: f32, b: f32) -> f32 { @f32_div(a, b) }
+fn f32::eql(a: f32, b: f32) -> bool { @f32_eql(a, b) }
+fn f32::neq(a: f32, b: f32) -> bool { @f32_neq(a, b) }
+fn f32::lt(a: f32, b: f32) -> bool { @f32_lt(a, b) }
+fn f32::lte(a: f32, b: f32) -> bool { @f32_lte(a, b) }
+fn f32::gt(a: f32, b: f32) -> bool { @f32_gt(a, b) }
+fn f32::gte(a: f32, b: f32) -> bool { @f32_gte(a, b) }
+
+fn f64::add(a: f64, b: f64) -> f64 { @f64_add(a, b) }
+fn f64::sub(a: f64, b: f64) -> f64 { @f64_sub(a, b) }
+fn f64::mul(a: f64, b: f64) -> f64 { @f64_mul(a, b) }
+fn f64::div(a: f64, b: f64) -> f64 { @f64_div(a, b) }
+fn f64::eql(a: f64, b: f64) -> bool { @f64_eql(a, b) }
+fn f64::neq(a: f64, b: f64) -> bool { @f64_neq(a, b) }
+fn f64::lt(a: f64, b: f64) -> bool { @f64_lt(a, b) }
+fn f64::lte(a: f64, b: f64) -> bool { @f64_lte(a, b) }
+fn f64::gt(a: f64, b: f64) -> bool { @f64_gt(a, b) }
+fn f64::gte(a: f64, b: f64) -> bool { @f64_gte(a, b) }
+
+fn bool::and(a: bool, b: bool) -> bool { @bool_and(a, b) }
+fn bool::or(a: bool, b: bool) -> bool { @bool_or(a, b) }
+fn bool::xor(a: bool, b: bool) -> bool { @bool_xor(a, b) }
+fn bool::eql(a: bool, b: bool) -> bool { @bool_eql(a, b) }
+fn bool::neq(a: bool, b: bool) -> bool { @bool_neq(a, b) }
+
+@assert(OpAdd(i32));
+@assert(OpSub(i32));
+@assert(OpMul(i32));
+@assert(OpDiv(i32));
+@assert(OpRem(i32));
+@assert(OpEq(i32));
+@assert(OpNeq(i32));
+@assert(OpLt(i32));
+@assert(OpLte(i32));
+@assert(OpGt(i32));
+@assert(OpGte(i32));
+
+@assert(OpAdd(u32));
+@assert(OpSub(u32));
+@assert(OpMul(u32));
+@assert(OpDiv(u32));
+@assert(OpRem(u32));
+@assert(OpEq(u32));
+@assert(OpNeq(u32));
+@assert(OpLt(u32));
+@assert(OpLte(u32));
+@assert(OpGt(u32));
+@assert(OpGte(u32));
+
+@assert(OpAdd(i64));
+@assert(OpSub(i64));
+@assert(OpMul(i64));
+@assert(OpDiv(i64));
+@assert(OpRem(i64));
+@assert(OpEq(i64));
+@assert(OpNeq(i64));
+@assert(OpLt(i64));
+@assert(OpLte(i64));
+@assert(OpGt(i64));
+@assert(OpGte(i64));
+
+@assert(OpAdd(u64));
+@assert(OpSub(u64));
+@assert(OpMul(u64));
+@assert(OpDiv(u64));
+@assert(OpRem(u64));
+@assert(OpEq(u64));
+@assert(OpNeq(u64));
+@assert(OpLt(u64));
+@assert(OpLte(u64));
+@assert(OpGt(u64));
+@assert(OpGte(u64));
+
+@assert(OpAdd(f32));
+@assert(OpSub(f32));
+@assert(OpMul(f32));
+@assert(OpDiv(f32));
+@assert(OpEq(f32));
+@assert(OpNeq(f32));
+@assert(OpLt(f32));
+@assert(OpLte(f32));
+@assert(OpGt(f32));
+@assert(OpGte(f32));
+
+@assert(OpAdd(f64));
+@assert(OpSub(f64));
+@assert(OpMul(f64));
+@assert(OpDiv(f64));
+@assert(OpEq(f64));
+@assert(OpNeq(f64));
+@assert(OpLt(f64));
+@assert(OpLte(f64));
+@assert(OpGt(f64));
+@assert(OpGte(f64));
+
+@assert(OpAnd(bool));
+@assert(OpOr(bool));
+@assert(OpXor(bool));
+@assert(OpEq(bool));
+@assert(OpNeq(bool));
 
 type fn OpAppend(t: type) -> type {
   let Expected = fn(a: t, b: t) -> t;
@@ -181,11 +353,12 @@ type fn OpAppend(t: type) -> type {
   t
 }
 
-fn op_append(a: t, b: t, const _proof: OpAppend(t)) -> t {
+fn op_append(a: t, b: t) -> t {
+  @assert(OpAppend(t));
   t::append(a, b)
 }
 
-const (<>) = @operator(#infixr, 55, op_append);
+infixr 55 (<>) = op_append;
 
 type fn OpApply(t: type fn(a: type) -> type) -> type {
   let Expected = fn(v: t(fn(x: a) -> b), x: t(a)) -> t(b);
@@ -196,23 +369,23 @@ type fn OpApply(t: type fn(a: type) -> type) -> type {
 
 fn op_apply(
   v: t(fn(x: a) -> b),
-  x: t(a),
-  const _proof: OpApply(t)
+  x: t(a)
 ) -> t(b) {
+  @assert(OpApply(t));
   t::apply(v, x)
 }
 
-const (<*>) = @operator(#infixl, 65, op_apply);
+infixl 65 (<*>) = op_apply;
 
 fn op_apply_flipped(
   x: t(a),
-  v: t(fn(x: a) -> b),
-  const _proof: OpApply(t)
+  v: t(fn(x: a) -> b)
 ) -> t(b) {
+  @assert(OpApply(t));
   t::apply(v, x)
 }
 
-const (<**>) = @operator(#infixl, 65, op_apply_flipped);
+infixl 65 (<**>) = op_apply_flipped;
 
 type fn OpMap(t: type fn(a: type) -> type) -> type {
   let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);
@@ -223,23 +396,23 @@ type fn OpMap(t: type fn(a: type) -> type) -> type {
 
 fn op_map(
   const f: fn(x: a) -> b,
-  v: t(a),
-  const _proof: OpMap(t)
+  v: t(a)
 ) -> t(b) {
+  @assert(OpMap(t));
   t::map(f, v)
 }
 
-const (<$>) = @operator(#infixl, 65, op_map);
+infixl 65 (<$>) = op_map;
 
 fn op_map_flipped(
   v: t(a),
-  const f: fn(x: a) -> b,
-  const _proof: OpMap(t)
+  const f: fn(x: a) -> b
 ) -> t(b) {
+  @assert(OpMap(t));
   t::map(f, v)
 }
 
-const (<&>) = @operator(#infixl, 65, op_map_flipped);
+infixl 65 (<&>) = op_map_flipped;
 
 type fn OpBind(t: type fn(a: type) -> type) -> type {
   let Expected = fn(v: t(a), const f: fn(x: a) -> t(b)) -> t(b);
@@ -250,40 +423,40 @@ type fn OpBind(t: type fn(a: type) -> type) -> type {
 
 fn op_bind(
   v: t(a),
-  const f: fn(x: a) -> t(b),
-  const _proof: OpBind(t)
+  const f: fn(x: a) -> t(b)
 ) -> t(b) {
+  @assert(OpBind(t));
   t::bind(v, f)
 }
 
-const (>>=) = @operator(#infixl, 10, op_bind);
+infixl 10 (>>=) = op_bind;
 
 fn op_bind_flipped(
   const f: fn(x: a) -> t(b),
-  v: t(a),
-  const _proof: OpBind(t)
+  v: t(a)
 ) -> t(b) {
+  @assert(OpBind(t));
   t::bind(v, f)
 }
 
-const (=<<) = @operator(#infixr, 10, op_bind_flipped);
+infixr 10 (=<<) = op_bind_flipped;
 
 fn op_kleisli_forward(
   const f: fn(x: a) -> t(b),
-  const g: fn(x: b) -> t(c),
-  const _proof: OpBind(t)
+  const g: fn(x: b) -> t(c)
 ) -> fn(x: a) -> t(c) {
+  @assert(OpBind(t));
   \x -> t::bind(f(x), g)
 }
 
-const (>=>) = @operator(#infixr, 10, op_kleisli_forward);
+infixr 10 (>=>) = op_kleisli_forward;
 
 fn op_kleisli_reverse(
   const g: fn(x: b) -> t(c),
-  const f: fn(x: a) -> t(b),
-  const _proof: OpBind(t)
+  const f: fn(x: a) -> t(b)
 ) -> fn(x: a) -> t(c) {
+  @assert(OpBind(t));
   \x -> t::bind(f(x), g)
 }
 
-const (<=<) = @operator(#infixr, 10, op_kleisli_reverse);
+infixr 10 (<=<) = op_kleisli_reverse;

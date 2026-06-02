@@ -8,6 +8,7 @@ const lexer = @import("./lexer.fig");
 const layout = @import("prelude.layout");
 const lowering = @import("./lowering.fig");
 const modgraph = @import("./modgraph.fig");
+const operators = @import("prelude.operators");
 const parser = @import("./parser.fig");
 const resolver = @import("./resolver.fig");
 const span = @import("./span.fig");

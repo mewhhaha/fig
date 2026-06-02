@@ -25,7 +25,6 @@ fn Tree::empty(const a: type) -> Tree(a) {
 }
 
 fn Tree::from_nodes(
-  const a: type,
   nodes: layout.HeapArray(TreeNode(a)),
   root: i32
 ) -> Tree(a) {
@@ -33,7 +32,6 @@ fn Tree::from_nodes(
 }
 
 fn Tree::push_node(
-  const a: type,
   tree: Tree(a),
   value: a,
   left: i32,
@@ -53,9 +51,8 @@ fn Tree::push_node(
   }
 }
 
-fn Tree::singleton(const a: type, value: a) -> Tree(a) {
+fn Tree::singleton(value: a) -> Tree(a) {
   Tree::push_node(
-    a,
     Tree::empty(a),
     value,
     - 1,
@@ -63,7 +60,39 @@ fn Tree::singleton(const a: type, value: a) -> Tree(a) {
   )
 }
 
-fn Tree::is_empty(const a: type, tree: Tree(a)) -> bool {
+fn Tree::map(
+  const f: fn(x: a) -> b,
+  tree: Tree(a)
+) -> Tree(b) {
+  Tree {
+    nodes: Tree::map_nodes(tree.nodes, f, 0, layout.HeapArray::empty(TreeNode(b))),
+    root: tree.root,
+  }
+}
+
+fn Tree::map_nodes(
+  nodes: layout.HeapArray(TreeNode(a)),
+  const f: fn(x: a) -> b,
+  index: i32,
+  out: layout.HeapArray(TreeNode(b))
+) -> layout.HeapArray(TreeNode(b)) {
+  match index < layout.HeapArray::len(TreeNode(a), nodes) {
+    true => layout.HeapArray::get(TreeNode(a), nodes, index)
+      \node -> Tree::map_nodes(
+      nodes,
+      f,
+      index + 1,
+      layout.HeapArray::push(
+        TreeNode(b),
+        out,
+        TreeNode {value: f(node.value), left: node.left, right: node.right}
+      )
+    ),
+    false => out,
+  }
+}
+
+fn Tree::is_empty(tree: Tree(a)) -> bool {
   tree.root < 0
 }
 
@@ -74,27 +103,28 @@ fn Tree::node_at(
 ) -> core.Option(TreeNode(a)) {
   match index < 0 {
     true => None,
-    false => option.some(layout.HeapArray::get(
+    false => layout.HeapArray::get(
       TreeNode(a),
       tree.nodes,
       index
-    )),
+    )
+      \node -> option.some(node),
   }
 }
 
-fn Tree::root_node(const a: type, tree: Tree(a)) -> core.Option(TreeNode(a)) {
+fn Tree::root_node(tree: Tree(a)) -> core.Option(TreeNode(a)) {
   Tree::node_at(a, tree, tree.root)
 }
 
 fn Tree::value(const a: type, tree: Tree(a)) -> core.Option(a) {
-  match Tree::root_node(a, tree) {
+  match Tree::node_at(a, tree, tree.root) {
     Some(node) => option.some(node.value),
     None => None,
   }
 }
 
-fn Tree::left(const a: type, tree: Tree(a)) -> core.Option(Tree(a)) {
-  match Tree::root_node(a, tree) {
+fn Tree::left(tree: Tree(a)) -> core.Option(Tree(a)) {
+  match Tree::node_at(a, tree, tree.root) {
     Some(node) => match node.left < 0 {
       true => None,
       false => option.some(Tree {nodes: tree.nodes, root: node.left}),
@@ -103,8 +133,8 @@ fn Tree::left(const a: type, tree: Tree(a)) -> core.Option(Tree(a)) {
   }
 }
 
-fn Tree::right(const a: type, tree: Tree(a)) -> core.Option(Tree(a)) {
-  match Tree::root_node(a, tree) {
+fn Tree::right(tree: Tree(a)) -> core.Option(Tree(a)) {
+  match Tree::node_at(a, tree, tree.root) {
     Some(node) => match node.right < 0 {
       true => None,
       false => option.some(Tree {nodes: tree.nodes, root: node.right}),
@@ -114,15 +144,11 @@ fn Tree::right(const a: type, tree: Tree(a)) -> core.Option(Tree(a)) {
 }
 
 fn Tree::fold_preorder(
-  const a: type,
-  const b: type,
   tree: Tree(a),
   acc: b,
   const f: fn(acc: b, x: a) -> b
 ) -> b {
   Tree::fold_preorder_at(
-    a,
-    b,
     tree.nodes,
     tree.root,
     acc,
@@ -131,8 +157,6 @@ fn Tree::fold_preorder(
 }
 
 fn Tree::fold_preorder_at(
-  const a: type,
-  const b: type,
   nodes: layout.HeapArray(TreeNode(a)),
   index: i32,
   acc: b,
@@ -146,8 +170,6 @@ fn Tree::fold_preorder_at(
       index
     )
       \node -> Tree::fold_preorder_node(
-      a,
-      b,
       nodes,
       node,
       acc,
@@ -157,8 +179,6 @@ fn Tree::fold_preorder_at(
 }
 
 fn Tree::fold_preorder_node(
-  const a: type,
-  const b: type,
   nodes: layout.HeapArray(TreeNode(a)),
   node: TreeNode(a),
   acc: b,
@@ -166,16 +186,12 @@ fn Tree::fold_preorder_node(
 ) -> b {
   let with_value = f(acc, node.value);
   let with_left = Tree::fold_preorder_at(
-    a,
-    b,
     nodes,
     node.left,
     with_value,
     f
   );
   Tree::fold_preorder_at(
-    a,
-    b,
     nodes,
     node.right,
     with_left,

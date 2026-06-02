@@ -541,12 +541,12 @@ Deno.test("prelude std exposes common operators for custom types", async () => {
         decl.body.expr.callee.kind === "var"
         ? decl.body.expr.callee.name
         : ""
-    );
+  );
   assertEquals(callees, [
-    "operators.op_add",
-    "operators.op_eql",
-    "operators.op_lt",
-    "operators.op_append",
+    "ops_op_add__Point",
+    "ops_op_eql__Point",
+    "ops_op_lt__Point",
+    "ops_op_append__Point",
   ]);
 });
 
@@ -612,7 +612,7 @@ Deno.test("prelude std exposes applicative apply operator", async () => {
   if (!main || main.kind !== "fn") throw new Error("missing main");
   assertEquals(main.body.expr?.kind, "call");
   if (main.body.expr?.kind === "call" && main.body.expr.callee.kind === "var") {
-    assertEquals(main.body.expr.callee.name, "operators.op_apply");
+    assertEquals(main.body.expr.callee.name, "ops_op_apply__Box__i32__i32");
   }
 });
 
@@ -665,12 +665,12 @@ Deno.test("prelude std exposes functor map and monad bind operators", async () =
     });
   assert(
     calls.some((call) =>
-      call?.callee === "operators.op_map" && call.args.join(",") === "var,shape"
+      call?.callee === "ops_op_map__i32__i32__Box__inc" && call.args.join(",") === "shape"
     ),
   );
   assert(
     calls.some((call) =>
-      call?.callee === "operators.op_bind" && call.args.join(",") === "shape,var"
+      call?.callee === "ops_op_bind__Box__i32__i32__wrap" && call.args.join(",") === "shape"
     ),
   );
 });
@@ -746,7 +746,7 @@ Deno.test("prelude monad inherits applicative requirements", async () => {
     fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) { f(v.value) }
 
     pub fn main() -> i32 {
-      const proof = @satisfies(Box, Monad);
+      @assert(Monad(Box));
       1
     }
     `,
@@ -767,7 +767,7 @@ Deno.test("prelude monad inherits applicative requirements", async () => {
     fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) { f(v.value) }
 
     pub fn main() -> i32 {
-      const proof = @satisfies(Box, Monad);
+      @assert(Monad(Box));
       1
     }
     `,
@@ -789,11 +789,11 @@ Deno.test("prelude exposes heap-backed compiler collection modules", async () =>
           fn add(acc: i32, x: i32) -> i32 { acc + x }
 
           pub fn main() -> i32 {
-            let xs0 = vec.Vec::empty(i32);
-            let xs1 = vec.Vec::push(i32, xs0, 1);
-            let xs2 = vec.Vec::push(i32, xs1, 2);
-            let ys = vec.Vec::map(i32, i32, xs2, inc);
-            vec.Vec::fold(i32, i32, ys, 0, add)
+            let xs0: vec.Vec(i32) = vec.Vec::empty();
+            let xs1 = vec.Vec::push(xs0, 1);
+            let xs2 = vec.Vec::push(xs1, 2);
+            let ys = vec.Vec::map(inc, xs2);
+            vec.Vec::fold(ys, 0, add)
           }
         `,
       },
@@ -808,10 +808,10 @@ Deno.test("prelude exposes heap-backed compiler collection modules", async () =>
           fn add(acc: i32, x: i32) -> i32 { acc + x }
 
           pub fn main() -> i32 {
-            let xs0 = list.List::empty(i32);
-            let xs1 = list.List::cons(i32, 1, xs0);
-            let xs2 = list.List::cons(i32, 2, xs1);
-            list.List::fold(i32, i32, xs2, 0, add)
+            let xs0: list.List(i32) = list.List::empty();
+            let xs1 = list.List::cons(1, xs0);
+            let xs2 = list.List::cons(2, xs1);
+            list.List::fold(xs2, 0, add)
           }
         `,
       },
@@ -824,11 +824,11 @@ Deno.test("prelude exposes heap-backed compiler collection modules", async () =>
           const queue = @import("prelude.queue");
 
           pub fn main() -> i32 {
-            let q0 = queue.Queue::empty(i32);
-            let q1 = queue.Queue::push_back(i32, q0, 4);
-            let q2 = queue.Queue::push_back(i32, q1, 5);
-            match queue.Queue::pop_front(i32, q2) {
-              Some(step) => step.value + queue.Queue::len(i32, step.queue),
+            let q0: queue.Queue(i32) = queue.Queue::empty();
+            let q1 = queue.Queue::push_back(q0, 4);
+            let q2 = queue.Queue::push_back(q1, 5);
+            match queue.Queue::pop_front(q2) {
+              Some(step) => step.value + queue.Queue::len(step.queue),
               None => 0,
             }
           }
@@ -845,10 +845,10 @@ Deno.test("prelude exposes heap-backed compiler collection modules", async () =>
 
           pub fn main() -> i32 {
             let t0 = tree.Tree::empty(i32);
-            let t1 = tree.Tree::push_node(i32, t0, 1, -1, -1);
-            let t2 = tree.Tree::push_node(i32, t1, 2, 0, -1);
-            let z = zipper.TreeZipper::from_tree(i32, t2);
-            match zipper.TreeZipper::go_left(i32, z) {
+            let t1 = tree.Tree::push_node(t0, 1, -1, -1);
+            let t2 = tree.Tree::push_node(t1, 2, 0, -1);
+            let z = zipper.TreeZipper::from_tree(t2);
+            match zipper.TreeZipper::go_left(z) {
               Some(left) => match zipper.TreeZipper::value(i32, left) {
                 Some(value) => value,
                 None => 0,
@@ -862,7 +862,7 @@ Deno.test("prelude exposes heap-backed compiler collection modules", async () =>
     [
       "map_set_graph",
       {
-        expected: 6,
+        expected: 7,
         source: `
           const graph = @import("prelude.graph");
           const map = @import("prelude.map");
@@ -883,7 +883,17 @@ Deno.test("prelude exposes heap-backed compiler collection modules", async () =>
             let g1 = graph.Graph::add_edge(g0, 0, 1);
             let g2 = graph.Graph::add_edge(g1, 1, 2);
             let reachable = match graph.Graph::reachable(g2, 0, 2) { true => 1, false => 0 };
-            map_sum / 10 + set.Set::len(i32, s1) + reachable + graph.Graph::edge_count(g2)
+            let bounded = match graph.Graph::reachable_bounded(
+              g2,
+              0,
+              2,
+              graph.Graph::edge_count(g2)
+            ) {
+              true => 1,
+              false => 0,
+            };
+            map_sum / 10 + set.Set::len(i32, s1) + reachable + bounded
+              + graph.Graph::edge_count(g2)
           }
         `,
       },
@@ -895,6 +905,176 @@ Deno.test("prelude exposes heap-backed compiler collection modules", async () =>
     const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
     assertEquals((instance.exports.main as CallableFunction)(), program.expected, name);
   }
+});
+
+Deno.test("prelude collection structures satisfy standard functional contracts", async () => {
+  await checkSource(
+    `
+    const merge = @import("prelude.std");
+    const core = @import("prelude.core");
+    const fun = @import("prelude.function");
+    const vec = @import("prelude.vec");
+    const list = @import("prelude.list");
+    const queue = @import("prelude.queue");
+    const nonempty = @import("prelude.nonempty");
+    const tree = @import("prelude.tree");
+    const zipper = @import("prelude.zipper");
+
+    type fn RequiresFunctor(t: type fn(a: type) -> type) -> type {
+      Functor(t);
+      i32
+    }
+
+    type fn RequiresApplicative(t: type fn(a: type) -> type) -> type {
+      Applicative(t);
+      i32
+    }
+
+    type fn RequiresMonad(t: type fn(a: type) -> type) -> type {
+      Monad(t);
+      i32
+    }
+
+    type fn RequiresSemigroup(t: type) -> type {
+      Semigroup(t);
+      i32
+    }
+
+    type fn RequiresMonoid(t: type) -> type {
+      Monoid(t);
+      i32
+    }
+
+    pub fn main() -> i32 {
+      let vec_functor: RequiresFunctor(vec.Vec) = 0;
+      let vec_applicative: RequiresApplicative(vec.Vec) = 0;
+      let vec_monad: RequiresMonad(vec.Vec) = 0;
+      let vec_semigroup: RequiresSemigroup(vec.Vec(i32)) = 0;
+      let vec_monoid: RequiresMonoid(vec.Vec(i32)) = 0;
+      let slice_functor: RequiresFunctor(vec.Slice) = 0;
+      let slice_applicative: RequiresApplicative(vec.Slice) = 0;
+      let slice_monad: RequiresMonad(vec.Slice) = 0;
+      let slice_semigroup: RequiresSemigroup(vec.Slice(i32)) = 0;
+      let slice_monoid: RequiresMonoid(vec.Slice(i32)) = 0;
+      let list_functor: RequiresFunctor(list.List) = 0;
+      let list_applicative: RequiresApplicative(list.List) = 0;
+      let list_monad: RequiresMonad(list.List) = 0;
+      let list_semigroup: RequiresSemigroup(list.List(i32)) = 0;
+      let list_monoid: RequiresMonoid(list.List(i32)) = 0;
+      let queue_functor: RequiresFunctor(queue.Queue) = 0;
+      let queue_applicative: RequiresApplicative(queue.Queue) = 0;
+      let queue_monad: RequiresMonad(queue.Queue) = 0;
+      let queue_semigroup: RequiresSemigroup(queue.Queue(i32)) = 0;
+      let queue_monoid: RequiresMonoid(queue.Queue(i32)) = 0;
+      let nonempty_functor: RequiresFunctor(nonempty.NonEmpty) = 0;
+      let nonempty_applicative: RequiresApplicative(nonempty.NonEmpty) = 0;
+      let nonempty_monad: RequiresMonad(nonempty.NonEmpty) = 0;
+      let nonempty_semigroup: RequiresSemigroup(nonempty.NonEmpty(i32)) = 0;
+      let tree_functor: RequiresFunctor(tree.Tree) = 0;
+      let zipper_functor: RequiresFunctor(zipper.TreeZipper) = 0;
+      0
+    }
+    `,
+    { resolveModule },
+  );
+});
+
+Deno.test("prelude Vec checks Monad through type assertions", async () => {
+  await checkSource(
+    `
+    const fun = @import("prelude.function");
+    const vec = @import("prelude.vec");
+
+    @assert(fun.Monad(vec.Vec));
+
+    pub fn main() -> i32 {
+      @assert(fun.Monad(vec.Vec));
+      1
+    }
+    `,
+    { resolveModule },
+  );
+});
+
+Deno.test("prelude collection structures expose concrete map append and bind helpers", async () => {
+  const source = `
+    const vec = @import("prelude.vec");
+    const list = @import("prelude.list");
+    const queue = @import("prelude.queue");
+    const nonempty = @import("prelude.nonempty");
+    const tree = @import("prelude.tree");
+    const zipper = @import("prelude.zipper");
+
+    fn inc(x: i32) -> i32 { x + 1 }
+    fn sum(acc: i32, x: i32) -> i32 { acc + x }
+
+    fn vec_wrap(x: i32) -> vec.Vec(i32) {
+      vec.Vec::append(vec.Vec::pure(x), vec.Vec::pure(x + 10))
+    }
+
+    fn list_wrap(x: i32) -> list.List(i32) {
+      list.List::append(list.List::pure(x), list.List::pure(x + 20))
+    }
+
+    fn queue_wrap(x: i32) -> queue.Queue(i32) {
+      queue.Queue::append(queue.Queue::pure(x), queue.Queue::pure(x + 30))
+    }
+
+    fn nonempty_wrap(x: i32) -> nonempty.NonEmpty(i32) {
+      nonempty.NonEmpty::append(nonempty.NonEmpty::pure(x), nonempty.NonEmpty::pure(x + 40))
+    }
+
+    fn slice_wrap(x: i32) -> vec.Slice(i32) {
+      vec.Slice::append(vec.Slice::pure(x), vec.Slice::pure(x + 50))
+    }
+
+    pub fn main() -> i32 {
+      let vec_base = vec.Vec::append(vec.Vec::pure(1), vec.Vec::pure(2));
+      let vec_bound = vec.Vec::bind(vec.Vec::map(inc, vec_base), vec_wrap);
+      let vec_sum = vec.Vec::fold(vec_bound, 0, sum);
+
+      let list_base = list.List::append(list.List::pure(1), list.List::pure(2));
+      let list_bound = list.List::bind(list.List::map(inc, list_base), list_wrap);
+      let list_sum = list.List::fold(list_bound, 0, sum);
+
+      let queue_base = queue.Queue::append(queue.Queue::pure(1), queue.Queue::pure(2));
+      let queue_bound = queue.Queue::bind(queue.Queue::map(inc, queue_base), queue_wrap);
+      let queue_sum = queue.Queue::fold(queue_bound, 0, sum);
+
+      let nonempty_base = nonempty.NonEmpty::append(
+        nonempty.NonEmpty::pure(1),
+        nonempty.NonEmpty::pure(2)
+      );
+      let nonempty_bound = nonempty.NonEmpty::bind(
+        nonempty.NonEmpty::map(inc, nonempty_base),
+        nonempty_wrap
+      );
+      let nonempty_sum = nonempty_bound.head +
+        list.List::fold(nonempty_bound.tail, 0, sum);
+
+      let slice_base = vec.Slice::append(vec.Slice::pure(1), vec.Slice::pure(2));
+      let slice_bound = vec.Slice::bind(vec.Slice::map(inc, slice_base), slice_wrap);
+      let slice_sum = vec.Slice::fold(slice_bound, 0, sum);
+
+      let t0 = tree.Tree::singleton(5);
+      let t1 = tree.Tree::map(inc, t0);
+      let tree_sum = tree.Tree::fold_preorder(t1, 0, sum);
+
+      let z0 = zipper.TreeZipper::from_tree(t1);
+      let z1 = zipper.TreeZipper::map(inc, z0);
+      let zipper_value = match zipper.TreeZipper::value(i32, z1) {
+        Some(value) => value,
+        None => 0,
+      };
+
+      vec_sum + list_sum + queue_sum + nonempty_sum + slice_sum + tree_sum + zipper_value
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 363);
 });
 
 Deno.test("prelude option concept methods construct map bind append and unwrap", async () => {
@@ -919,6 +1099,48 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
   );
   const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
   assertEquals((instance.exports.main as () => number)(), 12);
+});
+
+Deno.test("prelude option do strategies use imported attached members", async () => {
+  const wasm = await wasmFromSource(
+    `
+    const option = @import("prelude.option");
+    const core = @import("prelude.core");
+
+    fn start() -> core.Option(i32) {
+      option.some(1)
+    }
+
+    fn bump(value: i32) -> core.Option(i32) {
+      option.some(value + 1)
+    }
+
+    fn monad_value() -> core.Option(i32) {
+      do @monad(core.Option(_)) {
+        first <- start();
+        second <- bump(first);
+        pure(second + 1)
+      }
+    }
+
+    fn applicative_value() -> core.Option(i32) {
+      do @applicative(core.Option(_)) {
+        left <- option.some(2);
+        right <- option.some(3);
+        pure(left + right)
+      }
+    }
+
+    pub fn main() -> i32 {
+      let monad_result = match monad_value() { Some(value) => value, None => 0 };
+      let applicative_result = match applicative_value() { Some(value) => value, None => 0 };
+      monad_result * 10 + applicative_result
+    }
+    `,
+    { resolveModule },
+  );
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
+  assertEquals((instance.exports.main as () => number)(), 35);
 });
 
 Deno.test("prelude result methods construct map bind and unwrap", async () => {
@@ -1002,8 +1224,8 @@ Deno.test("prelude scalar and function helpers check", async () => {
     fn add(a: i32, b: i32) -> i32 { a + b }
 
     pub fn main() -> i32 {
-      let clamped = scalar.clamp(i32, scalar.Number(i32), scalar.abs(i32, scalar.Number(i32), 0 - 3), 0, 2);
-      scalar.select(scalar.between(i32, scalar.Number(i32), clamped, 1, 3), fun.pipe(clamped, inc), 0) + fun.flip(add, 4, 5)
+      let clamped = scalar.clamp(scalar.abs(0 - 3), 0, 2);
+      scalar.select(scalar.between(clamped, 1, 3), fun.pipe(clamped, inc), 0) + fun.flip(add, 4, 5)
     }
     `,
     { resolveModule },
@@ -1014,16 +1236,18 @@ Deno.test("prelude scalar exposes generic numeric helpers", async () => {
   const source = `
     const scalar = @import("prelude.scalar");
 
-    fn require_number(const t: type, const _proof: scalar.Number(t)) -> i32 { 0 }
+    fn require_number(value: t) -> i32 {
+      @assert(scalar.Number(t));
+      0
+    }
 
     pub fn main(x: i32, y: u3) -> i32 {
-      let signed = scalar.signum(i32, scalar.Number(i32), x) +
-        scalar.abs(i32, scalar.Number(i32), x);
-      let bounded = scalar.clamp(i32, scalar.Number(i32), signed, 0, 9);
-      let unsigned = scalar.signum(u3, scalar.Number(u3), y) +
-        scalar.square(u3, scalar.Number(u3), y);
-      let proof = require_number(u17, scalar.Number(u17));
-      let in_range = scalar.between(i32, scalar.Number(i32), bounded, 0, 9);
+      let signed = scalar.signum(x) + scalar.abs(x);
+      let bounded = scalar.clamp(signed, 0, 9);
+      let unsigned = scalar.signum(y) + scalar.square(y);
+      let z: u17 = 3;
+      let proof = require_number(z);
+      let in_range = scalar.between(bounded, 0, 9);
       scalar.select(in_range, bounded + unsigned + proof, 0)
     }
   `;
@@ -1156,8 +1380,6 @@ Deno.test("prelude std supports user semigroup types with erased helper proof", 
 
     pub fn main(seed: i32) -> i32 {
       let total = core.append(
-        Point,
-        core.Semigroup(Point),
         Point {x: seed, y: 2},
         Point {x: 3, y: 4}
       );
@@ -1181,8 +1403,6 @@ Deno.test("prelude std supports user semigroup types with erased helper proof", 
 
     pub fn main(seed: i32) -> i32 {
       let total = core.append(
-        Point,
-        core.Semigroup(Point),
         Point {x: seed, y: 2},
         Point {x: 3, y: 4}
       );
@@ -1218,7 +1438,11 @@ Deno.test("prelude std accepts user monoid contracts", async () => {
       Point {x: 0, y: 0}
     }
 
-    fn zero(const _proof: Monoid(Point)) -> i32 { 0 }
+    fn zero(value: Monoid(Point)) -> i32 {
+      0
+    }
+
+    pub fn main() -> i32 { zero(Point::empty()) }
     `,
     { resolveModule },
   );
@@ -1239,8 +1463,8 @@ Deno.test("prelude std rejects incomplete monoid implementations", async () => {
         Point {x: 0}
       }
 
-      fn Bad(const _proof: Monoid(Point)) -> i32 { 0 }
-      pub fn main() -> i32 { Bad(Monoid(Point)) }
+      fn Bad(value: Monoid(Point)) -> i32 { 0 }
+      pub fn main() -> i32 { Bad(Point::empty()) }
       `,
       { resolveModule },
     );
@@ -1274,7 +1498,7 @@ Deno.test("prelude std helpers support user functor applicative and monad types"
     fn wrap(x: i32) -> Box(i32) { Box {value: x + 10} }
 
     pub fn main() -> i32 {
-      bind(fmap(Box {value: 1}, inc, Functor(Box)), wrap, Monad(Box)).value
+      bind(fmap(Box {value: 1}, inc), wrap).value
     }
     `,
     { resolveModule },
@@ -1289,23 +1513,13 @@ Deno.test("prelude std exposes option as functor applicative monad and semigroup
     fn inc(x: i32) -> i32 { x + 1 }
     fn inc_to_option(x: i32) -> Option(i32) { some(x + 10) }
 
-    fn proof(
-      const _functor: Functor(Option),
-      const _applicative: Applicative(Option),
-      const _monad: Monad(Option),
-      const _semigroup: Semigroup(Option(i32)),
-      const _monoid: Monoid(Option(i32))
-    ) -> i32 {
-      0
-    }
-
     pub fn main() -> i32 {
-      let mapped = fmap(some(1), inc, Functor(Option));
-      let applied = apply(some(inc), mapped, Applicative(Option));
-      let bound = bind(applied, inc_to_option, Monad(Option));
-      let picked = append(Option(i32), Semigroup(Option(i32)), none(), bound);
-      proof(Functor(Option), Applicative(Option), Monad(Option), Semigroup(Option(i32)), Monoid(Option(i32))) +
-        Option::unwrap_or(picked, 0)
+      let mapped = fmap(some(1), inc);
+      let applied = apply(some(inc), mapped);
+      let bound = bind(applied, inc_to_option);
+      let empty_value: Option(i32) = empty();
+      let picked = append(empty_value, bound);
+      Option::unwrap_or(picked, 0)
     }
     `,
     { resolveModule },
@@ -1334,7 +1548,11 @@ Deno.test("prelude std accepts user applicative contracts", async () => {
       Box {value: v.value(x.value)}
     }
 
-    fn proof(const _proof: Applicative(Box)) -> i32 { 0 }
+    fn inc(x: i32) -> i32 { x + 1 }
+
+    pub fn main() -> i32 {
+      apply(Box {value: inc}, Box {value: 1}).value
+    }
     `,
     { resolveModule },
   );

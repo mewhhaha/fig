@@ -1,6 +1,8 @@
 // Core contracts are ordinary Fig type functions. They are intentionally
 // small so fragments can be concatenated or imported without compiler magic.
 
+const ops = @import("prelude.operators");
+
 type fn Eq(t: type) {
   let Expected = fn(a: t, b: t) -> bool;
   @require(@type_has_member(t, #eql), "Eq requires eql");
@@ -28,11 +30,11 @@ type fn Monoid(t: type) -> type {
   EmptyValue(t)
 }
 
-fn append(const t, const _proof: Semigroup(t), a: t, b: t) -> t {
+fn append(a: Semigroup(t), b: t) -> t {
   t::append(a, b)
 }
 
-fn empty(const t: type) -> t {
+fn empty() -> Monoid(t) {
   @empty(t)
 }
 
@@ -73,6 +75,10 @@ type fn Tuple2(a: type, b: type) -> type {
 type fn Tuple3(a: type, b: type, c: type) -> type {
   let Tuple3 = {first: a, second: b, third: c};
   struct(Tuple3)
+}
+
+type fn UnaryFn(a: type, b: type) -> type {
+  fn(x: a) -> b
 }
 
 type fn Index(n: count) -> type {
