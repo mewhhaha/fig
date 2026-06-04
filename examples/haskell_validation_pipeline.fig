@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 // Haskell-style pipelines in ordinary Fig: Functor/Applicative/Monad
 // members are attached to a small identity effect, then used through do.
 

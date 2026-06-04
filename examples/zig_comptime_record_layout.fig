@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 // Zig-style comptime reflection: derive a compact runtime descriptor from a
 // source record's slots and reject unsupported shapes at compile time.
 type Payload = struct {id: i32, score: i32, debug: bool}

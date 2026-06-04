@@ -1,4 +1,5 @@
 const core = @import("prelude.core");
+const operators = @import("prelude.operators");
 
 fn some(value: a) -> core.Option(a) {
   Some(value)
@@ -6,6 +7,13 @@ fn some(value: a) -> core.Option(a) {
 
 fn none() -> core.Option(a) {
   None
+}
+
+fn guard(condition: bool) -> core.Option(core.Unit) {
+  match condition {
+    true => some(core.unit()),
+    false => none(),
+  }
 }
 
 fn core.Option::is_some(value: core.Option(a)) -> bool {

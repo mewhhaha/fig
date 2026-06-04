@@ -2,6 +2,7 @@ const artifact = @import("./artifact.fig");
 const diagnostic = @import("./diagnostic.fig");
 const modgraph = @import("./modgraph.fig");
 const source = @import("./source.fig");
+const operators = @import("prelude.operators");
 
 type ModuleRole = union {
   RootModule, FeatureModule, UtilityModule, SharedModule

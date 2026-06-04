@@ -1,3 +1,4 @@
+const operators = @import("prelude.operators");
 fn identity(x: a) -> a {
   x
 }

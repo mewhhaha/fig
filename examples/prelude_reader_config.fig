@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 const monad = @import("prelude.monad");
 
 type Config = struct {base: i32, multiplier: i32}

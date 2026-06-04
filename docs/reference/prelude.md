@@ -45,7 +45,7 @@ directly too, including `prelude.core`, `prelude.layout`, `prelude.fixed`,
 | Module            | Available surface                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------- |
 | `prelude.core`    | `Eq`, `Semigroup`, `EmptyValue`, `Monoid`, `Copyable`, `Droppable`, `Option`, `Result`, `Pair`, `Tuple2`, `Tuple3`, `Unit`, `Index`, iterator contracts, `append`, `empty`, `unit`, and domain-index helpers. |
-| `prelude.option`  | `some`, `none`, plus `Option::is_some`, `Option::is_none`, `Option::unwrap_or`, `Option::map`, `Option::pure`, `Option::apply`, `Option::bind`, `Option::append`, `Option::empty`, and `Option::or_else`. |
+| `prelude.option`  | `some`, `none`, `guard`, plus `Option::is_some`, `Option::is_none`, `Option::unwrap_or`, `Option::map`, `Option::pure`, `Option::apply`, `Option::bind`, `Option::append`, `Option::empty`, and `Option::or_else`. |
 | `prelude.result`  | `ok`, `err`, plus `Result::is_ok`, `Result::is_err`, `Result::unwrap_or`, `Result::map`, `Result::map_err`, `Result::pure`, `Result::apply`, and `Result::bind`. |
 | `prelude.tuple`   | `Pair::first`, `Pair::second`, `Pair::swap`, `Pair::map_first`, `Pair::map_second`, `Pair::bimap`, and `Tuple3` field accessors. |
 | `prelude.scalar`  | Boolean helpers, `select`, the `Number(t)` contract, and generic `min`, `max`, `clamp`, `between`, `abs`, `signum`, and `square`. |

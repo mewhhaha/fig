@@ -61,6 +61,7 @@
 "=" @operator
 "=>" @operator
 "@" @operator
+"@[" @operator
 "@assert" @operator
 "@external" @operator
 "@profile" @operator

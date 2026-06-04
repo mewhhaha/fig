@@ -166,8 +166,17 @@ const typeListBuiltinNames = new Set([
   "type_list_is_unique",
 ]);
 
+const typeDomainBuiltinNames = new Set([
+  "type_domain_union",
+  "type_domain_intersect",
+  "type_domain_difference",
+  "type_domain_contains",
+  "type_domain_cardinality",
+]);
+
 function coreStaticParamKind(name: string, index: number): TypeParamKind | undefined {
   if (typeListBuiltinNames.has(name)) return "const";
+  if (typeDomainBuiltinNames.has(name)) return "type";
   if (shapeFirstArg.has(name) && index === 0) return "const";
   if (name === "shape_map" && index === 1) return "type fn(_: const) -> type";
   if ((name === "shape_map_with_key" || name === "shape_filter") && index === 1) {
@@ -226,6 +235,11 @@ const coreStaticBuiltinNames = [
   "type_scalar_signed",
   "type_scalar_domain",
   "type_is_refined_scalar",
+  "type_domain_union",
+  "type_domain_intersect",
+  "type_domain_difference",
+  "type_domain_contains",
+  "type_domain_cardinality",
   "type_layout",
   "type_storage_kind",
   "type_flat_slot_count",
@@ -594,8 +608,6 @@ const exactCompilerSpecialForms = [
   { name: "io", kind: "do_strategy", sourceFacing: true },
   { name: "monad", kind: "do_strategy", sourceFacing: true },
   { name: "applicative", kind: "do_strategy", sourceFacing: true },
-  { name: "likely", kind: "annotation", sourceFacing: true },
-  { name: "unlikely", kind: "annotation", sourceFacing: true },
   { name: "trace", kind: "instrumentation", sourceFacing: true },
   { name: "profile", kind: "instrumentation", sourceFacing: true },
   { name: "field", kind: "internal", sourceFacing: false },

@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 type Point = struct {x: i32, y: i32}
 
 type Option(a) = union {

@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import { type CliIo, type CliWatchEvent, runCli } from "../src/cli_app.ts";
 import { FIG_VERSION } from "../src/version.ts";
+import { OPERATOR_PRELUDE_IMPORT } from "./operator_prelude.ts";
 
 interface MockWatchEvent extends CliWatchEvent {
   before?: () => void;
@@ -19,6 +20,9 @@ function mockIo(
   const io: CliIo = {
     async readTextFile(path) {
       if (path in files) return files[path]!;
+      if (path.endsWith("/prelude/operators.fig")) {
+        return await Deno.readTextFile("prelude/operators.fig");
+      }
       throw new Deno.errors.NotFound(path);
     },
     async writeTextFile(path, data) {
@@ -90,7 +94,7 @@ Deno.test("CLI usage reports missing command", async () => {
 });
 
 Deno.test("CLI wat honors debug and release flags", async () => {
-  const source = `
+  const source = `${OPERATOR_PRELUDE_IMPORT}
     fn add1(x: i32) -> i32 { x + 1 }
     pub fn main() -> i32 { add1(41) }
   `;

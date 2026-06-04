@@ -1086,19 +1086,30 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
     fn inc(x: i32) -> i32 { x + 1 }
     fn bump_to_option(x: i32) -> core.Option(i32) { option.some(x + 1) }
     fn fallback() -> core.Option(i32) { option.some(9) }
+    fn guarded_value(x: i32) -> core.Option(i32) {
+      do @monad(core.Option(_)) {
+        option.guard(x > 0);
+        pure(x + 3)
+      }
+    }
 
     pub fn main() -> i32 {
       let empty: core.Option(i32) = option.none();
       let mapped = core.Option::map(inc, option.some(1));
       let bound = core.Option::bind(mapped, bump_to_option);
       let picked = core.Option::append(empty, bound);
-      core.Option::unwrap_or(picked, 0) + core.Option::unwrap_or(core.Option::or_else(empty, fallback), 0)
+      let guarded = core.Option::unwrap_or(guarded_value(4), 0);
+      let blocked = core.Option::unwrap_or(guarded_value(0), 7);
+      core.Option::unwrap_or(picked, 0) +
+        core.Option::unwrap_or(core.Option::or_else(empty, fallback), 0) +
+        guarded +
+        blocked
     }
     `,
     { resolveModule },
   );
   const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
-  assertEquals((instance.exports.main as () => number)(), 12);
+  assertEquals((instance.exports.main as () => number)(), 26);
 });
 
 Deno.test("prelude option do strategies use imported attached members", async () => {

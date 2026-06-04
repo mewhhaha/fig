@@ -78,8 +78,14 @@ normalizes to the backing type `i32`, and member references such as `Status::Rea
 declared integer value while keeping the user-facing enum type in annotations. Enum members can also
 be used as match patterns. In a match over a known enum type, bare variants are inferred from the
 scrutinee type, so `match status { Ready => 1, _ => 0 }` is equivalent to matching the declared
-backing value. Signed numeric enum values such as `Back = -1` are accepted for signed backing
-types. Enum backing types must be integer scalar types: `i32`, `i64`, `u32`, or `u64`.
+backing value. Signed numeric enum values such as `Back = -1` are accepted for signed backing types.
+Enum backing types must be integer scalar types: `i32`, `i64`, `u32`, or `u64`. Refined `i32(...)`
+domains are also accepted as enum backings, and every enum member must be inside the declared
+domain:
+
+```fig
+type Channel = enum(i32(0..4)) {Red = 0, Green = 1, Blue = 2, Alpha = 3}
+```
 
 ## Repeats and Constructors
 

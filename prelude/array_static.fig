@@ -1,5 +1,6 @@
 const layout = @import("prelude.layout");
 const core = @import("prelude.core");
+const operators = @import("prelude.operators");
 
 // Futhark-style SOAC names for fixed inline layouts. Work/span comments describe
 // intent only; the current backend proves parsing, checking, specialization, and

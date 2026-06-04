@@ -3,6 +3,7 @@ const layout = @import("prelude.layout");
 const vec = @import("prelude.vec");
 const span = @import("./span.fig");
 const token = @import("./token.fig");
+const operators = @import("prelude.operators");
 
 type TextCharClass = union {
   TextSpace, TextNewline, TextLower, TextUpper, TextDigit,
@@ -363,24 +364,21 @@ fn advance_newline(cursor: TextCursor) -> TextCursor {
 }
 
 fn is_lower_code(code: i32) -> bool {
-  match code >= TextCharCode::LowerA {
-    true => code <= TextCharCode::LowerZ,
-    false => false,
-  }
+  let above_lower_a = code >= TextCharCode::LowerA;
+  let below_lower_z = code <= TextCharCode::LowerZ;
+  above_lower_a && below_lower_z
 }
 
 fn is_upper_code(code: i32) -> bool {
-  match code >= TextCharCode::UpperA {
-    true => code <= TextCharCode::UpperZ,
-    false => false,
-  }
+  let above_upper_a = code >= TextCharCode::UpperA;
+  let below_upper_z = code <= TextCharCode::UpperZ;
+  above_upper_a && below_upper_z
 }
 
 fn is_digit_code(code: i32) -> bool {
-  match code >= TextCharCode::Digit0 {
-    true => code <= TextCharCode::Digit9,
-    false => false,
-  }
+  let above_digit_0 = code >= TextCharCode::Digit0;
+  let below_digit_9 = code <= TextCharCode::Digit9;
+  above_digit_0 && below_digit_9
 }
 
 fn classify(code: i32) -> TextCharClass {
@@ -391,16 +389,10 @@ fn classify(code: i32) -> TextCharClass {
     TextCharCode::Quote => TextQuote,
     TextCharCode::Slash => TextSlash,
     TextCharCode::Underscore => TextLower,
-    _ => match is_lower_code(code) {
-      true => TextLower,
-      false => match is_upper_code(code) {
-        true => TextUpper,
-        false => match is_digit_code(code) {
-          true => TextDigit,
-          false => TextPunctuation,
-        },
-      },
-    },
+    _ if is_lower_code(code) => TextLower,
+    _ if is_upper_code(code) => TextUpper,
+    _ if is_digit_code(code) => TextDigit,
+    _ => TextPunctuation,
   }
 }
 
@@ -485,40 +477,35 @@ fn token_kind(class: TextCharClass) -> token.TokenKind {
   }
 }
 
-fn scan_name_width_loop(
+fn scan_width_loop(
+  const can_continue: fn(class: TextCharClass) -> bool,
   text: TextBuffer,
   start: i32,
   index: i32
 ) -> i32 {
   match index < text.length {
     false => index - start,
-    true => match can_continue_name(classify(code_at(text, index))) {
-      true => scan_name_width_loop(text, start, index + 1),
+    true => match can_continue(classify(code_at(text, index))) {
+      true => rec(can_continue, text, start, index + 1),
       false => index - start,
     },
   }
+}
+
+fn scan_width(
+  const can_continue: fn(class: TextCharClass) -> bool,
+  text: TextBuffer,
+  start: i32
+) -> i32 {
+  scan_width_loop(can_continue, text, start, start + 1)
 }
 
 fn scan_name_width(text: TextBuffer, start: i32) -> i32 {
-  scan_name_width_loop(text, start, start + 1)
-}
-
-fn scan_number_width_loop(
-  text: TextBuffer,
-  start: i32,
-  index: i32
-) -> i32 {
-  match index < text.length {
-    false => index - start,
-    true => match can_continue_number(classify(code_at(text, index))) {
-      true => scan_number_width_loop(text, start, index + 1),
-      false => index - start,
-    },
-  }
+  scan_width(can_continue_name, text, start)
 }
 
 fn scan_number_width(text: TextBuffer, start: i32) -> i32 {
-  scan_number_width_loop(text, start, start + 1)
+  scan_width(can_continue_number, text, start)
 }
 
 fn string_width_loop(

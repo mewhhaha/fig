@@ -1,6 +1,7 @@
 const layout = @import("prelude.layout");
 const core = @import("prelude.core");
 const array = @import("prelude.array_static");
+const operators = @import("prelude.operators");
 
 type fn Vec2I32() -> type {
   let Vec2I32 = {x: i32, y: i32};

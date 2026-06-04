@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 const effect = @import("prelude.effect");
 
 type fn DebugLog() -> type {

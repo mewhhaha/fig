@@ -40,6 +40,11 @@ export type AstNode =
   | ProgramAstNode
   | FieldNameAstNode
   | DeclAstNode
+  | TaggedDeclAstNode
+  | DeclBodyAstNode
+  | TagListAstNode
+  | TagItemsAstNode
+  | TagAstNode
   | TypeSugarDeclAstNode
   | TypeSugarParamsAstNode
   | TypeSugarParamListAstNode
@@ -52,6 +57,7 @@ export type AstNode =
   | TypeSugarVariantPayloadAstNode
   | TypeSugarVariantPayloadBodyAstNode
   | TypeSugarEnumAstNode
+  | EnumBackingAstNode
   | TypeSugarEnumVariantsAstNode
   | TypeSugarEnumVariantAstNode
   | TypeFnDeclAstNode
@@ -236,6 +242,41 @@ export interface DeclAstNode {
   children: AstNode[];
 }
 
+export interface TaggedDeclAstNode {
+  kind: "TaggedDecl";
+  type: "TaggedDecl";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface DeclBodyAstNode {
+  kind: "DeclBody";
+  type: "DeclBody";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TagListAstNode {
+  kind: "TagList";
+  type: "TagList";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TagItemsAstNode {
+  kind: "TagItems";
+  type: "TagItems";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TagAstNode {
+  kind: "Tag";
+  type: "Tag";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface TypeSugarDeclAstNode {
   kind: "TypeSugarDecl";
   type: "TypeSugarDecl";
@@ -316,6 +357,13 @@ export interface TypeSugarVariantPayloadBodyAstNode {
 export interface TypeSugarEnumAstNode {
   kind: "TypeSugarEnum";
   type: "TypeSugarEnum";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface EnumBackingAstNode {
+  kind: "EnumBacking";
+  type: "EnumBacking";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -1476,6 +1524,7 @@ const rules: Record<string, Expression> = {
   "Decl": {
     kind: "choice",
     options: [
+      { kind: "ref", name: "TaggedDecl" },
       { kind: "ref", name: "TypeAssertDecl" },
       { kind: "ref", name: "TypeSugarDecl" },
       { kind: "ref", name: "TypeFnDecl" },
@@ -1485,6 +1534,48 @@ const rules: Record<string, Expression> = {
       { kind: "ref", name: "TopLetDecl" },
     ],
   },
+  "TaggedDecl": {
+    kind: "sequence",
+    items: [
+      { kind: "repeat1", expression: { kind: "ref", name: "TagList" } },
+      { kind: "ref", name: "DeclBody" },
+    ],
+  },
+  "DeclBody": {
+    kind: "choice",
+    options: [
+      { kind: "ref", name: "TypeAssertDecl" },
+      { kind: "ref", name: "TypeSugarDecl" },
+      { kind: "ref", name: "TypeFnDecl" },
+      { kind: "ref", name: "OperatorDecl" },
+      { kind: "ref", name: "ConstDecl" },
+      { kind: "ref", name: "FnDecl" },
+      { kind: "ref", name: "TopLetDecl" },
+    ],
+  },
+  "TagList": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "@[" },
+      { kind: "ref", name: "TagItems" },
+      { kind: "literal", value: "]" },
+    ],
+  },
+  "TagItems": {
+    kind: "sequence",
+    items: [
+      { kind: "ref", name: "Tag" },
+      {
+        kind: "repeat",
+        expression: {
+          kind: "sequence",
+          items: [{ kind: "literal", value: "," }, { kind: "ref", name: "Tag" }],
+        },
+      },
+      { kind: "optional", expression: { kind: "literal", value: "," } },
+    ],
+  },
+  "Tag": { kind: "ref", name: "LowerIdent" },
   "TypeSugarDecl": {
     kind: "sequence",
     items: [
@@ -1609,7 +1700,7 @@ const rules: Record<string, Expression> = {
     items: [
       { kind: "literal", value: "enum" },
       { kind: "literal", value: "(" },
-      { kind: "ref", name: "ScalarCarrier" },
+      { kind: "ref", name: "EnumBacking" },
       { kind: "literal", value: ")" },
       { kind: "literal", value: "{" },
       {
@@ -1618,6 +1709,10 @@ const rules: Record<string, Expression> = {
       },
       { kind: "literal", value: "}" },
     ],
+  },
+  "EnumBacking": {
+    kind: "choice",
+    options: [{ kind: "ref", name: "ScalarDomainType" }, { kind: "ref", name: "ScalarCarrier" }],
   },
   "TypeSugarEnumVariants": {
     kind: "sequence",
@@ -2060,13 +2155,7 @@ const rules: Record<string, Expression> = {
       { kind: "literal", value: "}" },
     ],
   },
-  "BranchHint": {
-    kind: "sequence",
-    items: [{ kind: "literal", value: "@" }, {
-      kind: "ref",
-      name: "LowerIdent",
-    }],
-  },
+  "BranchHint": { kind: "ref", name: "TagList" },
   "FnName": {
     kind: "sequence",
     items: [{
@@ -2130,28 +2219,40 @@ const rules: Record<string, Expression> = {
           }, { kind: "optional", expression: { kind: "literal", value: ";" } }],
         }, {
           kind: "sequence",
-          items: [{ kind: "ref", name: "FieldName" }, {
-            kind: "ref",
-            name: "Type",
-          }, { kind: "literal", value: "=" }, {
-            kind: "choice",
-            options: [{ kind: "ref", name: "ExternalConstValue" }, {
+          items: [
+            { kind: "ref", name: "FieldName" },
+            {
               kind: "ref",
-              name: "ConstValue",
-            }],
-          }, { kind: "optional", expression: { kind: "literal", value: ";" } }],
+              name: "Type",
+            },
+            { kind: "literal", value: "=" },
+            {
+              kind: "choice",
+              options: [{ kind: "ref", name: "ExternalConstValue" }, {
+                kind: "ref",
+                name: "ConstValue",
+              }],
+            },
+            { kind: "optional", expression: { kind: "literal", value: ";" } },
+          ],
         }, {
           kind: "sequence",
-          items: [{ kind: "ref", name: "LowerIdent" }, {
-            kind: "optional",
-            expression: { kind: "ref", name: "TypeAnn" },
-          }, { kind: "literal", value: "=" }, {
-            kind: "choice",
-            options: [{ kind: "ref", name: "ExternalConstValue" }, {
-              kind: "ref",
-              name: "ConstValue",
-            }],
-          }, { kind: "optional", expression: { kind: "literal", value: ";" } }],
+          items: [
+            { kind: "ref", name: "LowerIdent" },
+            {
+              kind: "optional",
+              expression: { kind: "ref", name: "TypeAnn" },
+            },
+            { kind: "literal", value: "=" },
+            {
+              kind: "choice",
+              options: [{ kind: "ref", name: "ExternalConstValue" }, {
+                kind: "ref",
+                name: "ConstValue",
+              }],
+            },
+            { kind: "optional", expression: { kind: "literal", value: ";" } },
+          ],
         }],
       },
     ],
@@ -3706,6 +3807,51 @@ export function projectParseNode(node: ParseNode): AstNode | null {
           child,
         ): child is AstNode => child !== null),
       };
+    case "TaggedDecl":
+      return {
+        kind: "TaggedDecl",
+        type: "TaggedDecl",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "DeclBody":
+      return {
+        kind: "DeclBody",
+        type: "DeclBody",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "TagList":
+      return {
+        kind: "TagList",
+        type: "TagList",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "TagItems":
+      return {
+        kind: "TagItems",
+        type: "TagItems",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "Tag":
+      return {
+        kind: "Tag",
+        type: "Tag",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
     case "TypeSugarDecl":
       return {
         kind: "TypeSugarDecl",
@@ -3809,6 +3955,15 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "TypeSugarEnum",
         type: "TypeSugarEnum",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "EnumBacking":
+      return {
+        kind: "EnumBacking",
+        type: "EnumBacking",
         node,
         children: node.children.map(projectParseNode).filter((
           child,
@@ -5286,9 +5441,7 @@ class Parser {
     if (!expression) throw new Error(`Unknown parser rule '${name}'`);
     const start = this.peek().span.start;
     const children = this.matchExpression(expression);
-    const end = children.length
-      ? children[children.length - 1].span.end
-      : start;
+    const end = children.length ? children[children.length - 1].span.end : start;
     return { kind: "rule", name, span: { start, end }, children };
   }
   expectEof(): void {
@@ -5323,9 +5476,7 @@ class Parser {
           }
         }
         this.fail(
-          `Expected ${
-            describeExpected(expression)
-          }, found '${this.peek().text}'`,
+          `Expected ${describeExpected(expression)}, found '${this.peek().text}'`,
         );
       case "optional":
         return this.canStart(expression.expression)
@@ -5476,9 +5627,7 @@ function describeExpected(expression: Expression): string {
     case "choice":
       return expression.options.map(describeExpected).join(" or ");
     case "sequence":
-      return expression.items.length
-        ? describeExpected(expression.items[0])
-        : "empty";
+      return expression.items.length ? describeExpected(expression.items[0]) : "empty";
     case "optional":
     case "repeat":
     case "repeat1":
@@ -5493,9 +5642,7 @@ function expressionNullable(expression: Expression): boolean {
     case "literal":
       return false;
     case "ref":
-      return ruleNames.has(expression.name)
-        ? expressionNullable(rules[expression.name])
-        : false;
+      return ruleNames.has(expression.name) ? expressionNullable(rules[expression.name]) : false;
     case "sequence":
       return expression.items.every(expressionNullable);
     case "choice":

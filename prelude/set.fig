@@ -1,5 +1,6 @@
 const map = @import("prelude.map");
 const order = @import("prelude.order");
+const operators = @import("prelude.operators");
 
 type fn Set(k: type) -> type {
   map.Map(k, bool)

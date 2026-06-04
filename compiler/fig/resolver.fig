@@ -4,6 +4,7 @@ const source = @import("./source.fig");
 const span = @import("./span.fig");
 const map = @import("prelude.map");
 const set = @import("prelude.set");
+const operators = @import("prelude.operators");
 
 type ResolveRequest = struct {
   importer_id: i32,

@@ -1,4 +1,5 @@
 const scalar = @import("prelude.scalar");
+const operators = @import("prelude.operators");
 
 type Ordering = union {
   Less, Equal, Greater

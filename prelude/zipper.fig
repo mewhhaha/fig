@@ -2,6 +2,7 @@ const core = @import("prelude.core");
 const list = @import("prelude.list");
 const option = @import("prelude.option");
 const tree = @import("prelude.tree");
+const operators = @import("prelude.operators");
 
 type fn Crumb() -> type {
   let Crumb = {

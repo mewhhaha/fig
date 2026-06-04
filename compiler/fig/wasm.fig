@@ -3,6 +3,7 @@ const checker = @import("./checker.fig");
 const diagnostic = @import("./diagnostic.fig");
 const lowering = @import("./lowering.fig");
 const span = @import("./span.fig");
+const operators = @import("prelude.operators");
 
 type WasmValType = union {
   WasmNoVal, WasmI32, WasmI64, WasmExternRef

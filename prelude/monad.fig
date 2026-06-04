@@ -1,4 +1,5 @@
 const core = @import("prelude.core");
+const operators = @import("prelude.operators");
 
 type fn StateResult(state: type, value: type) -> type {
   let StateResult = {value: value, state: state};

@@ -14,6 +14,12 @@ const formatCases: { name: string; input: string; expected: string }[] = [
     expected: "fn main() -> i32 {\n  let x = 1 + 2;\n  x\n}\n",
   },
   {
+    name: "declaration tags",
+    input: "@[test]fn parses_option()->bool{true}\n@[test]\npub fn main()->i32{1}",
+    expected:
+      "@[test]\nfn parses_option() -> bool {\n  true\n}\n\n@[test]\npub fn main() -> i32 {\n  1\n}\n",
+  },
+  {
     name: "leading and trailing comments",
     input: `/// docs
 // plain
@@ -84,8 +90,9 @@ pub fn main(host:io)->i32{clock(host)}`,
   },
   {
     name: "branch hints on match arms",
-    input: "pub fn score(x:i32)->i32 match {@likely 0=>1,@unlikely _=>2}",
-    expected: "pub fn score(x: i32) -> i32 match {\n  @likely 0 => 1,\n  @unlikely _ => 2\n}\n",
+    input: "pub fn score(x:i32)->i32 match {@[likely] 0=>1,@[unlikely] _=>2}",
+    expected:
+      "pub fn score(x: i32) -> i32 match {\n  @[likely] 0 => 1,\n  @[unlikely] _ => 2\n}\n",
   },
   {
     name: "debug trace statements",

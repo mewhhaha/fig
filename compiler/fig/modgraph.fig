@@ -3,6 +3,7 @@ const core = @import("prelude.core");
 const graph_data = @import("prelude.graph");
 const map = @import("prelude.map");
 const vec = @import("prelude.vec");
+const operators = @import("prelude.operators");
 
 type ModuleRecord = struct {
   module_id: i32,

@@ -13,11 +13,11 @@ annotation, intrinsic, or do-strategy builtins it provides.
 
 First-party compiler behavior is registered through built-in plugins:
 
-| Plugin             | Builtins                                                                  |
-| ------------------ | ------------------------------------------------------------------------- |
-| `core-imports`     | `@import`, `@external`                                                    |
+| Plugin             | Builtins                                                                   |
+| ------------------ | -------------------------------------------------------------------------- |
+| `core-imports`     | `@import`, `@external`                                                     |
 | `core-static`      | `@require`, `@compile_error`, and the listed static reflection builtins    |
-| `core-annotations` | `@likely`, `@unlikely`                                                    |
+| `core-annotations` | branch hint tags `@[likely]`, `@[unlikely]`                                |
 | `core-intrinsics`  | registered backend/internal intrinsics such as branch and heap-array calls |
 
 Plugin ids and builtin names must be unique after the built-in plugins are registered. Duplicate
@@ -31,14 +31,14 @@ compiler-owned IR paths rather than raw Wasm byte emission.
 The compiler classifies first-party special forms by the context where each one is valid. This keeps
 `@...` syntax explicit instead of treating all prefixed names as interchangeable builtins.
 
-| Category          | Forms                                                                                        | Valid context                                     |
-| ----------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Declaration       | `@import`, `@external`                                                                       | top-level `const` declaration values              |
+| Category          | Forms                                                                            | Valid context                                     |
+| ----------------- | -------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Declaration       | `@import`, `@external`                                                           | top-level `const` declaration values              |
 | Static/type-level | `@require`, `@compile_error`, and the exact static reflection names listed below | type and const evaluation, as documented per form |
-| Do strategy       | `@io`, `@monad`, `@applicative`                                                              | `do @strategy(...) { ... }`                       |
-| Annotation        | `@likely`, `@unlikely`                                                                       | branch hints on match arms                        |
-| Instrumentation   | `@trace`, `@profile`                                                                         | runtime function bodies                           |
-| Internal support  | `@field`, `@replace_field`, `@empty`, and exact heap/inline-array helpers                     | compiler-generated or narrow library wrapper code |
+| Do strategy       | `@io`, `@monad`, `@applicative`                                                  | `do @strategy(...) { ... }`                       |
+| Annotation        | `@[likely]`, `@[unlikely]`                                                       | branch hints on match arms                        |
+| Instrumentation   | `@trace`, `@profile`                                                             | runtime function bodies                           |
+| Internal support  | `@field`, `@replace_field`, `@empty`, and exact heap/inline-array helpers        | compiler-generated or narrow library wrapper code |
 
 `static_for_slots` is an internal checked-AST form used by generated fixed-layout code. It is not
 source syntax; source-level `static for` and record/product `for` slots are rejected.
@@ -95,8 +95,8 @@ separate from the optimizer `--profile name` flag, which selects optimization bu
 | `@require`       | bool, optional string | bool    | type evaluation           |
 | `@assert`        | type expression       | erased  | source type checking      |
 
-`@require` emits a diagnostic when the first argument is not `true`.
-`@assert(TypeExpr);` evaluates a type expression in source and discards the result.
+`@require` emits a diagnostic when the first argument is not `true`. `@assert(TypeExpr);` evaluates
+a type expression in source and discards the result.
 
 Contract checks are ordinary type-function calls. Use `@assert(Contract(Target));` when only the
 checking side effects matter and the type-level result can be discarded:
@@ -142,6 +142,11 @@ work during const evaluation when their arguments are compile-time Values.
 | `@type_scalar_signed`        | `t: type`                                                      | `bool`                                      |
 | `@type_scalar_domain`        | `t: type`                                                      | scalar domain metadata                      |
 | `@type_is_refined_scalar`    | `t: type`                                                      | `bool`                                      |
+| `@type_domain_union`         | `a: type`, `b: type`                                           | canonical refined `i32(...)` union          |
+| `@type_domain_intersect`     | `a: type`, `b: type`                                           | canonical refined `i32(...)` intersection   |
+| `@type_domain_difference`    | `a: type`, `b: type`                                           | canonical refined `i32(...)` difference     |
+| `@type_domain_contains`      | `expected: type`, `actual: type`                               | `bool`                                      |
+| `@type_domain_cardinality`   | `t: type`                                                      | finite member count                         |
 | `@type_layout`               | `t: type`                                                      | layout metadata shape                       |
 | `@type_storage_kind`         | `t: type`                                                      | storage kind tag                            |
 | `@type_flat_slot_count`      | `t: type`                                                      | flattened slot count                        |
@@ -232,8 +237,8 @@ source code should prefer the public `InlineArray::tabulate`, `tabulate_with`, `
 Backend intrinsics are recognized when a normal Fig function wraps a single intrinsic call. The
 wrapper function supplies the public API and types. Operator syntax still resolves through visible
 source declarations; `prelude.operators` exposes primitive scalar operators by defining attached
-members such as `i32::add` and `bool::and` that wrap the scalar intrinsics below. Explicit memory and
-pointer intrinsics are not source-facing Fig builtins.
+members such as `i32::add` and `bool::and` that wrap the scalar intrinsics below. Explicit memory
+and pointer intrinsics are not source-facing Fig builtins.
 
 | Intrinsic                 | Arguments     | Returns       |
 | ------------------------- | ------------- | ------------- |
@@ -248,13 +253,13 @@ The `@branch_*` intrinsics are accepted in `branch` and `branch-debug` memory mo
 
 Primitive scalar intrinsic names are exact backend forms registered by `core-intrinsics`:
 
-| Intrinsic family                                               | Purpose                                  |
-| -------------------------------------------------------------- | ---------------------------------------- |
-| `@i32_add`, `@i32_sub`, `@i32_mul`, `@i32_div`, `@i32_rem`     | signed 32-bit arithmetic                 |
-| `@u32_add`, `@u32_sub`, `@u32_mul`, `@u32_div`, `@u32_rem`     | unsigned 32-bit arithmetic               |
-| `@i64_add`, `@i64_sub`, `@i64_mul`, `@i64_div`, `@i64_rem`     | signed 64-bit arithmetic                 |
-| `@u64_add`, `@u64_sub`, `@u64_mul`, `@u64_div`, `@u64_rem`     | unsigned 64-bit arithmetic               |
-| `@f32_add`, `@f32_sub`, `@f32_mul`, `@f32_div`                 | 32-bit floating-point arithmetic         |
-| `@f64_add`, `@f64_sub`, `@f64_mul`, `@f64_div`                 | 64-bit floating-point arithmetic         |
+| Intrinsic family                                                           | Purpose                                  |
+| -------------------------------------------------------------------------- | ---------------------------------------- |
+| `@i32_add`, `@i32_sub`, `@i32_mul`, `@i32_div`, `@i32_rem`                 | signed 32-bit arithmetic                 |
+| `@u32_add`, `@u32_sub`, `@u32_mul`, `@u32_div`, `@u32_rem`                 | unsigned 32-bit arithmetic               |
+| `@i64_add`, `@i64_sub`, `@i64_mul`, `@i64_div`, `@i64_rem`                 | signed 64-bit arithmetic                 |
+| `@u64_add`, `@u64_sub`, `@u64_mul`, `@u64_div`, `@u64_rem`                 | unsigned 64-bit arithmetic               |
+| `@f32_add`, `@f32_sub`, `@f32_mul`, `@f32_div`                             | 32-bit floating-point arithmetic         |
+| `@f64_add`, `@f64_sub`, `@f64_mul`, `@f64_div`                             | 64-bit floating-point arithmetic         |
 | `@i32_eql` through `@i32_gte`, and matching `u32/i64/u64/f32/f64` families | scalar equality and ordering comparisons |
-| `@bool_and`, `@bool_or`, `@bool_xor`, `@bool_eql`, `@bool_neq` | boolean operations and comparisons       |
+| `@bool_and`, `@bool_or`, `@bool_xor`, `@bool_eql`, `@bool_neq`             | boolean operations and comparisons       |

@@ -7,6 +7,7 @@ const map = @import("prelude.map");
 const nonempty = @import("prelude.nonempty");
 const span = @import("./span.fig");
 const vec = @import("prelude.vec");
+const operators = @import("prelude.operators");
 
 type NodeKind = union {
   NodeFunction, NodeValue, NodeType, NodeImport
@@ -43,6 +44,16 @@ type SymbolGraph = struct {
   node_index: map.Map(i32, i32),
   edges: vec.Vec(DeclEdge),
   topology: graph_data.Graph,
+  diagnostics: diagnostic.DiagnosticBag,
+}
+
+type CycleCountScan = struct {
+  graph: SymbolGraph,
+  total: i32,
+}
+
+type CycleDiagnosticScan = struct {
+  graph: SymbolGraph,
   diagnostics: diagnostic.DiagnosticBag,
 }
 
@@ -166,10 +177,6 @@ fn push_edge(
 
 fn node_at(nodes: vec.Vec(DeclNode), index: i32) -> DeclNode {
   vec.Vec::get_t(DeclNode, nodes, index)
-}
-
-fn edge_at(edges: vec.Vec(DeclEdge), index: i32) -> DeclEdge {
-  vec.Vec::get_t(DeclEdge, edges, index)
 }
 
 fn empty_node_index() -> map.Map(i32, i32) {
@@ -323,22 +330,30 @@ fn edge_forms_cycle(graph: SymbolGraph, edge: DeclEdge) -> bool {
   )
 }
 
-fn cycle_count_loop(
-  graph: SymbolGraph,
-  index: i32,
-  total: i32
-) -> i32 {
-  match index < vec.Vec::len(graph.edges) {
-    true => match edge_forms_cycle(graph, edge_at(graph.edges, index)) {
-      true => rec(graph, index + 1, total + 1),
-      false => rec(graph, index + 1, total),
-    },
-    false => total,
+fn cycle_count_scan(graph: SymbolGraph) -> CycleCountScan {
+  CycleCountScan {
+    graph: graph,
+    total: 0,
+  }
+}
+
+fn cycle_count_step(scan: CycleCountScan, edge: DeclEdge) -> CycleCountScan {
+  let next_total = match edge_forms_cycle(scan.graph, edge) {
+    true => scan.total + 1,
+    false => scan.total,
+  };
+  CycleCountScan {
+    graph: scan.graph,
+    total: next_total,
   }
 }
 
 fn cycle_count(graph: SymbolGraph) -> i32 {
-  cycle_count_loop(graph, 0, 0)
+  vec.Vec::fold(
+    graph.edges,
+    cycle_count_scan(graph),
+    cycle_count_step
+  ).total
 }
 
 fn span_for_node_id(
@@ -367,27 +382,36 @@ fn cycle_diagnostic(graph: SymbolGraph, edge: DeclEdge) -> diagnostic.Diagnostic
   )
 }
 
-fn cycle_diagnostics_loop(
-  graph: SymbolGraph,
-  index: i32,
-  diagnostics: diagnostic.DiagnosticBag
-) -> diagnostic.DiagnosticBag {
-  match index < vec.Vec::len(graph.edges) {
-    true => edge_at(graph.edges, index)
-      \current -> match edge_forms_cycle(graph, current) {
-      true => rec(
-        graph,
-        index + 1,
-        diagnostic.push(diagnostics, cycle_diagnostic(graph, current))
-      ),
-      false => rec(graph, index + 1, diagnostics),
-    },
-    false => diagnostics,
+fn cycle_diagnostic_scan(graph: SymbolGraph) -> CycleDiagnosticScan {
+  CycleDiagnosticScan {
+    graph: graph,
+    diagnostics: diagnostic.empty(),
+  }
+}
+
+fn cycle_diagnostic_step(
+  scan: CycleDiagnosticScan,
+  edge: DeclEdge
+) -> CycleDiagnosticScan {
+  let next_diagnostics = match edge_forms_cycle(scan.graph, edge) {
+    true => diagnostic.push(
+      scan.diagnostics,
+      cycle_diagnostic(scan.graph, edge)
+    ),
+    false => scan.diagnostics,
+  };
+  CycleDiagnosticScan {
+    graph: scan.graph,
+    diagnostics: next_diagnostics,
   }
 }
 
 fn cycle_diagnostics(graph: SymbolGraph) -> diagnostic.DiagnosticBag {
-  cycle_diagnostics_loop(graph, 0, diagnostic.empty())
+  vec.Vec::fold(
+    graph.edges,
+    cycle_diagnostic_scan(graph),
+    cycle_diagnostic_step
+  ).diagnostics
 }
 
 fn bind_node(env: checker.CheckEnv, node: DeclNode) -> checker.CheckEnv {
@@ -444,22 +468,20 @@ fn resolve_scan_push(
   }
 }
 
-fn resolve_loop(
-  graph: SymbolGraph,
-  index: i32,
-  scan: ResolveGraphScan
+fn resolve_scan_step(
+  scan: ResolveGraphScan,
+  current: DeclNode
 ) -> ResolveGraphScan {
-  match index < vec.Vec::len(graph.nodes) {
-    true => node_at(graph.nodes, index)
-      \current -> resolve_node(scan.env, current)
-      \resolved -> resolve_scan_push(scan, resolved)
-      \next -> rec(graph, index + 1, next),
-    false => scan,
-  }
+  let resolved = resolve_node(scan.env, current);
+  resolve_scan_push(scan, resolved)
 }
 
 fn resolve(graph: SymbolGraph) -> SymbolGraph {
-  let resolved = resolve_loop(graph, 0, resolve_scan_initial());
+  let resolved = vec.Vec::fold(
+    graph.nodes,
+    resolve_scan_initial(),
+    resolve_scan_step
+  );
   SymbolGraph {
     nodes: resolved.nodes,
     node_index: graph.node_index,
@@ -499,26 +521,20 @@ fn add_order_id_score(acc: i32, node_id: i32) -> i32 {
   acc + node_id
 }
 
-fn resolution_order_id_list_loop(
-  nodes: vec.Vec(DeclNode),
-  index: i32,
-  out: list.List(i32)
+fn resolution_order_cons_node_id(
+  out: list.List(i32),
+  node: DeclNode
 ) -> list.List(i32) {
-  match index < vec.Vec::len(nodes) {
-    true => rec(
-      nodes,
-      index + 1,
-      list.List::cons(node_at(nodes, index).node_id, out)
-    ),
-    false => list.List::reverse(out),
-  }
+  list.List::cons(node.node_id, out)
 }
 
 fn resolution_order_id_list(nodes: vec.Vec(DeclNode)) -> list.List(i32) {
-  resolution_order_id_list_loop(
-    nodes,
-    0,
-    list.List::empty(i32)
+  list.List::reverse(
+    vec.Vec::fold(
+      nodes,
+      list.List::empty(i32),
+      resolution_order_cons_node_id
+    )
   )
 }
 

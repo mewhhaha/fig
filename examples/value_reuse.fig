@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 fn sink(x: i32) -> i32 {
   x
 }

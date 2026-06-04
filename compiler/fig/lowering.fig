@@ -2,6 +2,7 @@ const ast = @import("./ast.fig");
 const checker = @import("./checker.fig");
 const diagnostic = @import("./diagnostic.fig");
 const span = @import("./span.fig");
+const operators = @import("prelude.operators");
 
 type AbiClass = union {
   AbiVoid, AbiScalar, AbiHandle, AbiFunction

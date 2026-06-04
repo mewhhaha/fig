@@ -1,11 +1,20 @@
 const parser = @import("./parser.fig");
 const textlex = @import("./textlex.fig");
 const textmodel = @import("./textmodel.fig");
+const monad = @import("prelude.monad");
+const operators = @import("prelude.operators");
 
 type Context = struct {
   source: textlex.TextTokenStream,
   import_source: textlex.TextTokenStream,
   module_hash: i32,
+}
+
+type SignatureMetric = union {
+  TypeEnvironmentSignature, ResolvedDeclaredTypeClassSignature,
+  ResolvedDeclaredAbiClassSignature, ResolvedValueBodyTypeClassSignature,
+  ResolvedValueBodyAbiClassSignature, ResolvedSimpleBodyTypeCheckSignature,
+  ResolvedSymbolEnvironmentSignature, ResolvedExportAbiSignature
 }
 
 type ResolutionRecord = struct {
@@ -33,74 +42,197 @@ fn context(
   }
 }
 
+fn context_source(context_value: Context) -> textlex.TextTokenStream {
+  context_value.source
+}
+
+fn context_import_source(context_value: Context) -> textlex.TextTokenStream {
+  context_value.import_source
+}
+
+fn context_module_hash(context_value: Context) -> i32 {
+  context_value.module_hash
+}
+
 fn Context::type_environment_signature(context_value: Context) -> i32 {
-  parser.text_direct_import_type_environment_signature(
-    context_value.source,
-    context_value.import_source,
-    context_value.module_hash
-  )
+  monad.Reader::run(type_environment_signature_reader(), context_value)
 }
 
 fn Context::resolved_declared_type_class_signature(context_value: Context) -> i32 {
-  parser.text_direct_import_resolved_declared_type_class_signature(
-    context_value.source,
-    context_value.import_source,
-    context_value.module_hash
-  )
+  monad.Reader::run(resolved_declared_type_class_signature_reader(), context_value)
 }
 
 fn Context::resolved_declared_abi_class_signature(context_value: Context) -> i32 {
-  parser.text_direct_import_resolved_declared_abi_class_signature(
-    context_value.source,
-    context_value.import_source,
-    context_value.module_hash
-  )
+  monad.Reader::run(resolved_declared_abi_class_signature_reader(), context_value)
 }
 
 fn Context::resolved_value_body_type_class_signature(
   context_value: Context
 ) -> i32 {
-  parser.text_direct_import_resolved_value_body_type_class_signature(
-    context_value.source,
-    context_value.import_source,
-    context_value.module_hash
-  )
+  monad.Reader::run(resolved_value_body_type_class_signature_reader(), context_value)
 }
 
 fn Context::resolved_value_body_abi_class_signature(
   context_value: Context
 ) -> i32 {
-  parser.text_direct_import_resolved_value_body_abi_class_signature(
-    context_value.source,
-    context_value.import_source,
-    context_value.module_hash
-  )
+  monad.Reader::run(resolved_value_body_abi_class_signature_reader(), context_value)
 }
 
 fn Context::resolved_simple_body_type_check_signature(
   context_value: Context
 ) -> i32 {
-  parser.text_direct_import_resolved_simple_body_type_check_signature(
-    context_value.source,
-    context_value.import_source,
-    context_value.module_hash
-  )
+  monad.Reader::run(resolved_simple_body_type_check_signature_reader(), context_value)
 }
 
 fn Context::resolved_symbol_environment_signature(context_value: Context) -> i32 {
-  parser.text_direct_import_resolved_symbol_environment_signature(
-    context_value.source,
-    context_value.import_source,
-    context_value.module_hash
-  )
+  monad.Reader::run(resolved_symbol_environment_signature_reader(), context_value)
 }
 
 fn Context::resolved_export_abi_signature(context_value: Context) -> i32 {
-  parser.text_direct_import_resolved_export_abi_signature(
-    context_value.source,
-    context_value.import_source,
-    context_value.module_hash
-  )
+  monad.Reader::run(resolved_export_abi_signature_reader(), context_value)
+}
+
+fn signature_metric_value(
+  metric: SignatureMetric,
+  source: textlex.TextTokenStream,
+  import_source: textlex.TextTokenStream,
+  module_hash: i32
+) -> i32 {
+  match metric {
+    TypeEnvironmentSignature =>
+      parser.text_direct_import_type_environment_signature(
+        source,
+        import_source,
+        module_hash
+      ),
+    ResolvedDeclaredTypeClassSignature =>
+      parser.text_direct_import_resolved_declared_type_class_signature(
+        source,
+        import_source,
+        module_hash
+      ),
+    ResolvedDeclaredAbiClassSignature =>
+      parser.text_direct_import_resolved_declared_abi_class_signature(
+        source,
+        import_source,
+        module_hash
+      ),
+    ResolvedValueBodyTypeClassSignature =>
+      parser.text_direct_import_resolved_value_body_type_class_signature(
+        source,
+        import_source,
+        module_hash
+      ),
+    ResolvedValueBodyAbiClassSignature =>
+      parser.text_direct_import_resolved_value_body_abi_class_signature(
+        source,
+        import_source,
+        module_hash
+      ),
+    ResolvedSimpleBodyTypeCheckSignature =>
+      parser.text_direct_import_resolved_simple_body_type_check_signature(
+        source,
+        import_source,
+        module_hash
+      ),
+    ResolvedSymbolEnvironmentSignature =>
+      parser.text_direct_import_resolved_symbol_environment_signature(
+        source,
+        import_source,
+        module_hash
+      ),
+    ResolvedExportAbiSignature =>
+      parser.text_direct_import_resolved_export_abi_signature(
+        source,
+        import_source,
+        module_hash
+      ),
+  }
+}
+
+fn signature_reader(metric: SignatureMetric) -> monad.Reader(Context, i32) {
+  do @monad(monad.Reader(Context, _)) {
+    source <- monad.Reader::asks(context_source);
+    import_source <- monad.Reader::asks(context_import_source);
+    module_hash <- monad.Reader::asks(context_module_hash);
+    monad.Reader::pure(signature_metric_value(
+      metric,
+      source,
+      import_source,
+      module_hash
+    ))
+  }
+}
+
+fn type_environment_signature_reader() -> monad.Reader(Context, i32) {
+  signature_reader(TypeEnvironmentSignature)
+}
+
+fn resolved_declared_type_class_signature_reader() -> monad.Reader(Context, i32) {
+  signature_reader(ResolvedDeclaredTypeClassSignature)
+}
+
+fn resolved_declared_abi_class_signature_reader() -> monad.Reader(Context, i32) {
+  signature_reader(ResolvedDeclaredAbiClassSignature)
+}
+
+fn resolved_value_body_type_class_signature_reader() -> monad.Reader(
+  Context,
+  i32
+) {
+  signature_reader(ResolvedValueBodyTypeClassSignature)
+}
+
+fn resolved_value_body_abi_class_signature_reader() -> monad.Reader(
+  Context,
+  i32
+) {
+  signature_reader(ResolvedValueBodyAbiClassSignature)
+}
+
+fn resolved_simple_body_type_check_signature_reader() -> monad.Reader(
+  Context,
+  i32
+) {
+  signature_reader(ResolvedSimpleBodyTypeCheckSignature)
+}
+
+fn resolved_symbol_environment_signature_reader() -> monad.Reader(Context, i32) {
+  signature_reader(ResolvedSymbolEnvironmentSignature)
+}
+
+fn resolved_export_abi_signature_reader() -> monad.Reader(Context, i32) {
+  signature_reader(ResolvedExportAbiSignature)
+}
+
+fn resolution_record_reader(
+  alias_hash: i32
+) -> monad.Reader(Context, ResolutionRecord) {
+  do @monad(monad.Reader(Context, _)) {
+    module_hash <- monad.Reader::asks(context_module_hash);
+    type_environment_signature <- type_environment_signature_reader();
+    resolved_declared_type_signature <- resolved_declared_type_class_signature_reader();
+    resolved_declared_abi_signature <- resolved_declared_abi_class_signature_reader();
+    resolved_value_body_type_signature <- resolved_value_body_type_class_signature_reader();
+    resolved_value_body_abi_signature <- resolved_value_body_abi_class_signature_reader();
+    resolved_simple_body_type_check_signature <- resolved_simple_body_type_check_signature_reader();
+    resolved_symbol_environment_signature <- resolved_symbol_environment_signature_reader();
+    resolved_export_abi_signature <- resolved_export_abi_signature_reader();
+    monad.Reader::pure(
+      ResolutionRecord {
+        module_hash,
+        alias_hash,
+        type_environment_signature,
+        resolved_declared_type_signature,
+        resolved_declared_abi_signature,
+        resolved_value_body_type_signature,
+        resolved_value_body_abi_signature,
+        resolved_simple_body_type_check_signature,
+        resolved_symbol_environment_signature,
+        resolved_export_abi_signature,
+      }
+    )
+  }
 }
 
 fn resolution_record_hash(
@@ -143,34 +275,7 @@ fn resolution_record_hash(
 }
 
 fn Context::record(context_value: Context, alias_hash: i32) -> ResolutionRecord {
-  ResolutionRecord {
-    module_hash: context_value.module_hash,
-    alias_hash: alias_hash,
-    type_environment_signature: Context::type_environment_signature(
-      context_value
-    ),
-    resolved_declared_type_signature: Context::resolved_declared_type_class_signature(
-      context_value
-    ),
-    resolved_declared_abi_signature: Context::resolved_declared_abi_class_signature(
-      context_value
-    ),
-    resolved_value_body_type_signature: Context::resolved_value_body_type_class_signature(
-      context_value
-    ),
-    resolved_value_body_abi_signature: Context::resolved_value_body_abi_class_signature(
-      context_value
-    ),
-    resolved_simple_body_type_check_signature: Context::resolved_simple_body_type_check_signature(
-      context_value
-    ),
-    resolved_symbol_environment_signature: Context::resolved_symbol_environment_signature(
-      context_value
-    ),
-    resolved_export_abi_signature: Context::resolved_export_abi_signature(
-      context_value
-    ),
-  }
+  monad.Reader::run(resolution_record_reader(alias_hash), context_value)
 }
 
 fn Context::resolution_record_signature(context_value: Context) -> i32 {

@@ -1,19 +1,31 @@
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import {
-  checkSource,
+  checkSource as checkSourceRaw,
+  type CompileSourceOptions,
   decodeFigValue,
   instantiateFig,
-  wasmFromSource,
-  watFromSource,
+  wasmFromSource as wasmFromSourceRaw,
+  watFromSource as watFromSourceRaw,
 } from "../src/mod.ts";
+import {
+  resolveProjectModule as resolveModule,
+  withOperatorPrelude,
+} from "./operator_prelude.ts";
 
-const resolveModule = async (moduleName: string) => {
-  try {
-    return await Deno.readTextFile(`${moduleName.replaceAll(".", "/")}.fig`);
-  } catch {
-    return undefined;
-  }
+const checkSource = (source: string, options: CompileSourceOptions = {}) => {
+  const prepared = withOperatorPrelude(source, options);
+  return checkSourceRaw(prepared.source, prepared.options);
 };
+const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  {
+    const prepared = withOperatorPrelude(source, options);
+    return watFromSourceRaw(prepared.source, prepared.options);
+  };
+const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  {
+    const prepared = withOperatorPrelude(source, options);
+    return wasmFromSourceRaw(prepared.source, prepared.options);
+  };
 
 Deno.test("all examples parse and check", async () => {
   let discovered = 0;
@@ -228,7 +240,8 @@ Deno.test("CLI defaults to debug mode and --release selects release mode", async
   const path = await Deno.makeTempFile({ suffix: ".fig" });
   await Deno.writeTextFile(
     path,
-    `
+    `const operators = @import("prelude.operators");
+
       fn add1(x: i32) -> i32 { x + 1 }
       pub fn main() -> i32 { add1(41) }
     `,

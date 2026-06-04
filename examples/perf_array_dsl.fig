@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 // Futhark/Dex-inspired source API sketch for regular fixed-size arrays.
 // Helpers are ergonomic names over explicit inline layouts, not imported DSL primitives.
 

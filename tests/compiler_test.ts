@@ -35,11 +35,7 @@ import type {
   TypeAssertDecl,
   TypeDecl,
 } from "../src/core_ast.ts";
-import {
-  type CompilerPlugin,
-  compilerSpecialForm,
-  isCompilerSpecialForm,
-} from "../src/plugins.ts";
+import { type CompilerPlugin, compilerSpecialForm, isCompilerSpecialForm } from "../src/plugins.ts";
 import {
   canonicalDomainKey,
   cardinality,
@@ -139,16 +135,14 @@ function programDeclarationNames(program: Program): string[] {
   return program.declarations.filter(isNamedDeclaration).map((decl) => decl.name);
 }
 
-const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  {
-    const prepared = withOperatorPrelude(source, options);
-    return watFromSourceRaw(prepared.source, prepared.options);
-  };
-const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  {
-    const prepared = withOperatorPrelude(source, options);
-    return wasmFromSourceRaw(prepared.source, prepared.options);
-  };
+const watFromSource = (source: string, options: CompileSourceOptions = {}) => {
+  const prepared = withOperatorPrelude(source, options);
+  return watFromSourceRaw(prepared.source, prepared.options);
+};
+const wasmFromSource = (source: string, options: CompileSourceOptions = {}) => {
+  const prepared = withOperatorPrelude(source, options);
+  return wasmFromSourceRaw(prepared.source, prepared.options);
+};
 const compileWasmFromSource = (
   source: string,
   options: CompileSourceOptions = {},
@@ -156,15 +150,13 @@ const compileWasmFromSource = (
   const prepared = withOperatorPrelude(source, options);
   return compileWasmFromSourceRaw(prepared.source, prepared.options);
 };
-const compileArtifactsFromSource =
-  ((source: string, options: CompileArtifactsOptions = {}) =>
-    {
-      const prepared = withOperatorPrelude(source, options);
-      return (compileArtifactsFromSourceRaw as (
-      source: string,
-      options: CompileArtifactsOptions,
-    ) => unknown)(prepared.source, prepared.options as CompileArtifactsOptions);
-    }) as typeof compileArtifactsFromSourceRaw;
+const compileArtifactsFromSource = ((source: string, options: CompileArtifactsOptions = {}) => {
+  const prepared = withOperatorPrelude(source, options);
+  return (compileArtifactsFromSourceRaw as (
+    source: string,
+    options: CompileArtifactsOptions,
+  ) => unknown)(prepared.source, prepared.options as CompileArtifactsOptions);
+}) as typeof compileArtifactsFromSourceRaw;
 
 const explainOptimization = (
   source: string,
@@ -263,13 +255,13 @@ Deno.test("AST span metadata is hidden and semantic-neutral", async () => {
 Deno.test("branch hints parse on match arms and fn match bodies", async () => {
   const parsed = await parse(`
     fn score(x: bool) -> i32 match {
-      @unlikely false => 0,
-      @likely true => 1,
+      @[unlikely] false => 0,
+      @[likely] true => 1,
     }
     pub fn main(x: i32) -> i32 {
       match x {
-        @likely 0 => score(true),
-        @unlikely _ => score(false),
+        @[likely] 0 => score(true),
+        @[unlikely] _ => score(false),
       }
     }
   `);
@@ -288,7 +280,7 @@ Deno.test("branch hints parse on match arms and fn match bodies", async () => {
 
   const checked = await checkSource(`
     fn score(x: bool) -> i32 match {
-      @likely true => 1,
+      @[likely] true => 1,
       false => 0,
     }
     pub fn main() -> i32 { score(true) }
@@ -298,13 +290,77 @@ Deno.test("branch hints parse on match arms and fn match bodies", async () => {
   assertEquals(dispatcher.body.expr.arms[0]?.branchHint, "likely");
 });
 
+Deno.test("at-prefixed branch hint annotations are rejected", async () => {
+  await assertThrowsCompile(
+    `pub fn main(x: i32) -> i32 { match x { @likely 0 => 1, _ => 2 } }`,
+    "parse.syntax",
+  );
+  await assertThrowsCompile(
+    `pub fn main(x: i32) -> i32 { match x { @unlikely 0 => 1, _ => 2 } }`,
+    "parse.syntax",
+  );
+});
+
+Deno.test("declaration tags mark test functions", async () => {
+  const parsed = await parse(`
+    /// Parses option fixtures.
+    @[test]
+    fn parses_option() -> bool { true }
+
+    pub fn main() -> i32 { 1 }
+  `);
+  const testFn = findFn(parsed, "parses_option");
+  assertEquals(testFn?.doc, "Parses option fixtures.");
+  assertEquals(
+    testFn?.tags?.map((tag) => {
+      return tag.name;
+    }),
+    ["test"],
+  );
+
+  await checkSource(`
+    @[test]
+    fn parses_option() -> bool { true }
+
+    pub fn main() -> i32 { 1 }
+  `);
+
+  await assertThrowsCompile(
+    `
+      @[bench]
+      fn parses_option() -> bool { true }
+
+      pub fn main() -> i32 { 1 }
+    `,
+    "tag.unknown",
+  );
+  await assertThrowsCompile(
+    `
+      @[test]
+      const value = 1;
+
+      pub fn main() -> i32 { value }
+    `,
+    "tag.context",
+  );
+  await assertThrowsCompile(
+    `
+      @[test, test]
+      fn parses_option() -> bool { true }
+
+      pub fn main() -> i32 { 1 }
+    `,
+    "tag.duplicate",
+  );
+});
+
 Deno.test("branch hints reject unmapped source locations", async () => {
   await assertThrowsCompile(
-    `pub fn main(x: i32) -> i32 { match x { @likely _ => 1 } }`,
+    `pub fn main(x: i32) -> i32 { match x { @[likely] _ => 1 } }`,
     "branch_hint.unmapped",
   );
   await assertThrowsCompile(
-    `pub fn main(x: i32) -> i32 { match x { @likely 0 => 1, @unlikely _ => 2 } }`,
+    `pub fn main(x: i32) -> i32 { match x { @[likely] 0 => 1, @[unlikely] _ => 2 } }`,
     "branch_hint.unmapped",
   );
 });
@@ -463,7 +519,7 @@ Deno.test("compiler plugins can add branch-hint annotations", async () => {
   const checked = await checkSource(
     `
       fn score(x: bool) -> i32 match {
-        @hot true => 1,
+        @[hot] true => 1,
         false => 0,
       }
       pub fn main() -> i32 { score(true) }
@@ -479,7 +535,7 @@ Deno.test("unknown plugin annotations are diagnostics after parsing", async () =
   await assertThrowsCompile(
     `
       fn score(x: bool) -> i32 match {
-        @hot true => 1,
+        @[hot] true => 1,
         false => 0,
       }
       pub fn main() -> i32 { score(true) }
@@ -492,6 +548,8 @@ Deno.test("compiler special form classifier covers source and internal contexts"
   assertEquals(compilerSpecialForm("@import")?.kind, "declaration");
   assertEquals(compilerSpecialForm("@applicative")?.kind, "do_strategy");
   assertEquals(compilerSpecialForm("@assume"), undefined);
+  assertEquals(compilerSpecialForm("@likely"), undefined);
+  assertEquals(compilerSpecialForm("@unlikely"), undefined);
   assertEquals(compilerSpecialForm("@type_slots")?.kind, "static");
   assertEquals(compilerSpecialForm("@branch_handle"), undefined);
   assertEquals(compilerSpecialForm("@type_not_registered"), undefined);
@@ -1106,9 +1164,7 @@ Deno.test("target-typed collection literals lower through collector members", as
   );
   const first = main?.body.statements[0];
   assertEquals(
-    first?.kind === "let" && first.value.kind === "call"
-      ? first.value.callee
-      : undefined,
+    first?.kind === "let" && first.value.kind === "call" ? first.value.callee : undefined,
     { kind: "var", name: "Bag::collect_finish" },
   );
   const second = main?.body.statements[1];
@@ -1243,6 +1299,50 @@ Deno.test("match guards can use pattern bindings", async () => {
   const main = instance.exports.main as (value: number) => number;
   assertEquals(main(4), 0);
   assertEquals(main(12), 12);
+});
+
+Deno.test("source import qualification preserves match guards", async () => {
+  const source = `
+    const lib = @import("./guard_lib.fig");
+
+    pub fn main(value: i32) -> i32 { lib.run(value) }
+  `;
+  const modules = new Map([
+    [
+      "./guard_lib.fig",
+      `
+        type Kind = union {Lower, Other}
+
+        fn is_large(value: i32) -> bool {
+          value > 100
+        }
+
+        fn classify(value: i32) -> Kind {
+          match value {
+            _ if is_large(value) => Lower,
+            _ => Other,
+          }
+        }
+
+        fn score(kind: Kind) -> i32 match {
+          Lower => 1,
+          Other => 0,
+        }
+
+        pub fn run(value: i32) -> i32 {
+          score(classify(value))
+        }
+      `,
+    ],
+  ]);
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(source, { resolveModule: (name) => modules.get(name) }),
+    ),
+  );
+  const main = instance.exports.main as (value: number) => number;
+  assertEquals(main(80), 0);
+  assertEquals(main(112), 1);
 });
 
 Deno.test("fn match bodies deconstruct runtime parameters", async () => {
@@ -1609,6 +1709,36 @@ Deno.test("numeric enum members work as match patterns", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 20);
 });
 
+Deno.test("numeric enums support refined i32 backing domains", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+      type Channel = enum(i32(0..4)) {Red = 0, Green = 1, Blue = 2, Alpha = 3}
+
+      fn score(value: Channel) -> i32 match {
+        Red => 10,
+        Green => 20,
+        Blue => 30,
+        Alpha => 40,
+      }
+
+      pub fn main() -> i32 {
+        score(Channel::Blue)
+      }
+    `),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 30);
+
+  await assertThrowsCompile(
+    `
+    type Channel = enum(i32(0..4)) {Red = 0, Green = 1, Blue = 2, Alpha = 4}
+    pub fn main() -> i32 { 0 }
+    `,
+    "type.enum_value",
+  );
+});
+
 Deno.test("numeric enum members use associated syntax", async () => {
   await assertThrowsCompile(
     `
@@ -1702,21 +1832,15 @@ Deno.test("attaches slash doc comments to Fig bindings", async () => {
   assertEquals(point?.params[0]?.doc, "coordinate type");
   assertEquals(point?.body.statements[0]?.doc, "product shape");
   assertEquals(
-    point?.normalized?.kind === "product"
-      ? point.normalized.shape.slots
-      : undefined,
+    point?.normalized?.kind === "product" ? point.normalized.shape.slots : undefined,
     [
       { doc: "x coordinate", label: "x", type: "a" },
       { doc: "y coordinate", label: "y", type: "a" },
     ],
   );
-  const origin = checked.program.declarations.find((decl) =>
-    decl.kind === "const"
-  );
+  const origin = checked.program.declarations.find((decl) => decl.kind === "const");
   assertEquals(origin?.doc, "top constant");
-  const topValue = checked.program.declarations.find((decl) =>
-    decl.kind === "let"
-  );
+  const topValue = checked.program.declarations.find((decl) => decl.kind === "let");
   assertEquals(topValue?.doc, "top let");
   const add = checked.program.declarations.find((decl): decl is FnDecl =>
     decl.kind === "fn" && decl.name === "add"
@@ -1727,15 +1851,11 @@ Deno.test("attaches slash doc comments to Fig bindings", async () => {
     "right input",
   ]);
   assertEquals(
-    add?.body.statements[0]?.kind === "let"
-      ? add.body.statements[0].doc
-      : undefined,
+    add?.body.statements[0]?.kind === "let" ? add.body.statements[0].doc : undefined,
     "local temp",
   );
   assertEquals(
-    add?.body.statements[1]?.kind === "type_assert"
-      ? add.body.statements[1].doc
-      : undefined,
+    add?.body.statements[1]?.kind === "type_assert" ? add.body.statements[1].doc : undefined,
     "local assertion",
   );
 });
@@ -1802,9 +1922,7 @@ Deno.test("preserves docs through source import qualification", async () => {
   assertEquals(box?.doc, "imported box");
   assertEquals(box?.params[0]?.doc, "payload type");
   assertEquals(
-    box?.normalized?.kind === "product"
-      ? box.normalized.shape.slots[0]?.doc
-      : undefined,
+    box?.normalized?.kind === "product" ? box.normalized.shape.slots[0]?.doc : undefined,
     "payload field",
   );
 });
@@ -1847,9 +1965,7 @@ Deno.test("normalizes type function declarations", async () => {
     paramKinds: {},
   });
   assertEquals(
-    program.declarations[1].kind === "type"
-      ? program.declarations[1].normalized
-      : undefined,
+    program.declarations[1].kind === "type" ? program.declarations[1].normalized : undefined,
     {
       kind: "product",
       name: "Point",
@@ -1860,9 +1976,7 @@ Deno.test("normalizes type function declarations", async () => {
     },
   );
   assertEquals(
-    program.declarations[2].kind === "type"
-      ? program.declarations[2].normalized
-      : undefined,
+    program.declarations[2].kind === "type" ? program.declarations[2].normalized : undefined,
     {
       kind: "sum",
       variants: [
@@ -1872,9 +1986,7 @@ Deno.test("normalizes type function declarations", async () => {
     },
   );
   assertEquals(
-    program.declarations[3].kind === "type"
-      ? program.declarations[3].normalized
-      : undefined,
+    program.declarations[3].kind === "type" ? program.declarations[3].normalized : undefined,
     {
       kind: "product",
       name: "Weird",
@@ -1889,9 +2001,7 @@ Deno.test("normalizes type function declarations", async () => {
     },
   );
   assertEquals(
-    program.declarations[4].kind === "type"
-      ? program.declarations[4].paramKinds
-      : undefined,
+    program.declarations[4].kind === "type" ? program.declarations[4].paramKinds : undefined,
     {
       a: "count",
     },
@@ -3474,9 +3584,9 @@ Deno.test("namespace source imports qualify values and types", async () => {
       isNamedDeclaration(decl) && decl.name === "std.inc_local"
     ),
   );
-  assert(!checked.program.declarations.some((decl) =>
-    isNamedDeclaration(decl) && decl.name === "std"
-  ));
+  assert(
+    !checked.program.declarations.some((decl) => isNamedDeclaration(decl) && decl.name === "std"),
+  );
 
   assert(
     !checked.program.declarations.some((decl) =>
@@ -3939,6 +4049,114 @@ Deno.test("pruneImports keeps array_static range fold dependencies", async () =>
   assertEquals((instance.exports.main as (seed: number) => number)(0), 499500);
 });
 
+Deno.test("pruneImports keeps imported attached members used by do strategies", async () => {
+  const source = `
+    const option = @import("prelude.option");
+    const core = @import("prelude.core");
+
+    fn start() -> core.Option(i32) {
+      option.some(1)
+    }
+
+    fn bump(value: i32) -> core.Option(i32) {
+      option.some(value + 1)
+    }
+
+    fn value() -> core.Option(i32) {
+      do @monad(core.Option(_)) {
+        first <- start();
+        second <- bump(first);
+        pure(second + 1)
+      }
+    }
+
+    pub fn main() -> i32 {
+      match value() { Some(result) => result, None => 0 }
+    }
+  `;
+  const checked = await checkSource(source, {
+    resolveModule: resolveProjectModule,
+    pruneImports: true,
+  });
+
+  const names = programDeclarationNames(checked.program);
+  assert(names.includes("core.Option"));
+  assert(names.includes("option.core.Option::bind"));
+  assert(names.includes("option.core.Option::pure"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(source, {
+        resolveModule: resolveProjectModule,
+        pruneImports: true,
+        optMode: "release",
+      }),
+    ),
+  );
+  assertEquals((instance.exports.main as () => number)(), 3);
+});
+
+Deno.test("pruneImports keeps transitive attached members used by do strategies", async () => {
+  const modules = new Map([
+    [
+      "inner",
+      `
+        const option = @import("prelude.option");
+        const core = @import("prelude.core");
+
+        fn start() -> core.Option(i32) {
+          option.some(1)
+        }
+
+        fn bump(value: i32) -> core.Option(i32) {
+          option.some(value)
+        }
+
+        pub fn value() -> core.Option(i32) {
+          do @monad(core.Option(_)) {
+            first <- start();
+            second <- bump(first);
+            pure(second)
+          }
+        }
+      `,
+    ],
+  ]);
+  const resolveModule = async (moduleName: string) => {
+    const moduleSource = modules.get(moduleName);
+    if (moduleSource !== undefined) return { sourceId: moduleName, text: moduleSource };
+    return await resolveProjectModule(moduleName);
+  };
+  const source = `
+    const inner = @import("inner");
+    const core = @import("prelude.core");
+
+    pub fn main() -> i32 {
+      match inner.value() { Some(result) => result, None => 0 }
+    }
+  `;
+  const checked = await checkSource(source, {
+    resolveModule,
+    pruneImports: true,
+  });
+
+  const names = programDeclarationNames(checked.program);
+  assert(names.includes("option.core.Option::bind"));
+  assert(names.includes("option.core.Option::pure"));
+  assert(names.includes("inner.value"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(source, {
+        resolveModule,
+        pruneImports: true,
+        optMode: "release",
+      }),
+    ),
+  );
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
 Deno.test("merge source import alias is ordinary namespace alias", async () => {
   const modules = new Map([
     [
@@ -3991,9 +4209,7 @@ Deno.test("source import diagnostics use import span and module source ids", asy
     throw new Error("expected missing module diagnostic");
   } catch (error) {
     assert(error instanceof CompileError);
-    const diagnostic = error.diagnostics.find((item) =>
-      item.code === "module.not_found"
-    );
+    const diagnostic = error.diagnostics.find((item) => item.code === "module.not_found");
     assert(diagnostic, JSON.stringify(error.diagnostics));
     assertEquals(diagnostic.span?.sourceId, "root.fig");
     assertEquals(diagnostic.span?.line, 1);
@@ -4010,9 +4226,7 @@ Deno.test("source import diagnostics use import span and module source ids", asy
     throw new Error("expected imported module diagnostic");
   } catch (error) {
     assert(error instanceof CompileError);
-    const diagnostic = error.diagnostics.find((item) =>
-      item.code === "parse.syntax"
-    );
+    const diagnostic = error.diagnostics.find((item) => item.code === "parse.syntax");
     assert(diagnostic, JSON.stringify(error.diagnostics));
     assertEquals(diagnostic.span?.sourceId, "string.lib");
   }
@@ -4030,9 +4244,7 @@ Deno.test("source import diagnostics use import span and module source ids", asy
     throw new Error("expected imported module diagnostic");
   } catch (error) {
     assert(error instanceof CompileError);
-    const diagnostic = error.diagnostics.find((item) =>
-      item.code === "parse.syntax"
-    );
+    const diagnostic = error.diagnostics.find((item) => item.code === "parse.syntax");
     assert(diagnostic, JSON.stringify(error.diagnostics));
     assertEquals(diagnostic.span?.sourceId, "virtual/named.fig");
   }
@@ -5032,6 +5244,48 @@ Deno.test("do monad expression statements lower like bind-right", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 3);
 });
 
+Deno.test("do monad expression statements capture inferred scalar locals", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(
+        `
+    const option = @import("prelude.option");
+    const core = @import("prelude.core");
+
+    fn helper(index: i32, type_class: i32) -> core.Option(i32) {
+      do @monad(core.Option(_)) {
+        option.guard(type_class == 1);
+        option.guard(index < 128);
+        pure(index)
+      }
+    }
+
+    fn guarded(
+      param_count: i32,
+      local_index: i32,
+      local_count: i32,
+      local_type: i32
+    ) -> core.Option(i32) {
+      let wasm_index = param_count + local_index;
+      let is_local = local_index < local_count;
+      do @monad(core.Option(_)) {
+        option.guard(is_local);
+        helper(wasm_index, local_type)
+      }
+    }
+
+    pub fn main(local_count: i32) -> i32 {
+      core.Option::unwrap_or(guarded(3, 0, local_count, 1), 7)
+    }
+  `,
+        { resolveModule: resolveProjectModule, optMode: "release" },
+      ),
+    ),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(0), 7);
+  assertEquals((instance.exports.main as CallableFunction)(1), 3);
+});
+
 Deno.test("do monad parameterized effect dispatches through outer type function", async () => {
   const instance = new WebAssembly.Instance(
     new WebAssembly.Module(
@@ -5335,9 +5589,7 @@ Deno.test("type sugar aliases type-function calls without adding constructors", 
       match is_product { true => get(x) + slot_count, false => 0 }
     }
   `);
-  const aliases = checked.program.declarations.filter((decl) =>
-    decl.kind === "type"
-  );
+  const aliases = checked.program.declarations.filter((decl) => decl.kind === "type");
   const intBox = aliases.find((decl) => decl.name === "IntBox");
   assertEquals(intBox?.normalized, { kind: "alias", type: "Box(i32)" });
 
@@ -5887,9 +6139,7 @@ Deno.test("models type contracts with explicit const dictionaries", async () => 
         + bound(box_monad, {value: 3})
     }
   `);
-  const eq = parsed.program.declarations.find((decl) =>
-    decl.kind === "type" && decl.name === "Eq"
-  );
+  const eq = parsed.program.declarations.find((decl) => decl.kind === "type" && decl.name === "Eq");
   assertEquals(
     eq?.kind === "type" ? eq.normalized : undefined,
     {
@@ -6038,9 +6288,7 @@ Deno.test("models attached type members for static contracts", async () => {
     decl.kind === "type" && decl.name === "Point"
   );
   assertEquals(
-    point?.normalized?.kind === "product"
-      ? point.normalized.shape.slots
-      : undefined,
+    point?.normalized?.kind === "product" ? point.normalized.shape.slots : undefined,
     [
       { label: "x", type: "i32" },
       { label: "y", type: "i32" },
@@ -6091,9 +6339,7 @@ Deno.test("normalizes transparent contract annotations to runtime types", async 
     decl.kind === "fn" && decl.name === "main"
   );
   assertEquals(
-    main?.body.statements[0]?.kind === "let"
-      ? main.body.statements[0].type
-      : "",
+    main?.body.statements[0]?.kind === "let" ? main.body.statements[0].type : "",
     "Box",
   );
 
@@ -6203,9 +6449,7 @@ Deno.test("expected types specialize nullary generic constructors", async () => 
   const checked = await checkSource(source);
   const zeroSpecializations = checked.program.declarations.filter((
     decl,
-  ): decl is FnDecl =>
-    decl.kind === "fn" && decl.name.startsWith("Option__zero__")
-  );
+  ): decl is FnDecl => decl.kind === "fn" && decl.name.startsWith("Option__zero__"));
   assert(zeroSpecializations.some((decl) => decl.returnType === "Option(i32)"));
 
   const instance = new WebAssembly.Instance(
@@ -6967,9 +7211,7 @@ Deno.test("reuses nested const-specialized calls", async () => {
   );
   const outer = findFn(checked.program, "mapped_outer__box_functor");
   assertEquals(
-    outer?.kind === "fn" && outer.body.expr?.kind === "call"
-      ? outer.body.expr.callee
-      : undefined,
+    outer?.kind === "fn" && outer.body.expr?.kind === "call" ? outer.body.expr.callee : undefined,
     { kind: "var", name: "mapped__box_functor" },
   );
 });
@@ -6987,9 +7229,7 @@ Deno.test("optimizes const-parameter forwarding wrappers to direct calls", async
   assertEquals(findFns(checked.program, "mapped__box_functor").length, 1);
   const checkedMain = findFn(checked.program, "main");
   assertEquals(
-    checkedMain?.body.expr?.kind === "call"
-      ? checkedMain.body.expr.callee
-      : undefined,
+    checkedMain?.body.expr?.kind === "call" ? checkedMain.body.expr.callee : undefined,
     { kind: "var", name: "mapped__box_functor" },
   );
 
@@ -7398,9 +7638,7 @@ Deno.test("optimization plan records structural inline recurrence and domain dec
     optMode: "release",
   });
   const hasDecision = (target: string, action: string) =>
-    plan.decisions.some((decision) =>
-      decision.target === target && decision.action === action
-    );
+    plan.decisions.some((decision) => decision.target === target && decision.action === action);
 
   assertEquals(plan.profile, "release_balanced");
   assert(hasDecision("inc", "call.inline.private_scalar"));
@@ -7472,9 +7710,7 @@ Deno.test("optimization plan recurrence and inline actions match release WAT sha
   `;
   const plan = await explainOptimization(source, { optMode: "release" });
   const hasDecision = (target: string, action: string) =>
-    plan.decisions.some((decision) =>
-      decision.target === target && decision.action === action
-    );
+    plan.decisions.some((decision) => decision.target === target && decision.action === action);
 
   assert(hasDecision("inc", "call.inline.private_scalar"));
   assert(hasDecision("small", "recurrence.unfold.finite_static"));
@@ -7620,19 +7856,13 @@ Deno.test("explainOptimization reports packed local-slot and scratch fixed-array
   });
 
   assert(
-    packed.decisions.some((decision) =>
-      decision.action === "array.layout_packed"
-    ),
+    packed.decisions.some((decision) => decision.action === "array.layout_packed"),
   );
   assert(
-    localSlot.decisions.some((decision) =>
-      decision.action === "array.layout_local_slots"
-    ),
+    localSlot.decisions.some((decision) => decision.action === "array.layout_local_slots"),
   );
   assert(
-    scratch.decisions.some((decision) =>
-      decision.action === "array.layout_scratch"
-    ),
+    scratch.decisions.some((decision) => decision.action === "array.layout_scratch"),
   );
 
   const { wat: localWat } = await compileArtifactsFromSource(localSlotSource, {
@@ -7739,9 +7969,7 @@ Deno.test("release optimizer lowers generated tail recurrences before finite exp
     event.name === "opt.expandFiniteStaticRecurrences.initial"
   );
   const expand = compileTrace[expandIndex];
-  const optimizeDecls = compileTrace.find((event) =>
-    event.name === "opt.pass.0.optimizeDecls"
-  );
+  const optimizeDecls = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
 
   assert(lowerIndex >= 0);
   assert(expandIndex >= 0);
@@ -7767,22 +7995,15 @@ Deno.test("optimizer scope traces only reachable imported runtime helpers", asyn
     ),
   ].join("\n");
   const artifact = await compileArtifactsFromSource(source, {
-    resolveModule: (moduleName) =>
-      moduleName === "fixture.lib" ? moduleSource : undefined,
+    resolveModule: (moduleName) => moduleName === "fixture.lib" ? moduleSource : undefined,
     optMode: "release",
     compileTrace,
   });
 
   const scope = compileTrace.find((event) => event.name === "opt.scope");
-  const analysis = compileTrace.find((event) =>
-    event.name === "opt.pass.0.analysis"
-  );
-  const optimizeDecls = compileTrace.find((event) =>
-    event.name === "opt.pass.0.optimizeDecls"
-  );
-  const foldFacts = compileTrace.find((event) =>
-    event.name === "opt.pass.0.foldAbstractFacts"
-  );
+  const analysis = compileTrace.find((event) => event.name === "opt.pass.0.analysis");
+  const optimizeDecls = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
+  const foldFacts = compileTrace.find((event) => event.name === "opt.pass.0.foldAbstractFacts");
   assertEquals(scope?.counters?.reachableFunctions, 3);
   assertEquals(analysis?.counters?.dirtyFunctions, 2);
   assertEquals(analysis?.counters?.plannedActions, 2);
@@ -7817,18 +8038,10 @@ Deno.test("optimizer cleanup second pass only revisits changed functions and cal
     compileTrace,
   });
 
-  const pass0 = compileTrace.find((event) =>
-    event.name === "opt.pass.0.optimizeDecls"
-  );
-  const analysis1 = compileTrace.find((event) =>
-    event.name === "opt.pass.1.analysis"
-  );
-  const next0 = compileTrace.find((event) =>
-    event.name === "opt.pass.0.dirtyNext"
-  );
-  const pass1 = compileTrace.find((event) =>
-    event.name === "opt.pass.1.optimizeDecls"
-  );
+  const pass0 = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
+  const analysis1 = compileTrace.find((event) => event.name === "opt.pass.1.analysis");
+  const next0 = compileTrace.find((event) => event.name === "opt.pass.0.dirtyNext");
+  const pass1 = compileTrace.find((event) => event.name === "opt.pass.1.optimizeDecls");
   assert(pass0);
   assert(analysis1);
   assert(next0);
@@ -7866,18 +8079,10 @@ Deno.test("optimizer dirty pass tracks reachable top-level runtime declarations"
     compileTrace,
   });
 
-  const analysis0 = compileTrace.find((event) =>
-    event.name === "opt.pass.0.analysis"
-  );
-  const pass0 = compileTrace.find((event) =>
-    event.name === "opt.pass.0.optimizeDecls"
-  );
-  const next0 = compileTrace.find((event) =>
-    event.name === "opt.pass.0.dirtyNext"
-  );
-  const pass1 = compileTrace.find((event) =>
-    event.name === "opt.pass.1.optimizeDecls"
-  );
+  const analysis0 = compileTrace.find((event) => event.name === "opt.pass.0.analysis");
+  const pass0 = compileTrace.find((event) => event.name === "opt.pass.0.optimizeDecls");
+  const next0 = compileTrace.find((event) => event.name === "opt.pass.0.dirtyNext");
+  const pass1 = compileTrace.find((event) => event.name === "opt.pass.1.optimizeDecls");
   assert(analysis0);
   assert(pass0);
   assert(next0);
@@ -8015,9 +8220,7 @@ Deno.test("recurrence summaries capture refined-domain recursive match bodies", 
     terminates: true,
   });
   assertEquals(
-    recurrence?.clauses.map((clause) =>
-      clause.paramDomains[0]?.intervals[0]?.start
-    ),
+    recurrence?.clauses.map((clause) => clause.paramDomains[0]?.intervals[0]?.start),
     [
       { kind: "literal", value: 4, source: "4" },
       { kind: "literal", value: 0, source: "0" },
@@ -8380,18 +8583,14 @@ Deno.test("compile trace sink receives import phase events", async () => {
       compileTrace,
     },
   );
-  const importEvents = compileTrace.filter((event) =>
-    event.name.startsWith("import.")
-  );
+  const importEvents = compileTrace.filter((event) => event.name.startsWith("import."));
   assert(importEvents.some((event) => event.name === "import.parse.module"));
   assert(importEvents.some((event) => event.name === "import.prune.worklist"));
   assert(
     importEvents.some((event) => event.name === "import.prune.references"),
   );
   assert(
-    importEvents.some((event) =>
-      typeof event.counters?.declarationsIn === "number"
-    ),
+    importEvents.some((event) => typeof event.counters?.declarationsIn === "number"),
   );
   assert(
     importEvents.some((event) => typeof event.counters?.fnCount === "number"),
@@ -8449,8 +8648,7 @@ Deno.test("compileArtifactsFromSource reuses cached pruned imports", async () =>
     fn unused() -> i32 { 99 }
   `;
   const artifact = await compileArtifactsFromSource(source, {
-    resolveModule: (moduleName) =>
-      moduleName === "fixture.lib" ? moduleSource : undefined,
+    resolveModule: (moduleName) => moduleName === "fixture.lib" ? moduleSource : undefined,
     pruneImports: true,
     cache,
     trace: true,
@@ -8477,9 +8675,7 @@ Deno.test("compileArtifactsFromSource resolves repeated imports once per importe
   const artifact = await compileArtifactsFromSource(source, {
     resolveModule: (moduleName) => {
       resolveCalls++;
-      return moduleName === "fixture.lib"
-        ? "fn value() -> i32 { 4 }"
-        : undefined;
+      return moduleName === "fixture.lib" ? "fn value() -> i32 { 4 }" : undefined;
     },
     pruneImports: true,
     trace: true,
@@ -8508,15 +8704,13 @@ Deno.test("compileArtifactsFromSource reuses cached import closures", async () =
     fn unused() -> i32 { 99 }
   `;
   await compileArtifactsFromSource(source, {
-    resolveModule: (moduleName) =>
-      moduleName === "fixture.lib" ? moduleSource : undefined,
+    resolveModule: (moduleName) => moduleName === "fixture.lib" ? moduleSource : undefined,
     pruneImports: true,
     cache,
     trace: true,
   });
   const second = await compileArtifactsFromSource(source, {
-    resolveModule: (moduleName) =>
-      moduleName === "fixture.lib" ? moduleSource : undefined,
+    resolveModule: (moduleName) => moduleName === "fixture.lib" ? moduleSource : undefined,
     pruneImports: true,
     cache,
     trace: true,
@@ -9086,8 +9280,7 @@ Deno.test("compile cache misses pruned import selections when body references ch
 
   for (const event of compileTrace) {
     const matchesSelectionCache = event.name === "import.prune.selection_cache";
-    const matchesModule =
-      event.counters?.moduleName === "fixture.reference_change";
+    const matchesModule = event.counters?.moduleName === "fixture.reference_change";
     assert(!(matchesSelectionCache && matchesModule));
   }
 });
@@ -9096,9 +9289,7 @@ Deno.test("compile cache invalidates parsed imports when module source changes",
   const cache = createCompileCache();
   let value = 1;
   const resolveModule = (moduleName: string) =>
-    moduleName === "fixture.dynamic"
-      ? `fn value() -> i32 { ${value} }`
-      : undefined;
+    moduleName === "fixture.dynamic" ? `fn value() -> i32 { ${value} }` : undefined;
   const source = `
     const fixture = @import("fixture.dynamic");
     pub fn main() -> i32 { fixture.value() }
@@ -9368,8 +9559,7 @@ Deno.test("compiler session keeps function caches across semantic import edits",
   >();
   cache.functionChecks = functionChecks as typeof cache.functionChecks;
   cache.backendFunctions = backendFunctions as typeof cache.backendFunctions;
-  cache.backendDirectCalls =
-    backendDirectCalls as typeof cache.backendDirectCalls;
+  cache.backendDirectCalls = backendDirectCalls as typeof cache.backendDirectCalls;
   const modules = new Map([
     [
       "/project/lib.fig",
@@ -9639,8 +9829,7 @@ Deno.test("qualified declaration cache survives imported body-only edits", async
 
   const cache = createCompileCache();
   const qualifiedDeclarations = new CountingMap<string, unknown>();
-  cache.qualifiedDeclarations =
-    qualifiedDeclarations as typeof cache.qualifiedDeclarations;
+  cache.qualifiedDeclarations = qualifiedDeclarations as typeof cache.qualifiedDeclarations;
   const modules = new Map([
     [
       "/project/lib.fig",
@@ -9721,8 +9910,7 @@ Deno.test("declaration reference summary cache survives imported body-only edits
 
   const cache = createCompileCache();
   const referenceSummaries = new CountingMap<string, unknown>();
-  cache.referenceSummaries =
-    referenceSummaries as typeof cache.referenceSummaries;
+  cache.referenceSummaries = referenceSummaries as typeof cache.referenceSummaries;
   cache.prunedImportSelections = undefined;
   const modules = new Map([
     [
@@ -9998,9 +10186,7 @@ Deno.test("compiler session passes importer context to nested relative imports",
   });
   assertEquals(result.ok, true);
   assert(
-    seen.some(([moduleName, from]) =>
-      moduleName === "./leaf.fig" && from === "/project/lib.fig"
-    ),
+    seen.some(([moduleName, from]) => moduleName === "./leaf.fig" && from === "/project/lib.fig"),
   );
   assertEquals(session.watchedSourceIds("/project/main.fig"), [
     "/project/main.fig",
@@ -10033,16 +10219,12 @@ Deno.test("checker skips inferred specialization scans without inferred targets"
     { trace: true },
   );
   const inferredPhases =
-    checked.trace?.phases.filter((phase) =>
-      phase.name.startsWith("specializeInferredTypeCalls")
-    ) ??
+    checked.trace?.phases.filter((phase) => phase.name.startsWith("specializeInferredTypeCalls")) ??
       [];
   assert(inferredPhases.length > 0);
   assertEquals(inferredPhases.every((phase) => phase.specialization?.visitedCalls === 0), true);
   const constPhases =
-    checked.trace?.phases.filter((phase) =>
-      phase.name.startsWith("specializeConstParamCalls")
-    ) ??
+    checked.trace?.phases.filter((phase) => phase.name.startsWith("specializeConstParamCalls")) ??
       [];
   assert(constPhases.length > 0);
   assertEquals(constPhases.every((phase) => phase.specialization?.visitedCalls === 0), true);
@@ -10089,9 +10271,7 @@ Deno.test("backend function cache reuses side-effect-free lowered functions", as
     compileTrace,
     includeWat: false,
   });
-  const event = compileTrace.find((item) =>
-    item.name === "backend.lower.function_cache"
-  );
+  const event = compileTrace.find((item) => item.name === "backend.lower.function_cache");
   assert(event);
   assert((event.counters?.cacheHits as number | undefined ?? 0) > 0);
 });
@@ -10116,15 +10296,11 @@ Deno.test("wasm encoder cache reuses unchanged function bodies without stale edi
     compileTrace,
     includeWat: false,
   });
-  const event = compileTrace.find((item) =>
-    item.name === "wasm.encode.function_cache"
-  );
+  const event = compileTrace.find((item) => item.name === "wasm.encode.function_cache");
   assert(event);
   assert((event.counters?.cacheHits as number | undefined ?? 0) > 0);
   assert((event.counters?.cacheMisses as number | undefined ?? 0) > 0);
-  const nameEvent = compileTrace.find((item) =>
-    item.name === "wasm.encode.name_section_cache"
-  );
+  const nameEvent = compileTrace.find((item) => item.name === "wasm.encode.name_section_cache");
   assert(nameEvent);
   assert((nameEvent.counters?.cacheHits as number | undefined ?? 0) > 0);
   const instance = new WebAssembly.Instance(
@@ -10157,9 +10333,7 @@ Deno.test("backend planning cache reuses literal-only edits without stale output
     compileTrace: literalTrace,
     includeWat: false,
   });
-  const literalEvent = literalTrace.find((item) =>
-    item.name === "backend.layout.plan_cache"
-  );
+  const literalEvent = literalTrace.find((item) => item.name === "backend.layout.plan_cache");
   assert(literalEvent);
   assertEquals(literalEvent.counters?.cacheHit, true);
   const literalInstance = new WebAssembly.Instance(
@@ -10176,9 +10350,7 @@ Deno.test("backend planning cache reuses literal-only edits without stale output
     compileTrace: structuralTrace,
     includeWat: false,
   });
-  const structuralEvent = structuralTrace.find((item) =>
-    item.name === "backend.layout.plan_cache"
-  );
+  const structuralEvent = structuralTrace.find((item) => item.name === "backend.layout.plan_cache");
   assert(structuralEvent);
   assertEquals(structuralEvent.counters?.cacheHit, false);
   const structuralInstance = new WebAssembly.Instance(
@@ -10196,9 +10368,7 @@ Deno.test("debug optimizer fast path skips clone when no profile expressions nee
     `pub fn main() -> i32 { 1 }`,
     { compileTrace, includeWat: false },
   );
-  const fastPath = compileTrace.find((item) =>
-    item.name === "opt.debug_fast_path"
-  );
+  const fastPath = compileTrace.find((item) => item.name === "opt.debug_fast_path");
   assert(fastPath);
   assertEquals(compileTrace.some((item) => item.name === "opt.clone"), false);
   const instance = new WebAssembly.Instance(
@@ -10244,9 +10414,7 @@ Deno.test("backend function cache skips functions that emit debug trace sites", 
     compileTrace,
     includeWat: false,
   });
-  const event = compileTrace.find((item) =>
-    item.name === "backend.lower.function_cache"
-  );
+  const event = compileTrace.find((item) => item.name === "backend.lower.function_cache");
   assert(event);
   assertEquals(event.counters?.cacheHits ?? 0, 0);
   assert((event.counters?.skippedSideEffects as number | undefined ?? 0) > 0);
@@ -10266,9 +10434,7 @@ Deno.test("defaults unsuffixed integer literals in i32 contexts", async () => {
   const annotated = await checkSource(
     "pub fn main() -> i32 { let x: i32 = 40; x }",
   );
-  const annotatedMain = annotated.program.declarations.find((decl) =>
-    decl.kind === "fn"
-  );
+  const annotatedMain = annotated.program.declarations.find((decl) => decl.kind === "fn");
   assertEquals(
     annotatedMain?.kind === "fn" &&
       annotatedMain.body.statements[0]?.kind === "let" &&
@@ -10403,6 +10569,27 @@ Deno.test("checks refined i32 scalar domains", async () => {
 
 Deno.test("derives empty values for refined i32 domains containing zero", async () => {
   await checkSource(`pub fn main() -> i32(0..4) { @empty(i32(0..4)) }`);
+});
+
+Deno.test("static refined i32 domain algebra builtins canonicalize domains", async () => {
+  await checkSource(`
+    type Byte = i32(0..256)
+    type Unioned = @type_domain_union(i32(0..4), i32(4..8))
+    type Intersected = @type_domain_intersect(Byte, i32(128..300))
+    type Difference = @type_domain_difference(i32(0..8), i32(2..6))
+    type fn DomainProof() -> type {
+      @require(@type_domain_contains(Unioned, i32(0..8)), "union contains expected range");
+      @require(@type_domain_contains(i32(0..8), Unioned), "expected range contains union");
+      @require(@type_domain_contains(Intersected, i32(128..256)), "intersection contains expected range");
+      @require(@type_domain_contains(i32(128..256), Intersected), "expected range contains intersection");
+      @require(@type_domain_contains(Difference, i32(0..2 | 6..8)), "difference contains expected range");
+      @require(@type_domain_contains(i32(0..2 | 6..8), Difference), "expected range contains difference");
+      @require(@type_domain_contains(Byte, i32(0..128)), "domain contains subset");
+      @type_domain_cardinality(i32(0 | 2..5));
+      i32
+    }
+    pub fn main(x: DomainProof) -> i32 { x }
+  `);
 });
 
 Deno.test("canonicalizes refined i32 interval sets semantically", () => {
@@ -10946,9 +11133,7 @@ Deno.test("monoid rewrites remove empty append calls on both sides", async () =>
   const optimized = optimizeProgram(checked.program, { assumeRewrites: true });
   assertEquals(countCalls(optimized).get("Point::append") ?? 0, 0);
   const main = findFn(optimized, "main");
-  const left = main?.body.statements.find((stmt) =>
-    stmt.kind === "let" && stmt.name === "left"
-  );
+  const left = main?.body.statements.find((stmt) => stmt.kind === "let" && stmt.name === "left");
   assertEquals(left?.kind === "let" ? left.value : undefined, {
     kind: "var",
     name: "x",
@@ -11125,8 +11310,7 @@ function countExprRefs(expr: Expr, name: string): number {
           stmt.kind === "type_assert"
             ? sum
             : stmt.kind === "debug_trace"
-            ? sum + stmt.args.reduce((total, arg) =>
-              total + countExprRefs(arg, name), 0)
+            ? sum + stmt.args.reduce((total, arg) => total + countExprRefs(arg, name), 0)
             : sum + countExprRefs(stmt.value, name),
         expr.expr ? countExprRefs(expr.expr, name) : 0,
       );
@@ -11136,8 +11320,7 @@ function countExprRefs(expr: Expr, name: string): number {
           stmt.kind === "type_assert"
             ? sum
             : stmt.kind === "debug_trace"
-            ? sum + stmt.args.reduce((total, arg) =>
-              total + countExprRefs(arg, name), 0)
+            ? sum + stmt.args.reduce((total, arg) => total + countExprRefs(arg, name), 0)
             : sum + countExprRefs(stmt.value, name),
         expr.expr ? countExprRefs(expr.expr, name) : 0,
       );

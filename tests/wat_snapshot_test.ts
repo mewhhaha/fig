@@ -1,15 +1,26 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { type CompileSourceOptions, watFromSource as watFromSourceRaw } from "../src/mod.ts";
+import { withOperatorPrelude } from "./operator_prelude.ts";
 
 const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  watFromSourceRaw(source, options);
+  {
+    const prepared = withOperatorPrelude(source, options);
+    return watFromSourceRaw(prepared.source, prepared.options);
+  };
 
 Deno.test("golden WAT for arithmetic main", async () => {
   assertEquals(
     await watFromSource(`pub fn main() -> i32 { 7 * 6 }`),
     `(module
   (func $main (export "main") (result i32)
-    i32.const 42
+    i32.const 7
+    i32.const 6
+    call $__ops_op_mul__i32
+  )
+  (func $__ops_op_mul__i32 (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    local.get $b
+    i32.mul
   )
 )`,
   );

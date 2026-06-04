@@ -3,6 +3,7 @@ const layout = @import("prelude.layout");
 const queue = @import("prelude.queue");
 const set = @import("prelude.set");
 const vec = @import("prelude.vec");
+const operators = @import("prelude.operators");
 
 type Edge = struct {
   from: i32,

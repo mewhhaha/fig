@@ -1,4 +1,5 @@
 const core = @import("prelude.core");
+const operators = @import("prelude.operators");
 
 // Static inline layouts. These are value layouts today, not memory-backed arrays.
 

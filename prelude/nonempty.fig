@@ -1,4 +1,5 @@
 const list = @import("prelude.list");
+const operators = @import("prelude.operators");
 
 type fn NonEmpty(a: type) -> type {
   let NonEmpty = {

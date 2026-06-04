@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 const layout = @import("prelude.layout");
 
 type fn Pair() -> type {

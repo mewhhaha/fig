@@ -4,6 +4,7 @@ import type {
   ConstDecl,
   DebugTraceStmt,
   Declaration,
+  DeclarationTag,
   DoStatement,
   Expr,
   FnDecl,
@@ -47,6 +48,7 @@ import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
 import { checkPluginRewrites } from "./rewrites.ts";
 import {
   canonicalDomainKey,
+  cardinality,
   domainContains,
   type DomainInterval,
   domainIsEmpty,
@@ -1127,6 +1129,55 @@ function checkPreflightSyntax(program: Program, diagnostics: Diagnostic[]) {
   }
 }
 
+const CORE_DECLARATION_TAGS = new Set(["test"]);
+
+function checkDeclarationTags(program: Program, diagnostics: Diagnostic[]) {
+  for (const item of program.imports) {
+    checkDeclarationTagList("import", item.tags, diagnostics);
+  }
+  for (const item of program.sourceImports ?? []) {
+    checkDeclarationTagList("source_import", item.tags, diagnostics);
+  }
+  for (const decl of program.declarations) {
+    checkDeclarationTagList(decl.kind, decl.tags, diagnostics);
+  }
+}
+
+function checkDeclarationTagList(
+  ownerKind: string,
+  tags: DeclarationTag[] | undefined,
+  diagnostics: Diagnostic[],
+) {
+  if (!tags || tags.length === 0) return;
+  const seen = new Set<string>();
+  for (const tag of tags) {
+    if (!CORE_DECLARATION_TAGS.has(tag.name)) {
+      diagnostics.push(diagnosticAt(
+        "tag.unknown",
+        `unknown declaration tag @[${tag.name}]`,
+        tag,
+      ));
+      continue;
+    }
+    if (ownerKind !== "fn") {
+      diagnostics.push(diagnosticAt(
+        "tag.context",
+        `declaration tag @[${tag.name}] is only valid on functions`,
+        tag,
+      ));
+    }
+    if (seen.has(tag.name)) {
+      diagnostics.push(diagnosticAt(
+        "tag.duplicate",
+        `duplicate declaration tag @[${tag.name}]`,
+        tag,
+      ));
+      continue;
+    }
+    seen.add(tag.name);
+  }
+}
+
 function typeExprChildren(expr: TypeExpr): TypeExpr[] {
   switch (expr.kind) {
     case "type_call":
@@ -1207,6 +1258,7 @@ function checkProgramInternal(
   };
   const hostIoImports = new Map(program.imports.map((item) => [item.name, item.effects]));
   checkExternalImportsUseExplicitIo(program, diagnostics);
+  recordPhase("checkDeclarationTags", () => checkDeclarationTags(program, diagnostics));
   if (trace) {
     recordPhase(
       "checkReservedCompilerNames",
@@ -2785,9 +2837,9 @@ function validateDoStrategyEvidence(
   const contract = strategy === "monad" ? "Monad" : "Applicative";
   diagnostics.push({
     code: "do.missing_strategy_proof",
-    message: `@${strategy} do requires @assert(${contract}(${
-      renderTypeExpr(effect)
-    })): missing ${missing.map((member) => `${runtimeEffect}::${member}`).join(", ")}`,
+    message: `@${strategy} do requires @assert(${contract}(${renderTypeExpr(effect)})): missing ${
+      missing.map((member) => `${runtimeEffect}::${member}`).join(", ")
+    }`,
     span,
   });
 }
@@ -3984,7 +4036,10 @@ function programHasExpr(
 }
 
 function programHasOperatorChains(program: Program): boolean {
-  return programHasExpr(program, (expr) => expr.kind === "operator_chain" || expr.kind === "binary");
+  return programHasExpr(
+    program,
+    (expr) => expr.kind === "operator_chain" || expr.kind === "binary",
+  );
 }
 
 function programHasDoExpressions(program: Program, cache?: WeakMap<object, boolean>): boolean {
@@ -4905,6 +4960,19 @@ function inferRuntimeType(
     if (expr.literalKind === "bool") return finish("bool");
     return finish(expr.inferredType);
   }
+  if (expr.kind === "binary") {
+    return finish(inferScalarOperatorResultType(
+      expr.op,
+      inferRuntimeType(expr.left, env, functions, constructorTypes, memo),
+      inferRuntimeType(expr.right, env, functions, constructorTypes, memo),
+    ));
+  }
+  if (expr.kind === "operator_chain") {
+    return finish(inferOperatorChainResultType(
+      expr,
+      (child) => inferRuntimeType(child, env, functions, constructorTypes, memo),
+    ));
+  }
   if (expr.kind === "var") {
     const localType = stripBorrowType(env.get(expr.name));
     return finish(
@@ -4934,6 +5002,43 @@ function inferRuntimeType(
   }
   if (expr.kind === "range") return finish("range_i32");
   return finish(undefined);
+}
+
+function inferScalarOperatorResultType(
+  op: string,
+  leftType: string | undefined,
+  rightType: string | undefined,
+): string | undefined {
+  const left = scalarDomainRuntimeType(leftType) ?? leftType;
+  const right = scalarDomainRuntimeType(rightType) ?? rightType;
+  if (arithmeticBinaryOp(op)) {
+    if (left === "i32" && right === "i32") return "i32";
+    return undefined;
+  }
+  if (booleanBinaryOp(op)) {
+    if (left === "bool" && right === "bool") return "bool";
+    return undefined;
+  }
+  if (!comparisonBinaryOp(op)) return undefined;
+  if (op === "==" || op === "!=") {
+    if (left !== undefined && left === right) return "bool";
+    return undefined;
+  }
+  if (left === "i32" && right === "i32") return "bool";
+  return undefined;
+}
+
+function inferOperatorChainResultType(
+  expr: Extract<Expr, { kind: "operator_chain" }>,
+  inferChild: (expr: Expr) => string | undefined,
+): string | undefined {
+  let current = inferChild(expr.first);
+  for (const item of expr.rest) {
+    const right = inferChild(item.value);
+    current = inferScalarOperatorResultType(item.op, current, right);
+    if (!current) return undefined;
+  }
+  return current;
 }
 
 function inferProductConstructorType(
@@ -5069,7 +5174,7 @@ function checkBranchHints(
   if (likely !== "likely" || unlikely !== "unlikely") {
     diagnostics.push({
       code: "plugin.annotation",
-      message: "core branch hint annotations @likely and @unlikely must be registered",
+      message: "core branch hint tags @[likely] and @[unlikely] must be registered",
     });
   }
   for (const decl of program.declarations) {
@@ -5584,7 +5689,9 @@ function ensureTypeFragmentMembers(decl: TypeDecl) {
   return replacement.shape.members!;
 }
 
-function syntheticMemberShape(decl: TypeDecl): Extract<TypeExpr, { kind: "type_shape" }> | undefined {
+function syntheticMemberShape(
+  decl: TypeDecl,
+): Extract<TypeExpr, { kind: "type_shape" }> | undefined {
   const stmt = decl.body.statements.find((item) => item.name === TYPE_FRAGMENT_MEMBER_SHAPE);
   if (stmt?.value.kind !== "type_shape") return undefined;
   return stmt.value;
@@ -5893,6 +6000,14 @@ function enumMemberReplacements(
           span: variant.span,
         });
       }
+      if (!enumValueInBackingDomain(variant.value, enumBody.backing)) {
+        diagnostics?.push({
+          code: "type.enum_value",
+          message:
+            `enum variant ${decl.name}::${variant.name} value ${variant.value} is outside ${enumBody.backing}`,
+          span: variant.span,
+        });
+      }
       replacements.set(`${decl.name}::${variant.name}`, { type: decl.name, value: variant.value });
     }
   }
@@ -5923,14 +6038,33 @@ function enumMemberSyntaxDiagnostic(
 }
 
 function isIntegerEnumBacking(type: string): boolean {
-  return type === "i32" || type === "i64" || type === "u32" || type === "u64";
+  const runtime = scalarDomainRuntimeType(type);
+  return runtime === "i32" || runtime === "i64" || runtime === "u32" || runtime === "u64";
 }
 
 function isIntegerEnumValue(value: string, backing: string): boolean {
   if (value.includes(".")) return false;
   const suffix = value.match(/[a-z][a-z0-9]*$/)?.[0];
   if (!suffix) return true;
-  return suffix === backing;
+  return suffix === scalarDomainRuntimeType(backing);
+}
+
+function enumValueInBackingDomain(value: string, backing: string): boolean {
+  const domain = parseRefinedI32Type(backing);
+  if (!domain) return true;
+  const literal = enumIntegerLiteral(value);
+  if (literal === undefined) return false;
+  return refinedI32ContainsLiteral(backing, literal);
+}
+
+function enumIntegerLiteral(value: string): number | undefined {
+  if (value.includes(".")) return undefined;
+  const match = value.match(/^-?[0-9]+/);
+  const source = match?.[0];
+  if (!source) return undefined;
+  const parsed = Number.parseInt(source, 10);
+  if (!Number.isSafeInteger(parsed)) return undefined;
+  return parsed;
 }
 
 function rewriteEnumMembersInBlock(
@@ -7117,6 +7251,19 @@ class ConstEvaluator {
         ? { kind: "bool", value: constUniqueList(list).slots.length === list.slots.length }
         : undefined;
     }
+    const domainBuiltin = evalConstDomainBuiltin(
+      name,
+      args,
+      [...this.typesByName.values()],
+      (diagnostic) => {
+        this.report(
+          diagnostic.code,
+          diagnostic.message,
+          diagnostic.span,
+        );
+      },
+    );
+    if (domainBuiltin) return domainBuiltin;
     const type = args[0]?.kind === "type" ? this.resolveType(args[0]) : undefined;
     if (!type) return undefined;
     if (name === "type_is_product") {
@@ -8722,6 +8869,16 @@ function inferExprType(
       return `${label}${inferExprType(slot.value, context, env) ?? "i32"}`;
     });
     return `struct({${slots.join(", ")}})`;
+  }
+  if (expr.kind === "binary") {
+    return inferScalarOperatorResultType(
+      expr.op,
+      inferExprType(expr.left, context, env),
+      inferExprType(expr.right, context, env),
+    );
+  }
+  if (expr.kind === "operator_chain") {
+    return inferOperatorChainResultType(expr, (child) => inferExprType(child, context, env));
   }
   if (expr.kind === "call" && expr.callee.kind === "var") {
     if (isIoReturnCall(expr)) {
@@ -15213,6 +15370,15 @@ class TypeEvaluator {
         ? { kind: "bool", value: this.uniqueTypeList(list).slots.length === list.slots.length }
         : undefined;
     }
+    const domainBuiltin = evalTypeDomainBuiltin(
+      name,
+      args,
+      [...this.typesByName.values()],
+      (diagnostic) => {
+        this.reportDiagnostic(diagnostic);
+      },
+    );
+    if (domainBuiltin) return domainBuiltin;
     const originalType = args[0]?.kind === "type" ? args[0] : undefined;
     if (name === "type_has_member") {
       if (!originalType) return undefined;
@@ -16667,6 +16833,160 @@ function scalarDomainConstValue(scalar: ScalarReflection): ConstValue {
         : []),
     ],
   };
+}
+
+function evalTypeDomainBuiltin(
+  name: string,
+  args: TypeEvalValue[],
+  types: TypeDecl[],
+  report: (diagnostic: Diagnostic) => void,
+): TypeEvalValue | undefined {
+  const result = evalDomainBuiltin(
+    name,
+    args.map((arg) => refinedDomainFromTypeEvalValue(arg, types)),
+    report,
+    args[0]?.span,
+  );
+  if (!result) return undefined;
+  if (result.kind === "bool") return result;
+  if (result.kind === "number") return result;
+  if (result.kind === "never") return result;
+  return { kind: "type", name: result.name };
+}
+
+function evalConstDomainBuiltin(
+  name: string,
+  args: ConstValue[],
+  types: TypeDecl[],
+  report: (diagnostic: Diagnostic) => void,
+): ConstValue | undefined {
+  const result = evalDomainBuiltin(
+    name,
+    args.map((arg) => refinedDomainFromConstValue(arg, types)),
+    report,
+    args[0]?.span,
+  );
+  if (!result) return undefined;
+  if (result.kind === "bool") return result;
+  if (result.kind === "number") return result;
+  if (result.kind === "never") return result;
+  return { kind: "type", name: result.name };
+}
+
+type DomainBuiltinResult =
+  | { kind: "bool"; value: boolean }
+  | { kind: "number"; value: string }
+  | { kind: "never" }
+  | { kind: "type"; name: string };
+
+function evalDomainBuiltin(
+  name: string,
+  domains: (RefinedI32Domain | undefined)[],
+  report: (diagnostic: Diagnostic) => void,
+  span?: Span,
+): DomainBuiltinResult | undefined {
+  if (!isTypeDomainBuiltinName(name)) return undefined;
+  const left = domains[0];
+  if (!left) return domainBuiltinArgError(name, 1, report, span);
+  if (name === "type_domain_cardinality") {
+    const count = cardinality(left);
+    if (count === undefined) {
+      report({
+        code: "type.domain_cardinality",
+        message: "@type_domain_cardinality requires literal finite domain endpoints",
+        span,
+      });
+      return { kind: "never" };
+    }
+    return { kind: "number", value: String(count) };
+  }
+
+  const right = domains[1];
+  if (!right) return domainBuiltinArgError(name, 2, report, span);
+  if (name === "type_domain_contains") {
+    return { kind: "bool", value: domainContains(left, right) };
+  }
+  if (name === "type_domain_union") {
+    return domainBuiltinTypeResult(unionDomain(left, right), report, span);
+  }
+  if (name === "type_domain_intersect") {
+    return domainBuiltinTypeResult(intersectDomain(left, right), report, span);
+  }
+  if (name === "type_domain_difference") {
+    const difference = subtractDomain(left, right);
+    if (!difference) {
+      report({
+        code: "type.domain_difference",
+        message: "@type_domain_difference could not subtract symbolic domain endpoints",
+        span,
+      });
+      return { kind: "never" };
+    }
+    return domainBuiltinTypeResult(difference, report, span);
+  }
+  return undefined;
+}
+
+function isTypeDomainBuiltinName(name: string): boolean {
+  return name === "type_domain_union" ||
+    name === "type_domain_intersect" ||
+    name === "type_domain_difference" ||
+    name === "type_domain_contains" ||
+    name === "type_domain_cardinality";
+}
+
+function domainBuiltinArgError(
+  name: string,
+  index: number,
+  report: (diagnostic: Diagnostic) => void,
+  span?: Span,
+): DomainBuiltinResult {
+  report({
+    code: "type.domain_builtin_arg",
+    message: `@${name} argument ${index} must be a refined i32 domain`,
+    span,
+  });
+  return { kind: "never" };
+}
+
+function domainBuiltinTypeResult(
+  domain: RefinedI32Domain,
+  report: (diagnostic: Diagnostic) => void,
+  span?: Span,
+): DomainBuiltinResult {
+  if (domainIsEmpty(domain)) {
+    report({
+      code: "type.scalar_domain_empty",
+      message: "scalar domain result is empty",
+      span,
+    });
+    return { kind: "never" };
+  }
+  return { kind: "type", name: renderRefinedI32Domain(domain) };
+}
+
+function refinedDomainFromTypeEvalValue(
+  value: TypeEvalValue | undefined,
+  types: TypeDecl[],
+): RefinedI32Domain | undefined {
+  if (value?.kind !== "type") return undefined;
+  return refinedDomainFromTypeName(value.name, types);
+}
+
+function refinedDomainFromConstValue(
+  value: ConstValue | undefined,
+  types: TypeDecl[],
+): RefinedI32Domain | undefined {
+  if (value?.kind !== "type") return undefined;
+  return refinedDomainFromTypeName(value.name, types);
+}
+
+function refinedDomainFromTypeName(
+  name: string,
+  types: TypeDecl[],
+): RefinedI32Domain | undefined {
+  const resolved = resolveAliasType(name, types) ?? name;
+  return parseRefinedI32Type(resolved) ?? parseRefinedI32Type(name);
 }
 
 function flatTypeSlots(type: string, types: TypeDecl[], seen = new Set<string>()): string[] {
@@ -18733,7 +19053,9 @@ function checkExprImpl(
       if (!fn && callIsStaticTypeExpression(expr, expectedType, types)) {
         return;
       }
-      if (!fn && calleeName && !calleeName.includes("::") && startsUppercase(terminalName(calleeName))) {
+      if (
+        !fn && calleeName && !calleeName.includes("::") && startsUppercase(terminalName(calleeName))
+      ) {
         return;
       }
       let calleeType: string | undefined;
@@ -19289,6 +19611,7 @@ function exprBindingTypeImpl(
     );
   }
   if (expr.kind === "binary") {
+    if (booleanBinaryOp(expr.op)) return finish("bool");
     if (comparisonBinaryOp(expr.op)) return finish("bool");
     const facts = exprI32Facts(expr, env, types, functions, options);
     if (facts) return finish(renderRefinedI32Domain(facts.domain));
@@ -19301,6 +19624,13 @@ function exprBindingTypeImpl(
       );
       if (left === "i32" && right === "i32") return finish("i32");
     }
+  }
+  if (expr.kind === "operator_chain") {
+    const type = inferOperatorChainResultType(
+      expr,
+      (child) => exprBindingType(child, env, types, functions, options),
+    );
+    if (type) return finish(type);
   }
   if (expr.kind === "call") {
     const operation = i32BinaryOperation(expr, functions, options);
@@ -19413,6 +19743,10 @@ function arithmeticBinaryOp(op: string): boolean {
 
 function comparisonBinaryOp(op: string): boolean {
   return op === "==" || op === "!=" || op === "<" || op === "<=" || op === ">" || op === ">=";
+}
+
+function booleanBinaryOp(op: string): boolean {
+  return op === "&&" || op === "||" || op === "^^";
 }
 
 function i32BinaryOperation(
@@ -20290,7 +20624,10 @@ function sumVariantConstructorReturnType(
   const expectedBase = expectedType ? typeNameOf(expectedType) : undefined;
   for (const decl of types) {
     if (decl.normalized?.kind !== "sum") continue;
-    if (expectedBase && typeNameOf(decl.name) !== expectedBase && terminalName(decl.name) !== expectedBase) {
+    if (
+      expectedBase && typeNameOf(decl.name) !== expectedBase &&
+      terminalName(decl.name) !== expectedBase
+    ) {
       continue;
     }
     const variant = decl.normalized.variants.find((item) =>

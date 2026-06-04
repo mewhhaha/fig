@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 type Option(a) = union {
   None, Some(value: a)
 }

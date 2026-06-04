@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 type Point = struct {x: i32, y: i32}
 
 fn Point::eql(a: Point, b: Point) -> bool {

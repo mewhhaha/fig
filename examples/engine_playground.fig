@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 const ecs = @import("engine.ecs");
 const canvas = @import("web.canvas");
 const core = @import("prelude.core");
@@ -376,19 +378,21 @@ pub fn render_frame(
   target: i32,
   width: i32,
   height: i32
-) -> i32 {
-  let input = read_frame_input(host);
-  let world = build_demo_world();
-  let updated = run_frame(world, input);
-  let canvas_handle = canvas.gpu_begin_frame(
-    host,
-    target,
-    width,
-    height
-  );
-  let drawn = draw_render_items(host, canvas_handle, updated);
-  let presented = canvas.gpu_present(host, canvas_handle);
-  canvas_handle + drawn + presented
+) -> io(i32) {
+  do @io(_) {
+    let input = read_frame_input(host);
+    let world = build_demo_world();
+    let updated = run_frame(world, input);
+    canvas_handle <- canvas.gpu_begin_frame(
+      host,
+      target,
+      width,
+      height
+    );
+    let drawn = draw_render_items(host, canvas_handle, updated);
+    presented <- canvas.gpu_present(host, canvas_handle);
+    return(canvas_handle + drawn + presented)
+  }
 }
 
 pub fn playground_probe(host: io) -> i32 {

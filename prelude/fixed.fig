@@ -1,5 +1,6 @@
 const core = @import("prelude.core");
 const layout = @import("prelude.layout");
+const operators = @import("prelude.operators");
 
 // Canonical fixed-size value layouts. These mirror layout.InlineArray but keep
 // update/edit helpers written as structurally recognizable source patterns.

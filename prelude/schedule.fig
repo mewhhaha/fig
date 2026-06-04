@@ -1,3 +1,4 @@
+const operators = @import("prelude.operators");
 // Static schedule metadata. No backend lowering consumes these contracts yet.
 
 type fn Tile(m: count, n: count) {

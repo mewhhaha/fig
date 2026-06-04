@@ -3,6 +3,7 @@ const combinator = @import("./combinator.fig");
 const diagnostic = @import("./diagnostic.fig");
 const parser = @import("./parser.fig");
 const textlex = @import("./textlex.fig");
+const operators = @import("prelude.operators");
 
 fn parse_declaration(
   current: combinator.ParseState,

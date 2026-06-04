@@ -1,4 +1,4 @@
-// expect: operator.missing
+// expect: type.require
 const ops = @import("prelude.operators");
 
 type Box = struct {value: i32}

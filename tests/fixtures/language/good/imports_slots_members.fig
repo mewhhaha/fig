@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 const { map4_i32, lane4_add_i32 } = @import("prelude.array_static");
 
 type Point = struct {x: i32, y: i32}

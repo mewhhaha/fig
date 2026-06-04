@@ -1,4 +1,5 @@
 const core = @import("prelude.core");
+const operators = @import("prelude.operators");
 
 fn core.Pair::first(value: core.Pair(a, b)) -> a {
   value.first

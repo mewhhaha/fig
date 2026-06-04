@@ -1849,6 +1849,10 @@ function addAliasReferenceRoot(
     if (importedNames.has(name)) roots.add(name);
     return;
   }
+  if (hasQualifiedSeparator(name) && importedNames.has(name)) {
+    roots.add(name);
+    return;
+  }
   const prefix = `${alias}.`;
   if (!name.startsWith(prefix)) return;
   const unqualified = name.slice(prefix.length);
@@ -2162,6 +2166,7 @@ function referencedDeclarationNames(
     const match = longestReferencedName(name, nameIndex);
     if (match) {
       refs.add(match);
+      if (member && match !== name && !nameIndex.names.has(name)) refs.add(member);
       return;
     }
     if (member) refs.add(member);
@@ -3833,11 +3838,15 @@ function qualifyExpr(
         arms: expr.arms.map((arm) => {
           const armLocals = new Set(locals);
           collectParamPatternBindings(arm.pattern, armLocals);
-          return withMeta(arm, {
+          const nextArm = withMeta(arm, {
             ...arm,
             pattern: qualifyParamPattern(arm.pattern, alias, names),
             value: qualifyExpr(arm.value, alias, names, armLocals),
           });
+          if (arm.guard) {
+            nextArm.guard = qualifyExpr(arm.guard, alias, names, armLocals);
+          }
+          return nextArm;
         }),
       });
     case "shape":

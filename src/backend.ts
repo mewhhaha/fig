@@ -12218,8 +12218,7 @@ function productConstructorResultType(
       const source = expr.slots[index]!;
       const expected = findLastSlot(
         decl.normalized.shape.slots,
-        (slot, slotIndex) =>
-          (slot.label ?? String(slotIndex)) === (source.label ?? String(index)),
+        (slot, slotIndex) => (slot.label ?? String(slotIndex)) === (source.label ?? String(index)),
       )?.type;
       const actual = exprRuntimeTypeWithLiteralDefault(source.value, ctx);
       bindRuntimeTypePattern(expected, actual, bindings);
@@ -13028,15 +13027,25 @@ function lowerRefinedDomainTryMatch(
 ): Instr[] | undefined {
   if (arms.some((arm) => arm.guard)) return undefined;
   if (value.kind !== "call" || value.callee.kind !== "var") return undefined;
-  const calleeName = refinedDomainTryCalleeName(value.callee.name, ctx.functions);
-  if (!calleeName) return undefined;
-  const checked = value.args.at(-1);
+  const tryInfo = refinedDomainTryInfo(value.callee.name, ctx.functions);
+  if (!tryInfo) return undefined;
+  let checkedArgIndex = tryInfo.checkedArgIndex;
+  if (checkedArgIndex < 0) checkedArgIndex = value.args.length - 1;
+  const checked = value.args[checkedArgIndex];
   if (!checked) return undefined;
-  const callee = ctx.functions.get(calleeName);
+  const callee = ctx.functions.get(tryInfo.calleeName);
   const payloadType = optionPayloadType(callee?.returnType);
   const resolvedPayload = resolveAlias(payloadType, ctx.layouts) ?? payloadType;
-  const payloadFact = scalarFactsFromRefinedI32Type(resolvedPayload) ??
-    scalarFactsFromRefinedI32Type(refinedDomainTypeArg(value.args.at(0), ctx.layouts));
+  let payloadFact = scalarFactsFromRefinedI32Type(resolvedPayload);
+  if (!payloadFact && tryInfo.domainType) {
+    const resolvedDomain = resolveAlias(tryInfo.domainType, ctx.layouts) ?? tryInfo.domainType;
+    payloadFact = scalarFactsFromRefinedI32Type(resolvedDomain);
+  }
+  if (!payloadFact) {
+    payloadFact = scalarFactsFromRefinedI32Type(
+      refinedDomainTypeArg(value.args.at(0), ctx.layouts),
+    );
+  }
   if (!payloadFact) return undefined;
   const someArm = arms.find((arm) =>
     arm.pattern.kind === "constructor" && arm.pattern.name === "Some"
@@ -13097,17 +13106,52 @@ function isRefinedDomainTryCallee(name: string): boolean {
     name.endsWith("i32::try_domain") || name.includes("i32__try_domain__");
 }
 
-function refinedDomainTryCalleeName(
+type RefinedDomainTryInfo = {
+  calleeName: string;
+  checkedArgIndex: number;
+  domainType?: string;
+};
+
+function refinedDomainTryInfo(
   name: string,
   functions: ReadonlyMap<string, FnDecl>,
-): string | undefined {
-  if (isRefinedDomainTryCallee(name)) return name;
+): RefinedDomainTryInfo | undefined {
+  if (isRefinedDomainTryCallee(name)) {
+    return { calleeName: name, checkedArgIndex: -1 };
+  }
   const split = name.lastIndexOf(".");
+  if (split > 0) {
+    const attachedName = `${name.slice(0, split)}::${name.slice(split + 1)}`;
+    if (isRefinedDomainTryCallee(attachedName) && functions.has(attachedName)) {
+      return { calleeName: attachedName, checkedArgIndex: -1 };
+    }
+  }
+  const fn = functions.get(name);
+  const wrapper = refinedDomainTryWrapperInfo(fn);
+  if (wrapper) return { ...wrapper, calleeName: name };
   if (split <= 0) return undefined;
   const attachedName = `${name.slice(0, split)}::${name.slice(split + 1)}`;
-  return isRefinedDomainTryCallee(attachedName) && functions.has(attachedName)
-    ? attachedName
-    : undefined;
+  const attached = functions.get(attachedName);
+  const attachedWrapper = refinedDomainTryWrapperInfo(attached);
+  return attachedWrapper ? { ...attachedWrapper, calleeName: attachedName } : undefined;
+}
+
+function refinedDomainTryWrapperInfo(
+  fn: FnDecl | undefined,
+): Omit<RefinedDomainTryInfo, "calleeName"> | undefined {
+  if (!fn) return undefined;
+  const payloadType = optionPayloadType(fn.returnType);
+  if (!payloadType) return undefined;
+  const expr = fn.body.expr;
+  if (fn.body.statements.length > 0 || expr?.kind !== "call" || expr.callee.kind !== "var") {
+    return undefined;
+  }
+  if (!isRefinedDomainTryCallee(expr.callee.name)) return undefined;
+  const checkedArg = expr.args.at(-1);
+  if (checkedArg?.kind !== "var") return undefined;
+  const checkedArgIndex = fn.params.findIndex((param) => param.name === checkedArg.name);
+  if (checkedArgIndex < 0) return undefined;
+  return { checkedArgIndex, domainType: payloadType };
 }
 
 function optionPayloadType(type: string | undefined): string | undefined {
@@ -16319,6 +16363,12 @@ function binaryOp(op: string): string {
       return "i32.gt_s";
     case ">=":
       return "i32.ge_s";
+    case "&&":
+      return "i32.and";
+    case "||":
+      return "i32.or";
+    case "^^":
+      return "i32.xor";
     default:
       throw new Error(`backend does not support operator ${op}`);
   }

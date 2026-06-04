@@ -2,6 +2,7 @@ const combinator = @import("./combinator.fig");
 const span = @import("./span.fig");
 const textlex = @import("./textlex.fig");
 const token = @import("./token.fig");
+const operators = @import("prelude.operators");
 
 type TextInput = struct {
   source: textlex.TextTokenStream,

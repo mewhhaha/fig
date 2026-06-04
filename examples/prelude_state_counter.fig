@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 const monad = @import("prelude.monad");
 const core = @import("prelude.core");
 

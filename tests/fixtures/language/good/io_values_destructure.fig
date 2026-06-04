@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 const clock = @external("clock", fn(host: io) -> io(i32));
 
 type fn Pair() -> struct {

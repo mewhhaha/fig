@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 type fn InlineArray(n: count, a: type) -> type {
   let InlineArray = {n*a};
   struct(InlineArray)

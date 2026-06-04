@@ -1,6 +1,7 @@
 const ast = @import("./ast.fig");
 const combinator = @import("./combinator.fig");
 const textlex = @import("./textlex.fig");
+const operators = @import("prelude.operators");
 
 type SummaryKind = enum(i32) {
   Declarations = 0,
@@ -96,6 +97,10 @@ fn window(
 
 fn token_window_state(value: TokenWindow) -> combinator.ParseState {
   combinator.state(value.start, value.end)
+}
+
+fn full_window_state(source: textlex.TextTokenStream) -> combinator.ParseState {
+  token_window_state(full_window(source))
 }
 
 fn token_window_contains(value: TokenWindow, index: i32) -> bool {

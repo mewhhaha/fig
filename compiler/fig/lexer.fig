@@ -1,6 +1,7 @@
 const span = @import("./span.fig");
 const source = @import("./source.fig");
 const token = @import("./token.fig");
+const operators = @import("prelude.operators");
 
 type CharClass = union {
   Whitespace, Lower, Upper, Digit, Quote, Slash, SymbolChar,

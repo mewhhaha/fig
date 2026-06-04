@@ -76,6 +76,15 @@ fn score(left: bool, right: bool) -> i32 match {
 }
 ```
 
+Match arms can carry branch hint tags:
+
+```fig
+match value {
+  @[likely] 0 => fast_path(),
+  @[unlikely] _ => fallback(),
+}
+```
+
 Boolean `if` is pure expression sugar:
 
 ```fig

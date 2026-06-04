@@ -1,21 +1,51 @@
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
 import {
-  compileArtifactsFromSource,
+  compileArtifactsFromSource as compileArtifactsFromSourceRaw,
+  type CompileArtifactsOptions,
+  type CompileArtifactsResult,
+  type CompileArtifactsWithWatResult,
+  type CompileSourceOptions,
   createFigHost,
   decodeFigValue,
   encodeFigValue,
   instantiateFig,
   parseFigAbiManifest,
-  wasmFromSource,
+  wasmFromSource as wasmFromSourceRaw,
 } from "../src/mod.ts";
+import {
+  resolveProjectModule as resolveModule,
+  withOperatorPrelude,
+} from "./operator_prelude.ts";
 
-const resolveModule = async (moduleName: string) => {
-  try {
-    return await Deno.readTextFile(`${moduleName.replaceAll(".", "/")}.fig`);
-  } catch {
-    return undefined;
+const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
+  {
+    const prepared = withOperatorPrelude(source, options);
+    return wasmFromSourceRaw(prepared.source, prepared.options);
+  };
+function compileArtifactsFromSource(
+  source: string,
+  options?: CompileArtifactsOptions & { includeWat?: true },
+): Promise<CompileArtifactsWithWatResult>;
+function compileArtifactsFromSource(
+  source: string,
+  options: CompileArtifactsOptions & { includeWat: false },
+): Promise<CompileArtifactsResult>;
+function compileArtifactsFromSource(
+  source: string,
+  options: CompileArtifactsOptions = {},
+): Promise<CompileArtifactsResult> {
+  const prepared = withOperatorPrelude(source, options);
+  if (prepared.options.includeWat === false) {
+    return compileArtifactsFromSourceRaw(
+      prepared.source,
+      prepared.options as CompileArtifactsOptions & { includeWat: false },
+    );
   }
-};
+  return compileArtifactsFromSourceRaw(
+    prepared.source,
+    prepared.options as CompileArtifactsOptions & { includeWat?: true },
+  );
+}
 
 function wasmWithCustomSection(name: string, payload: string): Uint8Array {
   const encoder = new TextEncoder();

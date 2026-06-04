@@ -1,3 +1,4 @@
+const operators = @import("prelude.operators");
 type Span = struct {
   start: i32,
   end: i32,

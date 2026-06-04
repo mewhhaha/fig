@@ -27,8 +27,13 @@ export interface ResolvedTypeHole {
 export type Declaration = FnDecl | LetDecl | ConstDecl | OperatorDecl | TypeDecl | TypeAssertDecl;
 export type BranchHint = string;
 
+export interface DeclarationTag extends AstNodeMeta {
+  name: string;
+}
+
 export interface EffectImport extends AstNodeMeta {
   kind: "import";
+  tags?: DeclarationTag[];
   name: string;
   externalName?: string;
   type: string;
@@ -37,6 +42,7 @@ export interface EffectImport extends AstNodeMeta {
 
 export interface SourceImport extends AstNodeMeta {
   kind: "source_import";
+  tags?: DeclarationTag[];
   module: string;
   alias?: string;
   bindings?: SourceImportBinding[];
@@ -49,6 +55,7 @@ export interface SourceImportBinding extends AstNodeMeta {
 export interface FnDecl extends AstNodeMeta {
   kind: "fn";
   doc?: string;
+  tags?: DeclarationTag[];
   public: boolean;
   name: string;
   externalName?: string;
@@ -77,6 +84,7 @@ export interface FnDecl extends AstNodeMeta {
 export interface LetDecl extends AstNodeMeta {
   kind: "let";
   doc?: string;
+  tags?: DeclarationTag[];
   name: string;
   type?: string;
   typeSpan?: Span;
@@ -87,6 +95,7 @@ export interface LetDecl extends AstNodeMeta {
 export interface ConstDecl extends AstNodeMeta {
   kind: "const";
   doc?: string;
+  tags?: DeclarationTag[];
   name: string;
   type?: string;
   typeSpan?: Span;
@@ -97,6 +106,7 @@ export interface ConstDecl extends AstNodeMeta {
 export interface OperatorDecl extends AstNodeMeta {
   kind: "operator";
   doc?: string;
+  tags?: DeclarationTag[];
   name: string;
   symbol: string;
   fixity: "#infixl" | "#infixr" | "#infix";
@@ -117,6 +127,7 @@ export interface DestructureLetDecl extends AstNodeMeta {
 export interface TypeAssertDecl extends AstNodeMeta {
   kind: "type_assert";
   doc?: string;
+  tags?: DeclarationTag[];
   value: TypeExpr;
 }
 
@@ -130,6 +141,7 @@ export interface DebugTraceStmt extends AstNodeMeta {
 export interface TypeDecl extends AstNodeMeta {
   kind: "type";
   doc?: string;
+  tags?: DeclarationTag[];
   name: string;
   params: TypeParam[];
   resultKind: TypeResultKind;

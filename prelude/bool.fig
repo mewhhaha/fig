@@ -1,1 +1,2 @@
 const scalar = @import("prelude.scalar");
+const operators = @import("prelude.operators");

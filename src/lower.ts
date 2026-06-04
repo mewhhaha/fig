@@ -5,6 +5,7 @@ import type {
   ConstDecl,
   DebugTraceStmt,
   Declaration,
+  DeclarationTag,
   DestructureLetDecl,
   DoStatement,
   EffectImport,
@@ -21,11 +22,11 @@ import type {
   Statement,
   StaticForSource,
   TypeAnnotationHole,
+  TypeAssertDecl,
   TypeBlock,
   TypeCountExpr,
   TypeDecl,
   TypeExpr,
-  TypeAssertDecl,
   TypeMemberExpr,
   TypeParam,
   TypePattern,
@@ -39,7 +40,6 @@ import {
   annotationBranchHint,
   compilerSpecialForm,
   defaultCompilerPluginRegistry,
-  staticBuiltinName,
 } from "./plugins.ts";
 import type { SyntaxNodeLike } from "../generated/baba-workbench/ast/types.ts";
 import { projectNode } from "../generated/baba-workbench/ast/visitor.ts";
@@ -65,16 +65,21 @@ export function lowerProgram(
   projectNode({ type: "Program", text: root.text });
   const children = named(root);
   const decls = children.filter(is("Decl"));
-  const sourceImportConsts = decls.map(unwrap).filter(isSourceImportConst).map(
-    lowerSourceImportConst,
-  );
-  const externalConstImports = decls.map(unwrap).filter(isExternalConst).map(
-    lowerExternalConst,
-  );
-  const declarations = decls.filter((decl) => {
-    const unwrapped = unwrap(decl);
-    return !isSourceImportConst(unwrapped) && !isExternalConst(unwrapped);
-  }).map(lowerDecl);
+  const sourceImportConsts: SourceImport[] = [];
+  const externalConstImports: EffectImport[] = [];
+  const declarations: Declaration[] = [];
+  for (const decl of decls) {
+    const unwrapped = declarationPayload(decl);
+    if (isSourceImportConst(unwrapped)) {
+      sourceImportConsts.push(lowerSourceImportDecl(decl));
+      continue;
+    }
+    if (isExternalConst(unwrapped)) {
+      externalConstImports.push(lowerExternalImportDecl(decl));
+      continue;
+    }
+    declarations.push(lowerDecl(decl));
+  }
   declarations.push(...lowerInlineTypeMemberFns(declarations));
   return hideAstMetadata({
     moduleName: undefined,
@@ -82,6 +87,79 @@ export function lowerProgram(
     sourceImports: sourceImportConsts,
     declarations,
   }) as Program;
+}
+
+function declarationPayload(node: Node): Node {
+  if (node.type === "Decl") {
+    const tagged = optional(node, "TaggedDecl");
+    if (tagged) return declarationPayload(tagged);
+    for (const child of named(node)) return declarationPayload(child);
+    return unwrap(node);
+  }
+  if (node.type === "TaggedDecl") {
+    const body = optional(node, "DeclBody");
+    if (body) return declarationPayload(body);
+    for (const child of named(node)) {
+      if (child.type === "TagList") continue;
+      return declarationPayload(child);
+    }
+    return unwrap(node);
+  }
+  if (node.type === "DeclBody") {
+    for (const child of named(node)) return declarationPayload(child);
+  }
+  return unwrap(node);
+}
+
+function declarationTagSource(node: Node): Node | undefined {
+  if (node.type === "TaggedDecl") return node;
+  if (node.type !== "Decl") return undefined;
+  return optional(node, "TaggedDecl");
+}
+
+function lowerDeclarationTags(node: Node): DeclarationTag[] {
+  const tags: DeclarationTag[] = [];
+  const source = declarationTagSource(node);
+  if (!source) return tags;
+  for (const child of named(source)) {
+    if (child.type !== "TagList") continue;
+    tags.push(...lowerTagList(child));
+  }
+  return tags;
+}
+
+function lowerTagList(node: Node): DeclarationTag[] {
+  const tags: DeclarationTag[] = [];
+  for (const child of descendants(node, "Tag")) {
+    tags.push(lowerTag(child));
+  }
+  return tags;
+}
+
+function lowerTag(node: Node): DeclarationTag {
+  const nameNode = first(node, "LowerIdent");
+  return {
+    ...meta(node, nameNode),
+    name: text(nameNode, "tag name"),
+  };
+}
+
+function withDeclarationTags<t extends Declaration | EffectImport | SourceImport>(
+  lowered: t,
+  node: Node,
+): t {
+  const tags = lowerDeclarationTags(node);
+  if (tags.length > 0) lowered.tags = tags;
+  if (lowered.kind !== "import" && lowered.kind !== "source_import") {
+    const value = docText(node);
+    if (value !== undefined) lowered.doc = value;
+  }
+  return lowered;
+}
+
+function lowerExternalImportDecl(node: Node): EffectImport {
+  const lowered = lowerExternalConst(declarationPayload(node));
+  return withDeclarationTags(lowered, node);
 }
 
 function lowerExternalConst(node: Node): EffectImport {
@@ -92,6 +170,11 @@ function lowerExternalConst(node: Node): EffectImport {
   const externalName = JSON.parse(stringNode.text);
   const type = first(external, "FnType").text;
   return { kind: "import", ...meta(node, nameNode), name, externalName, type, effects: [] };
+}
+
+function lowerSourceImportDecl(node: Node): SourceImport {
+  const lowered = lowerSourceImportConst(declarationPayload(node));
+  return withDeclarationTags(lowered, node);
 }
 
 function lowerSourceImportConst(node: Node): SourceImport {
@@ -139,20 +222,27 @@ function isDeclarationBuiltinConst(node: Node, name: string): boolean {
 }
 
 function lowerDecl(node: Node): Declaration {
-  const decl = unwrap(node);
+  const decl = declarationPayload(node);
+  let lowered: Declaration;
   switch (decl.type) {
     case "TypeAssertDecl":
-      return lowerTypeAssert(decl);
+      lowered = lowerTypeAssert(decl);
+      break;
     case "TypeSugarDecl":
-      return lowerTypeSugarDecl(decl);
+      lowered = lowerTypeSugarDecl(decl);
+      break;
     case "TypeFnDecl":
-      return lowerTypeDecl(decl);
+      lowered = lowerTypeDecl(decl);
+      break;
     case "OperatorDecl":
-      return lowerOperatorDecl(decl);
+      lowered = lowerOperatorDecl(decl);
+      break;
     case "ConstDecl":
-      return lowerConst(decl);
+      lowered = lowerConst(decl);
+      break;
     case "FnDecl":
-      return lowerFn(decl);
+      lowered = lowerFn(decl);
+      break;
     case "TopLetDecl": {
       const lowered = lowerLet(decl);
       if (lowered.kind === "destructure_let") {
@@ -162,11 +252,12 @@ function lowerDecl(node: Node): Declaration {
           spanFor(decl),
         );
       }
-      return lowered;
+      return withDeclarationTags(lowered, node);
     }
     default:
       return unreachable(decl, "declaration");
   }
+  return withDeclarationTags(lowered, node);
 }
 
 function lowerOperatorDecl(node: Node): OperatorDecl {
@@ -280,7 +371,16 @@ function lowerFnBody(node: Node, params: Param[]): BlockExpr {
 
 function lowerBranchHint(node: Node | undefined): { branchHint: BranchHint } | undefined {
   if (!node) return undefined;
-  const hint = staticBuiltinName(node.text.replace(/\s+/g, ""));
+  const tagList = optional(node, "TagList");
+  const tags = lowerTagList(tagList ?? node);
+  if (tags.length !== 1) {
+    fail(
+      "parse.lower",
+      "branch hint tag list must contain exactly one tag",
+      spanFor(tagList ?? node),
+    );
+  }
+  const hint = tags[0]!.name;
   return { branchHint: annotationBranchHint(hint) ?? hint };
 }
 
@@ -415,13 +515,12 @@ function lowerTypeSugarBlock(name: string, node: Node): TypeBlock {
     };
   }
   if (node.type === "TypeSugarEnum") {
-    const backingNode = first(node, "ScalarCarrier");
-    const backing = text(backingNode, "enum backing type");
+    const backingNode = typeSugarEnumBackingNode(node);
     return {
       kind: "type_block",
       ...spanOnly(node),
       statements: [],
-      expr: typeRef(backing, backingNode),
+      expr: lowerTypeExpr(backingNode),
     };
   }
   return {
@@ -432,11 +531,21 @@ function lowerTypeSugarBlock(name: string, node: Node): TypeBlock {
   };
 }
 
+function typeSugarEnumBackingNode(node: Node): Node {
+  const backing = optional(node, "EnumBacking");
+  if (backing) return backing;
+  const domain = optional(node, "ScalarDomainType");
+  if (domain) return domain;
+  const carrier = optional(node, "ScalarCarrier");
+  if (carrier) return carrier;
+  return first(node, "EnumBacking");
+}
+
 function lowerTypeSugarEnumBody(node: Node): EnumTypeBody {
-  const backingNode = first(node, "ScalarCarrier");
+  const backingNode = typeSugarEnumBackingNode(node);
   return {
     ...spanOnly(node),
-    backing: text(backingNode, "enum backing type"),
+    backing: text(backingNode, "enum backing type").replace(/\s+/g, ""),
     variants: descendants(node, "TypeSugarEnumVariant").map((variant) => {
       const nameNode = first(variant, "PascalIdent");
       return {
@@ -1033,7 +1142,16 @@ function countAtom(text: string, span?: Span): TypeCountExpr {
 function unwrapType(node: Node): Node {
   const children = named(node);
   if (
-    ["TypeExpr", "TypeNonFnExpr", "TypePrimary", "TypeCall", "TypeBinary", "TypeUnion", "TypeAtom"]
+    [
+      "EnumBacking",
+      "TypeExpr",
+      "TypeNonFnExpr",
+      "TypePrimary",
+      "TypeCall",
+      "TypeBinary",
+      "TypeUnion",
+      "TypeAtom",
+    ]
       .includes(node.type) &&
     children.length === 1
   ) {

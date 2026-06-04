@@ -1,6 +1,7 @@
 const fixed = @import("prelude.fixed");
 const core = @import("prelude.core");
 const layout = @import("prelude.layout");
+const operators = @import("prelude.operators");
 
 // Builder fallback for fixed values when direct slot literals or spreads are
 // not convenient. Fixed updates should prefer prelude.fixed.Array spread forms.

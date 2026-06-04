@@ -1,5 +1,6 @@
 const option = @import("prelude.option");
 const core = @import("prelude.core");
+const operators = @import("prelude.operators");
 
 fn view(
   root: root,

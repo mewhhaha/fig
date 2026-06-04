@@ -3,6 +3,7 @@ const combinator = @import("./combinator.fig");
 const core = @import("prelude.core");
 const diagnostic = @import("./diagnostic.fig");
 const layout = @import("prelude.layout");
+const monad = @import("prelude.monad");
 const option = @import("prelude.option");
 const vec = @import("prelude.vec");
 const parser = @import("./parser.fig");
@@ -10,6 +11,7 @@ const span = @import("./span.fig");
 const textlex = @import("./textlex.fig");
 const textmodel = @import("./textmodel.fig");
 const textsummary = @import("./textsummary.fig");
+const operators = @import("prelude.operators");
 
 type CheckedFactKind = enum(i32) {
   CheckedDeclarationType = 1,
@@ -26,6 +28,21 @@ type CheckedFactKind = enum(i32) {
   WasmByteRecord = 12
 }
 
+type FactRecordScanKind = enum(i32) {
+  ScanCheckedDeclaration = 1,
+  ScanCheckedExpression = 2,
+  ScanCheckedExpressionChild = 3,
+  ScanCheckedExpressionShape = 4,
+  ScanCheckedLocal = 5,
+  ScanLoweredExport = 6
+}
+
+type WasmRecordScanKind = enum(i32) {
+  ScanWasmFunctionRecord = 1,
+  ScanWasmSectionRecord = 2,
+  ScanWasmByteRecord = 3
+}
+
 type CheckedLocalFactKind = enum(i32) {
   LocalLet = 1,
   LocalTypeAssert = 2
@@ -34,6 +51,21 @@ type CheckedLocalFactKind = enum(i32) {
 type FactContext = struct {
   source: textlex.TextTokenStream,
 }
+
+const summary_resolved_declared_type_class =
+  textmodel.SummaryKind::ResolvedDeclaredTypeClassSignature;
+const summary_resolved_value_body_type_class =
+  textmodel.SummaryKind::ResolvedValueBodyTypeClassSignature;
+const summary_resolved_simple_body_type_check =
+  textmodel.SummaryKind::ResolvedSimpleBodyTypeCheckSignature;
+const summary_simple_body_type_check =
+  textmodel.SummaryKind::SimpleBodyTypeCheckSignature;
+const summary_resolved_declared_abi_class =
+  textmodel.SummaryKind::ResolvedDeclaredAbiClassSignature;
+const summary_resolved_value_body_abi_class =
+  textmodel.SummaryKind::ResolvedValueBodyAbiClassSignature;
+const summary_resolved_export_abi =
+  textmodel.SummaryKind::ResolvedExportAbiSignature;
 
 type CheckedLocalScan = struct {
   index: i32,
@@ -208,6 +240,12 @@ fn wasm_byte_context(
   }
 }
 
+fn wasm_byte_context_window_state(
+  context_value: WasmByteContext
+) -> combinator.ParseState {
+  textmodel.full_window_state(context_value.source)
+}
+
 type WasmCallLowering = struct {
   context_value: WasmByteContext,
   codes: layout.HeapArray(i32),
@@ -227,20 +265,48 @@ type WasmBytePayloadState = struct {
   function_index: i32,
 }
 
-type WasmByteCursor = struct {
-  current: combinator.ParseState,
-  function_index: i32,
+fn wasm_payload_state_reader(
+  kind: WasmBytePayloadKind
+) -> monad.Reader(WasmByteContext, WasmBytePayloadState) {
+  do @monad(monad.Reader(WasmByteContext, _)) {
+    current <- monad.Reader::asks(wasm_byte_context_window_state);
+    monad.Reader::pure(WasmBytePayloadState {
+      kind: kind,
+      current: current,
+      function_index: 0,
+    })
+  }
+}
+
+fn WasmByteContext::payload_state(
+  context_value: WasmByteContext,
+  kind: WasmBytePayloadKind
+) -> WasmBytePayloadState {
+  monad.Reader::run(
+    wasm_payload_state_reader(kind),
+    context_value
+  )
 }
 
 fn context(source: textlex.TextTokenStream) -> FactContext {
   FactContext {source: source}
 }
 
+fn fact_context_source(context_value: FactContext) -> textlex.TextTokenStream {
+  context_value.source
+}
+
 fn FactContext::summary(
   context_value: FactContext,
   kind: textmodel.SummaryKind
 ) -> i32 {
-  textsummary.run(context_value.source, kind, 0)
+  monad.Reader::run(fact_summary_reader(kind), context_value)
+}
+
+fn fact_context_window_state(
+  context_value: FactContext
+) -> combinator.ParseState {
+  textmodel.full_window_state(fact_context_source(context_value))
 }
 
 fn fact_pair_signature(
@@ -262,6 +328,87 @@ fn fact_triple_signature(
   textmodel.signature_mix(with_pair, third)
 }
 
+fn fact_summary_reader(kind: textmodel.SummaryKind) -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    source <- monad.Reader::asks(fact_context_source);
+    monad.Reader::pure(textsummary.run(source, kind, 0))
+  }
+}
+
+fn checked_declaration_type_signature_reader() -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    declared <- fact_summary_reader(
+      summary_resolved_declared_type_class
+    );
+    body <- fact_summary_reader(
+      summary_resolved_value_body_type_class
+    );
+    check <- fact_summary_reader(
+      summary_resolved_simple_body_type_check
+    );
+    monad.Reader::pure(
+      fact_triple_signature(
+        CheckedFactKind::CheckedDeclarationType,
+        declared,
+        body,
+        check
+      )
+    )
+  }
+}
+
+fn checked_diagnostic_signature_reader() -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    declared <- fact_summary_reader(
+      summary_simple_body_type_check
+    );
+    resolved <- fact_summary_reader(
+      summary_resolved_simple_body_type_check
+    );
+    monad.Reader::pure(
+      fact_pair_signature(
+        CheckedFactKind::CheckedDiagnostic,
+        declared,
+        resolved
+      )
+    )
+  }
+}
+
+fn lowered_declaration_signature_reader() -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    declared <- fact_summary_reader(
+      summary_resolved_declared_abi_class
+    );
+    body <- fact_summary_reader(
+      summary_resolved_value_body_abi_class
+    );
+    exports <- fact_summary_reader(
+      summary_resolved_export_abi
+    );
+    monad.Reader::pure(
+      fact_triple_signature(
+        CheckedFactKind::LoweredDeclaration,
+        declared,
+        body,
+        exports
+      )
+    )
+  }
+}
+
+fn fact_record_signature_reader(
+  kind: FactRecordScanKind
+) -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    context_value <- monad.Reader::ask();
+    current <- monad.Reader::asks(fact_context_window_state);
+    monad.Reader::pure(
+      FactContext::fact_record_scan(context_value, kind, current, 0)
+    )
+  }
+}
+
 fn checked_type_status_diagnostic_code(status: i32) -> i32 {
   match status == parser.text_type_check_mismatch_tag() {
     true => diagnostic.code_score(diagnostic.CodeTypeMismatch),
@@ -280,10 +427,7 @@ fn checked_decl_fact(
     current.cursor,
     decl
   );
-  let name_hash = textlex.text_hash_at(
-    source,
-    parser.text_declaration_name_index(source, current.cursor, decl)
-  );
+  let name_hash = parser.text_declaration_name_hash(source, current.cursor, decl);
   let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
     source,
     current.cursor,
@@ -354,15 +498,37 @@ fn lowered_value_tag_for_abi(abi_class: i32) -> i32 {
   abi_class
 }
 
-fn lowered_value_has_primary(abi_class: i32) -> bool {
-  let is_scalar = abi_class == parser.text_abi_class_scalar_tag();
-  match is_scalar {
+fn abi_class_is_scalar(abi_class: i32) -> bool {
+  abi_class == parser.text_abi_class_scalar_tag()
+}
+
+fn abi_class_is_handle(abi_class: i32) -> bool {
+  abi_class == parser.text_abi_class_handle_tag()
+}
+
+fn abi_class_is_function(abi_class: i32) -> bool {
+  abi_class == parser.text_abi_class_function_tag()
+}
+
+fn abi_class_is_scalar_or_function(abi_class: i32) -> bool {
+  match abi_class_is_scalar(abi_class) {
     true => true,
-    false => match abi_class == parser.text_abi_class_handle_tag() {
+    false => abi_class_is_function(abi_class),
+  }
+}
+
+fn abi_class_is_runtime_value(abi_class: i32) -> bool {
+  match abi_class_is_scalar(abi_class) {
+    true => true,
+    false => match abi_class_is_handle(abi_class) {
       true => true,
-      false => abi_class == parser.text_abi_class_function_tag(),
+      false => abi_class_is_function(abi_class),
     },
   }
+}
+
+fn lowered_value_has_primary(abi_class: i32) -> bool {
+  abi_class_is_runtime_value(abi_class)
 }
 
 fn lowered_value_primary(
@@ -390,10 +556,7 @@ fn checked_expr_fact(
     current.cursor,
     decl
   );
-  let name_hash = textlex.text_hash_at(
-    source,
-    parser.text_declaration_name_index(source, current.cursor, decl)
-  );
+  let name_hash = parser.text_declaration_name_hash(source, current.cursor, decl);
   let root_type = parser.text_declaration_value_body_type_class_tag(
     source,
     current.cursor,
@@ -552,10 +715,7 @@ fn checked_expr_shape_fact(
   );
   CheckedExprShapeFact {
     kind_tag: kind_tag,
-    name_hash: textlex.text_hash_at(
-      source,
-      parser.text_declaration_name_index(source, current.cursor, decl)
-    ),
+    name_hash: parser.text_declaration_name_hash(source, current.cursor, decl),
     root_kind: parser.text_declaration_root_head_kind_tag(
       source,
       current.cursor,
@@ -637,12 +797,12 @@ fn checked_expr_shape_fact(
       current.cursor,
       decl
     ),
-    name_token_count: parser.text_declaration_value_name_token_count_delta(
+    name_token_count: parser.text_declaration_value_shape_name_token_count_delta(
       source,
       current.cursor,
       decl
     ),
-    name_token_signature_hash: parser.text_declaration_value_name_token_signature_delta(
+    name_token_signature_hash: parser.text_declaration_value_shape_name_token_signature_delta(
       source,
       current.cursor,
       decl,
@@ -747,9 +907,10 @@ fn lowered_export_fact(
     current.cursor
   );
   LoweredExportFact {
-    name_hash: textlex.text_hash_at(
+    name_hash: parser.text_declaration_name_hash(
       source,
-      parser.text_declaration_name_index(source, current.cursor, result.value.decl)
+      current.cursor,
+      result.value.decl
     ),
     param_count: ast.decl_param_count(result.value.decl),
     return_abi_class: parser.text_abi_class_tag_for_type_class(return_type),
@@ -974,13 +1135,10 @@ fn wasm_small_immediate_limit() -> i32 {
 }
 
 fn wasm_source_digit_value(code: i32) -> core.Option(i32) {
-  let above_lower = code >= textlex.TextCharCode::Digit0;
-  match above_lower {
-    true => match code <= textlex.TextCharCode::Digit9 {
-      true => option.some(code - textlex.TextCharCode::Digit0),
-      false => option.none(),
-    },
-    false => option.none(),
+  match code {
+    _ if code >= textlex.TextCharCode::Digit0 && code <= textlex.TextCharCode::Digit9 =>
+      option.some(code - textlex.TextCharCode::Digit0),
+    _ => option.none(),
   }
 }
 
@@ -1039,12 +1197,10 @@ fn wasm_bool_literal_immediate(
   token_span: span.Span
 ) -> core.Option(i32) {
   let first_code = wasm_source_code_at(codes, base_offset, token_span.start);
-  match first_code == textlex.TextCharCode::LowerT {
-    true => option.some(1),
-    false => match first_code == textlex.TextCharCode::LowerF {
-      true => option.some(0),
-      false => option.none(),
-    },
+  match first_code {
+    textlex.TextCharCode::LowerT => option.some(1),
+    textlex.TextCharCode::LowerF => option.some(0),
+    _ => option.none(),
   }
 }
 
@@ -1073,19 +1229,27 @@ fn wasm_scalar_body_immediate_from_root(
     current.cursor,
     decl
   );
-  match root_kind == parser.text_expression_root_number_tag() {
-    true => wasm_small_u7_decimal_literal(
-      codes,
-      context_value.base_offset,
-      token_span
-    ),
-    false => match root_kind == parser.text_expression_root_bool_tag() {
-      true => wasm_bool_literal_immediate(
+  let is_standalone = parser.text_scalar_literal_is_standalone(
+    context_value.source,
+    start,
+    limit
+  );
+  match is_standalone {
+    false => option.none(),
+    true => match root_kind == parser.text_expression_root_number_tag() {
+      true => wasm_small_u7_decimal_literal(
         codes,
         context_value.base_offset,
         token_span
       ),
-      false => option.none(),
+      false => match root_kind == parser.text_expression_root_bool_tag() {
+        true => wasm_bool_literal_immediate(
+          codes,
+          context_value.base_offset,
+          token_span
+        ),
+        false => option.none(),
+      },
     },
   }
 }
@@ -1166,24 +1330,21 @@ fn wasm_section_total_size(payload_size: i32) -> i32 {
 }
 
 fn wasm_val_type_for_abi(abi_class: i32) -> i32 {
-  match abi_class == parser.text_abi_class_scalar_tag() {
-    true => wasm_i32_val_type(),
-    false => match abi_class == parser.text_abi_class_handle_tag() {
-      true => wasm_externref_val_type(),
-      false => match abi_class == parser.text_abi_class_function_tag() {
-        true => wasm_i32_val_type(),
-        false => wasm_no_val_type(),
-      },
+  match abi_class_is_handle(abi_class) {
+    true => wasm_externref_val_type(),
+    false => match abi_class_is_scalar_or_function(abi_class) {
+      true => wasm_i32_val_type(),
+      false => wasm_no_val_type(),
     },
   }
 }
 
 fn wasm_body_opcode_for_abi(abi_class: i32) -> i32 {
-  match abi_class == parser.text_abi_class_scalar_tag() {
+  match abi_class_is_scalar(abi_class) {
     true => wasm_const_opcode(),
-    false => match abi_class == parser.text_abi_class_handle_tag() {
+    false => match abi_class_is_handle(abi_class) {
       true => wasm_const_opcode(),
-      false => match abi_class == parser.text_abi_class_function_tag() {
+      false => match abi_class_is_function(abi_class) {
         true => wasm_call_opcode(),
         false => wasm_drop_opcode(),
       },
@@ -1375,6 +1536,35 @@ fn wasm_instruction_plan(
   wasm_single_instruction_body_plan(instruction)
 }
 
+fn wasm_const_instruction_plan(value: i32) -> WasmBodyPlan {
+  wasm_instruction_plan(
+    wasm_body_instruction(
+      wasm_const_opcode(),
+      value
+    )
+  )
+}
+
+fn wasm_local_get_instruction_plan(index: i32) -> WasmBodyPlan {
+  wasm_instruction_plan(
+    wasm_body_instruction(
+      wasm_local_get_opcode(),
+      index
+    )
+  )
+}
+
+fn wasm_small_scalar_local_get_plan(
+  index: i32,
+  type_class: i32
+) -> core.Option(WasmBodyPlan) {
+  do @monad(core.Option(_)) {
+    option.guard(wasm_type_class_is_scalar(type_class));
+    option.guard(index < wasm_small_immediate_limit());
+    pure(wasm_local_get_instruction_plan(index))
+  }
+}
+
 fn WasmCallLowering::number_segment_plan(
   lowering: WasmCallLowering,
   start: i32
@@ -1383,19 +1573,14 @@ fn WasmCallLowering::number_segment_plan(
     lowering.context_value.source,
     start
   ).span;
-  match wasm_small_u7_decimal_literal(
-    lowering.codes,
-    lowering.context_value.base_offset,
-    token_span
-  ) {
-    Some(value) => option.some(wasm_instruction_plan(
-      wasm_body_instruction(
-        wasm_const_opcode(),
-        value
-      )
-    )),
-    None => option.none(),
-  }
+  core.Option::map(
+    wasm_const_instruction_plan,
+    wasm_small_u7_decimal_literal(
+      lowering.codes,
+      lowering.context_value.base_offset,
+      token_span
+    )
+  )
 }
 
 fn WasmCallLowering::bool_segment_plan(
@@ -1406,19 +1591,14 @@ fn WasmCallLowering::bool_segment_plan(
     lowering.context_value.source,
     start
   ).span;
-  match wasm_bool_literal_immediate(
-    lowering.codes,
-    lowering.context_value.base_offset,
-    token_span
-  ) {
-    Some(value) => option.some(wasm_instruction_plan(
-      wasm_body_instruction(
-        wasm_const_opcode(),
-        value
-      )
-    )),
-    None => option.none(),
-  }
+  core.Option::map(
+    wasm_const_instruction_plan,
+    wasm_bool_literal_immediate(
+      lowering.codes,
+      lowering.context_value.base_offset,
+      token_span
+    )
+  )
 }
 
 fn WasmCallLowering::identifier_segment_plan(
@@ -1446,8 +1626,6 @@ fn WasmCallLowering::identifier_segment_plan(
     target_hash
   );
   let is_param = param_index < param_count;
-  let is_scalar = wasm_type_class_is_scalar(param_type);
-  let is_small = param_index < wasm_small_immediate_limit();
   match target_hash == 0 {
     true => option.none(),
     false => match is_param {
@@ -1455,18 +1633,7 @@ fn WasmCallLowering::identifier_segment_plan(
         lowering,
         target_hash
       ),
-      true => match is_scalar {
-        false => option.none(),
-        true => match is_small {
-          true => option.some(wasm_instruction_plan(
-            wasm_body_instruction(
-              wasm_local_get_opcode(),
-              param_index
-            )
-          )),
-          false => option.none(),
-        },
-      },
+      true => wasm_small_scalar_local_get_plan(param_index, param_type),
     },
   }
 }
@@ -1495,22 +1662,9 @@ fn WasmCallLowering::local_segment_plan(
   );
   let wasm_index = param_count + local_index;
   let is_local = local_index < local_count;
-  let is_scalar = wasm_type_class_is_scalar(local_type);
-  let is_small = wasm_index < wasm_small_immediate_limit();
-  match is_local {
-    false => option.none(),
-    true => match is_scalar {
-      false => option.none(),
-      true => match is_small {
-        true => option.some(wasm_instruction_plan(
-          wasm_body_instruction(
-            wasm_local_get_opcode(),
-            wasm_index
-          )
-        )),
-        false => option.none(),
-      },
-    },
+  do @monad(core.Option(_)) {
+    option.guard(is_local);
+    wasm_small_scalar_local_get_plan(wasm_index, local_type)
   }
 }
 
@@ -1601,22 +1755,18 @@ fn WasmCallLowering::segment_has_bare_call(
     limit,
     0
   );
-  match root_kind == parser.text_expression_root_identifier_tag() {
-    false => false,
-    true => match call_arg_count == parser.text_no_root_call_arg_count() {
-      true => false,
-      false => match selector_count > 0 {
-        true => false,
-        false => match field_count > 0 {
-          true => false,
-          false => match operator_count > 0 {
-            true => false,
-            false => pipe_bind_count == 0,
-          },
-        },
-      },
-    },
-  }
+  let has_identifier_root = root_kind == parser.text_expression_root_identifier_tag();
+  let has_runtime_call = call_arg_count != parser.text_no_root_call_arg_count();
+  let has_no_selector = selector_count == 0;
+  let has_no_field = field_count == 0;
+  let has_no_operator = operator_count == 0;
+  let has_no_pipe_bind = pipe_bind_count == 0;
+  has_identifier_root
+    && has_runtime_call
+    && has_no_selector
+    && has_no_field
+    && has_no_operator
+    && has_no_pipe_bind
 }
 
 fn WasmCallLowering::append_segment_arg(
@@ -1648,22 +1798,22 @@ fn WasmCallLowering::append_segment_args(
 ) -> core.Option(WasmBodyPlan) {
   match arg_index >= arg_count {
     true => option.some(plan),
-    false => match WasmCallLowering::append_segment_arg(
-      lowering,
-      plan,
-      start,
-      limit,
-      arg_index
-    ) {
-      Some(next_plan) => WasmCallLowering::append_segment_args(
+    false => do @monad(core.Option(_)) {
+      next_plan <- WasmCallLowering::append_segment_arg(
+        lowering,
+        plan,
+        start,
+        limit,
+        arg_index
+      );
+      WasmCallLowering::append_segment_args(
         lowering,
         next_plan,
         start,
         limit,
         arg_index + 1,
         arg_count
-      ),
-      None => option.none(),
+      )
     },
   }
 }
@@ -1692,37 +1842,25 @@ fn WasmCallLowering::call_segment_plan(
     lowering.context_value.source,
     target_hash
   );
-  match WasmCallLowering::segment_has_bare_call(lowering, start, limit) {
-    false => option.none(),
-    true => match lookup.found {
-      false => option.none(),
-      true => match lookup.index < wasm_small_immediate_limit() {
-        false => option.none(),
-        true => match lookup.runtime_param_count == arg_count {
-          false => option.none(),
-          true => match wasm_type_class_is_scalar(return_type) {
-            false => option.none(),
-            true => match arg_count <= 5 {
-              false => option.none(),
-              true => match WasmCallLowering::append_segment_args(
-                lowering,
-                wasm_body_plan_empty(arg_count + 1),
-                start,
-                limit,
-                0,
-                arg_count
-              ) {
-                None => option.none(),
-                Some(args_plan) => option.some(wasm_body_plan_push_instruction(
-                  args_plan,
-                  wasm_body_instruction(wasm_call_opcode(), lookup.index)
-                )),
-              },
-            },
-          },
-        },
-      },
-    },
+  do @monad(core.Option(_)) {
+    option.guard(WasmCallLowering::segment_has_bare_call(lowering, start, limit));
+    option.guard(lookup.found);
+    option.guard(lookup.index < wasm_small_immediate_limit());
+    option.guard(lookup.runtime_param_count == arg_count);
+    option.guard(wasm_type_class_is_scalar(return_type));
+    option.guard(arg_count <= 5);
+    args_plan <- WasmCallLowering::append_segment_args(
+      lowering,
+      wasm_body_plan_empty(arg_count + 1),
+      start,
+      limit,
+      0,
+      arg_count
+    );
+    pure(wasm_body_plan_push_instruction(
+      args_plan,
+      wasm_body_instruction(wasm_call_opcode(), lookup.index)
+    ))
   }
 }
 
@@ -1742,54 +1880,46 @@ fn WasmCallLowering::branch_segment_plan(
     start,
     limit
   );
-  match segments.found {
-    false => option.none(),
-    true => match wasm_type_class_is_scalar(branch_type) {
-      false => option.none(),
-      true => match WasmCallLowering::segment_plan(
-        lowering,
-        segments.condition_start,
-        segments.condition_limit,
-        true
-      ) {
-        None => option.none(),
-        Some(condition_plan) => match WasmCallLowering::segment_plan(
-          lowering,
-          segments.true_value_start,
-          segments.true_value_limit,
-          true
-        ) {
-          None => option.none(),
-          Some(true_plan) => match WasmCallLowering::segment_plan(
-            lowering,
-            segments.false_value_start,
-            segments.false_value_limit,
-            true
-          ) {
-            None => option.none(),
-            Some(false_plan) => wasm_body_plan_append_plan(
-              wasm_body_plan_empty(6),
-              condition_plan
-            ) \with_condition -> wasm_body_plan_push_instruction(
-              with_condition,
-              wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
-            ) \with_if -> wasm_body_plan_append_plan(
-              with_if,
-              true_plan
-            ) \with_true -> wasm_body_plan_push_instruction(
-              with_true,
-              wasm_body_instruction(wasm_else_opcode(), 0)
-            ) \with_else -> wasm_body_plan_append_plan(
-              with_else,
-              false_plan
-            ) \with_false -> option.some(wasm_body_plan_push_instruction(
-              with_false,
-              wasm_body_instruction(wasm_end_opcode(), 0)
-            )),
-          },
-        },
-      },
-    },
+  do @monad(core.Option(_)) {
+    option.guard(segments.found);
+    option.guard(wasm_type_class_is_scalar(branch_type));
+    condition_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.condition_start,
+      segments.condition_limit,
+      true
+    );
+    true_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.true_value_start,
+      segments.true_value_limit,
+      true
+    );
+    false_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.false_value_start,
+      segments.false_value_limit,
+      true
+    );
+    pure(wasm_body_plan_append_plan(
+      wasm_body_plan_empty(6),
+      condition_plan
+    ) \with_condition -> wasm_body_plan_push_instruction(
+      with_condition,
+      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+    ) \with_if -> wasm_body_plan_append_plan(
+      with_if,
+      true_plan
+    ) \with_true -> wasm_body_plan_push_instruction(
+      with_true,
+      wasm_body_instruction(wasm_else_opcode(), 0)
+    ) \with_else -> wasm_body_plan_append_plan(
+      with_else,
+      false_plan
+    ) \with_false -> wasm_body_plan_push_instruction(
+      with_false,
+      wasm_body_instruction(wasm_end_opcode(), 0)
+    ))
   }
 }
 
@@ -1812,48 +1942,63 @@ fn wasm_function_match_body_plan(
     current.cursor
   );
   let lowering = wasm_call_lowering(context_value, codes, current);
-  match body_abi == parser.text_abi_class_scalar_tag() {
-    false => option.none(),
-    true => match wasm_type_class_is_scalar(result_type) {
-      false => option.none(),
-      true => match segments.found {
-        false => option.none(),
-        true => match WasmCallLowering::segment_plan(
-          lowering,
-          segments.true_value_start,
-          segments.true_value_limit,
-          true
-        ) {
-          None => option.none(),
-          Some(true_plan) => match WasmCallLowering::segment_plan(
-            lowering,
-            segments.false_value_start,
-            segments.false_value_limit,
-            true
-          ) {
-            None => option.none(),
-            Some(false_plan) => wasm_body_plan_push_instruction(
-              wasm_body_plan_empty(6),
-              wasm_body_instruction(wasm_local_get_opcode(), 0)
-            ) \with_condition -> wasm_body_plan_push_instruction(
-              with_condition,
-              wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
-            ) \with_if -> wasm_body_plan_append_plan(
-              with_if,
-              true_plan
-            ) \with_true -> wasm_body_plan_push_instruction(
-              with_true,
-              wasm_body_instruction(wasm_else_opcode(), 0)
-            ) \with_else -> wasm_body_plan_append_plan(
-              with_else,
-              false_plan
-            ) \with_false -> option.some(wasm_body_plan_push_instruction(
-              with_false,
-              wasm_body_instruction(wasm_end_opcode(), 0)
-            )),
-          },
-        },
-      },
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(body_abi));
+    option.guard(wasm_type_class_is_scalar(result_type));
+    option.guard(segments.found);
+    true_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.true_value_start,
+      segments.true_value_limit,
+      true
+    );
+    false_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.false_value_start,
+      segments.false_value_limit,
+      true
+    );
+    pure(wasm_body_plan_push_instruction(
+      wasm_body_plan_empty(6),
+      wasm_body_instruction(wasm_local_get_opcode(), 0)
+    ) \with_condition -> wasm_body_plan_push_instruction(
+      with_condition,
+      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+    ) \with_if -> wasm_body_plan_append_plan(
+      with_if,
+      true_plan
+    ) \with_true -> wasm_body_plan_push_instruction(
+      with_true,
+      wasm_body_instruction(wasm_else_opcode(), 0)
+    ) \with_else -> wasm_body_plan_append_plan(
+      with_else,
+      false_plan
+    ) \with_false -> wasm_body_plan_push_instruction(
+      with_false,
+      wasm_body_instruction(wasm_end_opcode(), 0)
+    ))
+  }
+}
+
+fn WasmCallLowering::non_branch_segment_plan(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  parts: parser.TextRootOperatorParts
+) -> core.Option(WasmBodyPlan) {
+  match parts.found {
+    true => WasmCallLowering::operator_segment_plan(lowering, parts),
+    false => match WasmCallLowering::segment_has_bare_call(
+      lowering,
+      start,
+      limit
+    ) {
+      true => WasmCallLowering::call_segment_plan(lowering, start, limit),
+      false => WasmCallLowering::simple_segment_plan(
+        lowering,
+        start,
+        limit
+      ),
     },
   }
 }
@@ -1877,21 +2022,12 @@ fn WasmCallLowering::segment_plan(
       limit
     ) {
       Some(plan) => option.some(plan),
-      None => match parts.found {
-        true => WasmCallLowering::operator_segment_plan(lowering, parts),
-        false => match WasmCallLowering::segment_has_bare_call(
-          lowering,
-          start,
-          limit
-        ) {
-          true => WasmCallLowering::call_segment_plan(lowering, start, limit),
-          false => WasmCallLowering::simple_segment_plan(
-            lowering,
-            start,
-            limit
-          ),
-        },
-      },
+      None => WasmCallLowering::non_branch_segment_plan(
+        lowering,
+        start,
+        limit,
+        parts
+      ),
     },
   }
 }
@@ -1905,14 +2041,14 @@ fn wasm_scalar_expression_body_plan(
   let source = context_value.source;
   let start = parser.text_function_body_value_start_index(source, current.cursor);
   let limit = parser.text_declaration_end_from_index(source, current.cursor);
-  match body_abi == parser.text_abi_class_scalar_tag() {
-    false => option.none(),
-    true => WasmCallLowering::segment_plan(
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(body_abi));
+    WasmCallLowering::segment_plan(
       wasm_call_lowering(context_value, codes, current),
       start,
       limit,
       true
-    ),
+    )
   }
 }
 
@@ -1928,41 +2064,73 @@ fn WasmCallLowering::arg_plan(
   )
 }
 
-fn wasm_scalar_operator_opcode(operator_hash: i32) -> core.Option(i32) {
-  match operator_hash == parser.text_operator_hash_plus() {
-    true => option.some(wasm_i32_add_opcode()),
-    false => match operator_hash == parser.text_operator_hash_minus() {
-      true => option.some(wasm_i32_sub_opcode()),
-      false => match operator_hash == parser.text_operator_hash_asterisk() {
-        true => option.some(wasm_i32_mul_opcode()),
-        false => match operator_hash == parser.text_operator_hash_slash() {
-          true => option.some(wasm_i32_div_s_opcode()),
-          false => match operator_hash == parser.text_operator_hash_percent() {
-            true => option.some(wasm_i32_rem_s_opcode()),
-            false => match operator_hash == parser.text_operator_hash_equal_equal() {
-              true => option.some(wasm_i32_eq_opcode()),
-              false => match operator_hash == parser.text_operator_hash_not_equal() {
-                true => option.some(wasm_i32_ne_opcode()),
-                false => match operator_hash == parser.text_operator_hash_less() {
-                  true => option.some(wasm_i32_lt_s_opcode()),
-                  false => match operator_hash == parser.text_operator_hash_greater() {
-                    true => option.some(wasm_i32_gt_s_opcode()),
-                    false => match operator_hash == parser.text_operator_hash_less_equal() {
-                      true => option.some(wasm_i32_le_s_opcode()),
-                      false => match operator_hash == parser.text_operator_hash_greater_equal() {
-                        true => option.some(wasm_i32_ge_s_opcode()),
-                        false => option.none(),
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
+fn wasm_scalar_operator_opcode_case(
+  operator_hash: i32,
+  target_hash: i32,
+  opcode: i32
+) -> core.Option(i32) {
+  match operator_hash == target_hash {
+    true => option.some(opcode),
+    false => option.none(),
   }
+}
+
+fn wasm_scalar_operator_opcode(operator_hash: i32) -> core.Option(i32) {
+  let plus = wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_plus(),
+    wasm_i32_add_opcode()
+  );
+  let minus = core.Option::append(plus, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_minus(),
+    wasm_i32_sub_opcode()
+  ));
+  let multiply = core.Option::append(minus, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_asterisk(),
+    wasm_i32_mul_opcode()
+  ));
+  let divide = core.Option::append(multiply, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_slash(),
+    wasm_i32_div_s_opcode()
+  ));
+  let remainder = core.Option::append(divide, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_percent(),
+    wasm_i32_rem_s_opcode()
+  ));
+  let equal = core.Option::append(remainder, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_equal_equal(),
+    wasm_i32_eq_opcode()
+  ));
+  let not_equal = core.Option::append(equal, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_not_equal(),
+    wasm_i32_ne_opcode()
+  ));
+  let less = core.Option::append(not_equal, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_less(),
+    wasm_i32_lt_s_opcode()
+  ));
+  let greater = core.Option::append(less, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_greater(),
+    wasm_i32_gt_s_opcode()
+  ));
+  let less_equal = core.Option::append(greater, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_less_equal(),
+    wasm_i32_le_s_opcode()
+  ));
+  core.Option::append(less_equal, wasm_scalar_operator_opcode_case(
+    operator_hash,
+    parser.text_operator_hash_greater_equal(),
+    wasm_i32_ge_s_opcode()
+  ))
 }
 
 fn wasm_scalar_operator_body_plan_from_parts(
@@ -1970,31 +2138,29 @@ fn wasm_scalar_operator_body_plan_from_parts(
   parts: parser.TextRootOperatorParts,
   opcode: i32
 ) -> core.Option(WasmBodyPlan) {
-  match WasmCallLowering::segment_plan(
-    lowering,
-    parts.left_start,
-    parts.left_limit,
-    parts.found
-  ) {
-    None => option.none(),
-    Some(left) => match WasmCallLowering::segment_plan(
+  do @monad(core.Option(_)) {
+    left <- WasmCallLowering::segment_plan(
+      lowering,
+      parts.left_start,
+      parts.left_limit,
+      parts.found
+    );
+    right <- WasmCallLowering::segment_plan(
       lowering,
       parts.right_start,
       parts.right_limit,
       parts.found
-    ) {
-      None => option.none(),
-      Some(right) => wasm_body_plan_append_plan(
-        wasm_body_plan_empty(3),
-        left
-      ) \with_left -> wasm_body_plan_append_plan(
-        with_left,
-        right
-      ) \with_right -> option.some(wasm_body_plan_push_instruction(
-        with_right,
-        wasm_body_instruction(opcode, 0)
-      )),
-    },
+    );
+    pure(wasm_body_plan_append_plan(
+      wasm_body_plan_empty(3),
+      left
+    ) \with_left -> wasm_body_plan_append_plan(
+      with_left,
+      right
+    ) \with_right -> wasm_body_plan_push_instruction(
+      with_right,
+      wasm_body_instruction(opcode, 0)
+    ))
   }
 }
 
@@ -2005,14 +2171,14 @@ fn wasm_semantic_scalar_body_immediate(
   decl: ast.Decl,
   body_abi: i32
 ) -> core.Option(i32) {
-  match body_abi == parser.text_abi_class_scalar_tag() {
-    false => option.none(),
-    true => wasm_scalar_body_immediate_from_root(
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(body_abi));
+    wasm_scalar_body_immediate_from_root(
       context_value,
       codes,
       current,
       decl
-    ),
+    )
   }
 }
 
@@ -2028,28 +2194,22 @@ fn wasm_semantic_scalar_body_instruction(
     current.cursor,
     decl
   );
-  let is_scalar_abi = body_abi == parser.text_abi_class_scalar_tag();
-  match is_scalar_abi {
-    false => option.none(),
-    true => match root_kind == parser.text_expression_root_identifier_tag() {
-      true => wasm_scalar_identifier_body_instruction(
-        context_value.source,
-        current
-      ),
-      false => match wasm_semantic_scalar_body_immediate(
-        context_value,
-        codes,
-        current,
-        decl,
-        body_abi
-      ) {
-        Some(value) => option.some(wasm_body_instruction(
-          wasm_const_opcode(),
-          value
-        )),
-        None => option.none(),
+  let is_scalar_abi = abi_class_is_scalar(body_abi);
+  do @monad(core.Option(_)) {
+    option.guard(is_scalar_abi);
+    match root_kind == parser.text_expression_root_identifier_tag() {
+      true => wasm_scalar_identifier_body_instruction(context_value.source, current),
+      false => do @monad(core.Option(_)) {
+        value <- wasm_semantic_scalar_body_immediate(
+          context_value,
+          codes,
+          current,
+          decl,
+          body_abi
+        );
+        pure(wasm_body_instruction(wasm_const_opcode(), value))
       },
-    },
+    }
   }
 }
 
@@ -2096,13 +2256,13 @@ fn wasm_scalar_call_body_plan(
     current.cursor
   );
   let limit = parser.text_declaration_end_from_index(source, current.cursor);
-  match body_abi == parser.text_abi_class_scalar_tag() {
-    false => option.none(),
-    true => WasmCallLowering::call_segment_plan(
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(body_abi));
+    WasmCallLowering::call_segment_plan(
       wasm_call_lowering(context_value, codes, current),
       start,
       limit
-    ),
+    )
   }
 }
 
@@ -2116,20 +2276,16 @@ fn wasm_scalar_operator_body_plan(
     context_value.source,
     current.cursor
   );
-  let is_scalar_body = body_abi == parser.text_abi_class_scalar_tag();
-  match is_scalar_body {
-    false => option.none(),
-    true => match parts.found {
-      false => option.none(),
-      true => match wasm_scalar_operator_opcode(parts.operator_hash) {
-        None => option.none(),
-        Some(opcode) => wasm_scalar_operator_body_plan_from_parts(
-          wasm_call_lowering(context_value, codes, current),
-          parts,
-          opcode
-        ),
-      },
-    },
+  let is_scalar_body = abi_class_is_scalar(body_abi);
+  do @monad(core.Option(_)) {
+    option.guard(is_scalar_body);
+    option.guard(parts.found);
+    opcode <- wasm_scalar_operator_opcode(parts.operator_hash);
+    wasm_scalar_operator_body_plan_from_parts(
+      wasm_call_lowering(context_value, codes, current),
+      parts,
+      opcode
+    )
   }
 }
 
@@ -2167,17 +2323,17 @@ fn wasm_scalar_local_let_initializer_plans(
 ) -> core.Option(WasmBodyPlan) {
   match local_index >= local_count {
     true => option.some(plan),
-    false => match wasm_scalar_local_let_initializer_plan(
-      lowering,
-      local_index
-    ) {
-      None => option.none(),
-      Some(local_plan) => wasm_scalar_local_let_initializer_plans(
+    false => do @monad(core.Option(_)) {
+      local_plan <- wasm_scalar_local_let_initializer_plan(
+        lowering,
+        local_index
+      );
+      wasm_scalar_local_let_initializer_plans(
         lowering,
         wasm_body_plan_append_plan(plan, local_plan),
         local_index + 1,
         local_count
-      ),
+      )
     },
   }
 }
@@ -2193,22 +2349,52 @@ fn wasm_scalar_local_let_prefixed_body_plan(
     context_value.source,
     current.cursor
   );
-  match body_abi == parser.text_abi_class_scalar_tag() {
-    false => option.none(),
-    true => match local_count <= 0 {
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(body_abi));
+    match local_count <= 0 {
       true => option.some(body_plan),
-      false => match wasm_scalar_local_let_initializer_plans(
-        wasm_call_lowering(context_value, codes, current),
-        wasm_body_plan_empty(local_count + 1),
-        0,
-        local_count
-      ) {
-        None => option.none(),
-        Some(local_plan) => option.some(wasm_body_plan_append_plan(
+      false => do @monad(core.Option(_)) {
+        local_plan <- wasm_scalar_local_let_initializer_plans(
+          wasm_call_lowering(context_value, codes, current),
+          wasm_body_plan_empty(local_count + 1),
+          0,
+          local_count
+        );
+        pure(wasm_body_plan_append_plan(
           local_plan,
           body_plan
-        )),
+        ))
       },
+    }
+  }
+}
+
+fn wasm_scalar_base_body_plan(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32
+) -> core.Option(WasmBodyPlan) {
+  match wasm_scalar_expression_body_plan(
+    context_value,
+    codes,
+    current,
+    body_abi
+  ) {
+    Some(plan) => option.some(plan),
+    None => match wasm_scalar_call_body_plan(
+      context_value,
+      codes,
+      current,
+      body_abi
+    ) {
+      Some(plan) => option.some(plan),
+      None => wasm_scalar_operator_body_plan(
+        context_value,
+        codes,
+        current,
+        body_abi
+      ),
     },
   }
 }
@@ -2227,38 +2413,22 @@ fn wasm_byte_base_body_plan(
     body_abi
   ) {
     Some(plan) => plan,
-    None => match wasm_scalar_expression_body_plan(
+    None => match wasm_scalar_base_body_plan(
       context_value,
       codes,
       current,
       body_abi
     ) {
       Some(plan) => plan,
-      None => match wasm_scalar_call_body_plan(
-        context_value,
-        codes,
-        current,
-        body_abi
-      ) {
-        Some(plan) => plan,
-        None => match wasm_scalar_operator_body_plan(
+      None => wasm_single_instruction_body_plan(
+        wasm_byte_body_instruction(
           context_value,
           codes,
           current,
+          decl,
           body_abi
-        ) {
-          Some(plan) => plan,
-          None => wasm_single_instruction_body_plan(
-            wasm_byte_body_instruction(
-              context_value,
-              codes,
-              current,
-              decl,
-              body_abi
-            )
-          ),
-        },
-      },
+        )
+      ),
     },
   }
 }
@@ -2312,22 +2482,42 @@ fn wasm_terminator_opcode(result_val_type: i32) -> i32 {
   }
 }
 
-fn wasm_instruction_size(opcode: i32) -> i32 {
-  match opcode == wasm_const_opcode() {
-    true => 2,
-    false => match opcode == wasm_local_get_opcode() {
-      true => 2,
-      false => match opcode == wasm_local_set_opcode() {
-        true => 2,
-        false => match opcode == wasm_call_opcode() {
-          true => 2,
-          false => match opcode == wasm_if_opcode() {
-            true => 2,
-            false => 1,
-          },
-        },
+fn wasm_opcode_matches_any4(
+  opcode: i32,
+  first: i32,
+  second: i32,
+  third: i32,
+  fourth: i32
+) -> bool {
+  match opcode == first {
+    true => true,
+    false => match opcode == second {
+      true => true,
+      false => match opcode == third {
+        true => true,
+        false => opcode == fourth,
       },
     },
+  }
+}
+
+fn wasm_instruction_has_immediate(opcode: i32) -> bool {
+  match wasm_opcode_matches_any4(
+    opcode,
+    wasm_const_opcode(),
+    wasm_local_get_opcode(),
+    wasm_local_set_opcode(),
+    wasm_call_opcode()
+  ) {
+    true => true,
+    false => opcode == wasm_if_opcode(),
+  }
+}
+
+fn wasm_instruction_size(opcode: i32) -> i32 {
+  match wasm_instruction_has_immediate(opcode) {
+    true => 2,
+    false => 1,
   }
 }
 
@@ -2718,264 +2908,6 @@ fn wasm_next_declaration_state(
   parser.next_text_declaration_state(result.state, context_value.source)
 }
 
-fn wasm_next_function_index(
-  context_value: WasmByteContext,
-  current: combinator.ParseState,
-  result: combinator.Reply(parser.DeclFrame),
-  function_index: i32
-) -> i32 {
-  match is_function(context_value.source, current, result) {
-    true => function_index + 1,
-    false => function_index,
-  }
-}
-
-fn wasm_type_payload_next_bytes(
-  context_value: WasmByteContext,
-  current: combinator.ParseState,
-  result: combinator.Reply(parser.DeclFrame),
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match is_function(context_value.source, current, result) {
-    true => wasm_push_type_payload_function(context_value, current, result, bytes),
-    false => bytes,
-  }
-}
-
-fn wasm_type_payload_scan(
-  context_value: WasmByteContext,
-  current: combinator.ParseState,
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match current.cursor < textlex.length(context_value.source) {
-    false => bytes,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      context_value.source,
-      0
-    ) {
-      Err(_) => bytes,
-      Ok(result) => rec(
-        context_value,
-        wasm_next_declaration_state(context_value, result),
-        wasm_type_payload_next_bytes(context_value, current, result, bytes)
-      ),
-    },
-  }
-}
-
-fn wasm_function_payload_next_bytes(
-  context_value: WasmByteContext,
-  current: combinator.ParseState,
-  result: combinator.Reply(parser.DeclFrame),
-  function_index: i32,
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match is_function(context_value.source, current, result) {
-    true => wasm_push_function_payload_function(function_index, bytes),
-    false => bytes,
-  }
-}
-
-fn wasm_function_payload_scan(
-  context_value: WasmByteContext,
-  current: combinator.ParseState,
-  function_index: i32,
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match current.cursor < textlex.length(context_value.source) {
-    false => bytes,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      context_value.source,
-      function_index
-    ) {
-      Err(_) => bytes,
-      Ok(result) => rec(
-        context_value,
-        wasm_next_declaration_state(context_value, result),
-        wasm_next_function_index(context_value, current, result, function_index),
-        wasm_function_payload_next_bytes(
-          context_value,
-          current,
-          result,
-          function_index,
-          bytes
-        )
-      ),
-    },
-  }
-}
-
-fn wasm_push_export_payload_direct(
-  context_value: WasmByteContext,
-  codes: layout.HeapArray(i32),
-  cursor: WasmByteCursor,
-  result: combinator.Reply(parser.DeclFrame),
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match is_pub_function(context_value.source, cursor.current, result) {
-    false => bytes,
-    true => wasm_push_export_payload_direct_bytes(
-      context_value,
-      codes,
-      cursor,
-      result,
-      bytes
-    ),
-  }
-}
-
-fn wasm_push_export_payload_direct_bytes(
-  context_value: WasmByteContext,
-  codes: layout.HeapArray(i32),
-  cursor: WasmByteCursor,
-  result: combinator.Reply(parser.DeclFrame),
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  let decl = result.value.decl;
-  let name_index = parser.text_declaration_name_index(
-    context_value.source,
-    cursor.current.cursor,
-    decl
-  );
-  let name_span = textlex.token_at(context_value.source, name_index).span;
-  let with_name_size = wasm_push_u32_leb(bytes, span.width(name_span));
-  let with_name = wasm_push_source_bytes(
-    codes,
-    context_value.base_offset,
-    name_span.start,
-    name_span.end,
-    with_name_size
-  );
-  let with_kind = wasm_push_byte(with_name, 0);
-  wasm_push_u32_leb(with_kind, cursor.function_index)
-}
-
-fn wasm_push_export_payload_by_name(
-  context_value: WasmByteContext,
-  codes: layout.HeapArray(i32),
-  name_index: i32,
-  function_index: i32,
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  let name_span = textlex.token_at(context_value.source, name_index).span;
-  let with_name_size = wasm_push_u32_leb(bytes, span.width(name_span));
-  let with_name = wasm_push_source_bytes(
-    codes,
-    context_value.base_offset,
-    name_span.start,
-    name_span.end,
-    with_name_size
-  );
-  let with_kind = wasm_push_byte(with_name, 0);
-  wasm_push_u32_leb(with_kind, function_index)
-}
-
-fn wasm_export_payload_next_bytes(
-  context_value: WasmByteContext,
-  codes: layout.HeapArray(i32),
-  cursor: WasmByteCursor,
-  result: combinator.Reply(parser.DeclFrame),
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match is_function(context_value.source, cursor.current, result) {
-    true => match is_pub_function(context_value.source, cursor.current, result) {
-      true => wasm_push_export_payload_by_name(
-        context_value,
-        codes,
-        parser.text_declaration_name_index(
-          context_value.source,
-          cursor.current.cursor,
-          result.value.decl
-        ),
-        cursor.function_index,
-        bytes
-      ),
-      false => bytes,
-    },
-    false => bytes,
-  }
-}
-
-fn wasm_export_payload_scan(
-  context_value: WasmByteContext,
-  codes: layout.HeapArray(i32),
-  current: combinator.ParseState,
-  function_index: i32,
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match current.cursor < textlex.length(context_value.source) {
-    false => bytes,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      context_value.source,
-      function_index
-    ) {
-      Err(_) => bytes,
-      Ok(result) => rec(
-        context_value,
-        codes,
-        wasm_next_declaration_state(context_value, result),
-        wasm_next_function_index(context_value, current, result, function_index),
-        wasm_export_payload_next_bytes(
-          context_value,
-          codes,
-          WasmByteCursor {
-            current: current,
-            function_index: function_index,
-          },
-          result,
-          bytes
-        )
-      ),
-    },
-  }
-}
-
-fn wasm_code_payload_next_bytes(
-  context_value: WasmByteContext,
-  codes: layout.HeapArray(i32),
-  current: combinator.ParseState,
-  result: combinator.Reply(parser.DeclFrame),
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match is_function(context_value.source, current, result) {
-    true => wasm_push_code_payload_function(
-      context_value,
-      codes,
-      current,
-      result,
-      bytes
-    ),
-    false => bytes,
-  }
-}
-
-fn wasm_code_payload_scan(
-  context_value: WasmByteContext,
-  codes: layout.HeapArray(i32),
-  current: combinator.ParseState,
-  bytes: layout.HeapArray(i32)
-) -> layout.HeapArray(i32) {
-  match current.cursor < textlex.length(context_value.source) {
-    false => bytes,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      context_value.source,
-      0
-    ) {
-      Err(_) => bytes,
-      Ok(result) => rec(
-        context_value,
-        codes,
-        wasm_next_declaration_state(context_value, result),
-        wasm_code_payload_next_bytes(context_value, codes, current, result, bytes)
-      ),
-    },
-  }
-}
-
 fn wasm_export_count_scan(
   context_value: WasmByteContext,
   current: combinator.ParseState,
@@ -3002,10 +2934,9 @@ fn wasm_export_count_scan(
 }
 
 fn wasm_export_count(context_value: WasmByteContext) -> i32 {
-  let window = textmodel.full_window(context_value.source);
   wasm_export_count_scan(
     context_value,
-    textmodel.token_window_state(window),
+    wasm_byte_context_window_state(context_value),
     0
   )
 }
@@ -3030,34 +2961,13 @@ fn wasm_section_payload_with_count(
   kind: WasmBytePayloadKind,
   count: i32
 ) -> layout.HeapArray(i32) {
-  let window = textmodel.full_window(context_value.source);
   let with_count = wasm_push_u32_leb(wasm_payload_buffer(codes, count), count);
-  match kind {
-    WasmBytePayloadKind::TypePayload => wasm_type_payload_scan(
-      context_value,
-      textmodel.token_window_state(window),
-      with_count
-    ),
-    WasmBytePayloadKind::FunctionPayload => wasm_function_payload_scan(
-      context_value,
-      textmodel.token_window_state(window),
-      0,
-      with_count
-    ),
-    WasmBytePayloadKind::ExportPayload => wasm_export_payload_scan(
-      context_value,
-      codes,
-      textmodel.token_window_state(window),
-      0,
-      with_count
-    ),
-    WasmBytePayloadKind::CodePayload => wasm_code_payload_scan(
-      context_value,
-      codes,
-      textmodel.token_window_state(window),
-      with_count
-    ),
-  }
+  wasm_payload_scan(
+    context_value,
+    codes,
+    WasmByteContext::payload_state(context_value, kind),
+    with_count
+  )
 }
 
 fn wasm_byte_buffer_from_counts(
@@ -3121,38 +3031,17 @@ fn wasm_section_payload(
   kind: WasmBytePayloadKind,
   scan: WasmSectionScan
 ) -> layout.HeapArray(i32) {
-  let window = textmodel.full_window(context_value.source);
   let count = wasm_payload_count(kind, scan);
   let with_count = wasm_push_u32_leb(
     wasm_byte_buffer_empty(wasm_payload_capacity(kind, scan)),
     count
   );
-  match kind {
-    WasmBytePayloadKind::TypePayload => wasm_type_payload_scan(
-      context_value,
-      textmodel.token_window_state(window),
-      with_count
-    ),
-    WasmBytePayloadKind::FunctionPayload => wasm_function_payload_scan(
-      context_value,
-      textmodel.token_window_state(window),
-      0,
-      with_count
-    ),
-    WasmBytePayloadKind::ExportPayload => wasm_export_payload_scan(
-      context_value,
-      codes,
-      textmodel.token_window_state(window),
-      0,
-      with_count
-    ),
-    WasmBytePayloadKind::CodePayload => wasm_code_payload_scan(
-      context_value,
-      codes,
-      textmodel.token_window_state(window),
-      with_count
-    ),
-  }
+  wasm_payload_scan(
+    context_value,
+    codes,
+    WasmByteContext::payload_state(context_value, kind),
+    with_count
+  )
 }
 
 fn wasm_byte_buffer_capacity(scan: WasmSectionScan) -> i32 {
@@ -3334,9 +3223,10 @@ fn wasm_byte_function_fact(
     current.cursor
   );
   WasmFunctionFact {
-    name_hash: textlex.text_hash_at(
+    name_hash: parser.text_declaration_name_hash(
       context_value.source,
-      parser.text_declaration_name_index(context_value.source, current.cursor, decl)
+      current.cursor,
+      decl
     ),
     export_tag: wasm_export_tag(context_value.source, current, result),
     runtime_param_count: parser.text_function_runtime_param_count(
@@ -3665,11 +3555,13 @@ fn is_function(
   current: combinator.ParseState,
   result: combinator.Reply(parser.DeclFrame)
 ) -> bool {
-  parser.text_declaration_kind_tag(
-    source,
-    current.cursor,
-    result.value.decl
-  ) == 1
+  parser.text_declaration_kind_is_function(
+    parser.text_declaration_kind_tag(
+      source,
+      current.cursor,
+      result.value.decl
+    )
+  )
 }
 
 fn wasm_function_lookup_not_found(function_index: i32) -> WasmFunctionLookup {
@@ -3722,13 +3614,10 @@ fn wasm_function_lookup_for_hash_at(
           target_hash,
           function_index
         ),
-        true => textlex.text_hash_at(
+        true => parser.text_declaration_name_hash(
           source,
-          parser.text_declaration_name_index(
-            source,
-            current.cursor,
-            result.value.decl
-          )
+          current.cursor,
+          result.value.decl
         ) \name_hash -> match name_hash == target_hash {
           true => wasm_function_lookup_found(
             function_index,
@@ -3750,10 +3639,9 @@ fn wasm_function_lookup_for_hash(
   source: textlex.TextTokenStream,
   target_hash: i32
 ) -> WasmFunctionLookup {
-  let window = textmodel.full_window(source);
   wasm_function_lookup_for_hash_at(
     source,
-    textmodel.token_window_state(window),
+    textmodel.full_window_state(source),
     target_hash,
     0
   )
@@ -3764,11 +3652,13 @@ fn is_pub_function(
   current: combinator.ParseState,
   result: combinator.Reply(parser.DeclFrame)
 ) -> bool {
-  let is_function = parser.text_declaration_kind_tag(
-    source,
-    current.cursor,
-    result.value.decl
-  ) == 1;
+  let is_function = parser.text_declaration_kind_is_function(
+    parser.text_declaration_kind_tag(
+      source,
+      current.cursor,
+      result.value.decl
+    )
+  );
   match is_function {
     true => match textlex.token_at(source, current.cursor).kind {
       PubKw => true,
@@ -4101,9 +3991,10 @@ fn checked_local_function_signature(
     next,
     textlex.PunctRightBrace
   );
-  let function_name_hash = textlex.text_hash_at(
+  let function_name_hash = parser.text_declaration_name_hash(
     source,
-    parser.text_declaration_name_index(source, current.cursor, result.value.decl)
+    current.cursor,
+    result.value.decl
   );
   checked_local_record_scan(
     context_value,
@@ -4118,35 +4009,71 @@ fn checked_local_function_signature(
   )
 }
 
-fn FactContext::checked_decl_record_scan(
+fn fact_record_scan_next_total(
+  kind: FactRecordScanKind,
   context_value: FactContext,
   current: combinator.ParseState,
-  total: i32
+  total: i32,
+  result: combinator.Reply(parser.DeclFrame)
 ) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
-      current,
+  match kind {
+    FactRecordScanKind::ScanCheckedDeclaration => textmodel.signature_mix(
+      total,
+      checked_decl_fact_signature(
+        checked_decl_fact(context_value.source, current, result)
+      )
+    ),
+    FactRecordScanKind::ScanCheckedExpression => textmodel.signature_mix(
+      total,
+      checked_expr_fact_signature(
+        checked_expr_fact(context_value.source, current, result)
+      )
+    ),
+    FactRecordScanKind::ScanCheckedExpressionChild =>
+      parser.text_declaration_root_child_record_signature(
+        context_value.source,
+        current.cursor,
+        result.value.decl,
+        total
+      ),
+    FactRecordScanKind::ScanCheckedExpressionShape => textmodel.signature_mix(
+      total,
+      checked_expr_shape_fact_signature(
+        checked_expr_shape_fact(context_value.source, current, result)
+      )
+    ),
+    FactRecordScanKind::ScanCheckedLocal => match is_function(
       context_value.source,
-      total
+      current,
+      result
     ) {
-      Err(_) => total,
-      Ok(result) => rec(
+      true => checked_local_function_signature(
         context_value,
-        parser.next_text_declaration_state(result.state, context_value.source),
-        textmodel.signature_mix(
-          total,
-          checked_decl_fact_signature(
-            checked_decl_fact(context_value.source, current, result)
-          )
+        current,
+        total,
+        result
+      ),
+      false => total,
+    },
+    FactRecordScanKind::ScanLoweredExport => match is_pub_function(
+      context_value.source,
+      current,
+      result
+    ) {
+      true => textmodel.signature_mix(
+        total,
+        lowered_export_fact_signature(
+          lowered_export_fact(context_value.source, current, result)
         )
       ),
+      false => total,
     },
   }
 }
 
-fn FactContext::checked_expr_record_scan(
+fn FactContext::fact_record_scan(
   context_value: FactContext,
+  kind: FactRecordScanKind,
   current: combinator.ParseState,
   total: i32
 ) -> i32 {
@@ -4160,101 +4087,9 @@ fn FactContext::checked_expr_record_scan(
       Err(_) => total,
       Ok(result) => rec(
         context_value,
+        kind,
         parser.next_text_declaration_state(result.state, context_value.source),
-        textmodel.signature_mix(
-          total,
-          checked_expr_fact_signature(
-            checked_expr_fact(context_value.source, current, result)
-          )
-        )
-      ),
-    },
-  }
-}
-
-fn FactContext::checked_expr_child_record_scan(
-  context_value: FactContext,
-  current: combinator.ParseState,
-  total: i32
-) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      context_value.source,
-      total
-    ) {
-      Err(_) => total,
-      Ok(result) => rec(
-        context_value,
-        parser.next_text_declaration_state(result.state, context_value.source),
-        parser.text_declaration_root_child_record_signature(
-          context_value.source,
-          current.cursor,
-          result.value.decl,
-          total
-        )
-      ),
-    },
-  }
-}
-
-fn FactContext::checked_expr_shape_record_scan(
-  context_value: FactContext,
-  current: combinator.ParseState,
-  total: i32
-) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      context_value.source,
-      total
-    ) {
-      Err(_) => total,
-      Ok(result) => rec(
-        context_value,
-        parser.next_text_declaration_state(result.state, context_value.source),
-        textmodel.signature_mix(
-          total,
-          checked_expr_shape_fact_signature(
-            checked_expr_shape_fact(context_value.source, current, result)
-          )
-        )
-      ),
-    },
-  }
-}
-
-fn FactContext::lowered_export_record_scan(
-  context_value: FactContext,
-  current: combinator.ParseState,
-  total: i32
-) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      context_value.source,
-      total
-    ) {
-      Err(_) => total,
-      Ok(result) => rec(
-        context_value,
-        parser.next_text_declaration_state(result.state, context_value.source),
-        match is_pub_function(
-          context_value.source,
-          current,
-          result
-        ) {
-          true => textmodel.signature_mix(
-            total,
-            lowered_export_fact_signature(
-              lowered_export_fact(context_value.source, current, result)
-            )
-          ),
-          false => total,
-        }
+        fact_record_scan_next_total(kind, context_value, current, total, result)
       ),
     },
   }
@@ -4329,161 +4164,140 @@ fn WasmByteContext::wasm_section_record_scan(
   }
 }
 
-fn FactContext::checked_local_record_scan(
-  context_value: FactContext,
-  current: combinator.ParseState,
-  total: i32
-) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      context_value.source,
-      total
-    ) {
-      Err(_) => total,
-      Ok(result) => rec(
-        context_value,
-        parser.next_text_declaration_state(result.state, context_value.source),
-        match parser.text_declaration_kind_tag(
-          context_value.source,
-          current.cursor,
-          result.value.decl
-        ) == 1 {
-          true => checked_local_function_signature(
-            context_value,
-            current,
-            total,
-            result
-          ),
-          false => total,
-        }
-      ),
-    },
-  }
-}
-
 fn FactContext::checked_declaration_type_signature(
   context_value: FactContext
 ) -> i32 {
-  let declared = FactContext::summary(
-    context_value,
-    textmodel.SummaryKind::ResolvedDeclaredTypeClassSignature
-  );
-  let body = FactContext::summary(
-    context_value,
-    textmodel.SummaryKind::ResolvedValueBodyTypeClassSignature
-  );
-  let check = FactContext::summary(
-    context_value,
-    textmodel.SummaryKind::ResolvedSimpleBodyTypeCheckSignature
-  );
-  fact_triple_signature(
-    CheckedFactKind::CheckedDeclarationType,
-    declared,
-    body,
-    check
+  monad.Reader::run(
+    checked_declaration_type_signature_reader(),
+    context_value
   )
 }
 
 fn FactContext::checked_diagnostic_signature(context_value: FactContext) -> i32 {
-  let declared = FactContext::summary(
-    context_value,
-    textmodel.SummaryKind::SimpleBodyTypeCheckSignature
-  );
-  let resolved = FactContext::summary(
-    context_value,
-    textmodel.SummaryKind::ResolvedSimpleBodyTypeCheckSignature
-  );
-  fact_pair_signature(CheckedFactKind::CheckedDiagnostic, declared, resolved)
+  monad.Reader::run(
+    checked_diagnostic_signature_reader(),
+    context_value
+  )
 }
 
 fn FactContext::lowered_declaration_signature(
   context_value: FactContext
 ) -> i32 {
-  let declared = FactContext::summary(
-    context_value,
-    textmodel.SummaryKind::ResolvedDeclaredAbiClassSignature
-  );
-  let body = FactContext::summary(
-    context_value,
-    textmodel.SummaryKind::ResolvedValueBodyAbiClassSignature
-  );
-  let exports = FactContext::summary(
-    context_value,
-    textmodel.SummaryKind::ResolvedExportAbiSignature
-  );
-  fact_triple_signature(
-    CheckedFactKind::LoweredDeclaration,
-    declared,
-    body,
-    exports
+  monad.Reader::run(
+    lowered_declaration_signature_reader(),
+    context_value
+  )
+}
+
+fn FactContext::fact_record_signature(
+  context_value: FactContext,
+  kind: FactRecordScanKind
+) -> i32 {
+  monad.Reader::run(
+    fact_record_signature_reader(kind),
+    context_value
   )
 }
 
 fn FactContext::checked_declaration_record_signature(
   context_value: FactContext
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  FactContext::checked_decl_record_scan(
+  FactContext::fact_record_signature(
     context_value,
-    textmodel.token_window_state(window),
-    0
+    FactRecordScanKind::ScanCheckedDeclaration
   )
 }
 
 fn FactContext::checked_expression_record_signature(
   context_value: FactContext
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  FactContext::checked_expr_record_scan(
+  FactContext::fact_record_signature(
     context_value,
-    textmodel.token_window_state(window),
-    0
+    FactRecordScanKind::ScanCheckedExpression
   )
 }
 
 fn FactContext::checked_expression_child_record_signature(
   context_value: FactContext
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  FactContext::checked_expr_child_record_scan(
+  FactContext::fact_record_signature(
     context_value,
-    textmodel.token_window_state(window),
-    0
+    FactRecordScanKind::ScanCheckedExpressionChild
   )
 }
 
 fn FactContext::checked_local_environment_signature(
   context_value: FactContext
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  FactContext::checked_local_record_scan(
+  FactContext::fact_record_signature(
     context_value,
-    textmodel.token_window_state(window),
-    0
+    FactRecordScanKind::ScanCheckedLocal
   )
 }
 
 fn FactContext::checked_expression_shape_signature(
   context_value: FactContext
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  FactContext::checked_expr_shape_record_scan(
+  FactContext::fact_record_signature(
     context_value,
-    textmodel.token_window_state(window),
-    0
+    FactRecordScanKind::ScanCheckedExpressionShape
   )
 }
 
 fn FactContext::lowered_export_record_signature(
   context_value: FactContext
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  FactContext::lowered_export_record_scan(
+  FactContext::fact_record_signature(
     context_value,
-    textmodel.token_window_state(window),
-    0
+    FactRecordScanKind::ScanLoweredExport
+  )
+}
+
+fn wasm_record_signature_reader(
+  codes: layout.HeapArray(i32),
+  kind: WasmRecordScanKind
+) -> monad.Reader(WasmByteContext, i32) {
+  do @monad(monad.Reader(WasmByteContext, _)) {
+    context_value <- monad.Reader::ask();
+    current <- monad.Reader::asks(wasm_byte_context_window_state);
+    monad.Reader::pure(match kind {
+      WasmRecordScanKind::ScanWasmFunctionRecord =>
+        WasmByteContext::wasm_function_record_scan(
+          context_value,
+          codes,
+          current,
+          0
+        ),
+      WasmRecordScanKind::ScanWasmSectionRecord =>
+        wasm_section_record_final_signature(
+          WasmByteContext::wasm_section_record_scan(
+            context_value,
+            codes,
+            current,
+            wasm_initial_section_scan()
+          )
+        ),
+      WasmRecordScanKind::ScanWasmByteRecord =>
+        wasm_byte_record_final_signature(
+          WasmByteContext::wasm_section_record_scan(
+            context_value,
+            codes,
+            current,
+            wasm_initial_section_scan()
+          )
+        ),
+    })
+  }
+}
+
+fn WasmByteContext::wasm_record_signature(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  kind: WasmRecordScanKind
+) -> i32 {
+  monad.Reader::run(
+    wasm_record_signature_reader(codes, kind),
+    context_value
   )
 }
 
@@ -4491,12 +4305,10 @@ fn WasmByteContext::wasm_function_record_signature(
   context_value: WasmByteContext,
   codes: layout.HeapArray(i32)
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  WasmByteContext::wasm_function_record_scan(
+  WasmByteContext::wasm_record_signature(
     context_value,
     codes,
-    textmodel.token_window_state(window),
-    0
+    WasmRecordScanKind::ScanWasmFunctionRecord
   )
 }
 
@@ -4504,14 +4316,10 @@ fn WasmByteContext::wasm_section_record_signature(
   context_value: WasmByteContext,
   codes: layout.HeapArray(i32)
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  wasm_section_record_final_signature(
-    WasmByteContext::wasm_section_record_scan(
-      context_value,
-      codes,
-      textmodel.token_window_state(window),
-      wasm_initial_section_scan()
-    )
+  WasmByteContext::wasm_record_signature(
+    context_value,
+    codes,
+    WasmRecordScanKind::ScanWasmSectionRecord
   )
 }
 
@@ -4519,14 +4327,10 @@ fn WasmByteContext::wasm_byte_record_signature(
   context_value: WasmByteContext,
   codes: layout.HeapArray(i32)
 ) -> i32 {
-  let window = textmodel.full_window(context_value.source);
-  wasm_byte_record_final_signature(
-    WasmByteContext::wasm_section_record_scan(
-      context_value,
-      codes,
-      textmodel.token_window_state(window),
-      wasm_initial_section_scan()
-    )
+  WasmByteContext::wasm_record_signature(
+    context_value,
+    codes,
+    WasmRecordScanKind::ScanWasmByteRecord
   )
 }
 

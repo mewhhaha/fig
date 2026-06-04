@@ -7,27 +7,107 @@ import {
 } from "jsr:@std/assert@1";
 import {
   compileArtifactsFromSource as compileArtifactsFromSourceRaw,
-  type CompileTraceEvent,
+  type CompileArtifactsOptions,
+  type CompileArtifactsResult,
+  type CompileArtifactsWithWatResult,
   type CompileSourceOptions,
+  type CompileTraceEvent,
   createFigHost,
   instantiateFig,
   wasmFromSource as wasmFromSourceRaw,
   watFromSource as watFromSourceRaw,
 } from "../src/mod.ts";
+import { emitWasm } from "../src/backend.ts";
+import type { Expr, Program } from "../src/core_ast.ts";
+import { resolveProjectModule as resolveModule, withOperatorPrelude } from "./operator_prelude.ts";
 
-const watFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  watFromSourceRaw(source, options);
-const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  wasmFromSourceRaw(source, options);
-const compileArtifactsFromSource = compileArtifactsFromSourceRaw;
-
-const resolveModule = async (moduleName: string) => {
-  try {
-    return await Deno.readTextFile(`${moduleName.replaceAll(".", "/")}.fig`);
-  } catch {
-    return undefined;
-  }
+const watFromSource = (source: string, options: CompileSourceOptions = {}) => {
+  const prepared = withOperatorPrelude(source, options);
+  return watFromSourceRaw(prepared.source, prepared.options);
 };
+const wasmFromSource = (source: string, options: CompileSourceOptions = {}) => {
+  const prepared = withOperatorPrelude(source, options);
+  return wasmFromSourceRaw(prepared.source, prepared.options);
+};
+function compileArtifactsFromSource(
+  source: string,
+  options?: CompileArtifactsOptions & { includeWat?: true },
+): Promise<CompileArtifactsWithWatResult>;
+function compileArtifactsFromSource(
+  source: string,
+  options: CompileArtifactsOptions & { includeWat: false },
+): Promise<CompileArtifactsResult>;
+function compileArtifactsFromSource(
+  source: string,
+  options: CompileArtifactsOptions = {},
+): Promise<CompileArtifactsResult> {
+  const prepared = withOperatorPrelude(source, options);
+  if (prepared.options.includeWat === false) {
+    return compileArtifactsFromSourceRaw(
+      prepared.source,
+      prepared.options as CompileArtifactsOptions & { includeWat: false },
+    );
+  }
+  return compileArtifactsFromSourceRaw(
+    prepared.source,
+    prepared.options as CompileArtifactsOptions & { includeWat?: true },
+  );
+}
+
+function boolLiteral(value: boolean): Expr {
+  return {
+    kind: "literal",
+    literalKind: "bool",
+    value: String(value),
+    inferredType: "bool",
+  };
+}
+
+function numberLiteral(value: number): Expr {
+  return {
+    kind: "literal",
+    literalKind: "number",
+    value: String(value),
+    inferredType: "i32",
+  };
+}
+
+function rawBooleanBinaryProgram(op: string): Program {
+  return {
+    imports: [],
+    declarations: [{
+      kind: "fn",
+      public: true,
+      name: "main",
+      params: [],
+      returnType: "i32",
+      effects: [],
+      body: {
+        kind: "block",
+        statements: [],
+        expr: {
+          kind: "match",
+          value: {
+            kind: "binary",
+            op,
+            left: boolLiteral(true),
+            right: boolLiteral(false),
+          },
+          arms: [
+            {
+              pattern: { kind: "literal", literalKind: "bool", value: "true" },
+              value: numberLiteral(1),
+            },
+            {
+              pattern: { kind: "literal", literalKind: "bool", value: "false" },
+              value: numberLiteral(0),
+            },
+          ],
+        },
+      },
+    }],
+  };
+}
 
 function hasCustomSection(bytes: Uint8Array, name: string): boolean {
   let offset = 8;
@@ -104,6 +184,19 @@ function readUleb(bytes: Uint8Array, offset: number): { value: number; offset: n
   }
   return { value, offset };
 }
+
+Deno.test("backend lowers raw checked boolean binary operators", () => {
+  const cases = [
+    { op: "&&", expected: 0 },
+    { op: "||", expected: 1 },
+    { op: "^^", expected: 1 },
+  ];
+  for (const item of cases) {
+    const wasm = emitWasm(rawBooleanBinaryProgram(item.op));
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
+    assertEquals((instance.exports.main as CallableFunction)(), item.expected);
+  }
+});
 
 Deno.test("WAT and wasm share lowered import signatures", async () => {
   const source = `
@@ -410,7 +503,7 @@ Deno.test("branch hints emit release custom section and WAT annotations", async 
   const source = `
     pub fn main(x: i32) -> i32 {
       match x {
-        @likely 0 => 1,
+        @[likely] 0 => 1,
         _ => 2,
       }
     }
@@ -446,7 +539,7 @@ Deno.test("branch hints emit release custom section and WAT annotations", async 
 Deno.test("function match branch hints lower to dispatcher branch metadata", async () => {
   const clauses = `
     fn score(x: bool) -> i32 match {
-      @likely true => 1,
+      @[likely] true => 1,
       false => 0,
     }
     pub fn main(x: bool) -> i32 { score(x) }
@@ -454,7 +547,7 @@ Deno.test("function match branch hints lower to dispatcher branch metadata", asy
   const handwritten = `
     fn score(x: bool) -> i32 {
       match x {
-        @likely true => 1,
+        @[likely] true => 1,
         _ => 0,
       }
     }
@@ -770,6 +863,39 @@ Deno.test("backend lowers Index::try refined-domain matches as checked bounds", 
   const generic = fig.instance.exports.generic as CallableFunction;
   assertEquals(generic(2), 3);
   assertEquals(generic(4), 0);
+});
+
+Deno.test("backend lowers named refined-domain try wrappers as checked conversions", async () => {
+  const source = `
+    type Option(a) = union {None, Some(value: a)}
+    type Byte = i32(0..256)
+
+    fn i32::try_domain(const domain: type, x: i32) -> Option(domain) {
+      Some(x)
+    }
+
+    fn Byte::try(x: i32) -> Option(Byte) {
+      i32::try_domain(Byte, x)
+    }
+
+    pub fn main(raw: i32) -> i32 {
+      match Byte::try(raw) {
+        Some(value) => value,
+        None => 999,
+      }
+    }
+  `;
+  const wat = await watFromSource(source);
+  assertStringIncludes(wat, "i32.ge_s");
+  assertStringIncludes(wat, "i32.le_s");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source)),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(-1), 999);
+  assertEquals(main(255), 255);
+  assertEquals(main(256), 999);
 });
 
 Deno.test("backend compacts adjacent refined-domain singleton checks", async () => {
@@ -1665,7 +1791,8 @@ Deno.test("boolean true match patterns branch directly", async () => {
     pub fn main() -> i32 { lt(1, 2) }
   `);
   const lt = wat.match(/\(func \$lt[\s\S]*?\n  \)/)?.[0] ?? "";
-  assertStringIncludes(lt, "i32.lt_s");
+  assertStringIncludes(lt, "call $__ops_op_lt__i32");
+  assertStringIncludes(wat, "i32.lt_s");
   assert(!lt.includes("i32.const 1\n    i32.eq"));
 });
 

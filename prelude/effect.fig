@@ -1,5 +1,6 @@
 const core = @import("prelude.core");
 const monad = @import("prelude.monad");
+const operators = @import("prelude.operators");
 
 type fn Member(effect: const, effects: const) -> type {
   @require(

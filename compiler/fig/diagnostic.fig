@@ -1,6 +1,7 @@
 const combinator = @import("./combinator.fig");
 const span = @import("./span.fig");
 const vec = @import("prelude.vec");
+const operators = @import("prelude.operators");
 
 type Severity = union {
   Error, Warning, Note

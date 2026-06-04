@@ -34,6 +34,22 @@ There is no implicit typeclass search. Generic behavior is carried by visible co
 constants, attached members, or fully spelled do-strategy types such as `State(World, _)`.
 Compiler-owned `@...` forms are valid only in their documented contexts.
 
+## Declaration Tags
+
+Tag lists can prefix top-level declarations. The first supported declaration tag is `test`, and it
+is valid only on function declarations:
+
+```fig
+@[test]
+fn parses_option() -> bool {
+  true
+}
+```
+
+Tags are compiler metadata, not comments. Unknown tags are diagnostics, and `@[test]` on a non-`fn`
+declaration is rejected. Multiple tag lists can appear before the same declaration, but duplicate
+tags are rejected.
+
 ## Rewrite Facts
 
 Fig source no longer declares optimizer rewrite facts. Rewrites are compiler-plugin facts, and the

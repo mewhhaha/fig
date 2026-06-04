@@ -2,6 +2,8 @@ const combinator = @import("./combinator.fig");
 const parser = @import("./parser.fig");
 const textlex = @import("./textlex.fig");
 const textmodel = @import("./textmodel.fig");
+const monad = @import("prelude.monad");
+const operators = @import("prelude.operators");
 
 type Context = struct {
   kind: textmodel.SummaryKind,
@@ -10,6 +12,31 @@ type Context = struct {
 
 fn context(kind: textmodel.SummaryKind, arg: i32) -> Context {
   Context {kind: kind, arg: arg}
+}
+
+fn context_kind(context_value: Context) -> textmodel.SummaryKind {
+  context_value.kind
+}
+
+fn context_arg(context_value: Context) -> i32 {
+  context_value.arg
+}
+
+fn parser_summary_context_reader() -> monad.Reader(
+  Context,
+  parser.TextSummaryContext
+) {
+  do @monad(monad.Reader(Context, _)) {
+    kind <- monad.Reader::asks(context_kind);
+    arg <- monad.Reader::asks(context_arg);
+    monad.Reader::pure(parser.text_summary_context(0, kind, arg))
+  }
+}
+
+fn Context::parser_summary_context(
+  context_value: Context
+) -> parser.TextSummaryContext {
+  monad.Reader::run(parser_summary_context_reader(), context_value)
 }
 
 fn Context::apply_decl(
@@ -26,7 +53,7 @@ fn Context::apply_decl(
       result.state.cursor,
       result.value.decl
     ),
-    parser.text_summary_context(0, context_value.kind, context_value.arg),
+    Context::parser_summary_context(context_value),
     total
   )
 }
@@ -60,11 +87,10 @@ fn run(
   kind: textmodel.SummaryKind,
   arg: i32
 ) -> i32 {
-  let window = textmodel.full_window(source);
   Context::scan(
     context(kind, arg),
     source,
-    textmodel.token_window_state(window),
+    textmodel.full_window_state(source),
     0
   )
 }

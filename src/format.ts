@@ -15,7 +15,8 @@ type TopLevelDeclKind =
   | "TopLetDecl"
   | "FnDecl"
   | "TypeFnDecl"
-  | "TypeSugarDecl";
+  | "TypeSugarDecl"
+  | "TypeAssertDecl";
 
 const MAX_LINE_WIDTH = 100;
 
@@ -58,7 +59,7 @@ const binaryOperators = new Set([
 ]);
 
 const compactBefore = new Set([")", "]", ",", ";", ".", ":", "::"]);
-const compactAfter = new Set(["(", "[", ".", "::", "@", "\\"]);
+const compactAfter = new Set(["(", "[", ".", "::", "@", "@[", "\\"]);
 const spacedSymbols = new Set(["=", "->", "=>"]);
 const declarationKeywords = new Set([
   "pub",
@@ -381,23 +382,40 @@ function collectImportBindingDecls(root: RuleParseNode | null): Map<number, Impo
 
 function collectTopLevelDecls(root: RuleParseNode | null, source: string): TopLevelDecl[] {
   if (!root) return [];
-  return root.children
-    .filter((child): child is RuleParseNode => child.kind === "rule" && child.name === "Decl")
-    .map((decl) =>
-      decl.children.find((child): child is RuleParseNode =>
-        child.kind === "rule" &&
-        (child.name === "ConstDecl" || child.name === "OperatorDecl" ||
-          child.name === "TopLetDecl" || child.name === "FnDecl" ||
-          child.name === "TypeFnDecl" || child.name === "TypeSugarDecl")
-      )
-    )
-    .filter((decl): decl is RuleParseNode => !!decl)
-    .map((decl): TopLevelDecl => ({
+  const decls: TopLevelDecl[] = [];
+  for (const node of root.children) {
+    if (node.kind !== "rule" || node.name !== "Decl") continue;
+    const decl = topLevelDeclPayload(node);
+    if (!decl) continue;
+    decls.push({
       kind: decl.name as TopLevelDeclKind,
-      start: decl.span.start,
-      end: decl.span.end,
+      start: node.span.start,
+      end: node.span.end,
       fnName: decl.name === "FnDecl" ? topLevelFnName(decl, source) : undefined,
-    }));
+    });
+  }
+  return decls;
+}
+
+function topLevelDeclPayload(decl: RuleParseNode): RuleParseNode | undefined {
+  for (const child of decl.children) {
+    if (child.kind !== "rule") continue;
+    if (child.name === "TaggedDecl" || child.name === "DeclBody") {
+      const nested = topLevelDeclPayload(child);
+      if (nested) return nested;
+      continue;
+    }
+    if (child.name === "TagList") continue;
+    if (
+      child.name === "ConstDecl" || child.name === "OperatorDecl" ||
+      child.name === "TopLetDecl" || child.name === "FnDecl" ||
+      child.name === "TypeFnDecl" || child.name === "TypeSugarDecl" ||
+      child.name === "TypeAssertDecl"
+    ) {
+      return child;
+    }
+  }
+  return undefined;
 }
 
 function collectCollectionDelimiterStarts(root: RuleParseNode | null): Set<number> {
@@ -465,6 +483,10 @@ function separate(
     } else if (previousTopLevelDecl) {
       writer.newline();
     }
+    return;
+  }
+  if (left.text === "]" && declarationKeywords.has(right.text)) {
+    writer.newline();
     return;
   }
   if (left.text === ",") {
@@ -704,7 +726,8 @@ function nextStartsTopLevelItem(items: item[], index: number): boolean {
     | TokenItem
     | undefined;
   return !!next &&
-    (next.text === "const" || next.text === "pub" || next.text === "fn" || next.text === "type");
+    (next.text === "@" || next.text === "const" || next.text === "pub" || next.text === "fn" ||
+      next.text === "type");
 }
 
 function nextTopLevelDecl(

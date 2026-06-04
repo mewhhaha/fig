@@ -12,6 +12,7 @@ const stream = @import("./stream.fig");
 const token = @import("./token.fig");
 const map = @import("prelude.map");
 const vec = @import("prelude.vec");
+const operators = @import("prelude.operators");
 
 type CompilePhase = union {
   PhaseSource, PhaseParsed, PhaseChecked, PhaseLowered

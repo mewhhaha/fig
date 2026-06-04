@@ -1,3 +1,5 @@
+const operators = @import("prelude.operators");
+
 // Zig-style static parameters: concrete matrix shape, operation dictionaries,
 // and schedule metadata are encoded in types and const values.
 type fn InlineArray(n: count, a: type) -> type {
