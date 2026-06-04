@@ -38,20 +38,32 @@ alias may be unused.
 Import these fragments directly when you need their qualified APIs. Import omitted fragments
 directly too, including `prelude.core`, `prelude.layout`, `prelude.fixed`,
 `prelude.fixed_build`, `prelude.range`, `prelude.scalar`, `prelude.order`, `prelude.effect`,
-`prelude.optic`, and `prelude.geometry2d`.
+`prelude.optic`, `prelude.derive`, and `prelude.geometry2d`.
 
 ## Core Values And Contracts
 
 | Module            | Available surface                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------- |
 | `prelude.core`    | `Eq`, `Semigroup`, `EmptyValue`, `Monoid`, `Copyable`, `Droppable`, `Option`, `Result`, `Pair`, `Tuple2`, `Tuple3`, `Unit`, `Index`, iterator contracts, `append`, `empty`, `unit`, and domain-index helpers. |
+| `prelude.derive`  | Source-level declaration tag providers `derive.Eq(Self)` and `derive.EmptyValue(Self)` for generated attached members. |
 | `prelude.option`  | `some`, `none`, `guard`, plus `Option::is_some`, `Option::is_none`, `Option::unwrap_or`, `Option::map`, `Option::pure`, `Option::apply`, `Option::bind`, `Option::append`, `Option::empty`, and `Option::or_else`. |
 | `prelude.result`  | `ok`, `err`, plus `Result::is_ok`, `Result::is_err`, `Result::unwrap_or`, `Result::map`, `Result::map_err`, `Result::pure`, `Result::apply`, and `Result::bind`. |
 | `prelude.tuple`   | `Pair::first`, `Pair::second`, `Pair::swap`, `Pair::map_first`, `Pair::map_second`, `Pair::bimap`, and `Tuple3` field accessors. |
 | `prelude.scalar`  | Boolean helpers, `select`, the `Number(t)` contract, and generic `min`, `max`, `clamp`, `between`, `abs`, `signum`, and `square`. |
+| `prelude.bool`    | Boolean conversion and negation helpers: `to_i32`, `to_sign`, and `not`.              |
 | `prelude.order`   | `Ordering`, `compare_i32`, and predicates for less, equal, and greater cases.                    |
 
-`prelude.bool` and `prelude.num` are compatibility namespaces that import `prelude.scalar`.
+`prelude.num` is a compatibility namespace that imports `prelude.scalar`.
+
+Use `prelude.derive` with core contracts when a type should get source-visible generated members:
+
+```fig
+const derive = @import("prelude.derive");
+const core = @import("prelude.core");
+
+@[derive.Eq(Self), core.Eq(Self)]
+type Point = struct {x: i32, y: i32}
+```
 
 ## Operators And Functional Helpers
 

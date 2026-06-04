@@ -7720,7 +7720,7 @@ function lowerExpr(
         const emptyType = expectedType ??
           (expr.args[0] ? renderBackendTypeProofArg(expr.args[0]) : undefined);
         const explicitEmpty = emptyType ? ctx.functions.get(`${emptyType}::empty`) : undefined;
-        if (explicitEmpty) {
+        if (explicitEmpty && explicitEmpty.name !== ctx.currentFn?.name) {
           return lowerExpr(
             {
               kind: "call",
@@ -9834,6 +9834,25 @@ function renamePattern(pattern: ParamPattern, renames: Map<string, string>): Par
       return { ...pattern, items: pattern.items.map((item) => renamePattern(item, renames)) };
     case "constructor":
       return { ...pattern, args: pattern.args.map((item) => renamePattern(item, renames)) };
+    case "or":
+      return {
+        ...pattern,
+        alternatives: pattern.alternatives.map((item) => renamePattern(item, new Map(renames))),
+      };
+    case "as": {
+      const name = renames.get(pattern.name) ??
+        `${[...renames.values()][0] ?? "__inl"}_${pattern.name}`;
+      renames.set(pattern.name, name);
+      return { ...pattern, name, pattern: renamePattern(pattern.pattern, renames) };
+    }
+    case "product":
+      return {
+        ...pattern,
+        fields: pattern.fields.map((field) => ({
+          ...field,
+          pattern: renamePattern(field.pattern, renames),
+        })),
+      };
     case "typed":
       return { ...pattern, pattern: renamePattern(pattern.pattern, renames) };
     case "literal":
@@ -12070,6 +12089,8 @@ function renderBackendTypeExpr(expr: import("./core_ast.ts").TypeExpr): string {
           `${slot.label ? `${slot.label}: ` : ""}${renderBackendTypeExpr(slot.type)}`
         ).join(", ")
       }}`;
+    case "type_members":
+      return renderBackendTypeExpr(expr.target);
     case "type_match":
       return "i32";
     case "type_binary":
@@ -13384,6 +13405,7 @@ function lowerSumMatch(
   const valueType = exprTypeWithLocals(value, ctx);
   const sum = sumLayoutForType(valueType, ctx.layouts);
   if (!sum) return undefined;
+  if (arms.some((arm) => !sumMatchPatternSupported(arm.pattern))) return undefined;
   const slots = flattenType(valueType, ctx.layouts);
   const temps = slots.map((slot) => {
     const name = `__sum_tmp${ctx.tempIndex++}`;
@@ -13396,6 +13418,12 @@ function lowerSumMatch(
     ...temps.toReversed().map((name): Instr => ({ op: "local.set", name })),
     ...lowerSumMatchArms(sum, temps, arms, ctx, locals, expectedType),
   ];
+}
+
+function sumMatchPatternSupported(pattern: ParamPattern): boolean {
+  if (pattern.kind === "typed") return sumMatchPatternSupported(pattern.pattern);
+  return pattern.kind === "constructor" || pattern.kind === "type" ||
+    pattern.kind === "binding" || pattern.kind === "wildcard";
 }
 
 function lowerSumMatchArms(
@@ -13576,7 +13604,10 @@ function lowerSumPatternBindings(
   return body;
 }
 
-function literalPatternMatches(pattern: ParamPattern, literal: Extract<Expr, { kind: "literal" }>) {
+function literalPatternMatches(
+  pattern: ParamPattern,
+  literal: Extract<Expr, { kind: "literal" }>,
+): boolean {
   if (pattern.kind === "typed") {
     if (!literalPatternMatches(pattern.pattern, literal)) return false;
     const domain = parseRefinedI32Type(pattern.type);
@@ -13584,6 +13615,10 @@ function literalPatternMatches(pattern: ParamPattern, literal: Extract<Expr, { k
     const value = Number.parseInt(literal.value, 10);
     if (!Number.isFinite(value)) return false;
     return scalarFactsContainsLiteral(scalarFactsFromDomain(domain), value);
+  }
+  if (pattern.kind === "as") return literalPatternMatches(pattern.pattern, literal);
+  if (pattern.kind === "or") {
+    return pattern.alternatives.some((alternative) => literalPatternMatches(alternative, literal));
   }
   if (pattern.kind !== "literal") return false;
   return pattern.literalKind === literal.literalKind && pattern.value === literal.value;
@@ -13636,6 +13671,15 @@ function addPatternBindingTypes(
     case "typed":
       addPatternBindingTypes(pattern.pattern, pattern.type, localTypes, layouts);
       return;
+    case "as":
+      if (valueType) localTypes.set(pattern.name, valueType);
+      addPatternBindingTypes(pattern.pattern, valueType, localTypes, layouts);
+      return;
+    case "or":
+      if (pattern.alternatives[0]) {
+        addPatternBindingTypes(pattern.alternatives[0], valueType, localTypes, layouts);
+      }
+      return;
     case "tuple": {
       const itemTypes = tuplePatternItemTypes(pattern, valueType, layouts);
       for (let index = 0; index < pattern.items.length; index++) {
@@ -13655,6 +13699,14 @@ function addPatternBindingTypes(
           localTypes,
           layouts,
         );
+      }
+      return;
+    }
+    case "product": {
+      const slots = productSlotsForType(valueType, layouts) ?? [];
+      for (const field of pattern.fields) {
+        const slot = slots.find((item, index) => (item.label ?? String(index)) === field.label);
+        addPatternBindingTypes(field.pattern, slot?.type, localTypes, layouts);
       }
       return;
     }
@@ -13690,6 +13742,42 @@ function lowerPatternBindings(
     }
     case "typed":
       return lowerPatternBindings(pattern.pattern, ctx, locals, pattern.type);
+    case "as": {
+      if (!ctx || !locals) return lowerPatternBindings(pattern.pattern, ctx, locals, valueType);
+      const slots = flattenType(valueType, ctx.layouts);
+      const temps = slots.map((slot, index) => {
+        const name = `__match_as${ctx.tempIndex++}_${index}`;
+        locals.add(name);
+        ctx.tempLocals.push({ name, type: slot.wat });
+        return name;
+      });
+      const stores = temps.toReversed().map((name): Instr => ({ op: "local.set", name }));
+      return [
+        ...stores,
+        ...temps.flatMap((name) => [{ op: "local.get", name } as Instr]),
+        ...lowerPatternBindings({ kind: "binding", name: pattern.name }, ctx, locals, valueType),
+        ...temps.flatMap((name) => [{ op: "local.get", name } as Instr]),
+        ...lowerPatternBindings(pattern.pattern, ctx, locals, valueType),
+      ];
+    }
+    case "or": {
+      if (!ctx || !locals) {
+        const alternative = pattern.alternatives[0];
+        if (!alternative) return [];
+        return lowerPatternBindings(alternative, ctx, locals, valueType);
+      }
+      const slots = flattenType(valueType, ctx.layouts);
+      const temps = slots.map((slot, index) => {
+        const name = `__match_or_bind${ctx.tempIndex++}_${index}`;
+        locals.add(name);
+        ctx.tempLocals.push({ name, type: slot.wat });
+        return name;
+      });
+      return [
+        ...temps.toReversed().map((name): Instr => ({ op: "local.set", name })),
+        ...lowerOrPatternBindingsFromTemps(pattern.alternatives, valueType, temps, ctx, locals),
+      ];
+    }
     case "tuple": {
       if (ctx && locals) {
         const itemTypes = tuplePatternItemTypes(pattern, valueType, ctx.layouts);
@@ -13735,6 +13823,31 @@ function lowerPatternBindings(
         ...pattern.args.toReversed().flatMap((item) => lowerPatternBindings(item)),
         { op: "drop" },
       ];
+    }
+    case "product": {
+      if (!ctx || !locals) {
+        const count = pattern.fields.length;
+        const body: Instr[] = [];
+        for (let index = 0; index < count; index++) body.push({ op: "drop" });
+        return body;
+      }
+      const slots = productSlotsForType(valueType, ctx.layouts) ?? [];
+      const allFlatSlots = slots.map((slot) => flattenType(slot.type, ctx.layouts));
+      const fieldByLabel = new Map(pattern.fields.map((field) => [field.label, field]));
+      const body: Instr[] = [];
+      for (let index = slots.length - 1; index >= 0; index--) {
+        const slot = slots[index]!;
+        const label = slot.label ?? String(index);
+        const field = fieldByLabel.get(label);
+        if (field) {
+          body.push(...lowerPatternBindings(field.pattern, ctx, locals, slot.type));
+        } else {
+          for (let flat = 0; flat < allFlatSlots[index]!.length; flat++) {
+            body.push({ op: "drop" });
+          }
+        }
+      }
+      return body;
     }
     case "wildcard":
     case "literal":
@@ -14476,6 +14589,9 @@ function lowerPatternTest(
   valueType?: string,
 ): Instr[] {
   if (pattern.kind === "typed") return lowerTypedPatternTest(pattern, ctx, locals);
+  if (pattern.kind === "as") return lowerPatternTest(pattern.pattern, ctx, locals, valueType);
+  if (pattern.kind === "or") return lowerOrPatternTest(pattern, ctx, locals, valueType);
+  if (pattern.kind === "product") return lowerProductPatternTest(pattern, ctx, locals, valueType);
   if (pattern.kind === "tuple") {
     if (!ctx || !locals) {
       return [
@@ -14571,6 +14687,21 @@ function lowerPatternTestFromTemps(
   if (pattern.kind === "typed") {
     return lowerPatternTestFromTemps(pattern.pattern, pattern.type, temps, ctx, locals);
   }
+  if (pattern.kind === "as") {
+    return lowerPatternTestFromTemps(pattern.pattern, valueType, temps, ctx, locals);
+  }
+  if (pattern.kind === "or") {
+    const tests = pattern.alternatives.map((alternative) =>
+      lowerPatternTestFromTemps(alternative, valueType, temps, ctx, locals)
+    );
+    return combinePatternTests(tests, "i32.or");
+  }
+  if (pattern.kind === "product") {
+    return [
+      ...temps.map((name): Instr => ({ op: "local.get", name })),
+      ...lowerProductPatternTest(pattern, ctx, locals, valueType),
+    ];
+  }
   if (pattern.kind === "constructor" || pattern.kind === "type") {
     const variant = sumVariantByNameForType(pattern.name, valueType, ctx.layouts) ??
       uniqueSumVariantByName(pattern.name, ctx.layouts);
@@ -14593,6 +14724,103 @@ function lowerPatternTestFromTemps(
     { op: "local.get", name: temps[0]! },
     ...lowerPatternTest(pattern, ctx, locals, valueType),
   ];
+}
+
+function lowerOrPatternBindingsFromTemps(
+  alternatives: ParamPattern[],
+  valueType: string | undefined,
+  temps: string[],
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const [alternative, ...rest] = alternatives;
+  if (!alternative) return [];
+  const bindings = [
+    ...temps.map((name): Instr => ({ op: "local.get", name })),
+    ...lowerPatternBindings(alternative, ctx, locals, valueType),
+  ];
+  if (!rest.length) return bindings;
+  return [
+    ...temps.map((name): Instr => ({ op: "local.get", name })),
+    ...lowerPatternTest(alternative, ctx, locals, valueType),
+    {
+      op: "if",
+      results: [],
+      thenBody: bindings,
+      elseBody: lowerOrPatternBindingsFromTemps(rest, valueType, temps, ctx, locals),
+    },
+  ];
+}
+
+function lowerOrPatternTest(
+  pattern: Extract<ParamPattern, { kind: "or" }>,
+  ctx: LowerContext | undefined,
+  locals: Set<string> | undefined,
+  valueType: string | undefined,
+): Instr[] {
+  if (!ctx || !locals) return [{ op: "drop" }, { op: "const", type: "i32", value: 0 }];
+  const slots = flattenType(valueType, ctx.layouts);
+  const temps = slots.map((slot, index) => {
+    const name = `__match_or${ctx.tempIndex++}_${index}`;
+    locals.add(name);
+    ctx.tempLocals.push({ name, type: slot.wat });
+    return name;
+  });
+  const stores = temps.toReversed().map((name): Instr => ({ op: "local.set", name }));
+  const tests = pattern.alternatives.map((alternative) => {
+    return [
+      ...temps.map((name): Instr => ({ op: "local.get", name })),
+      ...lowerPatternTest(alternative, ctx, locals, valueType),
+    ];
+  });
+  return [...stores, ...combinePatternTests(tests, "i32.or")];
+}
+
+function lowerProductPatternTest(
+  pattern: Extract<ParamPattern, { kind: "product" }>,
+  ctx: LowerContext | undefined,
+  locals: Set<string> | undefined,
+  valueType: string | undefined,
+): Instr[] {
+  if (!ctx || !locals) return [{ op: "drop" }, { op: "const", type: "i32", value: 0 }];
+  const slots = productSlotsForType(valueType, ctx.layouts);
+  if (!slots) {
+    return [
+      ...flattenType(valueType, ctx.layouts).map(() => ({ op: "drop" } as Instr)),
+      { op: "const", type: "i32", value: 0 },
+    ];
+  }
+  const fieldByLabel = new Map(pattern.fields.map((field) => [field.label, field]));
+  const tempGroups = slots.map((slot, slotIndex) => {
+    const flatSlots = flattenType(slot.type, ctx.layouts);
+    return flatSlots.map((flatSlot, flatIndex) => {
+      const name = `__match_product${ctx.tempIndex++}_${slotIndex}_${flatIndex}`;
+      locals.add(name);
+      ctx.tempLocals.push({ name, type: flatSlot.wat });
+      return name;
+    });
+  });
+  const stores = tempGroups.flat().toReversed().map((name): Instr => ({ op: "local.set", name }));
+  const tests: Instr[][] = [];
+  for (let index = 0; index < slots.length; index++) {
+    const slot = slots[index]!;
+    const label = slot.label ?? String(index);
+    const field = fieldByLabel.get(label);
+    if (!field || isCatchAllPattern(field.pattern)) continue;
+    tests.push(lowerPatternTestFromTemps(field.pattern, slot.type, tempGroups[index]!, ctx, locals));
+  }
+  return [...stores, ...combinePatternTests(tests, "i32.and")];
+}
+
+function combinePatternTests(tests: Instr[][], wasm: "i32.and" | "i32.or"): Instr[] {
+  if (!tests.length) {
+    const value = wasm === "i32.and" ? 1 : 0;
+    return [{ op: "const", type: "i32", value }];
+  }
+  return tests.reduce((body, test): Instr[] => {
+    if (!body.length) return test;
+    return [...body, ...test, { op: "binary", wasm }];
+  }, [] as Instr[]);
 }
 
 function lowerTypedPatternTest(

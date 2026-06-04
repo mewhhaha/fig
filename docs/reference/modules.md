@@ -49,7 +49,7 @@ instead of spelling them through another module such as `array.layout`.
 | `prelude.option`       | Pure option constructors and helpers.                                                                        |
 | `prelude.result`       | Pure result constructors and helpers.                                                                        |
 | `prelude.tuple`        | Tuple and pair helpers.                                                                                      |
-| `prelude.bool`         | Compatibility namespace that imports `prelude.scalar`.                                                       |
+| `prelude.bool`         | Boolean conversion and negation helpers plus the scalar helper import.                                       |
 | `prelude.num`          | Compatibility namespace that imports `prelude.scalar`.                                                       |
 | `prelude.order`        | `Ordering` union plus comparison predicates and `compare_i32`.                                               |
 | `prelude.schedule`     | Static schedule metadata vocabulary.                                                                         |

@@ -1930,12 +1930,9 @@ fn wasm_function_match_body_plan(
   body_abi: i32
 ) -> core.Option(WasmBodyPlan) {
   let source = context_value.source;
-  let start = parser.text_function_body_value_start_index(source, current.cursor);
-  let limit = parser.text_function_body_value_limit_index(source, current.cursor);
-  let result_type = parser.text_match_body_literal_result_type_class_between(
+  let result_type = parser.text_function_match_body_result_type_class(
     source,
-    start,
-    limit
+    current.cursor
   );
   let segments = parser.text_function_bool_match_body_segments(
     source,

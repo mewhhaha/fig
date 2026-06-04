@@ -542,6 +542,10 @@ function separate(
     writer.space();
     return;
   }
+  if (left.text === "if" && right.text === "(") {
+    writer.space();
+    return;
+  }
   if (right.text === "(" && opensParenWithoutSpace(left)) return;
   if (
     right.text === "." &&

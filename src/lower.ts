@@ -130,15 +130,43 @@ function lowerDeclarationTags(node: Node): DeclarationTag[] {
 
 function lowerTagList(node: Node): DeclarationTag[] {
   const tags: DeclarationTag[] = [];
+  const items = descendants(node, "TagItem");
+  if (items.length > 0) {
+    for (const child of items) {
+      tags.push(lowerTagItem(child));
+    }
+    return tags;
+  }
   for (const child of descendants(node, "Tag")) {
     tags.push(lowerTag(child));
   }
   return tags;
 }
 
+function lowerTagItem(node: Node): DeclarationTag {
+  const tag = optional(node, "Tag");
+  if (tag) return lowerTag(tag);
+  const expr = first(node, "TypeExpr");
+  const lowered = lowerTypeExpr(expr);
+  if (lowered.kind === "type_ref" && /^[a-z_][a-z0-9_]*$/.test(lowered.name)) {
+    return {
+      kind: "legacy",
+      ...spanOnly(expr),
+      name: lowered.name,
+    };
+  }
+  return {
+    kind: "expr",
+    ...spanOnly(expr),
+    name: expr.text.trim(),
+    expr: lowered,
+  };
+}
+
 function lowerTag(node: Node): DeclarationTag {
   const nameNode = first(node, "LowerIdent");
   return {
+    kind: "legacy",
     ...meta(node, nameNode),
     name: text(nameNode, "tag name"),
   };
@@ -381,6 +409,13 @@ function lowerBranchHint(node: Node | undefined): { branchHint: BranchHint } | u
     );
   }
   const hint = tags[0]!.name;
+  if (tags[0]!.kind !== "legacy") {
+    fail(
+      "parse.lower",
+      "branch hint tag list must contain exactly one legacy tag",
+      spanFor(tagList ?? node),
+    );
+  }
   return { branchHint: annotationBranchHint(hint) ?? hint };
 }
 
@@ -586,7 +621,8 @@ function typeCall(callee: string, args: TypeExpr[], node: Node): TypeExpr {
 function lowerTypeResultKind(node: Node | undefined): TypeResultKind {
   if (!node) return "type";
   const kind = optional(node, "TypeResultKind")?.text.trim();
-  return kind === "struct" || kind === "union" ? kind : "type";
+  if (kind === "struct" || kind === "union" || kind === "members") return kind;
+  return "type";
 }
 
 function lowerTypeParam(node: Node): TypeParam {
@@ -744,6 +780,8 @@ function canonicalizeSlots<t extends { position?: number; spread?: boolean; span
 function lowerTypeExpr(node: Node): TypeExpr {
   const expr = unwrapType(node);
   switch (expr.type) {
+    case "TypeMembers":
+      return lowerTypeMembers(expr);
     case "TypeMatch": {
       const exprs = named(expr).filter(is("TypeExpr"));
       return {
@@ -834,6 +872,23 @@ function lowerTypeExpr(node: Node): TypeExpr {
     default:
       return unreachable(expr, "type expression");
   }
+}
+
+function lowerTypeMembers(node: Node): TypeExpr {
+  const block = first(node, "TypeMembersBlock");
+  return {
+    kind: "type_members",
+    ...spanOnly(node),
+    target: lowerTypeExpr(first(node, "TypeExpr")),
+    functions: descendants(block, "TypeMemberFn").map((item) => {
+      const fnTail = first(item, "FnTail");
+      const lowered = lowerFn(fnTail);
+      return {
+        ...lowered,
+        public: false,
+      };
+    }),
+  };
 }
 
 function lowerScalarDomainType(node: Node): TypeExpr {
@@ -1199,7 +1254,9 @@ function paramTypeAnnotation(source: string): string | undefined {
 
 function constTypeFnAnnotation(source: string): string | undefined {
   if (!/^\s*const\b/.test(source)) return undefined;
-  const match = source.match(/:\s*(type\s+fn\s*\([\s\S]*\)\s*->\s*(?:type|struct|union))/);
+  const match = source.match(
+    /:\s*(type\s+fn\s*\([\s\S]*\)\s*->\s*(?:type|struct|union|members))/,
+  );
   return match?.[1]?.replace(/\s+/g, " ");
 }
 
@@ -1219,9 +1276,35 @@ function lowerParamPattern(node: Node): ParamPattern {
     return {
       kind: "typed",
       ...spanOnly(node),
-      pattern: lowerParamPattern(first(node, "PatternBase")),
+      pattern: lowerParamPattern(first(node, "PatternOr")),
       type: first(typeAnn, "Type").text,
     };
+  }
+  if (node.type === "Pattern") return lowerParamPattern(first(node, "PatternOr"));
+  if (node.type === "PatternOr") {
+    const alternatives = named(node).filter(is("PatternAs")).map(lowerParamPattern);
+    if (alternatives.length > 1) {
+      return { kind: "or", ...spanOnly(node), alternatives };
+    }
+    if (alternatives[0]) return alternatives[0];
+  }
+  if (node.type === "PatternAs") {
+    const children = named(node);
+    const at = children.find((child) => child.text === "@");
+    if (at) {
+      const nameNode = children.find(is("LowerIdent"));
+      const patternNode = children.find(is("PatternAs"));
+      if (nameNode && patternNode) {
+        return {
+          kind: "as",
+          ...meta(node, nameNode),
+          name: nameNode.text,
+          pattern: lowerParamPattern(patternNode),
+        };
+      }
+    }
+    const base = children.find(is("PatternBase"));
+    if (base) return lowerParamPattern(base);
   }
   if (node.type === "Pattern") return lowerParamPattern(first(node, "PatternBase"));
   if (node.type === "PatternBase") {
@@ -1251,6 +1334,23 @@ function lowerParamPattern(node: Node): ParamPattern {
       kind: "tuple",
       ...spanOnly(tuple),
       items: listTupleItems(tuple, "Pattern").map(lowerParamPattern),
+    };
+  }
+  if (node.type === "PatternGroup" || child.type === "PatternGroup") {
+    const group = node.type === "PatternGroup" ? node : child;
+    return lowerParamPattern(first(group, "Pattern"));
+  }
+  if (node.type === "ProductPattern" || child.type === "ProductPattern") {
+    const product = node.type === "ProductPattern" ? node : child;
+    const nameNode = first(product, "ProductPatternName");
+    const fieldsNode = optional(product, "ProductPatternFields");
+    return {
+      kind: "product",
+      ...meta(product, nameNode),
+      name: nameNode.text.replace(/\s+/g, ""),
+      fields: fieldsNode ? named(fieldsNode).filter(is("ProductPatternField")).map(
+        lowerProductPatternField,
+      ) : [],
     };
   }
   if (node.type === "PatternMember" || child.type === "PatternMember") {
@@ -1299,8 +1399,23 @@ function lowerParamPattern(node: Node): ParamPattern {
   return { kind: "binding", ...spanOnly(node), name: source };
 }
 
+function lowerProductPatternField(
+  node: Node,
+): Extract<ParamPattern, { kind: "product" }>["fields"][number] {
+  const name = first(node, "LowerIdent");
+  const pattern = optional(node, "Pattern");
+  return {
+    ...meta(node, name),
+    label: name.text,
+    pattern: pattern
+      ? lowerParamPattern(pattern)
+      : { kind: "binding", ...meta(name, name), name: name.text },
+  };
+}
+
 function paramBindingName(pattern: ParamPattern, fallback: Node | undefined): string {
   if (pattern.kind === "binding") return pattern.name;
+  if (pattern.kind === "as") return pattern.name;
   const fallbackName = fallback ? bindingName(fallback) : "";
   return fallbackName && fallbackName !== "_"
     ? fallbackName
@@ -1441,6 +1556,69 @@ function lowerIfArmBlock(node: Node): Expr {
   return block.statements.length === 0 && block.expr ? block.expr : block;
 }
 
+function boolLiteralPattern(value: "true" | "false", node: Node | undefined): ParamPattern {
+  return {
+    kind: "literal",
+    value,
+    literalKind: "bool",
+    ...spanOnly(node),
+  };
+}
+
+function wildcardPattern(node: Node | undefined): ParamPattern {
+  return { kind: "wildcard", ...spanOnly(node) };
+}
+
+function lowerIfElse(node: Node): Expr {
+  const nested = optional(node, "IfExpr");
+  if (nested) return lowerExpr(nested);
+  return lowerIfArmBlock(first(node, "Block"));
+}
+
+function lowerIfExpr(expr: Node): Expr {
+  const condition = first(expr, "IfCondition");
+  const trueBlock = first(expr, "Block");
+  const elseNode = first(expr, "IfElse");
+  const fallback = lowerIfElse(elseNode);
+  const ifLet = optional(condition, "IfLetCondition");
+  if (ifLet) {
+    return {
+      kind: "match",
+      ...spanOnly(expr),
+      value: lowerExpr(first(ifLet, "Expr")),
+      arms: [
+        {
+          ...spanOnly(trueBlock),
+          pattern: lowerParamPattern(first(ifLet, "Pattern")),
+          value: lowerIfArmBlock(trueBlock),
+        },
+        {
+          ...spanOnly(elseNode),
+          pattern: wildcardPattern(elseNode),
+          value: fallback,
+        },
+      ],
+    };
+  }
+  return {
+    kind: "match",
+    ...spanOnly(expr),
+    value: lowerExpr(first(condition, "Expr")),
+    arms: [
+      {
+        ...spanOnly(trueBlock),
+        pattern: boolLiteralPattern("true", trueBlock),
+        value: lowerIfArmBlock(trueBlock),
+      },
+      {
+        ...spanOnly(elseNode),
+        pattern: boolLiteralPattern("false", elseNode),
+        value: fallback,
+      },
+    ],
+  };
+}
+
 function lowerExpr(node: Node): Expr {
   const expr = unwrap(node);
   switch (expr.type) {
@@ -1448,39 +1626,8 @@ function lowerExpr(node: Node): Expr {
       return lowerDoExpr(expr);
     case "ProfileExpr":
       return lowerProfileExpr(expr);
-    case "IfExpr": {
-      const condition = first(expr, "Expr");
-      const blocks = named(expr).filter(is("Block"));
-      const trueBlock = blocks[0];
-      const falseBlock = blocks[1];
-      return {
-        kind: "match",
-        ...spanOnly(expr),
-        value: lowerExpr(condition),
-        arms: [
-          {
-            ...spanOnly(trueBlock),
-            pattern: {
-              kind: "literal",
-              value: "true",
-              literalKind: "bool",
-              ...spanOnly(trueBlock),
-            },
-            value: lowerIfArmBlock(trueBlock),
-          },
-          {
-            ...spanOnly(falseBlock),
-            pattern: {
-              kind: "literal",
-              value: "false",
-              literalKind: "bool",
-              ...spanOnly(falseBlock),
-            },
-            value: lowerIfArmBlock(falseBlock),
-          },
-        ],
-      };
-    }
+    case "IfExpr":
+      return lowerIfExpr(expr);
     case "MatchExpr": {
       const value = first(expr, "MatchValues");
       const arms = named(expr).filter(is("Arm")).map(lowerMatchArm);

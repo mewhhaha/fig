@@ -34,6 +34,21 @@ type fn Collector(target: type, item: type, builder: type) {
   @require(@type_member_type(target, #collect_finish) == Finish, "collector collect_finish has wrong type");
 }
 
+type fn SizeBits(t: type, bits: const) -> type {
+  @require(@type_size_bits(t) == bits, "SizeBits expected size");
+  t
+}
+
+type fn AlignBits(t: type, bits: const) -> type {
+  @require(@type_align_bits(t) == bits, "AlignBits expected alignment");
+  t
+}
+
+type fn FlatSlotCount(t: type, slots: const) -> type {
+  @require(@type_flat_slot_count(t) == slots, "FlatSlotCount expected slots");
+  t
+}
+
 fn InlineArrayList::nil(const a: type) -> InlineArrayList(0, a) {
   []
 }

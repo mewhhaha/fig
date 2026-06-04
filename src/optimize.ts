@@ -6968,6 +6968,26 @@ function renamePatternBindings(
         ...pattern,
         args: pattern.args.map((arg) => renamePatternBindings(arg, env, fnName)),
       };
+    case "or":
+      return {
+        ...pattern,
+        alternatives: pattern.alternatives.map((alternative) =>
+          renamePatternBindings(alternative, new Map(env), fnName)
+        ),
+      };
+    case "as": {
+      const fresh = inlineBindingName(fnName, pattern.name);
+      env.set(pattern.name, fresh);
+      return { ...pattern, name: fresh, pattern: renamePatternBindings(pattern.pattern, env, fnName) };
+    }
+    case "product":
+      return {
+        ...pattern,
+        fields: pattern.fields.map((field) => ({
+          ...field,
+          pattern: renamePatternBindings(field.pattern, env, fnName),
+        })),
+      };
     case "typed":
       return {
         ...pattern,

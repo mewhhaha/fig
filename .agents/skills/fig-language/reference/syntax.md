@@ -183,7 +183,9 @@ patterns per arm:
 ```fig
 fn score(left: bool, right: bool) -> i32 match {
   true, true => 3,
-  _, _ => 0,
+  true, false => 1,
+  false, true => 0,
+  false, false => 0,
 }
 
 fn unwrap(value: Option(i32)) -> i32 match {

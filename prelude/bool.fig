@@ -1,2 +1,17 @@
 const scalar = @import("prelude.scalar");
 const operators = @import("prelude.operators");
+
+fn to_i32(value: bool) -> i32 match {
+  true => 1,
+  _ => 0,
+}
+
+fn not(value: bool) -> bool match {
+  true => false,
+  _ => true,
+}
+
+fn to_sign(value: bool) -> i32 match {
+  true => 0 + 1,
+  _ => 0 - 1,
+}

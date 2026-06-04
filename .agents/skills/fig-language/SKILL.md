@@ -97,7 +97,7 @@ Generated grammar/parser updates require `deno task codegen`.
 Write Fig files with `.fig` extension. A program is a sequence of declarations:
 
 - `type fn` declarations for compile-time type functions.
-- `type` declaration sugar for fixed product, sum, and alias layouts.
+- `type` declaration sugar for fixed product, sum, numeric enum, and alias layouts.
 - `const` declarations for compile-time constants, dictionaries, host IO imports, and imports.
 - `fn` or `pub fn` declarations for value functions.
 - Top-level `let` declarations for simple Values.
@@ -173,7 +173,9 @@ Use a function match body when runtime parameters drive ordered pattern dispatch
 ```fig
 fn score(left: bool, right: bool) -> i32 match {
   true, true => 3,
-  _, _ => 0,
+  true, false => 1,
+  false, true => 0,
+  false, false => 0,
 }
 ```
 
@@ -210,15 +212,19 @@ Supported expressions include:
 - Shape values: `{x: 1, y: 2}`, `{x, y}`, and `{...base, z: 3}`.
 - Tuple and repeat values: `[1, 2]`, `[0; 4]`, fixed update `[...xs, [1]: value]`.
 - Target-typed collection literals: `#[1, 2, 3]`, `#[0, ...rest]`.
-- `match value { pattern => expr, _ => fallback }` and boolean `if cond { a } else { b }`.
+- `match value { pattern => expr, _ => fallback }`, boolean
+  `if cond { a } else if other { b } else { c }`, and pattern
+  `if (let Some(x) = value) { x } else { fallback }`.
 - `rec(args...)` in a runtime function tail position to re-enter the current function with new
   runtime parameter values.
 - Binary operators listed in `grammar.ebnf`.
 - Ranges: `start .. end`.
 - Pipe-bind: `expr \name -> next`.
 
-Boolean `if` is expression sugar for `match` on `bool`. There is no assignment statement; bind new
-locals with `let`. Let statements require semicolons.
+Boolean `if` is expression sugar for `match` on `bool`; `else if` nests another boolean match in the
+fallback arm. Parenthesized `if (let Pattern = value)` is expression sugar for
+`match value { Pattern => ..., _ => ... }`, with pattern bindings scoped to the first block. There is
+no assignment statement; bind new locals with `let`. Let statements require semicolons.
 
 ## Pattern Matching
 
@@ -247,12 +253,19 @@ Type functions also support ordered clauses and `match` over static values and t
 
 ## Products, Sums, Shapes, and Arrays
 
-Define concrete product and sum layouts with type declaration sugar:
+Define concrete product, sum, numeric enum, and alias layouts with type declaration sugar:
 
 ```fig
 type Point = struct {x: i32, y: i32}
 type Option(a) = union {None, Some(value: a)}
+type Status = enum(i32) {Ready = 1, Done = 2}
+type Channel = enum(i32(0..4)) {Red = 0, Green = 1, Blue = 2, Alpha = 3}
 ```
+
+Numeric enums are scalar aliases with named integer members. Use associated value syntax such as
+`Status::Ready`; in a match over a known enum type, bare variants such as `Ready` are inferred from
+the scrutinee type. Enum backings must be integer scalar types or refined `i32(...)` domains, and
+member values must fit the backing domain.
 
 Shape slots may be labeled or anonymous. Counted inline arrays use repeat syntax:
 
@@ -302,7 +315,10 @@ Inside type functions:
 
 When choosing a type-function pattern:
 
-- If you intend to define a runtime data layout, write a `type fn`, bind a PascalCase shape, and
+- If you intend to define a fixed runtime data layout, prefer declaration sugar such as
+  `type Point = struct ...`, `type Option(a) = union ...`, `type Mode = enum(...) ...`, or
+  `type Alias = ...`.
+- If you intend to compute a runtime data layout, write a `type fn`, bind a PascalCase shape, and
   return `struct(Shape)` or `union(...)`.
 - If you intend to require behavior on a type, write a contract `type fn` with `@require` and
   attached members such as `t::eql`, `t::append`, or `t::map`.
@@ -598,6 +614,10 @@ pub fn main(host: io) -> io(i32) {
 }
 ```
 
+Runtime function values cannot cross public Wasm boundaries: `pub fn` exports and `@external`
+imports cannot import or export function-typed values. Use const function parameters inside Fig, or
+represent host-side callback state with explicit handles.
+
 Host imports take the `io` executor value explicitly and lower to Wasm imports from module `env`.
 Under the stable memory ABI, compound host import params/results cross as `i32` handles and are
 described by the emitted `fig.abi` custom section. Use typed `prelude.effect` rows such as
@@ -647,7 +667,8 @@ Prefer `const std = @import("prelude.std");` for normal programs. It imports com
 - `prelude.function`: `functor`, `applicative`, `monad`, `fmap`, `bind`, `pipe`, `flip`.
 - `prelude.monad`: `State(S, A)` and explicit `Reader(R, A)` helpers.
 - `prelude.operators`: common operator declarations.
-- `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, and `prelude.schedule`.
+- `prelude.option`, `prelude.result`, `prelude.tuple`, `prelude.scalar`, `prelude.bool`, and
+  `prelude.schedule`.
 - `prelude.vec`, `prelude.list`, `prelude.nonempty`, `prelude.queue`, `prelude.tree`,
   `prelude.zipper`, `prelude.map`, `prelude.set`, and `prelude.graph`: heap-backed compiler data
   structures, including graph reachability helpers for dependency checks.

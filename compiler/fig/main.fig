@@ -86,6 +86,10 @@ pub fn compile_code_count(codes: layout.HeapArray(i32)) -> i32 {
   frontend.compile_code_summary(codes, 0, textmodel.SummaryKind::Declarations, 0)
 }
 
+pub fn compile_text_token_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_text_token_signature(codes, 0)
+}
+
 pub fn compile_declaration_kind_count(
   codes: layout.HeapArray(i32),
   kind_tag: i32
@@ -137,6 +141,24 @@ pub fn compile_function_return_signature_hash(codes: layout.HeapArray(i32)) -> i
     codes,
     0,
     textmodel.SummaryKind::FunctionReturnSignature,
+    0
+  )
+}
+
+pub fn compile_function_attached_declaration_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionAttachedDeclarations,
+    0
+  )
+}
+
+pub fn compile_function_attached_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::FunctionAttachedSignature,
     0
   )
 }
@@ -203,6 +225,33 @@ pub fn compile_type_sugar_statement_count(codes: layout.HeapArray(i32)) -> i32 {
     codes,
     0,
     textmodel.SummaryKind::TypeSugarStatements,
+    0
+  )
+}
+
+pub fn compile_type_enum_declaration_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::TypeEnumDeclarations,
+    0
+  )
+}
+
+pub fn compile_type_enum_variant_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::TypeEnumVariants,
+    0
+  )
+}
+
+pub fn compile_type_enum_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::TypeEnumSignature,
     0
   )
 }
@@ -275,6 +324,24 @@ pub fn compile_value_operator_signature_hash(codes: layout.HeapArray(i32)) -> i3
     codes,
     0,
     textmodel.SummaryKind::ValueOperatorSignature,
+    0
+  )
+}
+
+pub fn compile_operator_declaration_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::OperatorDeclarations,
+    0
+  )
+}
+
+pub fn compile_operator_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::OperatorSignature,
     0
   )
 }

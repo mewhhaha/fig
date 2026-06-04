@@ -38,7 +38,7 @@ The compiler classifies first-party special forms by the context where each one 
 | Do strategy       | `@io`, `@monad`, `@applicative`                                                  | `do @strategy(...) { ... }`                       |
 | Annotation        | `@[likely]`, `@[unlikely]`                                                       | branch hints on match arms                        |
 | Instrumentation   | `@trace`, `@profile`                                                             | runtime function bodies                           |
-| Internal support  | `@field`, `@replace_field`, `@empty`, and exact heap/inline-array helpers        | compiler-generated or narrow library wrapper code |
+| Internal support  | `@field`, `@replace_field`, `@empty`, `@memberwise_eql`, and exact heap/inline-array helpers | compiler-generated or narrow library wrapper code |
 
 `static_for_slots` is an internal checked-AST form used by generated fixed-layout code. It is not
 source syntax; source-level `static for` and record/product `for` slots are rejected.
@@ -51,7 +51,8 @@ source syntax; source-level `static for` and record/product `for` slots are reje
 | `@external` | string import name, function type | host IO action function | top-level const checking/backend  |
 
 `@import` and `@external` are declaration-only forms. They are valid as top-level `const` values,
-not as ordinary expressions.
+not as ordinary expressions. `@external` signatures must take `io` as the first parameter, return an
+`io(T)` action, and avoid runtime function values at the host boundary.
 
 `return(value)` is available in expression position when an `io(T)` result is expected. It is not a
 normal function and cannot be redefined.
@@ -112,6 +113,10 @@ Named `const` declarations can keep a type-level result when later compile-time 
 
 `@assume` is not a source builtin. Rewrite assumptions are supplied by compiler plugins as
 const-function template strings.
+
+`@memberwise_eql(t, left, right)` is an internal helper for source-written derive providers. It
+expands to field-wise equality for product types and is intended for generated member bodies such as
+`prelude.derive.Eq`.
 
 ## Type Reflection
 

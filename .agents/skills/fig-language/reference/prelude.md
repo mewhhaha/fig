@@ -49,9 +49,10 @@ directly too, including `prelude.core`, `prelude.layout`, `prelude.fixed`,
 | `prelude.result`  | `ok`, `err`, plus `Result::is_ok`, `Result::is_err`, `Result::unwrap_or`, `Result::map`, `Result::map_err`, `Result::pure`, `Result::apply`, and `Result::bind`. |
 | `prelude.tuple`   | `Pair::first`, `Pair::second`, `Pair::swap`, `Pair::map_first`, `Pair::map_second`, `Pair::bimap`, and `Tuple3` field accessors. |
 | `prelude.scalar`  | Boolean helpers, `select`, the `Number(t)` contract, and generic `min`, `max`, `clamp`, `between`, `abs`, `signum`, and `square`. |
+| `prelude.bool`    | Boolean conversion and negation helpers: `to_i32`, `to_sign`, and `not`.              |
 | `prelude.order`   | `Ordering`, `compare_i32`, and predicates for less, equal, and greater cases.                    |
 
-`prelude.bool` and `prelude.num` are compatibility namespaces that import `prelude.scalar`.
+`prelude.num` is a compatibility namespace that imports `prelude.scalar`.
 
 ## Operators And Functional Helpers
 

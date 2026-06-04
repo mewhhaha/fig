@@ -7,7 +7,8 @@ attached members, erased proof values, Branch-Bit values, and WebAssembly loweri
 The practical rule is:
 
 - Rust `struct` or tuple structs become Fig product types.
-- Rust `enum` becomes a Fig `union`.
+- Rust `enum` with payloads becomes a Fig `union`; fieldless integer-backed enums can become Fig
+  numeric enums.
 - Rust inherent `impl Type` methods become attached member functions named `Type::method`.
 - Rust trait bounds become `type fn` contracts checked with `@require`.
 - Rust generic functions carry evidence explicitly, either as transparent annotations or local
@@ -73,6 +74,22 @@ fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
 
 Fig variants are PascalCase constructors. `match` is an expression, so every arm must produce a
 compatible result type.
+
+Fieldless integer-backed Rust enums can map to Fig numeric enum sugar:
+
+```fig
+type Status = enum(i32) {Ready = 1, Done = 2, Back = -1}
+
+fn score(status: Status) -> i32 match {
+  Ready => 10,
+  Status::Done => 20,
+  Back => -5,
+  _ => 0,
+}
+```
+
+Numeric enum members use associated syntax such as `Status::Ready` in expressions. In a match over
+a known enum type, bare variants such as `Ready` are inferred from the scrutinee type.
 
 ## Inherent Methods
 

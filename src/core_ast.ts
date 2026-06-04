@@ -28,7 +28,9 @@ export type Declaration = FnDecl | LetDecl | ConstDecl | OperatorDecl | TypeDecl
 export type BranchHint = string;
 
 export interface DeclarationTag extends AstNodeMeta {
+  kind: "legacy" | "expr";
   name: string;
+  expr?: TypeExpr;
 }
 
 export interface EffectImport extends AstNodeMeta {
@@ -153,7 +155,7 @@ export interface TypeDecl extends AstNodeMeta {
   clauses?: TypeDecl[];
 }
 
-export type TypeResultKind = "type" | "struct" | "union";
+export type TypeResultKind = "type" | "struct" | "union" | "members";
 
 export type TypeParamKind =
   | "type"
@@ -241,6 +243,7 @@ export type TypeExpr =
   | ({ kind: "type_static_ref"; name: string } & AstNodeMeta)
   | ({ kind: "type_fn"; source: string } & AstNodeMeta)
   | ({ kind: "type_shape"; shape: TypeShape } & AstNodeMeta)
+  | ({ kind: "type_members"; target: TypeExpr; functions: FnDecl[] } & AstNodeMeta)
   | ({ kind: "type_match"; value: TypeExpr; arms: TypeMatchArm[] } & AstNodeMeta)
   | (
     & { kind: "type_scalar_domain"; carrier: string; members: TypeScalarDomainMember[] }
@@ -336,9 +339,17 @@ export type ParamPattern =
   )
   | ({ kind: "tuple"; items: ParamPattern[] } & AstNodeMeta)
   | ({ kind: "constructor"; name: string; args: ParamPattern[] } & AstNodeMeta)
+  | ({ kind: "or"; alternatives: ParamPattern[] } & AstNodeMeta)
+  | ({ kind: "as"; name: string; pattern: ParamPattern } & AstNodeMeta)
+  | ({ kind: "product"; name: string; fields: ProductPatternField[] } & AstNodeMeta)
   | ({ kind: "enum_member"; name: string } & AstNodeMeta)
   | ({ kind: "type"; name: string } & AstNodeMeta)
   | ({ kind: "typed"; pattern: ParamPattern; type: string } & AstNodeMeta);
+
+export interface ProductPatternField extends AstNodeMeta {
+  label: string;
+  pattern: ParamPattern;
+}
 
 export interface BlockExpr extends AstNodeMeta {
   kind: "block";

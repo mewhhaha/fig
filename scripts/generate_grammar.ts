@@ -110,6 +110,10 @@ for (const file of bundle.files) {
       "[$.MatchValues],\n  ],",
       "[$.MatchValues],\n    [$.Primary, $.ScalarDomainType],\n    [$.TypePrimary, $.ScalarDomainType],\n  ],",
     );
+    content = content.replace(
+      "[$.TypePrimary, $.ScalarDomainType],\n  ],",
+      "[$.TypePrimary, $.ScalarDomainType],\n    [$.Tag, $.TypePrimary],\n  ],",
+    );
   }
   if (file.path === "tokenizer.ts") {
     content = content.replace(

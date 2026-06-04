@@ -111,6 +111,10 @@ fn TextSource::summary(
   )
 }
 
+fn TextSource::text_token_signature(input: TextSource) -> i32 {
+  textlex.stream_token_signature_hash(input.stream)
+}
+
 fn TextSource::checked_declaration_type_signature(input: TextSource) -> i32 {
   textfacts.checked_declaration_type_signature(input.stream)
 }
@@ -438,6 +442,13 @@ fn compile_code_summary(
     summary_kind,
     summary_arg
   )
+}
+
+fn compile_text_token_signature(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::text_token_signature(TextSource::from_codes(codes, seed))
 }
 
 fn compile_checked_declaration_type_signature(

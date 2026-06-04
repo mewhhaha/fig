@@ -16,6 +16,7 @@ type TextCharCode = enum(i32) {
   Space = 32,
   Bang = 33,
   Quote = 34,
+  Hash = 35,
   Percent = 37,
   LeftParen = 40,
   RightParen = 41,
@@ -23,6 +24,7 @@ type TextCharCode = enum(i32) {
   Plus = 43,
   Comma = 44,
   Minus = 45,
+  Dot = 46,
   Slash = 47,
   Digit0 = 48,
   Digit1 = 49,
@@ -38,6 +40,8 @@ type TextCharCode = enum(i32) {
   UpperB = 66,
   UpperI = 73,
   UpperZ = 90,
+  LeftBracket = 91,
+  RightBracket = 93,
   Underscore = 95,
   LowerA = 97,
   LowerB = 98,
@@ -102,6 +106,7 @@ type TextLexResult = union {
 }
 
 type TextTokenStream = struct {
+  text: TextBuffer,
   tokens: vec.Vec(TextToken),
   count: i32,
   diagnostics: diagnostic.DiagnosticBag,
@@ -302,6 +307,40 @@ fn code_at(text: TextBuffer, index: i32) -> i32 {
   }
 }
 
+fn source_code_at(source: TextTokenStream, offset: i32) -> i32 {
+  code_at(source.text, offset - source.text.base_offset)
+}
+
+fn decimal_digit_value(code: i32) -> i32 {
+  match code {
+    _ if code >= TextCharCode::Digit0 && code <= TextCharCode::Digit9 =>
+      code - TextCharCode::Digit0,
+    _ => 0,
+  }
+}
+
+fn decimal_span_value_loop(
+  source: TextTokenStream,
+  offset: i32,
+  limit: i32,
+  total: i32
+) -> i32 {
+  match offset >= limit {
+    true => total,
+    false => rec(
+      source,
+      offset + 1,
+      limit,
+      total * 10 + decimal_digit_value(source_code_at(source, offset))
+    ),
+  }
+}
+
+fn decimal_token_value(source: TextTokenStream, index: i32) -> i32 {
+  let token_span = token_at(source, index).span;
+  decimal_span_value_loop(source, token_span.start, token_span.end, 0)
+}
+
 fn text_hash_loop(
   text: TextBuffer,
   index: i32,
@@ -309,7 +348,7 @@ fn text_hash_loop(
   total: i32
 ) -> i32 {
   match index < limit {
-    true => text_hash_loop(
+    true => rec(
       text,
       index + 1,
       limit,
@@ -437,11 +476,13 @@ fn keyword_kind_from_hash(width: i32, value_hash: i32) -> token.TokenKind {
     },
     4 => match value_hash {
       3751145 => token.ElseKw,
+      3753397 => token.EnumKw,
       4296800 => token.BoolLiteral,
       4304258 => token.TypeKw,
       _ => token.Identifier,
     },
     5 => match value_hash {
+      128589438 => token.InfixKw,
       121518887 => token.ConstKw,
       124571339 => token.BoolLiteral,
       132880973 => token.MatchKw,
@@ -452,6 +493,18 @@ fn keyword_kind_from_hash(width: i32, value_hash: i32) -> token.TokenKind {
       347397349 => token.StructKw,
       _ => match value_hash == (0 - 52335941) {
         true => token.Import,
+        false => match value_hash == (0 - 51515734) {
+          true => token.InfixlKw,
+          false => match value_hash == (0 - 51515728) {
+            true => token.InfixrKw,
+            false => token.Identifier,
+          },
+        },
+      },
+    },
+    7 => match value_hash {
+      _ => match value_hash == (0 - 1173303669) {
+        true => token.MembersKw,
         false => token.Identifier,
       },
     },
@@ -508,6 +561,17 @@ fn scan_number_width(text: TextBuffer, start: i32) -> i32 {
   scan_width(can_continue_number, text, start)
 }
 
+fn literal_type_marker_width(text: TextBuffer, start: i32) -> i32 {
+  match can_continue_name(classify(code_at(text, start + 1))) {
+    true => 1 + scan_name_width(text, start + 1),
+    false => 1,
+  }
+}
+
+fn is_string_end(text: TextBuffer, index: i32) -> bool {
+  code_at(text, index) == TextCharCode::Quote
+}
+
 fn string_width_loop(
   text: TextBuffer,
   start: i32,
@@ -515,9 +579,9 @@ fn string_width_loop(
 ) -> i32 {
   match index < text.length {
     false => 0,
-    true => match code_at(text, index) == TextCharCode::Quote {
+    true => match is_string_end(text, index) {
       true => index - start + 1,
-      false => string_width_loop(text, start, index + 1),
+      false => rec(text, start, index + 1),
     },
   }
 }
@@ -526,13 +590,22 @@ fn string_width(text: TextBuffer, start: i32) -> i32 {
   string_width_loop(text, start, start + 1)
 }
 
+fn is_arrow_start(text: TextBuffer, start: i32) -> bool {
+  let has_minus = code_at(text, start) == TextCharCode::Minus;
+  let has_greater = code_at(text, start + 1) == TextCharCode::Greater;
+  has_minus && has_greater
+}
+
+fn is_collection_open_start(text: TextBuffer, start: i32) -> bool {
+  let has_hash = code_at(text, start) == TextCharCode::Hash;
+  let has_bracket = code_at(text, start + 1) == TextCharCode::LeftBracket;
+  has_hash && has_bracket
+}
+
 fn punctuation_width(text: TextBuffer, start: i32) -> i32 {
-  match code_at(text, start) == TextCharCode::Minus {
+  match is_arrow_start(text, start) {
+    true => 2,
     false => 1,
-    true => match code_at(text, start + 1) == TextCharCode::Greater {
-      false => 1,
-      true => 2,
-    },
   }
 }
 
@@ -601,7 +674,27 @@ fn lex_name(class: TextCharClass, text: TextBuffer, cursor: TextCursor) -> TextL
 
 fn lex_one(text: TextBuffer, cursor: TextCursor) -> TextLexResult {
   let code = code_at(text, cursor.index);
-  let class = classify(code);
+  match is_collection_open_start(text, cursor.index) {
+    true => lex_width(text, token.Symbol, PunctNone, cursor, 2),
+    false => match code == TextCharCode::Hash {
+      true => lex_width(
+      text,
+      token.LiteralType,
+      PunctNone,
+      cursor,
+      literal_type_marker_width(text, cursor.index)
+      ),
+      false => lex_one_class(text, cursor, code, classify(code)),
+    },
+  }
+}
+
+fn lex_one_class(
+  text: TextBuffer,
+  cursor: TextCursor,
+  code: i32,
+  class: TextCharClass
+) -> TextLexResult {
   match class {
     TextEof => TextLexFailed(UnexpectedTextChar(
       code,
@@ -642,16 +735,19 @@ fn lex_one(text: TextBuffer, cursor: TextCursor) -> TextLexResult {
 }
 
 fn is_line_comment_start(text: TextBuffer, cursor: TextCursor) -> bool {
-  match code_at(text, cursor.index) == TextCharCode::Slash {
-    true => code_at(text, cursor.index + 1) == TextCharCode::Slash,
-    false => false,
-  }
+  let has_first_slash = code_at(text, cursor.index) == TextCharCode::Slash;
+  let has_second_slash = code_at(text, cursor.index + 1) == TextCharCode::Slash;
+  has_first_slash && has_second_slash
+}
+
+fn is_line_end(text: TextBuffer, cursor: TextCursor) -> bool {
+  code_at(text, cursor.index) == TextCharCode::Newline
 }
 
 fn skip_line_comment(text: TextBuffer, cursor: TextCursor) -> TextCursor {
   match cursor.index < text.length {
     false => cursor,
-    true => match code_at(text, cursor.index) == TextCharCode::Newline {
+    true => match is_line_end(text, cursor) {
       true => cursor,
       false => rec(text, advance(cursor, 1)),
     },
@@ -814,13 +910,14 @@ fn stream_loop(
   let token_cursor = skip_trivia(text, cursor);
   match token_cursor.index < text.length {
     false => TextTokenStream {
+      text: text,
       tokens: tokens,
       count: count,
       diagnostics: diagnostics,
       source_span: source_span,
     },
     true => match lex_one(text, token_cursor) {
-      result => stream_loop(
+      result => rec(
         text,
         safe_cursor_from_result(
           result,
@@ -903,6 +1000,19 @@ fn text_hash_at(source: TextTokenStream, index: i32) -> i32 {
   text_token_at(source, index).text_hash
 }
 
+fn collection_open_hash() -> i32 {
+  TextCharCode::Hash * 33 + TextCharCode::LeftBracket
+}
+
+fn token_is_collection_open(source: TextTokenStream, index: i32) -> bool {
+  let current = text_token_at(source, index);
+  let is_symbol = token.is_symbol(current.token.kind);
+  let has_no_punctuation = punctuation_score(current.punctuation) == 0;
+  let has_collection_width = current.token.span.end - current.token.span.start == 2;
+  let has_collection_hash = current.text_hash == collection_open_hash();
+  is_symbol && has_no_punctuation && has_collection_width && has_collection_hash
+}
+
 fn lexeme_score(value: TextLexeme) -> i32 {
   token.token_score(token.make(value.kind, value.span))
     + punctuation_score(value.punctuation)
@@ -944,7 +1054,7 @@ fn stream_token_score_loop(
   total: i32
 ) -> i32 {
   match index < stream.count {
-    true => stream_token_score_loop(
+    true => rec(
       stream,
       index + 1,
       total + text_token_score(text_token_at(stream, index))
@@ -959,13 +1069,32 @@ fn stream_score(stream: TextTokenStream) -> i32 {
     + diagnostic.bag_score(stream.diagnostics)
 }
 
+fn stream_token_signature_loop(
+  stream: TextTokenStream,
+  index: i32,
+  total: i32
+) -> i32 {
+  match index < stream.count {
+    true => rec(
+      stream,
+      index + 1,
+      total * 131 + text_token_score(text_token_at(stream, index))
+    ),
+    false => total,
+  }
+}
+
+fn stream_token_signature_hash(stream: TextTokenStream) -> i32 {
+  stream_token_signature_loop(stream, 0, stream.count)
+}
+
 fn buffer_code_score_loop(
   text: TextBuffer,
   index: i32,
   total: i32
 ) -> i32 {
   match index < text.length {
-    true => buffer_code_score_loop(
+    true => rec(
       text,
       index + 1,
       total + code_at(text, index)

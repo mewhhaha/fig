@@ -1,0 +1,6 @@
+// expect: function.closure_boundary
+const host = @external("host", fn(host: io, cb: fn(x: i32) -> i32) -> io(i32));
+
+pub fn main(host_io: io) -> io(i32) {
+  host(host_io, \x -> x)
+}

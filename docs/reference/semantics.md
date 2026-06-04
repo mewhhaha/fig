@@ -142,6 +142,8 @@ into `fig_objects`. The compiler emits a `fig.abi` custom section that describes
 host imports, value layouts, variant and heap-array metadata, memories, object headers, and helper
 names. Host code can parse that manifest or use the TypeScript helpers `instantiateFig`,
 `createFigHost`, `encodeFigValue`, and `decodeFigValue`.
+Runtime function values cannot cross this public boundary. Keep callback-shaped values inside Fig as
+ordinary or const function values, or model host-side callback state with explicit handles.
 
 `fig_objects` stores object headers followed by flattened payload fields. The current header is
 `layout_id`, `payload_bytes`, `flags`, and `ref_count`, each a little-endian `i32`; payload fields

@@ -26,6 +26,7 @@ const keywords = new Set<string>([
   "infixr",
   "let",
   "match",
+  "members",
   "pub",
   "struct",
   "true",

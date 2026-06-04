@@ -72,7 +72,8 @@ signature single and puts deconstruction beside the branch results:
 fn score(left: bool, right: bool) -> i32 match {
   true, true => 3,
   true, false => 1,
-  _, _ => 0,
+  false, true => 0,
+  false, false => 0,
 }
 ```
 
@@ -90,17 +91,42 @@ Boolean `if` is pure expression sugar:
 ```fig
 if cond {
   a
-} else {
+} else if other {
   b
+} else {
+  c
+}
+```
+
+It desugars to nested `match` expressions:
+
+```fig
+match cond {
+  true => a,
+  false => match other {
+    true => b,
+    false => c,
+  },
+}
+```
+
+Use parenthesized `if let` for a single pattern branch. Bindings introduced by the pattern are
+available only in the first block:
+
+```fig
+if (let Some(inner) = value) {
+  inner
+} else {
+  fallback
 }
 ```
 
 It desugars to:
 
 ```fig
-match cond {
-  true => a,
-  false => b,
+match value {
+  Some(inner) => inner,
+  _ => fallback,
 }
 ```
 

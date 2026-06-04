@@ -42,6 +42,8 @@ type Result(a) = union {
   Ok(value: a), Err(message: string)
 }
 
+type Mode = enum(i32) {Idle = 0, Run = 1, Back = -1}
+
 type fn Eq(t: type) {
   let Eq = {
     eql: fn(a: t, b: t) -> bool,
@@ -160,6 +162,13 @@ fn classify(x: i32) -> i32 {
   }
 }
 
+fn mode_score(mode: Mode) -> i32 match {
+  Idle => 0,
+  Run => 1,
+  Mode::Back => -1,
+  _ => 0,
+}
+
 pub fn main(host: io) -> i32 {
   let n: Id = 40;
   let point: Point = Point {x: 1, y: 2};
@@ -185,6 +194,7 @@ line```;
   let mapped_value = mapped({value: 1});
   let applied_value = applied(2);
   let bound_value = bound({value: 3});
+  let mode_value = mode_score(Mode::Run);
   Choose(ok)
     + classify(1)
     + pair_first(pair)
@@ -195,6 +205,7 @@ line```;
     + mapped_value
     + applied_value
     + bound_value
+    + mode_value
     + n
     + 2
 }

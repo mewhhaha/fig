@@ -72,7 +72,8 @@ signature single and puts deconstruction beside the branch results:
 fn score(left: bool, right: bool) -> i32 match {
   true, true => 3,
   true, false => 1,
-  _, _ => 0,
+  false, true => 0,
+  false, false => 0,
 }
 ```
 

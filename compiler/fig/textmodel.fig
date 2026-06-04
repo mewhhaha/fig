@@ -48,7 +48,14 @@ type SummaryKind = enum(i32) {
   SourceImportEdgeSignature = 41,
   SourceImportGraphDiagnosticSignature = 42,
   DeclarationDependencySignature = 43,
-  DeclarationDependencyDiagnosticSignature = 44
+  DeclarationDependencyDiagnosticSignature = 44,
+  TypeEnumDeclarations = 45,
+  TypeEnumVariants = 46,
+  TypeEnumSignature = 47,
+  FunctionAttachedDeclarations = 48,
+  FunctionAttachedSignature = 49,
+  OperatorDeclarations = 50,
+  OperatorSignature = 51
 }
 
 type ImportResolutionMode = enum(i32) {

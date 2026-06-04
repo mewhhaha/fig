@@ -208,6 +208,7 @@ function coreStaticParamKind(name: string, index: number): TypeParamKind | undef
     (name === "wgsl_shader_id" || name === "wgsl_bindings" || name === "wgsl_locations") &&
     index === 0
   ) return "string";
+  if (name === "memberwise_eql" && index === 0) return "type";
   return undefined;
 }
 
@@ -268,6 +269,7 @@ const coreStaticBuiltinNames = [
   "type_variant_slots",
   "type_variants",
   "require",
+  "memberwise_eql",
   "wgsl_shader_id",
   "wgsl_bindings",
   "wgsl_locations",

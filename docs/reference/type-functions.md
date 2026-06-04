@@ -20,7 +20,7 @@ type fn Pair(a: type, b: type) -> struct {
 ```
 
 Type function bodies contain `let` or `const` bindings and type expressions. The final type
-expression is the result. Result kinds are `type`, `struct`, and `union`.
+expression is the result. Result kinds are `type`, `struct`, `union`, and `members`.
 
 ## Parameters and Clauses
 
@@ -85,6 +85,29 @@ type fn Eq(t: type) -> type {
 }
 ```
 
+Type functions that return `members` produce generated attached member functions. `members(...)`
+values are only legal as declaration tag results:
+
+```fig
+type fn Eq(t: type) -> members {
+  members(t) {
+    fn eql(left: t, right: t) -> bool {
+      @memberwise_eql(t, left, right)
+    }
+  }
+}
+
+const derive = @import("prelude.derive");
+const core = @import("prelude.core");
+
+@[derive.Eq(Self), core.Eq(Self)]
+type Point = struct {x: i32, y: i32}
+```
+
+Generated members cannot overwrite explicit source members. Tag expressions are evaluated in source
+order, so `derive.Eq(Self)` must run before a following `core.Eq(Self)` contract check that requires
+the generated `eql` member.
+
 Type constructor parameters let contracts describe generic families:
 
 ```fig
@@ -114,7 +137,7 @@ Use these patterns when choosing how to express static intent:
 
 | Intent                                         | Pattern                                                                                         |
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Define a fixed runtime data layout             | Use `type Name = struct ...`, `type Name(a) = union ...`, or `type Alias = ...`.                |
+| Define a fixed runtime data layout             | Use `type Name = struct ...`, `type Name(a) = union ...`, `type Name = enum(...) ...`, or `type Alias = ...`. |
 | Compute a runtime data layout                  | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
 | Require behavior on a concrete type            | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`. |
 | Call required behavior carried by a value      | Annotate a value as `contract(t)` and call the attached member as `t::member(...)`.             |

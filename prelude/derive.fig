@@ -1,0 +1,17 @@
+const core = @import("prelude.core");
+
+type fn Eq(t: type) -> members {
+  members(t) {
+    fn eql(left: t, right: t) -> bool {
+      @memberwise_eql(t, left, right)
+    }
+  }
+}
+
+type fn EmptyValue(t: type) -> members {
+  members(t) {
+    fn empty() -> t {
+      @empty(t)
+    }
+  }
+}

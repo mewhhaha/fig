@@ -1159,6 +1159,14 @@ function patternBindingNamesForHover(pattern: ParamPattern): string[] {
       return pattern.items.flatMap(patternBindingNamesForHover);
     case "constructor":
       return pattern.args.flatMap(patternBindingNamesForHover);
+    case "or":
+      return pattern.alternatives[0]
+        ? patternBindingNamesForHover(pattern.alternatives[0])
+        : [];
+    case "as":
+      return [pattern.name, ...patternBindingNamesForHover(pattern.pattern)];
+    case "product":
+      return pattern.fields.flatMap((field) => patternBindingNamesForHover(field.pattern));
     case "typed":
       return patternBindingNamesForHover(pattern.pattern);
     case "wildcard":
@@ -3318,6 +3326,19 @@ function renderParamPatternHover(pattern: ParamPattern): string {
       return `[${pattern.items.map(renderParamPatternHover).join(", ")}]`;
     case "constructor":
       return `${pattern.name}(${pattern.args.map(renderParamPatternHover).join(", ")})`;
+    case "or":
+      return pattern.alternatives.map(renderParamPatternHover).join(" | ");
+    case "as":
+      return `${pattern.name} @ ${renderParamPatternHover(pattern.pattern)}`;
+    case "product":
+      return `${pattern.name} {${
+        pattern.fields.map((field) => {
+          if (field.pattern.kind === "binding" && field.pattern.name === field.label) {
+            return field.label;
+          }
+          return `${field.label}: ${renderParamPatternHover(field.pattern)}`;
+        }).join(", ")
+      }}`;
     case "type":
       return pattern.name;
     case "typed":
@@ -3337,6 +3358,12 @@ function patternHoverKind(pattern: ParamPattern): string {
       return "tuple pattern";
     case "constructor":
       return "constructor pattern";
+    case "or":
+      return "or pattern";
+    case "as":
+      return "as pattern";
+    case "product":
+      return "product pattern";
     case "enum_member":
       return "enum member pattern";
     case "type":
@@ -3368,6 +3395,8 @@ function renderTypeExprHover(expr: TypeExpr): string {
           }${renderTypeExprHover(slot.type)}`
         ).join(", ")
       }}`;
+    case "type_members":
+      return renderTypeExprHover(expr.target);
     case "type_match":
       return `match ${renderTypeExprHover(expr.value)} { ${
         expr.arms.map((arm) =>
@@ -3411,6 +3440,8 @@ function typeExprKindHover(expr: TypeExpr): string {
       return "function type";
     case "type_shape":
       return "shape type";
+    case "type_members":
+      return "type with members";
     case "type_match":
       return "type match";
     case "type_binary":

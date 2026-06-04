@@ -18,6 +18,7 @@
     "infixr",
     "let",
     "match",
+    "members",
     "pub",
     "struct",
     "true",

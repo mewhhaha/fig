@@ -55,12 +55,15 @@ Type functions currently cover several compile-time concepts:
 
 - Layout constructors: products, sums, aliases, function types, shape types, and counted inline
   arrays.
-- Type declaration sugar for fixed layouts, such as `type Point = struct {x: i32, y: i32}` and
-  `type Option(a) = union {None, Some(value: a)}`, plus `type fn` for computed layouts.
+- Type declaration sugar for fixed layouts, such as `type Point = struct {x: i32, y: i32}`,
+  `type Option(a) = union {None, Some(value: a)}`, and
+  `type Mode = enum(i32) {Idle = 0, Run = 1}`, plus `type fn` for computed layouts.
 - Static reflection: product/sum/alias checks, slot lookup, variant lookup, and attached member
   lookup.
 - Static contracts: `@require`-checked proofs such as `Eq(t)`, `Functor(t)`, `Droppable(t)`, and
   layout predicates.
+- Source-level derive tags: providers such as `prelude.derive.Eq(Self)` generate attached members
+  before follow-up contracts such as `prelude.core.Eq(Self)` validate them.
 - Constructor-polymorphic helpers: generic functions can infer type constructors at call sites and
   evaluate local type-level checks such as `@assert(Functor(t));`.
 - Reader, state, and effect carriers: `prelude.monad` exposes compiler-lowered `Reader` and `State`
@@ -119,6 +122,8 @@ with stable layout metadata for objects, fixed arrays, strings, sums, and heap a
 such as `fig_alloc_object`, `fig_alloc_buffer`, `fig_retain`, and `fig_release`. The TypeScript API
 exports `instantiateFig`, `createFigHost`, `encodeFigValue`, and `decodeFigValue` for host-side
 calls into Fig modules, including UTF-8 string slots stored through `fig_buffers`.
+Runtime function values are internal values only; `pub fn` exports and `@external` imports cannot
+import or export function-typed values.
 
 The Branch-Bit heap runtime uses separate Wasm memories named `fig_objects` and `fig_buffers` for
 heap objects and large byte buffers. Transitional internal branch handles are `i64` values whose
@@ -134,7 +139,7 @@ pure: it exposes common fragments as nested namespaces for core value data, stat
 fixed-array/lane helpers, functional helpers, pure option/result methods, tuple methods, and
 schedule metadata. Existing fragment imports such as `prelude.core`, `prelude.layout`,
 `prelude.array_static`, `prelude.function`, `prelude.option`, `prelude.result`, `prelude.tuple`,
-`prelude.scalar`, and `prelude.schedule` remain available for smaller surfaces.
+`prelude.scalar`, `prelude.bool`, and `prelude.schedule` remain available for smaller surfaces.
 
 ```fig
 const std = @import("prelude.std");
@@ -188,6 +193,8 @@ const canvas = @import("web.canvas");
 
 Host IO imports are declared with `@external("name", fn(host: io, ...) -> io(T))`. Runtime entry
 points pass the primitive `io` executor explicitly and use `do @io(_)` to sequence actions.
+External signatures cannot include runtime function values; use const function parameters inside Fig
+or represent host-side callbacks with explicit handles.
 
 ## Benchmarking
 

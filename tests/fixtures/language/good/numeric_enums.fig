@@ -1,0 +1,22 @@
+const operators = @import("prelude.operators");
+
+type Status = enum(i32) {Ready = 1, Done = 2, Back = -1}
+type Channel = enum(i32(0..4)) {Red = 0, Green = 1, Blue = 2, Alpha = 3}
+
+fn status_score(value: Status) -> i32 match {
+  Ready => 10,
+  Status::Done => 20,
+  Back => -5,
+  _ => 0,
+}
+
+fn channel_score(value: Channel) -> i32 match {
+  Red => 1,
+  Green => 2,
+  Blue => 3,
+  Alpha => 4,
+}
+
+pub fn main() -> i32 {
+  status_score(Status::Back) + channel_score(Channel::Blue)
+}

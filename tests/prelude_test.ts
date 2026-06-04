@@ -26,6 +26,41 @@ Deno.test("prelude array module checks through resolver imports", async () => {
   );
 });
 
+Deno.test("prelude layout exposes reflection contracts", async () => {
+  await checkSource(
+    `
+    const layout = @import("prelude.layout");
+
+    type Point = struct {x: i32, y: bool}
+    @[test]
+    type fn Proof() -> type {
+      layout.SizeBits(i32, 32);
+      layout.AlignBits(i32, 32);
+      layout.FlatSlotCount(Point, 2);
+      Point
+    }
+
+    pub fn main(value: Proof) -> i32 { value.x }
+  `,
+    { resolveModule },
+  );
+  await assertThrowsCompile(
+    `
+    const layout = @import("prelude.layout");
+
+    @[test]
+    type fn Bad() -> type {
+      layout.SizeBits(i32, 64);
+      i32
+    }
+
+    pub fn main(value: Bad) -> i32 { value }
+  `,
+    "type.require",
+    { resolveModule },
+  );
+});
+
 Deno.test("module resolver loads prelude fig files", async () => {
   const source = await resolveModule("prelude.core");
   assert(source?.includes("type fn Eq"));

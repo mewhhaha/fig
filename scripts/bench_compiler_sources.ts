@@ -11,6 +11,7 @@ import { parse } from "../src/parser.ts";
 import { tokenize, type Token as SourceToken } from "../src/tokenize.ts";
 import type {
   Expr,
+  OperatorDecl,
   Param,
   ParamPattern,
   Program,
@@ -37,6 +38,11 @@ const samples = numberArg("--samples", 5);
 const warmup = numberArg("--warmup", 1);
 const figRunIters = numberArg("--fig-run-iters", 1);
 const figWasmOpt = optModeArg("--fig-wasm-opt", "debug");
+const figSourceFilters = stringListArg("--fig-source");
+const figImportSourceFilters = stringListArg("--fig-import-source");
+const figDirectCheckFilters = stringListArg("--fig-direct-check");
+const figSkipDirectImports = Deno.args.includes("--fig-skip-direct-imports");
+const figSkipSourceChecks = Deno.args.includes("--fig-skip-source-checks");
 const progress = Deno.args.includes("--progress");
 const selectedRuntimes = runtimeArgs();
 const runRoot = await Deno.makeTempDir({ prefix: "fig-compiler-source-bench-" });
@@ -46,17 +52,23 @@ let figWasmSink = 0;
 type FigCompilerInput = {
   sourceId: string;
   codes: number[];
+  textTokenSignatureHash: number;
   declarationCount: number;
   declarationKindCounts: DeclarationKindCounts;
   functionParamCount: number;
   typeParamCount: number;
   typeResultKindCounts: TypeResultKindCounts;
   typeSugarStatementCount: number;
+  typeEnumDeclarationCount: number;
+  typeEnumVariantCount: number;
+  typeEnumSignatureHash: number;
   declarationSignatureHash: number;
   functionParamSignatureHash: number;
   typeParamSignatureHash: number;
   functionParamTypeSignatureHash: number;
   functionReturnSignatureHash: number;
+  functionAttachedDeclarationCount: number;
+  functionAttachedSignatureHash: number;
   valueAnnotationSignatureHash: number;
   functionBodySignatureHash: number;
   typeBodySignatureHash: number;
@@ -98,6 +110,8 @@ type FigCompilerInput = {
   valuePipeBindCount: number;
   valueOperatorExpressionCount: number;
   valueOperatorSignatureHash: number;
+  operatorDeclarationCount: number;
+  operatorSignatureHash: number;
   valueCallExpressionCount: number;
   sourceImportEdgeSignatureHash: number;
   sourceImportGraphDiagnosticSignatureHash: number;
@@ -279,6 +293,7 @@ type TypeResultKindCounts = {
   types: number;
   structs: number;
   unions: number;
+  members: number;
 };
 
 const declarationKindChecks: {
@@ -301,11 +316,13 @@ const typeResultKindChecks: {
   { label: "type", tag: 1, key: "types" },
   { label: "struct", tag: 2, key: "structs" },
   { label: "union", tag: 3, key: "unions" },
+  { label: "members", tag: 4, key: "members" },
 ];
 
 const figCompilerSources = await readFigSourceRoots([`${root}/compiler/fig`]);
 const figSources = new Map(figCompilerSources);
 await readFigSources(`${root}/prelude`, figSources);
+const figCompilerBenchmarkSources = filteredFigCompilerSources();
 const figRoot = `${root}/compiler/fig/main.fig`;
 const goRoot = `${root}/compiler/go`;
 
@@ -324,12 +341,12 @@ if (shouldRun("deno/js")) {
 if (shouldRun("deno/fig")) {
   const source = figSources.get(figRoot);
   if (!source) throw new Error(`missing ${figRoot}`);
-  const loc = sourceLocFromTexts(figCompilerSources.values());
+  const loc = sourceLocFromTexts(figCompilerBenchmarkSources.values());
   try {
     const runCompiledCompiler = await compiledFigSourceRunner(source, figRoot);
     rows.push({
       runtime: "deno/fig",
-      mode: `compiled_${figWasmOpt}_source_tree_${figRunIters}x`,
+      mode: `compiled_${figWasmOpt}_${figBenchmarkSourceScope()}_${figRunIters}x`,
       loc,
       samples,
       ...(await timedRow((index) => runCompiledCompiler(index))),
@@ -441,182 +458,206 @@ async function compiledFigSourceRunner(
     if (progress) {
       console.error(`[fig-input] ${input.sourceId}`);
     }
-    for (const importInput of input.directImportTypeEnvironmentInputs) {
+    if (!figSkipDirectImports) for (const importInput of input.directImportTypeEnvironmentInputs) {
+      if (!figDirectImportMatches(importInput)) {
+        continue;
+      }
       if (progress) {
         console.error(`[fig-import] ${importInput.sourceId} -> ${importInput.importSourceId}`);
       }
-      const actualDirectImportTypeEnvironmentSignatureHash = Number(
-        host.call(
-          "compile_direct_import_type_environment_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const directImportTypeEnvironmentSignatureMatches =
-        actualDirectImportTypeEnvironmentSignatureHash === importInput.signatureHash;
-      if (!directImportTypeEnvironmentSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import type-environment signature hash ` +
-            `${actualDirectImportTypeEnvironmentSignatureHash} for ${importInput.sourceId} ` +
-            `importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.signatureHash}`,
+      if (shouldRunFigDirectCheck("type_environment")) {
+        const actualDirectImportTypeEnvironmentSignatureHash = Number(
+          host.call(
+            "compile_direct_import_type_environment_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const directImportTypeEnvironmentSignatureMatches =
+          actualDirectImportTypeEnvironmentSignatureHash === importInput.signatureHash;
+        if (!directImportTypeEnvironmentSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import type-environment signature hash ` +
+              `${actualDirectImportTypeEnvironmentSignatureHash} for ${importInput.sourceId} ` +
+              `importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.signatureHash}`,
+          );
+        }
       }
-      const actualQualifiedResolvedDeclaredTypeClassSignatureHash = Number(
-        host.call(
-          "compile_direct_import_resolved_declared_type_class_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const qualifiedResolvedDeclaredTypeClassSignatureMatches =
-        actualQualifiedResolvedDeclaredTypeClassSignatureHash ===
-          importInput.qualifiedResolvedDeclaredTypeClassSignatureHash;
-      if (!qualifiedResolvedDeclaredTypeClassSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import resolved declared ` +
-            `type-class signature hash ${actualQualifiedResolvedDeclaredTypeClassSignatureHash} ` +
-            `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.qualifiedResolvedDeclaredTypeClassSignatureHash}`,
+      if (shouldRunFigDirectCheck("resolved_declared_type_class")) {
+        const actualQualifiedResolvedDeclaredTypeClassSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolved_declared_type_class_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const qualifiedResolvedDeclaredTypeClassSignatureMatches =
+          actualQualifiedResolvedDeclaredTypeClassSignatureHash ===
+            importInput.qualifiedResolvedDeclaredTypeClassSignatureHash;
+        if (!qualifiedResolvedDeclaredTypeClassSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolved declared ` +
+              `type-class signature hash ${actualQualifiedResolvedDeclaredTypeClassSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.qualifiedResolvedDeclaredTypeClassSignatureHash}`,
+          );
+        }
       }
-      const actualQualifiedResolvedDeclaredAbiClassSignatureHash = Number(
-        host.call(
-          "compile_direct_import_resolved_declared_abi_class_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const qualifiedResolvedDeclaredAbiClassSignatureMatches =
-        actualQualifiedResolvedDeclaredAbiClassSignatureHash ===
-          importInput.qualifiedResolvedDeclaredAbiClassSignatureHash;
-      if (!qualifiedResolvedDeclaredAbiClassSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import resolved declared ` +
-            `ABI-class signature hash ${actualQualifiedResolvedDeclaredAbiClassSignatureHash} ` +
-            `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.qualifiedResolvedDeclaredAbiClassSignatureHash}`,
+      if (shouldRunFigDirectCheck("resolved_declared_abi_class")) {
+        const actualQualifiedResolvedDeclaredAbiClassSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolved_declared_abi_class_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const qualifiedResolvedDeclaredAbiClassSignatureMatches =
+          actualQualifiedResolvedDeclaredAbiClassSignatureHash ===
+            importInput.qualifiedResolvedDeclaredAbiClassSignatureHash;
+        if (!qualifiedResolvedDeclaredAbiClassSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolved declared ` +
+              `ABI-class signature hash ${actualQualifiedResolvedDeclaredAbiClassSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.qualifiedResolvedDeclaredAbiClassSignatureHash}`,
+          );
+        }
       }
-      const actualQualifiedResolvedValueBodyTypeClassSignatureHash = Number(
-        host.call(
-          "compile_direct_import_resolved_value_body_type_class_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const qualifiedResolvedValueBodyTypeClassSignatureMatches =
-        actualQualifiedResolvedValueBodyTypeClassSignatureHash ===
-          importInput.qualifiedResolvedValueBodyTypeClassSignatureHash;
-      if (!qualifiedResolvedValueBodyTypeClassSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import resolved value-body ` +
-            `type-class signature hash ${actualQualifiedResolvedValueBodyTypeClassSignatureHash} ` +
-            `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.qualifiedResolvedValueBodyTypeClassSignatureHash}`,
+      if (shouldRunFigDirectCheck("resolved_value_body_type_class")) {
+        const actualQualifiedResolvedValueBodyTypeClassSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolved_value_body_type_class_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const qualifiedResolvedValueBodyTypeClassSignatureMatches =
+          actualQualifiedResolvedValueBodyTypeClassSignatureHash ===
+            importInput.qualifiedResolvedValueBodyTypeClassSignatureHash;
+        if (!qualifiedResolvedValueBodyTypeClassSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolved value-body ` +
+              `type-class signature hash ${actualQualifiedResolvedValueBodyTypeClassSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.qualifiedResolvedValueBodyTypeClassSignatureHash}`,
+          );
+        }
       }
-      const actualQualifiedResolvedValueBodyAbiClassSignatureHash = Number(
-        host.call(
-          "compile_direct_import_resolved_value_body_abi_class_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const qualifiedResolvedValueBodyAbiClassSignatureMatches =
-        actualQualifiedResolvedValueBodyAbiClassSignatureHash ===
-          importInput.qualifiedResolvedValueBodyAbiClassSignatureHash;
-      if (!qualifiedResolvedValueBodyAbiClassSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import resolved value-body ` +
-            `ABI-class signature hash ${actualQualifiedResolvedValueBodyAbiClassSignatureHash} ` +
-            `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.qualifiedResolvedValueBodyAbiClassSignatureHash}`,
+      if (shouldRunFigDirectCheck("resolved_value_body_abi_class")) {
+        const actualQualifiedResolvedValueBodyAbiClassSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolved_value_body_abi_class_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const qualifiedResolvedValueBodyAbiClassSignatureMatches =
+          actualQualifiedResolvedValueBodyAbiClassSignatureHash ===
+            importInput.qualifiedResolvedValueBodyAbiClassSignatureHash;
+        if (!qualifiedResolvedValueBodyAbiClassSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolved value-body ` +
+              `ABI-class signature hash ${actualQualifiedResolvedValueBodyAbiClassSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.qualifiedResolvedValueBodyAbiClassSignatureHash}`,
+          );
+        }
       }
-      const actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash = Number(
-        host.call(
-          "compile_direct_import_resolved_simple_body_type_check_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const qualifiedResolvedSimpleBodyTypeCheckSignatureMatches =
-        actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash ===
-          importInput.qualifiedResolvedSimpleBodyTypeCheckSignatureHash;
-      if (!qualifiedResolvedSimpleBodyTypeCheckSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import resolved simple body ` +
-            `type-check signature hash ` +
-            `${actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash} ` +
-            `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.qualifiedResolvedSimpleBodyTypeCheckSignatureHash}`,
+      if (shouldRunFigDirectCheck("resolved_simple_body_type_check")) {
+        const actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolved_simple_body_type_check_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const qualifiedResolvedSimpleBodyTypeCheckSignatureMatches =
+          actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash ===
+            importInput.qualifiedResolvedSimpleBodyTypeCheckSignatureHash;
+        if (!qualifiedResolvedSimpleBodyTypeCheckSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolved simple body ` +
+              `type-check signature hash ` +
+              `${actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.qualifiedResolvedSimpleBodyTypeCheckSignatureHash}`,
+          );
+        }
       }
-      const actualQualifiedResolvedSymbolEnvironmentSignatureHash = Number(
-        host.call(
-          "compile_direct_import_resolved_symbol_environment_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const qualifiedResolvedSymbolEnvironmentSignatureMatches =
-        actualQualifiedResolvedSymbolEnvironmentSignatureHash ===
-          importInput.qualifiedResolvedSymbolEnvironmentSignatureHash;
-      if (!qualifiedResolvedSymbolEnvironmentSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import resolved symbol ` +
-            `environment signature hash ` +
-            `${actualQualifiedResolvedSymbolEnvironmentSignatureHash} ` +
-            `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.qualifiedResolvedSymbolEnvironmentSignatureHash}`,
+      if (shouldRunFigDirectCheck("resolved_symbol_environment")) {
+        const actualQualifiedResolvedSymbolEnvironmentSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolved_symbol_environment_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const qualifiedResolvedSymbolEnvironmentSignatureMatches =
+          actualQualifiedResolvedSymbolEnvironmentSignatureHash ===
+            importInput.qualifiedResolvedSymbolEnvironmentSignatureHash;
+        if (!qualifiedResolvedSymbolEnvironmentSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolved symbol ` +
+              `environment signature hash ` +
+              `${actualQualifiedResolvedSymbolEnvironmentSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.qualifiedResolvedSymbolEnvironmentSignatureHash}`,
+          );
+        }
       }
-      const actualQualifiedResolvedExportAbiSignatureHash = Number(
-        host.call(
-          "compile_direct_import_resolved_export_abi_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const qualifiedResolvedExportAbiSignatureMatches =
-        actualQualifiedResolvedExportAbiSignatureHash ===
-          importInput.qualifiedResolvedExportAbiSignatureHash;
-      if (!qualifiedResolvedExportAbiSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import resolved export ` +
-            `ABI signature hash ${actualQualifiedResolvedExportAbiSignatureHash} ` +
-            `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.qualifiedResolvedExportAbiSignatureHash}`,
+      if (shouldRunFigDirectCheck("resolved_export_abi")) {
+        const actualQualifiedResolvedExportAbiSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolved_export_abi_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const qualifiedResolvedExportAbiSignatureMatches =
+          actualQualifiedResolvedExportAbiSignatureHash ===
+            importInput.qualifiedResolvedExportAbiSignatureHash;
+        if (!qualifiedResolvedExportAbiSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolved export ` +
+              `ABI signature hash ${actualQualifiedResolvedExportAbiSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.qualifiedResolvedExportAbiSignatureHash}`,
+          );
+        }
       }
-      const actualDirectImportResolutionRecordSignatureHash = Number(
-        host.call(
-          "compile_direct_import_resolution_record_signature_hash",
-          importInput.sourceCodes,
-          importInput.importCodes,
-          importInput.moduleHash,
-        ),
-      );
-      const directImportResolutionRecordSignatureMatches =
-        actualDirectImportResolutionRecordSignatureHash ===
-          importInput.resolutionRecordSignatureHash;
-      if (!directImportResolutionRecordSignatureMatches) {
-        throw new Error(
-          `compiled Fig compiler produced direct import resolution-record ` +
-            `signature hash ${actualDirectImportResolutionRecordSignatureHash} ` +
-            `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-            `JS parser produced ${importInput.resolutionRecordSignatureHash}`,
+      if (shouldRunFigDirectCheck("resolution_record")) {
+        const actualDirectImportResolutionRecordSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolution_record_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
         );
+        const directImportResolutionRecordSignatureMatches =
+          actualDirectImportResolutionRecordSignatureHash ===
+            importInput.resolutionRecordSignatureHash;
+        if (!directImportResolutionRecordSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolution-record ` +
+              `signature hash ${actualDirectImportResolutionRecordSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.resolutionRecordSignatureHash}`,
+          );
+        }
       }
+    }
+    if (figSkipSourceChecks) {
+      continue;
     }
     const actualSourceImportEdgeSignatureHash = Number(
       host.call("compile_source_import_edge_signature_hash", input.codes),
@@ -641,6 +682,18 @@ async function compiledFigSourceRunner(
         `compiled Fig compiler produced source import graph-diagnostic signature hash ` +
           `${actualSourceImportGraphDiagnosticSignatureHash} for ${input.sourceId}; ` +
           `JS parser produced ${input.sourceImportGraphDiagnosticSignatureHash}`,
+      );
+    }
+    const actualTextTokenSignatureHash = Number(
+      host.call("compile_text_token_signature_hash", input.codes),
+    );
+    const textTokenSignatureMatches =
+      actualTextTokenSignatureHash === input.textTokenSignatureHash;
+    if (!textTokenSignatureMatches) {
+      throw new Error(
+        `compiled Fig compiler produced text-token signature hash ` +
+          `${actualTextTokenSignatureHash} for ${input.sourceId}; ` +
+          `JS tokenizer produced ${input.textTokenSignatureHash}`,
       );
     }
     const actualDeclarationDependencySignatureHash = Number(
@@ -732,6 +785,42 @@ async function compiledFigSourceRunner(
           `JS parser counted ${input.typeSugarStatementCount}`,
       );
     }
+    const actualTypeEnumDeclarationCount = Number(
+      host.call("compile_type_enum_declaration_count", input.codes),
+    );
+    const typeEnumDeclarationCountMatches =
+      actualTypeEnumDeclarationCount === input.typeEnumDeclarationCount;
+    if (!typeEnumDeclarationCountMatches) {
+      throw new Error(
+        `compiled Fig compiler counted ${actualTypeEnumDeclarationCount} ` +
+          `enum type declarations in ${input.sourceId}; ` +
+          `JS parser counted ${input.typeEnumDeclarationCount}`,
+      );
+    }
+    const actualTypeEnumVariantCount = Number(
+      host.call("compile_type_enum_variant_count", input.codes),
+    );
+    const typeEnumVariantCountMatches =
+      actualTypeEnumVariantCount === input.typeEnumVariantCount;
+    if (!typeEnumVariantCountMatches) {
+      throw new Error(
+        `compiled Fig compiler counted ${actualTypeEnumVariantCount} ` +
+          `enum variants in ${input.sourceId}; ` +
+          `JS parser counted ${input.typeEnumVariantCount}`,
+      );
+    }
+    const actualTypeEnumSignatureHash = Number(
+      host.call("compile_type_enum_signature_hash", input.codes),
+    );
+    const typeEnumSignatureMatches =
+      actualTypeEnumSignatureHash === input.typeEnumSignatureHash;
+    if (!typeEnumSignatureMatches) {
+      throw new Error(
+        `compiled Fig compiler produced enum type signature hash ` +
+          `${actualTypeEnumSignatureHash} for ${input.sourceId}; ` +
+          `JS parser produced ${input.typeEnumSignatureHash}`,
+      );
+    }
     const actualSignatureHash = Number(
       host.call("compile_declaration_signature_hash", input.codes),
     );
@@ -787,6 +876,30 @@ async function compiledFigSourceRunner(
         `compiled Fig compiler produced function return signature hash ` +
           `${actualFunctionReturnSignatureHash} for ${input.sourceId}; ` +
           `JS parser produced ${input.functionReturnSignatureHash}`,
+      );
+    }
+    const actualFunctionAttachedDeclarationCount = Number(
+      host.call("compile_function_attached_declaration_count", input.codes),
+    );
+    const functionAttachedDeclarationCountMatches =
+      actualFunctionAttachedDeclarationCount === input.functionAttachedDeclarationCount;
+    if (!functionAttachedDeclarationCountMatches) {
+      throw new Error(
+        `compiled Fig compiler counted ${actualFunctionAttachedDeclarationCount} ` +
+          `attached function declarations in ${input.sourceId}; ` +
+          `JS parser counted ${input.functionAttachedDeclarationCount}`,
+      );
+    }
+    const actualFunctionAttachedSignatureHash = Number(
+      host.call("compile_function_attached_signature_hash", input.codes),
+    );
+    const functionAttachedSignatureMatches =
+      actualFunctionAttachedSignatureHash === input.functionAttachedSignatureHash;
+    if (!functionAttachedSignatureMatches) {
+      throw new Error(
+        `compiled Fig compiler produced attached function signature hash ` +
+          `${actualFunctionAttachedSignatureHash} for ${input.sourceId}; ` +
+          `JS parser produced ${input.functionAttachedSignatureHash}`,
       );
     }
     const actualValueAnnotationSignatureHash = Number(
@@ -941,6 +1054,30 @@ async function compiledFigSourceRunner(
         `compiled Fig compiler produced value operator signature hash ` +
           `${actualValueOperatorSignatureHash} in ${input.sourceId}; ` +
           `JS parser produced ${input.valueOperatorSignatureHash}`,
+      );
+    }
+    const actualOperatorDeclarationCount = Number(
+      host.call("compile_operator_declaration_count", input.codes),
+    );
+    const operatorDeclarationCountMatches =
+      actualOperatorDeclarationCount === input.operatorDeclarationCount;
+    if (!operatorDeclarationCountMatches) {
+      throw new Error(
+        `compiled Fig compiler counted ${actualOperatorDeclarationCount} ` +
+          `operator declarations in ${input.sourceId}; ` +
+          `JS parser counted ${input.operatorDeclarationCount}`,
+      );
+    }
+    const actualOperatorSignatureHash = Number(
+      host.call("compile_operator_signature_hash", input.codes),
+    );
+    const operatorSignatureHashMatches =
+      actualOperatorSignatureHash === input.operatorSignatureHash;
+    if (!operatorSignatureHashMatches) {
+      throw new Error(
+        `compiled Fig compiler produced operator declaration signature hash ` +
+          `${actualOperatorSignatureHash} in ${input.sourceId}; ` +
+          `JS parser produced ${input.operatorSignatureHash}`,
       );
     }
     const actualValueCallExpressionCount = Number(
@@ -1319,7 +1456,7 @@ async function compiledFigSourceRunner(
 
 async function figCompilerInputs(): Promise<FigCompilerInput[]> {
   const inputs: FigCompilerInput[] = [];
-  for (const [sourceId, source] of figCompilerSources) {
+  for (const [sourceId, source] of figCompilerBenchmarkSources) {
     const program = await parse(source, { sourceId });
     const typeEnvironment = programNamedTypeEnvironment(program);
     const codes = sourceCodes(source);
@@ -1327,17 +1464,23 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
     inputs.push({
       sourceId,
       codes,
+      textTokenSignatureHash: textTokenSignatureHash(tokens),
       declarationCount: programDeclarationCount(program),
       declarationKindCounts: programDeclarationKindCounts(program),
       functionParamCount: programFunctionParamCount(program),
       typeParamCount: programTypeParamCount(program),
       typeResultKindCounts: programTypeResultKindCounts(program),
       typeSugarStatementCount: programTypeSugarStatementCount(program, source),
+      typeEnumDeclarationCount: programTypeEnumDeclarationCount(program),
+      typeEnumVariantCount: programTypeEnumVariantCount(program),
+      typeEnumSignatureHash: programTypeEnumSignatureHash(program),
       declarationSignatureHash: programDeclarationSignatureHash(program),
       functionParamSignatureHash: programFunctionParamSignatureHash(program),
       typeParamSignatureHash: programTypeParamSignatureHash(program),
       functionParamTypeSignatureHash: programFunctionParamTypeSignatureHash(program),
       functionReturnSignatureHash: programFunctionReturnSignatureHash(program),
+      functionAttachedDeclarationCount: programFunctionAttachedDeclarationCount(program),
+      functionAttachedSignatureHash: programFunctionAttachedSignatureHash(program),
       valueAnnotationSignatureHash: programValueAnnotationSignatureHash(program),
       functionBodySignatureHash: programFunctionBodySignatureHash(program, source),
       typeBodySignatureHash: programTypeBodySignatureHash(program, source),
@@ -1441,6 +1584,8 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
       valuePipeBindCount: programValuePipeBindCount(program),
       valueOperatorExpressionCount: programValueOperatorExpressionCount(program),
       valueOperatorSignatureHash: programValueOperatorSignatureHash(program, tokens),
+      operatorDeclarationCount: programOperatorDeclarationCount(program),
+      operatorSignatureHash: programOperatorSignatureHash(program),
       valueCallExpressionCount: programValueCallExpressionCount(program),
       sourceImportEdgeSignatureHash: programSourceImportEdgeSignatureHash(program),
       sourceImportGraphDiagnosticSignatureHash:
@@ -1456,6 +1601,75 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
     });
   }
   return inputs;
+}
+
+function filteredFigCompilerSources(): Map<string, string> {
+  if (figSourceFilters.length === 0) {
+    return figCompilerSources;
+  }
+  const sources = new Map<string, string>();
+  for (const [sourceId, source] of figSources) {
+    if (figSourceMatchesFilter(sourceId)) {
+      sources.set(sourceId, source);
+    }
+  }
+  if (sources.size === 0) {
+    throw new Error(`no Fig sources matched --fig-source=${figSourceFilters.join(",")}`);
+  }
+  return sources;
+}
+
+function figSourceMatchesFilter(sourceId: string): boolean {
+  return figSourceIdMatchesFilters(sourceId, figSourceFilters);
+}
+
+function figDirectImportMatches(input: FigDirectImportTypeEnvironmentInput): boolean {
+  return figSourceIdMatchesFilters(input.importSourceId, figImportSourceFilters);
+}
+
+function shouldRunFigDirectCheck(name: string): boolean {
+  if (figDirectCheckFilters.length === 0) {
+    return true;
+  }
+  for (const filter of figDirectCheckFilters) {
+    if (name === filter) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function figSourceIdMatchesFilters(sourceId: string, filters: string[]): boolean {
+  if (filters.length === 0) {
+    return true;
+  }
+  for (const filter of filters) {
+    const path = normalizedFigSourceFilter(filter);
+    if (sourceId === path) {
+      return true;
+    }
+    if (sourceId.endsWith(`/${filter}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function figBenchmarkSourceScope(): string {
+  if (figSourceFilters.length === 0) {
+    return "source_tree";
+  }
+  return "source_filtered";
+}
+
+function normalizedFigSourceFilter(filter: string): string {
+  if (filter.startsWith("/")) {
+    return filter;
+  }
+  if (filter.startsWith("./")) {
+    return `${root}/${filter.slice(2)}`;
+  }
+  return `${root}/${filter}`;
 }
 
 function programDeclarationCount(program: Program): number {
@@ -1523,6 +1737,7 @@ function programTypeResultKindCounts(program: Program): TypeResultKindCounts {
     types: 0,
     structs: 0,
     unions: 0,
+    members: 0,
   };
   for (const decl of program.declarations) {
     if (decl.kind !== "type") {
@@ -1534,6 +1749,10 @@ function programTypeResultKindCounts(program: Program): TypeResultKindCounts {
     }
     if (decl.resultKind === "union") {
       counts.unions += 1;
+      continue;
+    }
+    if (decl.resultKind === "members") {
+      counts.members += 1;
       continue;
     }
     counts.types += 1;
@@ -1551,6 +1770,74 @@ function programTypeSugarStatementCount(program: Program, source: string): numbe
       continue;
     }
     total += decl.body.statements.length;
+  }
+  return total;
+}
+
+function programTypeEnumDeclarationCount(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind !== "type") {
+      continue;
+    }
+    if (decl.enum === undefined) {
+      continue;
+    }
+    total += 1;
+  }
+  return total;
+}
+
+function programTypeEnumVariantCount(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind !== "type") {
+      continue;
+    }
+    if (decl.enum === undefined) {
+      continue;
+    }
+    total += decl.enum.variants.length;
+  }
+  return total;
+}
+
+function programTypeEnumSignatureHash(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind !== "type") {
+      continue;
+    }
+    if (decl.enum === undefined) {
+      continue;
+    }
+    const nameHash = textHash(decl.name);
+    const backingHash = normalizedTypeSignatureHash(decl.enum.backing);
+    const variantHash = enumVariantSignatureHash(decl);
+    const fact = signatureMix(
+      signatureMix(
+        signatureMix(149, nameHash),
+        backingHash,
+      ),
+      variantHash,
+    );
+    total = signatureMix(total, fact);
+  }
+  return total;
+}
+
+function enumVariantSignatureHash(decl: TypeDecl): number {
+  let total = 0;
+  if (decl.enum === undefined) {
+    return total;
+  }
+  for (const variant of decl.enum.variants) {
+    const value = variant.value.replace(/\s+/g, "");
+    const fact = signatureMix(
+      signatureMix(151, textHash(variant.name)),
+      textHash(value),
+    );
+    total = signatureMix(total, fact);
   }
   return total;
 }
@@ -1622,6 +1909,51 @@ function programFunctionReturnSignatureHash(program: Program): number {
       continue;
     }
     total = signatureMix(total, normalizedTypeSignatureHash(decl.returnType));
+  }
+  return total;
+}
+
+function programFunctionAttachedDeclarationCount(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind !== "fn") {
+      continue;
+    }
+    if (decl.memberOf === undefined) {
+      continue;
+    }
+    total += 1;
+  }
+  return total;
+}
+
+function programFunctionAttachedSignatureHash(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind !== "fn") {
+      continue;
+    }
+    if (decl.memberOf === undefined) {
+      continue;
+    }
+    let publicTag = 0;
+    if (decl.public) {
+      publicTag = 1;
+    }
+    const fact = signatureMix(
+      signatureMix(
+        signatureMix(
+          signatureMix(
+            signatureMix(157, publicTag),
+            textHash(decl.memberOf.owner),
+          ),
+          textHash(decl.memberOf.member),
+        ),
+        decl.params.length,
+      ),
+      normalizedTypeSignatureHash(decl.returnType),
+    );
+    total = signatureMix(total, fact);
   }
   return total;
 }
@@ -3036,35 +3368,33 @@ function programCheckedExpressionRecordSignatureHash(
     const abiClass = abiClassFromTypeClass(resolved);
     const body = declarationExpressionShapeBody(decl);
     const rootChildren = declarationExpressionRootChildExpressions(decl);
-    total = signatureMix(
-      total,
-      checkedExpressionRecordFactHash({
-        kindTag: declarationKindTag(decl.kind),
-        nameHash: textHash(primaryDeclarationName(decl)),
-        rootKind: expressionRootHeadKindTag(body),
-        rootHash: expressionRootHeadHash(body),
-        rootChildCount: rootChildren.length,
-        rootChildSignatureHash: expressionRootChildSignatureHashFromChildren(rootChildren),
-        rootGrandchildCount: expressionRootGrandchildCountFromChildren(rootChildren),
-        rootGrandchildSignatureHash: expressionRootGrandchildSignatureHashFromChildren(
-          rootChildren,
-        ),
-        rootDescendantCount: expressionRootDescendantCountFromChildren(rootChildren),
-        rootDescendantSignatureHash: expressionRootDescendantSignatureHashFromChildren(
-          rootChildren,
-        ),
-        rootTypeClass: declarationBodyTypeClassTag(decl),
-        resolvedTypeClass: resolved,
-        expectedTypeClass: expected,
-        checkStatus: simpleBodyTypeCheckStatus(expected, resolved),
-        diagnosticCode: diagnosticCodeForTypeCheckStatus(
-          simpleBodyTypeCheckStatus(expected, resolved),
-        ),
-        loweredValueTag: loweredValueTagForAbi(abiClass),
-        loweredValuePrimary: loweredValuePrimary(abiClass, resolved),
-        loweredValueSecondary: loweredValueSecondary(),
-      }),
-    );
+    const fact = {
+      kindTag: declarationKindTag(decl.kind),
+      nameHash: textHash(primaryDeclarationName(decl)),
+      rootKind: expressionRootHeadKindTag(body),
+      rootHash: expressionRootHeadHash(body),
+      rootChildCount: rootChildren.length,
+      rootChildSignatureHash: expressionRootChildSignatureHashFromChildren(rootChildren),
+      rootGrandchildCount: expressionRootGrandchildCountFromChildren(rootChildren),
+      rootGrandchildSignatureHash: expressionRootGrandchildSignatureHashFromChildren(
+        rootChildren,
+      ),
+      rootDescendantCount: expressionRootDescendantCountFromChildren(rootChildren),
+      rootDescendantSignatureHash: expressionRootDescendantSignatureHashFromChildren(
+        rootChildren,
+      ),
+      rootTypeClass: declarationBodyTypeClassTag(decl),
+      resolvedTypeClass: resolved,
+      expectedTypeClass: expected,
+      checkStatus: simpleBodyTypeCheckStatus(expected, resolved),
+      diagnosticCode: diagnosticCodeForTypeCheckStatus(
+        simpleBodyTypeCheckStatus(expected, resolved),
+      ),
+      loweredValueTag: loweredValueTagForAbi(abiClass),
+      loweredValuePrimary: loweredValuePrimary(abiClass, resolved),
+      loweredValueSecondary: loweredValueSecondary(),
+    };
+    total = signatureMix(total, checkedExpressionRecordFactHash(fact));
   }
   return total;
 }
@@ -3461,7 +3791,11 @@ function declarationResolvedBodyTypeClassTag(
     );
     const root = expressionRoot(decl.body);
     if (decl.matchBody === true && root?.kind === "match") {
-      const matchBodyTypeClass = declarationFunctionMatchBodyLiteralResultTypeClassTag(decl);
+      const matchBodyTypeClass = declarationFunctionMatchBodyResultTypeClassTag(
+        decl,
+        bodyEnvironment,
+        functionReturnEnvironment,
+      );
       if (matchBodyTypeClass !== typeClassUnknownTag()) {
         return matchBodyTypeClass;
       }
@@ -3532,6 +3866,22 @@ function declarationFunctionMatchBodyLiteralResultTypeClassTag(
     return typeClassUnknownTag();
   }
   return resultTypeClass;
+}
+
+function declarationFunctionMatchBodyResultTypeClassTag(
+  decl: Program["declarations"][number],
+  environment: Map<string, number>,
+  functionReturnEnvironment?: Map<string, number>,
+): number {
+  const literalResultType = declarationFunctionMatchBodyLiteralResultTypeClassTag(decl);
+  if (literalResultType !== typeClassUnknownTag()) {
+    return literalResultType;
+  }
+  return expressionSimpleBoolMatchTypeClassTag(
+    declarationExpressionShapeBody(decl),
+    environment,
+    functionReturnEnvironment,
+  );
 }
 
 function functionParamTypeEnvironment(
@@ -4514,9 +4864,22 @@ function expressionSimpleBoolMatch(expr: Expr | undefined): SimpleBoolMatchExpr 
   }
   let trueValue: Expr | undefined;
   let falseValue: Expr | undefined;
+  let fallbackValue: Expr | undefined;
+  let armIndex = 0;
   for (const arm of root.arms) {
     if (arm.guard !== undefined) {
       return undefined;
+    }
+    if (arm.pattern.kind === "wildcard") {
+      if (armIndex !== 1) {
+        return undefined;
+      }
+      if (fallbackValue !== undefined) {
+        return undefined;
+      }
+      fallbackValue = arm.value;
+      armIndex += 1;
+      continue;
     }
     if (arm.pattern.kind !== "literal") {
       return undefined;
@@ -4529,6 +4892,7 @@ function expressionSimpleBoolMatch(expr: Expr | undefined): SimpleBoolMatchExpr 
         return undefined;
       }
       trueValue = arm.value;
+      armIndex += 1;
       continue;
     }
     if (arm.pattern.value === "false") {
@@ -4536,9 +4900,19 @@ function expressionSimpleBoolMatch(expr: Expr | undefined): SimpleBoolMatchExpr 
         return undefined;
       }
       falseValue = arm.value;
+      armIndex += 1;
       continue;
     }
     return undefined;
+  }
+  if (fallbackValue !== undefined) {
+    if (trueValue === undefined) {
+      trueValue = fallbackValue;
+    } else if (falseValue === undefined) {
+      falseValue = fallbackValue;
+    } else {
+      return undefined;
+    }
   }
   if (trueValue === undefined) {
     return undefined;
@@ -5578,7 +5952,8 @@ function declarationLocalLetTypeClass(
     let typeClass = typeClassUnknownTag();
     if (statement.type !== undefined) {
       typeClass = typeClassFromAnnotation(statement.type, typeEnvironment);
-    } else {
+    }
+    if (typeClass === typeClassUnknownTag()) {
       typeClass = expressionRootResolvedTypeClassTag(
         statement.value,
         environment,
@@ -6137,7 +6512,11 @@ function wasmScalarFunctionMatchBodyInstructions(
   if (declarationSingleRuntimeParamTypeClass(decl, typeEnvironment) !== typeClassBoolTag()) {
     return undefined;
   }
-  const resultTypeClass = declarationFunctionMatchBodyLiteralResultTypeClassTag(decl);
+  const resultTypeClass = declarationFunctionMatchBodyResultTypeClassTag(
+    decl,
+    functionBodyTypeEnvironment(decl, typeEnvironment, functionReturnEnvironment),
+    functionReturnEnvironment,
+  );
   if (!typeClassIsScalar(resultTypeClass)) {
     return undefined;
   }
@@ -6555,6 +6934,42 @@ function programValueOperatorSignatureHash(program: Program, tokens: SourceToken
     }
   }
   return total;
+}
+
+function programOperatorDeclarationCount(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind === "operator") {
+      total += 1;
+    }
+  }
+  return total;
+}
+
+function programOperatorSignatureHash(program: Program): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind !== "operator") {
+      continue;
+    }
+    total = signatureMix(total, operatorDeclarationSignatureFact(decl));
+  }
+  return total;
+}
+
+function operatorDeclarationSignatureFact(decl: OperatorDecl): number {
+  let total = signatureMix(163, textHash(decl.symbol));
+  total = signatureMix(total, operatorFixityTag(decl.fixity));
+  total = signatureMix(total, decl.precedence);
+  total = signatureMix(total, textHash(decl.target));
+  return total;
+}
+
+function operatorFixityTag(fixity: OperatorDecl["fixity"]): number {
+  if (fixity === "#infix") return 1;
+  if (fixity === "#infixl") return 2;
+  if (fixity === "#infixr") return 3;
+  return 0;
 }
 
 function programValueCallExpressionCount(program: Program): number {
@@ -7146,6 +7561,7 @@ function expressionOperatorTokenSignatureHash(
     return initial;
   }
   let total = initial;
+  let previousToken: SourceToken | undefined;
   for (const token of tokens) {
     if (token.span.start < span.start) {
       continue;
@@ -7153,10 +7569,12 @@ function expressionOperatorTokenSignatureHash(
     if (token.span.start >= span.end) {
       break;
     }
-    if (!tokenIsValueOperator(token)) {
+    if (!tokenIsValueOperatorLink(token, previousToken)) {
+      previousToken = token;
       continue;
     }
     total = signatureMix(total, textHash(token.text));
+    previousToken = token;
   }
   return total;
 }
@@ -7275,6 +7693,38 @@ function tokenIsValueOperator(token: SourceToken): boolean {
     }
   }
   return token.text.length > 0;
+}
+
+function tokenIsValueOperatorLink(
+  token: SourceToken,
+  previousToken: SourceToken | undefined,
+): boolean {
+  if (!tokenIsValueOperator(token)) {
+    return false;
+  }
+  if (previousToken === undefined) {
+    return false;
+  }
+  return tokenCanEndValueExpr(previousToken);
+}
+
+function tokenCanEndValueExpr(token: SourceToken): boolean {
+  if (tokenIsExpressionLiteral(token)) {
+    return true;
+  }
+  if (token.kind === "identifier") {
+    return true;
+  }
+  if (token.kind === "literalType") {
+    return true;
+  }
+  if (token.kind !== "symbol") {
+    return false;
+  }
+  if (token.text === ")") return true;
+  if (token.text === "}") return true;
+  if (token.text === "]") return true;
+  return false;
 }
 
 function operatorSymbolCodeMatches(code: number): boolean {
@@ -7552,6 +8002,234 @@ function declarationAuxHash(decl: Program["declarations"][number]): number {
   return 0;
 }
 
+function textTokenSignatureHash(tokens: SourceToken[]): number {
+  let total = figTextTokenCount(tokens);
+  for (const token of tokens) {
+    if (token.kind === "symbol" && token.text === "@assert") {
+      total = signatureMix(total, figSyntheticTextTokenScore("symbol", "@"));
+      total = signatureMix(total, figSyntheticTextTokenScore("identifier", "assert"));
+      continue;
+    }
+    if (isGeneratedRepeatPrefixToken(token)) {
+      for (const text of repeatPrefixTokenTexts(token.text)) {
+        total = signatureMix(total, repeatPrefixTextTokenScore(text));
+      }
+      continue;
+    }
+    if (token.kind === "symbol" && shouldSplitFigSymbolToken(token.text)) {
+      for (let index = 0; index < token.text.length; index++) {
+        total = signatureMix(total, splitTextTokenScore(token, index));
+      }
+    } else {
+      total = signatureMix(total, textTokenScore(token));
+    }
+  }
+  return total;
+}
+
+function figTextTokenCount(tokens: SourceToken[]): number {
+  let total = 0;
+  for (const token of tokens) {
+    if (token.kind === "symbol" && token.text === "@assert") {
+      total += 2;
+      continue;
+    }
+    if (isGeneratedRepeatPrefixToken(token)) {
+      total += repeatPrefixTokenTexts(token.text).length;
+      continue;
+    }
+    if (token.kind === "symbol" && shouldSplitFigSymbolToken(token.text)) {
+      total += token.text.length;
+    } else {
+      total++;
+    }
+  }
+  return total;
+}
+
+function shouldSplitFigSymbolToken(text: string): boolean {
+  return text.length > 1 && text !== "->";
+}
+
+function splitTextTokenScore(token: SourceToken, index: number): number {
+  const text = token.text[index] ?? "";
+  const kind = figTextTokenKind(token);
+  return tokenKindWeight(kind) +
+    1 +
+    declarationKindScore(kind) +
+    expressionKindScore(kind) +
+    punctuationTextScore(text) +
+    textHash(text);
+}
+
+function figSyntheticTextTokenScore(kind: string, text: string): number {
+  const punctuationScore = kind === "symbol" ? punctuationTextScore(text) : 0;
+  return tokenKindWeight(kind) +
+    text.length +
+    declarationKindScore(kind) +
+    expressionKindScore(kind) +
+    punctuationScore +
+    textHash(text);
+}
+
+function textTokenScore(token: SourceToken): number {
+  const kind = figTextTokenKind(token);
+  return tokenKindWeight(kind) +
+    (token.span.end - token.span.start) +
+    declarationKindScore(kind) +
+    expressionKindScore(kind) +
+    symbolPunctuationScore(token) +
+    textHash(token.text);
+}
+
+function figTextTokenKind(token: SourceToken): string {
+  const first = token.text.charCodeAt(0);
+  const startsUpper = first >= 65 && first <= 90;
+  if (token.kind === "identifier" && startsUpper) {
+    return "literalType";
+  }
+  return token.kind;
+}
+
+function tokenKindWeight(kind: string): number {
+  if (kind === "import") return 11;
+  if (kind === "external") return 13;
+  if (kind === "type") return 17;
+  if (kind === "const") return 19;
+  if (kind === "fn") return 23;
+  if (kind === "let") return 29;
+  if (kind === "match") return 31;
+  if (kind === "pub") return 37;
+  if (kind === "bool") return 41;
+  if (kind === "identifier") return 43;
+  if (kind === "number") return 47;
+  if (kind === "string") return 53;
+  if (kind === "char") return 59;
+  if (kind === "multiline") return 61;
+  if (kind === "literalType") return 67;
+  if (kind === "symbol") return 71;
+  if (kind === "_") return 73;
+  if (kind === "do") return 79;
+  if (kind === "else") return 83;
+  if (kind === "if") return 89;
+  if (kind === "struct") return 97;
+  if (kind === "union") return 101;
+  if (kind === "i32") return 103;
+  if (kind === "i64") return 107;
+  if (kind === "u32") return 109;
+  if (kind === "u64") return 113;
+  if (kind === "f32") return 127;
+  if (kind === "f64") return 131;
+  if (kind === "enum") return 137;
+  if (kind === "infix") return 139;
+  if (kind === "infixl") return 149;
+  if (kind === "infixr") return 151;
+  if (kind === "members") return 157;
+  return 71;
+}
+
+function declarationKindScore(kind: string): number {
+  if (kind === "fn") return 1;
+  if (kind === "let") return 2;
+  if (kind === "const") return 3;
+  if (kind === "type") return 4;
+  return 0;
+}
+
+function expressionKindScore(kind: string): number {
+  if (kind === "number") return 1;
+  if (kind === "bool") return 2;
+  if (kind === "identifier" || kind === "literalType") return 3;
+  if (kind === "string" || kind === "char" || kind === "multiline") return 4;
+  return 0;
+}
+
+function isGeneratedRepeatPrefixToken(token: SourceToken): boolean {
+  const kind = String(token.kind);
+  if (kind === "CountRepeat") return true;
+  if (kind === "LowerIdentRepeat") return true;
+  if (kind === "PascalIdentRepeat") return true;
+  if (kind === "TypeRepeatPrefix") return true;
+  return false;
+}
+
+function repeatPrefixTokenTexts(text: string): string[] {
+  const parts: string[] = [];
+  let index = 0;
+  while (index < text.length) {
+    const code = text.charCodeAt(index);
+    if (isRepeatPrefixWhitespace(code)) {
+      index += 1;
+      continue;
+    }
+    if (text[index] === "*") {
+      parts.push("*");
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < text.length) {
+      const current = text.charCodeAt(index);
+      if (isRepeatPrefixWhitespace(current)) {
+        break;
+      }
+      if (text[index] === "*") {
+        break;
+      }
+      index += 1;
+    }
+    if (index > start) {
+      parts.push(text.slice(start, index));
+    }
+  }
+  return parts;
+}
+
+function isRepeatPrefixWhitespace(code: number): boolean {
+  if (code === 9) return true;
+  if (code === 10) return true;
+  if (code === 13) return true;
+  if (code === 32) return true;
+  return false;
+}
+
+function repeatPrefixTextTokenScore(text: string): number {
+  return figSyntheticTextTokenScore(repeatPrefixTextTokenKind(text), text);
+}
+
+function repeatPrefixTextTokenKind(text: string): string {
+  if (text === "*") {
+    return "symbol";
+  }
+  const first = text.charCodeAt(0);
+  if (first >= 48 && first <= 57) {
+    return "number";
+  }
+  if (first >= 65 && first <= 90) {
+    return "literalType";
+  }
+  return "identifier";
+}
+
+function symbolPunctuationScore(token: SourceToken): number {
+  if (token.kind !== "symbol") return 0;
+  return punctuationTextScore(token.text);
+}
+
+function punctuationTextScore(text: string): number {
+  if (text === "=") return 1;
+  if (text === "(") return 2;
+  if (text === ")") return 3;
+  if (text === "->") return 4;
+  if (text === "{") return 5;
+  if (text === "}") return 6;
+  if (text === ",") return 7;
+  if (text === ":") return 8;
+  if (text === "/") return 9;
+  if (text === ";") return 10;
+  return 11;
+}
+
 function signatureMix(total: number, value: number): number {
   return (Math.imul(total, 131) + value) | 0;
 }
@@ -7713,6 +8391,35 @@ function numberArg(name: string, fallback: number): number {
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be positive`);
   return Math.floor(value);
+}
+
+function stringListArg(name: string): string[] {
+  const values: string[] = [];
+  for (const arg of Deno.args) {
+    if (!arg.startsWith(`${name}=`)) {
+      continue;
+    }
+    appendStringListArg(values, arg.slice(name.length + 1));
+  }
+  const flagIndex = Deno.args.indexOf(name);
+  if (flagIndex >= 0) {
+    const raw = Deno.args[flagIndex + 1];
+    if (!raw) {
+      throw new Error(`${name} requires a value`);
+    }
+    appendStringListArg(values, raw);
+  }
+  return values;
+}
+
+function appendStringListArg(values: string[], raw: string): void {
+  for (const item of raw.split(",")) {
+    const value = item.trim();
+    if (!value) {
+      continue;
+    }
+    values.push(value);
+  }
 }
 
 function optModeArg(name: string, fallback: FigWasmOptMode): FigWasmOptMode {

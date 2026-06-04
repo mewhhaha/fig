@@ -6,7 +6,8 @@ type TokenKind = union {
   PubKw, BoolLiteral, Identifier, NumberLiteral, StringLiteral,
   CharLiteral, MultilineLiteral, LiteralType, Symbol, WildcardKw,
   DoKw, ElseKw, IfKw, StructKw, UnionKw, I32Kw, I64Kw, U32Kw,
-  U64Kw, F32Kw, F64Kw
+  U64Kw, F32Kw, F64Kw, EnumKw, InfixKw, InfixlKw, InfixrKw,
+  MembersKw
 }
 
 type GeneratedTokenCode = enum(i32) {
@@ -56,7 +57,12 @@ type TokenKindWeight = enum(i32) {
   U32Kw = 109,
   U64Kw = 113,
   F32Kw = 127,
-  F64Kw = 131
+  F64Kw = 131,
+  EnumKw = 137,
+  InfixKw = 139,
+  InfixlKw = 149,
+  InfixrKw = 151,
+  MembersKw = 157
 }
 
 type DeclarationKind = union {
@@ -124,6 +130,11 @@ fn keyword_weight(kind: TokenKind) -> i32 {
     U64Kw => TokenKindWeight::U64Kw,
     F32Kw => TokenKindWeight::F32Kw,
     F64Kw => TokenKindWeight::F64Kw,
+    EnumKw => TokenKindWeight::EnumKw,
+    InfixKw => TokenKindWeight::InfixKw,
+    InfixlKw => TokenKindWeight::InfixlKw,
+    InfixrKw => TokenKindWeight::InfixrKw,
+    MembersKw => TokenKindWeight::MembersKw,
   }
 }
 

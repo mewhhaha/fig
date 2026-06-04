@@ -47,17 +47,23 @@ Run the source comparison with:
 deno task bench:compiler-sources
 ```
 
-The `deno/fig` row first validates parsed declaration totals, declaration-kind counts, function
-parameter totals, type-parameter totals, a stable declaration signature hash, and function/type
-parameter signature hashes against the `deno/js` parser before timing the compiled slice. It also
-checks type result-kind counts, normalized function parameter type signatures, function return
-signatures, and top-level value annotation signatures so annotation parsing drift is caught before
-timing. Function and type-sugar body signatures are also checked from normalized source spans, which
-keeps the compiled Fig scanner honest as expression and type-body parsing grows. The same preflight
-counts top-level function local `let` statements, lowered type-sugar statements, and value-context
-`match`, `do`, and pipe-bind expressions, value match arms, plus function match-body declarations,
-to keep block/type-block statement discovery and expression-shape discovery aligned with the JS
-parser, including whole value-expression operator-link totals and source-order operator
+Use `--fig-source=name.fig` to restrict the compiled-slice preflight and timing inputs to matching
+compiler source files while still compiling the same `compiler/fig/main.fig` entry point. Filtered
+runs report `source_filtered` in the `deno/fig` mode; unfiltered runs report `source_tree`.
+
+The `deno/fig` row first validates tokenizer parity with a stable text-token signature hash, parsed
+declaration totals, declaration-kind counts, function parameter totals, type-parameter totals, a
+stable declaration signature hash, and function/type parameter signature hashes against the
+`deno/js` parser before timing the compiled slice. It also checks type result-kind counts, lowered
+type-sugar statement counts, numeric enum declaration/variant counts and enum signature hashes,
+normalized function parameter type signatures, function return signatures, attached-function
+counts/signatures, operator declaration counts/signatures, and top-level value annotation signatures
+so source-shape drift is caught before timing. Function and type-sugar body signatures are also
+checked from normalized source spans, which keeps the compiled Fig scanner honest as expression and
+type-body parsing grows. The same preflight counts top-level function local `let` statements and
+value-context `match`, `do`, and pipe-bind expressions, value match arms, plus function match-body
+declarations, to keep block/type-block statement discovery and expression-shape discovery aligned
+with the JS parser, including whole value-expression operator-link totals and source-order operator
 signatures. It also checks a conservative declared type-class signature for primitive returns,
 primitive value annotations, function declarations, and type result kinds as the first checked-shape
 parity gate, then maps that declared shape into scalar/function/handle/void ABI classes as the
@@ -240,9 +246,10 @@ Current parity status:
   model prefixes those initializer instructions with `local.set` before the final body expression,
   keeping the function facts and returned Wasm byte buffer aligned.
 - Simple boolean function match bodies now participate in the same emitted instruction-tape path
-  when the function has exactly one runtime `bool` parameter and two `true`/`false` arms whose
-  results are standalone scalar literals. The generated body reads parameter 0, emits a Wasm `if`
-  with scalar result type, then emits the true and false arm instruction tapes before `else`/`end`.
+  when the function has exactly one runtime `bool` parameter and two `true`/`false` arms, or a
+  leading boolean arm followed by `_` fallback, whose results are standalone scalar expressions. The
+  generated body reads parameter 0, emits a Wasm `if` with scalar result type, then emits the true
+  and false arm instruction tapes before `else`/`end`.
 - Resolved body-type facts now recognize final scalar local identifiers, scalar body operators over
   those locals, and scalar locals whose initializers are literals, parameter aliases, simple scalar
   operators, or bare same-module scalar calls. Scalar operator type facts now recurse through nested

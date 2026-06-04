@@ -2210,6 +2210,19 @@ function visitDeclarationReferenceNames(
     ) {
       add(pattern.name);
     }
+    if (pattern.kind === "product") {
+      add(pattern.name);
+      for (const field of pattern.fields) visitPattern(field.pattern);
+      return;
+    }
+    if (pattern.kind === "typed" || pattern.kind === "as") {
+      visitPattern(pattern.pattern);
+      return;
+    }
+    if (pattern.kind === "or") {
+      for (const alternative of pattern.alternatives) visitPattern(alternative);
+      return;
+    }
     if (pattern.kind === "constructor" || pattern.kind === "tuple") {
       const items = pattern.kind === "constructor" ? pattern.args : pattern.items;
       for (const item of items) visitPattern(item);
@@ -2331,6 +2344,10 @@ function visitDeclarationReferenceNames(
       case "type_shape":
         visitTypeShape(expr.shape);
         return;
+      case "type_members":
+        visitTypeExpr(expr.target);
+        for (const fn of expr.functions) visitDecl(fn);
+        return;
       case "type_match":
         visitTypeExpr(expr.value);
         for (const arm of expr.arms) {
@@ -2385,6 +2402,9 @@ function visitDeclarationReferenceNames(
     visitTypeExpr(block.expr);
   };
   const visitDecl = (item: Declaration) => {
+    for (const tag of item.tags ?? []) {
+      if (tag.kind === "expr") visitTypeExpr(tag.expr);
+    }
     if (item.kind === "type_assert") {
       visitTypeExpr(item.value);
       return;
@@ -2840,6 +2860,7 @@ function declarationInterfaceKey(decl: Declaration): string {
   let hash = 0x811c9dc5;
   hash = hashUpdateString(hash, decl.kind);
   hash = hashUpdateString(hash, declarationName(decl));
+  hash = hashAstSemanticValue(hash, decl.tags);
   if (decl.kind === "fn") {
     hash = hashUpdateString(hash, decl.public ? "pub" : "priv");
     hash = hashUpdateString(hash, decl.externalName ?? "");
@@ -3626,14 +3647,47 @@ function qualifyNameSet(names: Set<string>, alias: string): Set<string> {
   return qualified;
 }
 
+function qualifyDeclarationTags(
+  tags: Declaration["tags"],
+  alias: string,
+  names: Set<string>,
+): Declaration["tags"] {
+  return tags?.map((tag) => {
+    if (tag.kind !== "expr" || !tag.expr) return tag;
+    return withMeta(tag, {
+      ...tag,
+      expr: qualifyTypeExpr(tag.expr, alias, names),
+    });
+  });
+}
+
+function qualifyMemberFragmentFn(fn: FnDecl, alias: string, names: Set<string>): FnDecl {
+  const locals = paramLocalNames(fn.params);
+  return withMeta(fn, {
+    ...fn,
+    params: fn.params.map((param) => ({
+      ...param,
+      type: qualifyTypeSource(param.type, alias, names),
+      pattern: param.pattern ? qualifyParamPattern(param.pattern, alias, names) : undefined,
+    })),
+    returnType: fn.returnType ? qualifyTypeSource(fn.returnType, alias, names) : undefined,
+    body: qualifyExpr(fn.body, alias, names, locals) as FnDecl["body"],
+  });
+}
+
 function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>): Declaration {
   if (decl.kind === "type_assert") {
-    return withMeta(decl, { ...decl, value: qualifyTypeExpr(decl.value, alias, names) });
+    return withMeta(decl, {
+      ...decl,
+      tags: qualifyDeclarationTags(decl.tags, alias, names),
+      value: qualifyTypeExpr(decl.value, alias, names),
+    });
   }
   if (decl.kind === "fn") {
     const locals = paramLocalNames(decl.params);
     return withMeta(decl, {
       ...decl,
+      tags: qualifyDeclarationTags(decl.tags, alias, names),
       imported: true,
       rootPublic: false,
       name: qualifyName(decl.name, alias),
@@ -3658,12 +3712,14 @@ function qualifyDeclaration(decl: Declaration, alias: string, names: Set<string>
   if (decl.kind === "operator") {
     return withMeta(decl, {
       ...decl,
+      tags: qualifyDeclarationTags(decl.tags, alias, names),
       imported: true,
       target: qualifyReference(decl.target, alias, names),
     });
   }
   return withMeta(decl, {
     ...decl,
+    tags: qualifyDeclarationTags(decl.tags, alias, names),
     name: qualifyName(decl.name, alias),
     type: decl.type ? qualifyTypeSource(decl.type, alias, names) : undefined,
     value: qualifyExpr(decl.value, alias, names),
@@ -3677,6 +3733,7 @@ function qualifyConstLike<t extends ConstDecl | LetDecl>(
 ): t {
   return withMeta(decl, {
     ...decl,
+    tags: qualifyDeclarationTags(decl.tags, alias, names),
     name: qualifyName(decl.name, alias),
     type: decl.type ? qualifyTypeSource(decl.type, alias, names) : undefined,
     value: qualifyExpr(decl.value, alias, names),
@@ -3686,6 +3743,7 @@ function qualifyConstLike<t extends ConstDecl | LetDecl>(
 function qualifyTypeDecl(decl: TypeDecl, alias: string, names: Set<string>): TypeDecl {
   return withMeta(decl, {
     ...decl,
+    tags: qualifyDeclarationTags(decl.tags, alias, names),
     name: qualifyName(decl.name, alias),
     paramPatterns: decl.paramPatterns?.map((pattern) => qualifyParamPattern(pattern, alias, names)),
     body: qualifyTypeBlock(decl.body, alias, names),
@@ -3729,6 +3787,25 @@ function collectParamPatternBindings(pattern: ParamPattern | undefined, locals: 
   }
   if (pattern.kind === "constructor") {
     for (const item of pattern.args) collectParamPatternBindings(item, locals);
+    return;
+  }
+  if (pattern.kind === "typed") {
+    collectParamPatternBindings(pattern.pattern, locals);
+    return;
+  }
+  if (pattern.kind === "as") {
+    locals.add(pattern.name);
+    collectParamPatternBindings(pattern.pattern, locals);
+    return;
+  }
+  if (pattern.kind === "or") {
+    for (const alternative of pattern.alternatives) {
+      collectParamPatternBindings(alternative, locals);
+    }
+    return;
+  }
+  if (pattern.kind === "product") {
+    for (const field of pattern.fields) collectParamPatternBindings(field.pattern, locals);
   }
 }
 
@@ -4003,6 +4080,12 @@ function qualifyTypeExpr(expr: TypeExpr, alias: string, names: Set<string>): Typ
       });
     case "type_shape":
       return withMeta(expr, { ...expr, shape: qualifyTypeShape(expr.shape, alias, names) });
+    case "type_members":
+      return withMeta(expr, {
+        ...expr,
+        target: qualifyTypeExpr(expr.target, alias, names),
+        functions: expr.functions.map((fn) => qualifyMemberFragmentFn(fn, alias, names)),
+      });
     case "type_match":
       return withMeta(expr, {
         ...expr,
@@ -4119,14 +4202,54 @@ function qualifyParamPattern(
   alias: string,
   names: Set<string>,
 ): ParamPattern {
-  if (pattern.kind === "constructor" || pattern.kind === "type" || pattern.kind === "enum_member") {
-    return pattern.kind === "constructor"
-      ? withMeta(pattern, {
+  if (pattern.kind === "constructor") {
+    return withMeta(pattern, {
         ...pattern,
         name: qualifyReference(pattern.name, alias, names),
         args: pattern.args.map((arg) => qualifyParamPattern(arg, alias, names)),
-      })
-      : withMeta(pattern, { ...pattern, name: qualifyReference(pattern.name, alias, names) });
+      });
+  }
+  if (pattern.kind === "type" || pattern.kind === "enum_member") {
+    return withMeta(pattern, { ...pattern, name: qualifyReference(pattern.name, alias, names) });
+  }
+  if (pattern.kind === "typed") {
+    return withMeta(pattern, {
+      ...pattern,
+      pattern: qualifyParamPattern(pattern.pattern, alias, names),
+      type: qualifyTypeSource(pattern.type, alias, names),
+    });
+  }
+  if (pattern.kind === "as") {
+    return withMeta(pattern, {
+      ...pattern,
+      pattern: qualifyParamPattern(pattern.pattern, alias, names),
+    });
+  }
+  if (pattern.kind === "or") {
+    return withMeta(pattern, {
+      ...pattern,
+      alternatives: pattern.alternatives.map((alternative) =>
+        qualifyParamPattern(alternative, alias, names)
+      ),
+    });
+  }
+  if (pattern.kind === "product") {
+    return withMeta(pattern, {
+      ...pattern,
+      name: qualifyReference(pattern.name, alias, names),
+      fields: pattern.fields.map((field) =>
+        withMeta(field, {
+          ...field,
+          pattern: qualifyParamPattern(field.pattern, alias, names),
+        })
+      ),
+    });
+  }
+  if (pattern.kind === "tuple") {
+    return withMeta(pattern, {
+      ...pattern,
+      items: pattern.items.map((item) => qualifyParamPattern(item, alias, names)),
+    });
   }
   return pattern;
 }

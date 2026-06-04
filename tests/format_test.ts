@@ -20,6 +20,20 @@ const formatCases: { name: string; input: string; expected: string }[] = [
       "@[test]\nfn parses_option() -> bool {\n  true\n}\n\n@[test]\npub fn main() -> i32 {\n  1\n}\n",
   },
   {
+    name: "declaration tag expressions and member blocks",
+    input:
+      "@[layout.SizeBits(Self,64)]type Vec2i=struct{x:i32,y:i32}\ntype fn Eq(t:type)->members{members(t) {fn eql(left:t,right:t)->bool{@memberwise_eql(t,left,right)}}}",
+    expected:
+      "@[layout.SizeBits(Self, 64)]\ntype Vec2i = struct {x: i32, y: i32}\n\ntype fn Eq(t: type) -> members {\n  members(t) {\n    fn eql(left: t, right: t) -> bool {\n      @memberwise_eql(t, left, right)\n    }\n  }\n}\n",
+  },
+  {
+    name: "grouped or and product patterns",
+    input:
+      "fn score(p: Point, n: i32)->i32{let a=match p{Point {x: 1 | 2, y: y}=>y,_=>0};let b=match n{(1 | 3)=>10,_=>0};a+b}",
+    expected:
+      "fn score(p: Point, n: i32) -> i32 {\n  let a = match p {\n    Point {\n      x: 1 | 2, y: y\n    } => y,\n    _ => 0\n  };\n  let b = match n {\n    (1 | 3) => 10,\n    _ => 0\n  };\n  a + b\n}\n",
+  },
+  {
     name: "leading and trailing comments",
     input: `/// docs
 // plain
@@ -109,6 +123,18 @@ pub fn main(host:io)->i32{clock(host)}`,
     input: "fn main(x:i32)->i32{if x<3{let y=x+1;y}else{x-1}}",
     expected:
       "fn main(x: i32) -> i32 {\n  if x < 3 {\n    let y = x + 1;\n    y\n  } else {\n    x - 1\n  }\n}\n",
+  },
+  {
+    name: "formatter else-if expression",
+    input: "fn main(x:i32)->i32{if x<0{0}else if x<3{1}else{2}}",
+    expected:
+      "fn main(x: i32) -> i32 {\n  if x < 0 {\n    0\n  } else if x < 3 {\n    1\n  } else {\n    2\n  }\n}\n",
+  },
+  {
+    name: "formatter if-let expression",
+    input: "fn pick(value:Option(i32))->i32{if(let Some(x)=value){x+1}else{0}}",
+    expected:
+      "fn pick(value: Option(i32)) -> i32 {\n  if (let Some(x) = value) {\n    x + 1\n  } else {\n    0\n  }\n}\n",
   },
   {
     name: "operators fields indexing and literal tags",

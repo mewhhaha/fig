@@ -343,6 +343,35 @@ Deno.test("declaration tags mark test functions", async () => {
     `,
     "tag.context",
   );
+  await checkSource(`
+    @[test]
+    type fn StaticProof() -> type {
+      @require(true, "static proof")
+      i32
+    }
+
+    pub fn main() -> i32 { 1 }
+  `);
+  await assertThrowsCompile(
+    `
+      @[test]
+      type fn BadProof(a: type) -> type { a }
+
+      pub fn main() -> i32 { 1 }
+    `,
+    "tag.context",
+  );
+  await assertThrowsCompile(
+    `
+      @[test]
+      type fn FailingProof() -> type {
+        @compile_error("static test failed")
+      }
+
+      pub fn main() -> i32 { 1 }
+    `,
+    "type.compile_error",
+  );
   await assertThrowsCompile(
     `
       @[test, test]
@@ -351,6 +380,24 @@ Deno.test("declaration tags mark test functions", async () => {
       pub fn main() -> i32 { 1 }
     `,
     "tag.duplicate",
+  );
+});
+
+Deno.test("members result expressions are restricted to declaration tags", async () => {
+  await assertThrowsCompile(
+    `
+      type fn Bad() -> members {
+        members(i32) {
+          fn empty() -> i32 { 0 }
+        }
+      }
+
+      fn main() -> i32 {
+        @assert(Bad())
+        0
+      }
+    `,
+    "type.members_context",
   );
 });
 
@@ -595,6 +642,59 @@ Deno.test("if expression desugars to boolean match", async () => {
   );
   assertEquals((instance.exports.main as CallableFunction)(2), 3);
   assertEquals((instance.exports.main as CallableFunction)(4), 3);
+});
+
+Deno.test("else if expression desugars to nested boolean match", async () => {
+  const source = `
+    pub fn main(x: i32) -> i32 {
+      if x < 0 {
+        0
+      } else if x < 3 {
+        1
+      } else {
+        2
+      }
+    }
+  `;
+  const parsed = await parse(source);
+  const main = findFn(parsed, "main");
+  assert(main?.body.expr?.kind === "match");
+  assert(main.body.expr.arms[1]?.value.kind === "match");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source)),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(-1), 0);
+  assertEquals((instance.exports.main as CallableFunction)(1), 1);
+  assertEquals((instance.exports.main as CallableFunction)(4), 2);
+});
+
+Deno.test("if let expression desugars to pattern match", async () => {
+  const source = `
+    type Option(a) = union {None, Some(value: a)}
+    fn pick(value: Option(i32)) -> i32 {
+      if (let Some(x) = value) {
+        x + 1
+      } else {
+        0
+      }
+    }
+    pub fn main(flag: bool) -> i32 {
+      if flag { pick(Some(4)) } else { pick(None) }
+    }
+  `;
+  const parsed = await parse(source);
+  const pick = findFn(parsed, "pick");
+  assert(pick?.body.expr?.kind === "match");
+  assert(pick.body.expr.arms[0]?.pattern.kind === "constructor");
+  assertEquals(pick.body.expr.arms[0]?.pattern.name, "Some");
+  assert(pick.body.expr.arms[1]?.pattern.kind === "wildcard");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source)),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(1), 5);
+  assertEquals((instance.exports.main as CallableFunction)(0), 0);
 });
 
 Deno.test("index cursor itself is not an inline-array index proof", async () => {
@@ -2280,7 +2380,7 @@ Deno.test("const evaluation supports extended static type reflection", async () 
       let InlineArray = {n*a};
       struct(InlineArray)
     }
-    const members = @type_members(Point);
+    const member_shape = @type_members(Point);
     const reflected = {
       target: @type_member_target(Point, #eql),
       width: @type_scalar_bit_width(u3),
@@ -2312,12 +2412,12 @@ Deno.test("const evaluation supports extended static type reflection", async () 
       : undefined,
     { kind: "literal", literalKind: "number", value: "12" },
   );
-  const members = checked.program.declarations.find((decl): decl is ConstDecl =>
-    decl.kind === "const" && decl.name === "members"
+  const memberShape = checked.program.declarations.find((decl): decl is ConstDecl =>
+    decl.kind === "const" && decl.name === "member_shape"
   );
   assert(
-    members?.value.kind === "shape" &&
-      members.value.slots.some((slot) => slot.label === "eql"),
+    memberShape?.value.kind === "shape" &&
+      memberShape.value.slots.some((slot) => slot.label === "eql"),
   );
 });
 
@@ -2341,6 +2441,49 @@ Deno.test("generic empty derives primitive and product zero values", async () =>
         { resolveModule: resolveProjectModule },
       ),
     ),
+  );
+  assertEquals((instance.exports.main as () => number)(), 0);
+});
+
+Deno.test("derive EmptyValue generates concrete generic and imported empty members", async () => {
+  const resolveModule = async (moduleName: string) => {
+    if (moduleName === "fixture.empty_dep") {
+      return `
+        const core = @import("prelude.core");
+        const derive = @import("prelude.derive");
+
+        @[derive.EmptyValue(Self), core.EmptyValue(Self)]
+        type Pair = struct {left: i32, right: i32}
+      `;
+    }
+    return await resolveProjectModule(moduleName);
+  };
+  const source = `
+    const core = @import("prelude.core");
+    const derive = @import("prelude.derive");
+    const dep = @import("fixture.empty_dep");
+
+    @[derive.EmptyValue(Self), core.EmptyValue(Self)]
+    type Point = struct {x: i32, y: bool}
+
+    @[derive.EmptyValue(Self), core.EmptyValue(Self)]
+    type Box(a) = struct {value: a}
+
+    pub fn main() -> i32 {
+      let p: Point = Point::empty();
+      let b: Box(i32) = Box::empty();
+      let q: dep.Pair = dep.Pair::empty();
+      p.x + b.value + q.left + q.right
+    }
+  `;
+
+  const checked = await checkSource(source, { resolveModule });
+  assertEquals(findFn(checked.program, "Point::empty")?.returnType, "Point");
+  assertEquals(findFn(checked.program, "Box::empty")?.returnType, "Box(a)");
+  assertEquals(findFn(checked.program, "dep.Pair::empty")?.returnType, "dep.Pair");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
   );
   assertEquals((instance.exports.main as () => number)(), 0);
 });
@@ -3313,6 +3456,69 @@ Deno.test("wildcard value patterns check without binding underscore", async () =
   `);
 });
 
+Deno.test("accepts or as grouped and product field patterns", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+        type fn Point() -> type {
+          let Point = {x: i32, y: i32};
+          struct(Point)
+        }
+        fn score(p: Point, n: i32) -> i32 {
+          let a = match p {
+            whole @ Point {x: 1 | 2, y: y} => whole.x + y,
+            Point {x: px, y: _} => px,
+          };
+          let b = match n {
+            (1 | 3) => 10,
+            _ => 0,
+          };
+          a + b
+        }
+        pub fn main() -> i32 { score(Point {x: 2, y: 5}, 3) }
+      `),
+    ),
+  );
+  assertEquals((instance.exports.main as () => number)(), 17);
+});
+
+Deno.test("rich patterns validate bindings and product fields", async () => {
+  const optionDecl = `
+    type fn Option(a: type) -> type {
+      let None = {};
+      let Some = {value: a};
+      union(None, Some)
+    }
+  `;
+  await assertThrowsCompile(
+    `
+      ${optionDecl}
+      pub fn main(v: Option(i32)) -> i32 {
+        match v { Some(x) | None => x }
+      }
+    `,
+    "match.pattern_binding",
+  );
+  await assertThrowsCompile(
+    `
+      type Point = struct {x: i32}
+      pub fn main(p: Point) -> i32 {
+        match p { Point {y} => 0 }
+      }
+    `,
+    "match.unknown_field",
+  );
+  await checkSource(`
+    type fn Point() -> type {
+      let Point = {x: i32, y: i32};
+      struct(Point)
+    }
+    pub fn main(p: Point) -> i32 {
+      match p { Point {x} => x }
+    }
+  `);
+});
+
 Deno.test("rejects runtime parameter patterns and duplicate functions", async () => {
   await assertThrowsCompile(
     `
@@ -3432,6 +3638,72 @@ Deno.test("rejects non-exhaustive refined i32 function match bodies", async () =
       i: i32(4) => 2,
     }
     pub fn main(i: i32(0..5)) -> i32 { covered(i) }
+  `);
+});
+
+Deno.test("finite match coverage handles bool enums and union variants", async () => {
+  const optionDecl = `
+    type fn Option(a: type) -> type {
+      let None = {};
+      let Some = {value: a};
+      union(None, Some)
+    }
+  `;
+  await assertThrowsCompile(
+    `
+      ${optionDecl}
+      pub fn main(v: Option(i32)) -> i32 {
+        match v { Some(x) => x }
+      }
+    `,
+    "type.non_exhaustive_match",
+  );
+  await assertThrowsCompile(
+    `
+      ${optionDecl}
+      pub fn main(v: Option(i32)) -> i32 {
+        match v { Some(x) if true => x, None => 0 }
+      }
+    `,
+    "type.non_exhaustive_match",
+  );
+  await assertThrowsCompile(
+    `
+      fn choose(flag: bool) -> i32 match {
+        true => 1,
+      }
+      pub fn main(flag: bool) -> i32 { choose(flag) }
+    `,
+    "type.non_exhaustive_match",
+  );
+  await assertThrowsCompile(
+    `
+      type Channel = enum(i32(0..2)) {Red = 0, Green = 1}
+      fn score(value: Channel) -> i32 match {
+        Red => 1,
+      }
+      pub fn main(value: Channel) -> i32 { score(value) }
+    `,
+    "type.non_exhaustive_match",
+  );
+  await assertThrowsCompile(
+    `
+      ${optionDecl}
+      fn choose(v: Option(i32)) -> i32 match {
+        Some(x) => x,
+      }
+      pub fn main(v: Option(i32)) -> i32 { choose(v) }
+    `,
+    "type.non_exhaustive_match",
+  );
+  await checkSource(`
+    ${optionDecl}
+    fn choose(v: Option(i32), flag: bool) -> i32 match {
+      Some(x), true => x,
+      Some(_), false => 0,
+      None, _ => 0,
+    }
+    pub fn main(v: Option(i32), flag: bool) -> i32 { choose(v, flag) }
   `);
 });
 
@@ -6304,6 +6576,140 @@ Deno.test("models attached type members for static contracts", async () => {
   });
 });
 
+Deno.test("declaration tag expressions generate members in order", async () => {
+  const source = `
+    const derive = @import("prelude.derive");
+    const core = @import("prelude.core");
+
+    @[derive.Eq(Self), core.Eq(Self)]
+    type Point = struct {x: i32, y: i32}
+
+    @[derive.Eq(Self), core.Eq(Self)]
+    type Box(a) = struct {value: a}
+
+    pub fn main() -> i32 {
+      let same_point = Point::eql(Point {x: 1, y: 2}, Point {x: 1, y: 2});
+      let same_box = Box::eql(Box {value: 3}, Box {value: 3});
+      match same_point {
+        true => match same_box { true => 1, false => 0 },
+        false => 0,
+      }
+    }
+  `;
+  const checked = await checkSource(source, { resolveModule: resolveProjectModule });
+  const point = checked.program.declarations.find((decl): decl is TypeDecl =>
+    decl.kind === "type" && decl.name === "Point"
+  );
+  assertEquals(point?.normalized?.kind === "product" ? point.normalized.members : undefined, [{
+    name: "eql",
+    type: "fn(left: Point, right: Point) -> bool",
+    target: "Point::eql",
+  }]);
+  const boxEql = findFn(checked.program, "Box::eql");
+  assertEquals(boxEql?.params.map((param) => param.type), ["Box(a)", "Box(a)"]);
+  assertEquals(boxEql?.returnType, "bool");
+  const boxBody = boxEql?.body.expr;
+  assertEquals(boxBody?.kind, "block");
+  assertEquals(boxBody?.kind === "block" ? boxBody.statements[0]?.kind : undefined, "type_assert");
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule: resolveProjectModule })),
+  );
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("generated declaration tag members work through source imports", async () => {
+  const model = `
+    const derive = @import("prelude.derive");
+    const core = @import("prelude.core");
+    @[derive.Eq(Self), core.Eq(Self)]
+    type Point = struct {x: i32, y: i32}
+    fn same_point() -> i32 {
+      match Point::eql(Point {x: 1, y: 2}, Point {x: 1, y: 2}) {
+        true => 1,
+        false => 0,
+      }
+    }
+  `;
+  const resolveModule = async (moduleName: string) => {
+    if (moduleName === "./model.fig") {
+      return { sourceId: "/tmp/model.fig", text: model };
+    }
+    return await resolveProjectModule(moduleName);
+  };
+  const source = `
+    const model = @import("./model.fig");
+    pub fn main() -> i32 { model.same_point() }
+  `;
+  const checked = await checkSource(source, { resolveModule });
+  assert(findFn(checked.program, "model.Point::eql"));
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("declaration tag expression diagnostics preserve Self and ordering rules", async () => {
+  await assertThrowsCompile("type Bad = Self", "type.self_context");
+  await assertThrowsCompile(
+    `
+      const derive = @import("prelude.derive");
+      const core = @import("prelude.core");
+      @[core.Eq(Self), derive.Eq(Self)]
+      type Point = struct {x: i32, y: i32}
+    `,
+    "type.require",
+    { resolveModule: resolveProjectModule },
+  );
+  await assertThrowsCompile(
+    `
+      const derive = @import("prelude.derive");
+      @[derive.Eq(Self)]
+      type Point = struct {x: i32, y: i32}
+      fn Point::eql(left: Point, right: Point) -> bool { true }
+    `,
+    "type.duplicate_member",
+    { resolveModule: resolveProjectModule },
+  );
+  await assertThrowsCompile(
+    `
+      const derive = @import("prelude.derive");
+      @[derive.EmptyValue(Self), derive.EmptyValue(Self)]
+      type Point = struct {x: i32}
+    `,
+    "type.duplicate_member",
+    { resolveModule: resolveProjectModule },
+  );
+});
+
+Deno.test("declaration tag Self supports function const and constructor contexts", async () => {
+  await checkSource(`
+    type fn ExportedI32(f: type) -> type {
+      @require(@type_is_fn(f), "expected function");
+      @require(@type_fn_return(f) == i32, "expected i32 return");
+      f
+    }
+    type fn Constructor1(f: type fn(a: type) -> type) -> type { f(i32) }
+    type fn I32Value(t: type) -> type {
+      @require(t == i32, "expected i32");
+      t
+    }
+
+    @[Constructor1(Box)]
+    type fn Box(a: type) -> type {
+      let Box = {value: a};
+      struct(Box)
+    }
+
+    @[I32Value(Self)]
+    const answer = 1;
+
+    @[ExportedI32(Self)]
+    pub fn main() -> i32 { answer }
+  `);
+});
+
 Deno.test("normalizes transparent contract annotations to runtime types", async () => {
   const checked = await checkSource(`
     type fn Box() -> type {
@@ -9093,6 +9499,39 @@ Deno.test("module interface key ignores function bodies but tracks signatures", 
   assertEquals(moduleInterfaceKey(original), moduleInterfaceKey(bodyEdit));
   assert(moduleInterfaceKey(original) !== moduleInterfaceKey(signatureEdit));
   assert(moduleInterfaceKey(original) !== moduleInterfaceKey(typeEdit));
+});
+
+Deno.test("module interface key tracks declaration tags and generated members", async () => {
+  const untagged = await parse(`
+    type fn Marker(t: type) -> type { t }
+    type Point = struct {x: i32}
+  `);
+  const tagged = await parse(`
+    type fn Marker(t: type) -> type { t }
+    @[Marker(Self)]
+    type Point = struct {x: i32}
+  `);
+  assert(moduleInterfaceKey(untagged) !== moduleInterfaceKey(tagged));
+
+  const generatedI32 = await checkSource(`
+    type fn Derive(t: type) -> members {
+      members(t) {
+        fn zero() -> i32 { 0 }
+      }
+    }
+    @[Derive(Self)]
+    type Point = struct {x: i32}
+  `);
+  const generatedI64 = await checkSource(`
+    type fn Derive(t: type) -> members {
+      members(t) {
+        fn zero() -> i64 { 0i64 }
+      }
+    }
+    @[Derive(Self)]
+    type Point = struct {x: i32}
+  `);
+  assert(moduleInterfaceKey(generatedI32.program) !== moduleInterfaceKey(generatedI64.program));
 });
 
 Deno.test("compile cache records stable module interface keys across body edits", async () => {

@@ -1,0 +1,6 @@
+// expect: type.enum_member_syntax
+type Status = enum(i32) {Ready = 1, Done = 2}
+
+pub fn main() -> i32 {
+  Status.Ready
+}

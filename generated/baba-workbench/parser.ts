@@ -44,6 +44,7 @@ export type AstNode =
   | DeclBodyAstNode
   | TagListAstNode
   | TagItemsAstNode
+  | TagItemAstNode
   | TagAstNode
   | TypeSugarDeclAstNode
   | TypeSugarParamsAstNode
@@ -69,6 +70,9 @@ export type AstNode =
   | OperatorBindingNameAstNode
   | OperatorTargetAstNode
   | TypeExprAstNode
+  | TypeMembersAstNode
+  | TypeMembersBlockAstNode
+  | TypeMemberFnAstNode
   | TypeMatchAstNode
   | TypeArmAstNode
   | TypePatternAstNode
@@ -124,6 +128,9 @@ export type AstNode =
   | PipeBindAstNode
   | PipeBindAtomAstNode
   | IfExprAstNode
+  | IfConditionAstNode
+  | IfLetConditionAstNode
+  | IfElseAstNode
   | MatchExprAstNode
   | MatchValuesAstNode
   | MatchValuesParenAstNode
@@ -162,8 +169,15 @@ export type AstNode =
   | TupleOverrideSlotAstNode
   | TupleValueRepeatAstNode
   | PatternAstNode
+  | PatternOrAstNode
+  | PatternAsAstNode
   | PatternTypeAnnAstNode
   | PatternBaseAstNode
+  | PatternGroupAstNode
+  | ProductPatternAstNode
+  | ProductPatternNameAstNode
+  | ProductPatternFieldsAstNode
+  | ProductPatternFieldAstNode
   | PatternMemberAstNode
   | PatternIdentAstNode
   | PatternArgsAstNode
@@ -266,6 +280,13 @@ export interface TagListAstNode {
 export interface TagItemsAstNode {
   kind: "TagItems";
   type: "TagItems";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TagItemAstNode {
+  kind: "TagItem";
+  type: "TagItem";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -441,6 +462,27 @@ export interface OperatorTargetAstNode {
 export interface TypeExprAstNode {
   kind: "TypeExpr";
   type: "TypeExpr";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeMembersAstNode {
+  kind: "TypeMembers";
+  type: "TypeMembers";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeMembersBlockAstNode {
+  kind: "TypeMembersBlock";
+  type: "TypeMembersBlock";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface TypeMemberFnAstNode {
+  kind: "TypeMemberFn";
+  type: "TypeMemberFn";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -830,6 +872,27 @@ export interface IfExprAstNode {
   children: AstNode[];
 }
 
+export interface IfConditionAstNode {
+  kind: "IfCondition";
+  type: "IfCondition";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface IfLetConditionAstNode {
+  kind: "IfLetCondition";
+  type: "IfLetCondition";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface IfElseAstNode {
+  kind: "IfElse";
+  type: "IfElse";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface MatchExprAstNode {
   kind: "MatchExpr";
   type: "MatchExpr";
@@ -1096,6 +1159,20 @@ export interface PatternAstNode {
   children: AstNode[];
 }
 
+export interface PatternOrAstNode {
+  kind: "PatternOr";
+  type: "PatternOr";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface PatternAsAstNode {
+  kind: "PatternAs";
+  type: "PatternAs";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
 export interface PatternTypeAnnAstNode {
   kind: "PatternTypeAnn";
   type: "PatternTypeAnn";
@@ -1106,6 +1183,41 @@ export interface PatternTypeAnnAstNode {
 export interface PatternBaseAstNode {
   kind: "PatternBase";
   type: "PatternBase";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface PatternGroupAstNode {
+  kind: "PatternGroup";
+  type: "PatternGroup";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ProductPatternAstNode {
+  kind: "ProductPattern";
+  type: "ProductPattern";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ProductPatternNameAstNode {
+  kind: "ProductPatternName";
+  type: "ProductPatternName";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ProductPatternFieldsAstNode {
+  kind: "ProductPatternFields";
+  type: "ProductPatternFields";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ProductPatternFieldAstNode {
+  kind: "ProductPatternField";
+  type: "ProductPatternField";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -1564,16 +1676,20 @@ const rules: Record<string, Expression> = {
   "TagItems": {
     kind: "sequence",
     items: [
-      { kind: "ref", name: "Tag" },
+      { kind: "ref", name: "TagItem" },
       {
         kind: "repeat",
         expression: {
           kind: "sequence",
-          items: [{ kind: "literal", value: "," }, { kind: "ref", name: "Tag" }],
+          items: [{ kind: "literal", value: "," }, { kind: "ref", name: "TagItem" }],
         },
       },
       { kind: "optional", expression: { kind: "literal", value: "," } },
     ],
+  },
+  "TagItem": {
+    kind: "choice",
+    options: [{ kind: "ref", name: "TypeExpr" }, { kind: "ref", name: "Tag" }],
   },
   "Tag": { kind: "ref", name: "LowerIdent" },
   "TypeSugarDecl": {
@@ -1838,7 +1954,10 @@ const rules: Record<string, Expression> = {
   },
   "TypeExpr": {
     kind: "choice",
-    options: [{ kind: "ref", name: "TypeMatch" }, {
+    options: [{ kind: "ref", name: "TypeMembers" }, {
+      kind: "ref",
+      name: "TypeMatch",
+    }, {
       kind: "ref",
       name: "FnType",
     }, {
@@ -1846,6 +1965,25 @@ const rules: Record<string, Expression> = {
       name: "TypeBinary",
     }],
   },
+  "TypeMembers": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "members" },
+      { kind: "literal", value: "(" },
+      { kind: "ref", name: "TypeExpr" },
+      { kind: "literal", value: ")" },
+      { kind: "ref", name: "TypeMembersBlock" },
+    ],
+  },
+  "TypeMembersBlock": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "{" },
+      { kind: "repeat", expression: { kind: "ref", name: "TypeMemberFn" } },
+      { kind: "literal", value: "}" },
+    ],
+  },
+  "TypeMemberFn": { kind: "ref", name: "FnTail" },
   "TypeMatch": {
     kind: "sequence",
     items: [
@@ -2602,11 +2740,36 @@ const rules: Record<string, Expression> = {
     kind: "sequence",
     items: [
       { kind: "literal", value: "if" },
-      { kind: "ref", name: "Expr" },
+      { kind: "ref", name: "IfCondition" },
       { kind: "ref", name: "Block" },
       { kind: "literal", value: "else" },
-      { kind: "ref", name: "Block" },
+      { kind: "ref", name: "IfElse" },
     ],
+  },
+  "IfCondition": {
+    kind: "choice",
+    options: [{ kind: "ref", name: "IfLetCondition" }, {
+      kind: "ref",
+      name: "Expr",
+    }],
+  },
+  "IfLetCondition": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "(" },
+      { kind: "literal", value: "let" },
+      { kind: "ref", name: "Pattern" },
+      { kind: "literal", value: "=" },
+      { kind: "ref", name: "Expr" },
+      { kind: "literal", value: ")" },
+    ],
+  },
+  "IfElse": {
+    kind: "choice",
+    options: [{ kind: "ref", name: "IfExpr" }, {
+      kind: "ref",
+      name: "Block",
+    }],
   },
   "MatchExpr": {
     kind: "sequence",
@@ -3025,7 +3188,7 @@ const rules: Record<string, Expression> = {
   },
   "Pattern": {
     kind: "sequence",
-    items: [{ kind: "ref", name: "PatternBase" }, {
+    items: [{ kind: "ref", name: "PatternOr" }, {
       kind: "optional",
       expression: { kind: "ref", name: "PatternTypeAnn" },
     }],
@@ -3034,6 +3197,26 @@ const rules: Record<string, Expression> = {
     kind: "sequence",
     items: [{ kind: "literal", value: ":" }, { kind: "ref", name: "Type" }],
   },
+  "PatternOr": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "PatternAs" }, {
+      kind: "repeat",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: "|" }, { kind: "ref", name: "PatternAs" }],
+      },
+    }],
+  },
+  "PatternAs": {
+    kind: "choice",
+    options: [{
+      kind: "sequence",
+      items: [{ kind: "ref", name: "LowerIdent" }, { kind: "literal", value: "@" }, {
+        kind: "ref",
+        name: "PatternAs",
+      }],
+    }, { kind: "ref", name: "PatternBase" }],
+  },
   "PatternBase": {
     kind: "choice",
     options: [{ kind: "literal", value: "_" }, {
@@ -3041,11 +3224,67 @@ const rules: Record<string, Expression> = {
       name: "TuplePattern",
     }, {
       kind: "ref",
+      name: "PatternGroup",
+    }, {
+      kind: "ref",
+      name: "ProductPattern",
+    }, {
+      kind: "ref",
       name: "PatternMember",
     }, {
       kind: "ref",
       name: "PatternIdent",
     }, { kind: "ref", name: "Literal" }],
+  },
+  "PatternGroup": {
+    kind: "sequence",
+    items: [{ kind: "literal", value: "(" }, { kind: "ref", name: "Pattern" }, {
+      kind: "literal",
+      value: ")",
+    }],
+  },
+  "ProductPattern": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "ProductPatternName" }, { kind: "literal", value: "{" }, {
+      kind: "optional",
+      expression: { kind: "ref", name: "ProductPatternFields" },
+    }, { kind: "literal", value: "}" }],
+  },
+  "ProductPatternName": {
+    kind: "sequence",
+    items: [{
+      kind: "choice",
+      options: [{ kind: "ref", name: "LowerIdent" }, {
+        kind: "ref",
+        name: "PascalIdent",
+      }],
+    }, {
+      kind: "optional",
+      expression: { kind: "ref", name: "TypeQualifiedTail" },
+    }],
+  },
+  "ProductPatternFields": {
+    kind: "sequence",
+    items: [{ kind: "ref", name: "ProductPatternField" }, {
+      kind: "repeat",
+      expression: {
+        kind: "sequence",
+        items: [{ kind: "literal", value: "," }, {
+          kind: "ref",
+          name: "ProductPatternField",
+        }],
+      },
+    }, { kind: "optional", expression: { kind: "literal", value: "," } }],
+  },
+  "ProductPatternField": {
+    kind: "choice",
+    options: [{
+      kind: "sequence",
+      items: [{ kind: "ref", name: "LowerIdent" }, { kind: "literal", value: ":" }, {
+        kind: "ref",
+        name: "Pattern",
+      }],
+    }, { kind: "ref", name: "LowerIdent" }],
   },
   "PatternMember": {
     kind: "sequence",
@@ -3405,6 +3644,9 @@ const rules: Record<string, Expression> = {
     }, {
       kind: "literal",
       value: "union",
+    }, {
+      kind: "literal",
+      value: "members",
     }],
   },
   "TypeAnn": {
@@ -3843,6 +4085,15 @@ export function projectParseNode(node: ParseNode): AstNode | null {
           child,
         ): child is AstNode => child !== null),
       };
+    case "TagItem":
+      return {
+        kind: "TagItem",
+        type: "TagItem",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
     case "Tag":
       return {
         kind: "Tag",
@@ -4063,6 +4314,33 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "TypeExpr",
         type: "TypeExpr",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "TypeMembers":
+      return {
+        kind: "TypeMembers",
+        type: "TypeMembers",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "TypeMembersBlock":
+      return {
+        kind: "TypeMembersBlock",
+        type: "TypeMembersBlock",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "TypeMemberFn":
+      return {
+        kind: "TypeMemberFn",
+        type: "TypeMemberFn",
         node,
         children: node.children.map(projectParseNode).filter((
           child,
@@ -4563,6 +4841,33 @@ export function projectParseNode(node: ParseNode): AstNode | null {
           child,
         ): child is AstNode => child !== null),
       };
+    case "IfCondition":
+      return {
+        kind: "IfCondition",
+        type: "IfCondition",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "IfLetCondition":
+      return {
+        kind: "IfLetCondition",
+        type: "IfLetCondition",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "IfElse":
+      return {
+        kind: "IfElse",
+        type: "IfElse",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
     case "MatchExpr":
       return {
         kind: "MatchExpr",
@@ -4905,6 +5210,24 @@ export function projectParseNode(node: ParseNode): AstNode | null {
           child,
         ): child is AstNode => child !== null),
       };
+    case "PatternOr":
+      return {
+        kind: "PatternOr",
+        type: "PatternOr",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "PatternAs":
+      return {
+        kind: "PatternAs",
+        type: "PatternAs",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
     case "PatternTypeAnn":
       return {
         kind: "PatternTypeAnn",
@@ -4918,6 +5241,51 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "PatternBase",
         type: "PatternBase",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "PatternGroup":
+      return {
+        kind: "PatternGroup",
+        type: "PatternGroup",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "ProductPattern":
+      return {
+        kind: "ProductPattern",
+        type: "ProductPattern",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "ProductPatternName":
+      return {
+        kind: "ProductPatternName",
+        type: "ProductPatternName",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "ProductPatternFields":
+      return {
+        kind: "ProductPatternFields",
+        type: "ProductPatternFields",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "ProductPatternField":
+      return {
+        kind: "ProductPatternField",
+        type: "ProductPatternField",
         node,
         children: node.children.map(projectParseNode).filter((
           child,

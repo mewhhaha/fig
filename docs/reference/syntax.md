@@ -36,8 +36,8 @@ Compiler-owned `@...` forms are valid only in their documented contexts.
 
 ## Declaration Tags
 
-Tag lists can prefix top-level declarations. The first supported declaration tag is `test`, and it
-is valid only on function declarations:
+Tag lists can prefix top-level declarations. Bare lowercase tags are compiler metadata. The
+currently supported bare declaration tag is `test`, and it is valid only on function declarations:
 
 ```fig
 @[test]
@@ -46,9 +46,33 @@ fn parses_option() -> bool {
 }
 ```
 
-Tags are compiler metadata, not comments. Unknown tags are diagnostics, and `@[test]` on a non-`fn`
-declaration is rejected. Multiple tag lists can appear before the same declaration, but duplicate
-tags are rejected.
+Declaration tags can also be type-function expressions. These expressions run left to right after
+the annotated declaration's signature or type is known. Inside a declaration tag expression, `Self`
+names the annotated declaration's type:
+
+```fig
+const derive = @import("prelude.derive");
+const core = @import("prelude.core");
+
+@[derive.Eq(Self), core.Eq(Self)]
+type Point = struct {x: i32, y: i32}
+
+type fn ExportedI32(f: type) -> type {
+  @require(@type_is_fn(f), "expected function");
+  @require(@type_fn_return(f) == i32, "expected i32 return");
+  f
+}
+
+@[ExportedI32(Self)]
+pub fn main() -> i32 { 1 }
+```
+
+For a generic `type Box(a) = ...`, `Self` is `Box(a)`. For a type-constructor declaration, use the
+declaration name itself when a contract expects the constructor, such as `@[Functor(Box)]`.
+
+Tags are compiler metadata, not comments. Unknown bare tags are diagnostics, and `@[test]` on a
+non-`fn` declaration is rejected. Multiple tag lists can appear before the same declaration, but
+duplicate bare tags are rejected. `Self` is rejected outside declaration tag expressions.
 
 ## Rewrite Facts
 
@@ -127,6 +151,8 @@ takes the compiler primitive `io` executor as its first parameter and returns an
 const clock = @external("clock", fn(host: io) -> io(i32));
 ```
 
+External signatures cannot import or export runtime function values.
+
 Host IO imports lower to WebAssembly imports from module `env`. Pass the `io` executor explicitly
 and sequence actions with `do @io(_)`:
 
@@ -174,7 +200,7 @@ the initializer.
 
 Functions use either a block body or a match body. `pub fn` exports through the WebAssembly backend
 and must include an explicit return annotation; `-> _` is accepted when the body resolves to a
-concrete exportable type.
+concrete exportable type. Public exports cannot import or export runtime function values.
 
 ```fig
 fn add(a: i32, b: i32) -> i32 { a + b }
@@ -199,7 +225,9 @@ patterns per arm:
 ```fig
 fn score(left: bool, right: bool) -> i32 match {
   true, true => 3,
-  _, _ => 0,
+  true, false => 1,
+  false, true => 0,
+  false, false => 0,
 }
 
 fn unwrap(value: Option(i32)) -> i32 match {
@@ -282,6 +310,20 @@ match n {
   small: i32(0..4 | 8) => small,
   _ if n > 20 => 20,
   _ => n,
+}
+```
+
+Boolean `if` is expression sugar for `match` on `bool`, and `else if` nests another boolean match in
+the fallback arm. Parenthesized `if (let Pattern = value)` is expression sugar for
+`match value { Pattern => ..., _ => ... }`, with pattern bindings scoped to the first block:
+
+```fig
+if (let Some(value) = maybe) {
+  value
+} else if fallback_ready {
+  1
+} else {
+  0
 }
 ```
 
