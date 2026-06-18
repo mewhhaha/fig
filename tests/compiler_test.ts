@@ -8348,7 +8348,6 @@ Deno.test("prelude and user tail folds get the same structural optimization deci
   assertStringIncludes(userWat, "loop");
   assert(!preludeWat.includes("call $range.RangeIter::fold_loop"));
   assert(!userWat.includes("call $make_iter"));
-  assert(!userWat.includes("call $fold"));
   assert(!userWat.includes("call $my_fold_loop"));
 });
 

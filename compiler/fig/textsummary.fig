@@ -87,12 +87,22 @@ fn run(
   kind: textmodel.SummaryKind,
   arg: i32
 ) -> i32 {
-  Context::scan(
-    context(kind, arg),
-    source,
-    textmodel.full_window_state(source),
-    0
-  )
+  match kind {
+    textmodel.SummaryKind::DeclarationDependencyDiagnosticSignature =>
+      parser.text_declaration_dependency_diagnostic_signature_for_source(source),
+    textmodel.SummaryKind::ResolvedValueBodyTypeClassSignature =>
+      parser.text_resolved_value_body_type_class_signature_for_source(source),
+    textmodel.SummaryKind::ResolvedValueBodyAbiClassSignature =>
+      parser.text_resolved_value_body_abi_class_signature_for_source(source),
+    textmodel.SummaryKind::ResolvedSimpleBodyTypeCheckSignature =>
+      parser.text_resolved_simple_body_type_check_signature_for_source(source),
+    _ => Context::scan(
+      context(kind, arg),
+      source,
+      textmodel.full_window_state(source),
+      0
+    ),
+  }
 }
 
 fn entry(seed: i32) -> i32 {

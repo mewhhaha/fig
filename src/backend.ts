@@ -8666,19 +8666,12 @@ function lowerPrivateProductCallInline(
     for (const [index, param] of callee.params.entries()) {
       const arg = runtimeArgs[index];
       if (!arg || arg.kind === "var") continue;
-      if (flattenType(param.type, ctx.layouts).length !== 1) continue;
+      if (!isInlineScalarParamType(param.type, ctx.layouts)) continue;
       if (hasRuntimeEffect(arg, ctx.functions)) continue;
       if (cachedCountNameUses(callee.body, param.name, ctx.backendCache) > 1) continue;
       scalarArgSubstitutions.set(param.name, arg);
     }
   }
-  const inlineCallee = scalarArgSubstitutions.size
-    ? {
-      ...callee,
-      body: substituteExpr(callee.body as Expr, scalarArgSubstitutions) as BlockExpr,
-    }
-    : callee;
-
   const prefix = `__inl_${callee.name.replaceAll(/[^A-Za-z0-9_]/g, "_")}_${ctx.tempIndex++}`;
   const renames = new Map<string, string>();
   const aliasedScalarParams = new Set<string>();
@@ -8698,7 +8691,7 @@ function lowerPrivateProductCallInline(
     if (
       !calleeTailCalls.hasDirectSelfCall &&
       arg?.kind === "var" &&
-      flattenType(param.type, ctx.layouts).length === 1 &&
+      isInlineScalarParamType(param.type, ctx.layouts) &&
       !deadProductBases.has(baseName(arg.name))
     ) {
       renames.set(param.name, arg.name);
@@ -8736,7 +8729,7 @@ function lowerPrivateProductCallInline(
       }
     }
   });
-  const renamed = renameFunctionLocals(inlineCallee, renames);
+  const renamed = renameFunctionLocalsThenSubstitute(callee, renames, scalarArgSubstitutions);
   const scratchArrays = renamedScratchPlans(
     ctx.scratchPlansByFunction?.get(callee.name),
     renames,
@@ -9019,7 +9012,7 @@ function lowerPrivateScalarTailLoopCallInline(
   for (const [index, param] of callee.params.entries()) {
     const arg = runtimeArgs[index];
     if (!arg) continue;
-    if (flattenType(param.type, ctx.layouts).length === 1) {
+    if (isInlineScalarParamType(param.type, ctx.layouts)) {
       if (arg.kind === "var") continue;
       if (
         selfCalls.length &&
@@ -9053,23 +9046,17 @@ function lowerPrivateScalarTailLoopCallInline(
     }
   }
   const substitutions = new Map([...scalarArgSubstitutions, ...productFieldSubstitutions]);
-  const inlineCallee = substitutions.size
-    ? {
-      ...callee,
-      body: substituteExpr(callee.body as Expr, substitutions) as BlockExpr,
-    }
-    : callee;
-
+  if (productFieldSubstitutions.size) return undefined;
   const renames = new Map<string, string>();
   const aliasedScalarParams = new Set<string>();
   const aliasedProductParams = new Set<string>();
-  for (const [index, param] of inlineCallee.params.entries()) {
+  for (const [index, param] of callee.params.entries()) {
     const originalParam = callee.params[index];
     const arg = runtimeArgs[index];
     if (
       originalParam &&
       arg?.kind === "var" &&
-      flattenType(param.type, ctx.layouts).length === 1 &&
+      isInlineScalarParamType(param.type, ctx.layouts) &&
       selfCalls.every((call) =>
         tailLoopArgIsIdentity(tailLoopCallArgs(call, callee)[index], originalParam, ctx)
       )
@@ -9110,7 +9097,7 @@ function lowerPrivateScalarTailLoopCallInline(
       }
     }
   });
-  const renamed = renameFunctionLocals(inlineCallee, renames);
+  const renamed = renameFunctionLocalsThenSubstitute(callee, renames, substitutions);
   const scratchArrays = renamedScratchPlans(
     ctx.scratchPlansByFunction?.get(callee.name),
     renames,
@@ -9355,6 +9342,7 @@ function lowerPrivateScalarCallInline(
   }
   if (flattenType(callee.returnType, ctx.layouts).length !== 1) return undefined;
   if (hasRuntimeEffect(callee.body, ctx.functions)) return undefined;
+  if (hasNonSelfCalls(callee, ctx.backendCache)) return undefined;
   if (scalarFunctionMatchesUnionParam(callee, ctx.layouts)) return undefined;
   if (cachedAnalyzeTailCalls(callee, ctx.backendCache).hasDirectSelfCall) return undefined;
   const cost = cachedBackendInlineBlockCost(callee.body, ctx.backendCache);
@@ -9375,7 +9363,7 @@ function lowerPrivateScalarCallInline(
   for (const [index, param] of callee.params.entries()) {
     const arg = runtimeArgs[index];
     if (!arg) continue;
-    if (flattenType(param.type, ctx.layouts).length === 1) {
+    if (isInlineScalarParamType(param.type, ctx.layouts)) {
       if (arg.kind === "var") continue;
       if (cachedCountNameUses(callee.body, param.name, ctx.backendCache) > 1) continue;
       scalarArgSubstitutions.set(param.name, arg);
@@ -9409,35 +9397,27 @@ function lowerPrivateScalarCallInline(
     }
   }
   const substitutions = new Map([...scalarArgSubstitutions, ...productFieldSubstitutions]);
-  const inlineCallee = substitutions.size
-    ? {
-      ...callee,
-      body: substituteExpr(callee.body as Expr, substitutions) as BlockExpr,
-    }
-    : callee;
 
   const renames = new Map<string, string>();
   const aliasedScalarParams = new Set<string>();
   const elidedProductParams = new Set<string>();
-  for (const [index, param] of inlineCallee.params.entries()) {
-    const originalParam = callee.params[index];
+  for (const [index, param] of callee.params.entries()) {
     const arg = runtimeArgs[index];
     if (
-      originalParam &&
       arg?.kind === "var" &&
-      flattenType(param.type, ctx.layouts).length === 1
+      isInlineScalarParamType(param.type, ctx.layouts)
     ) {
       renames.set(param.name, arg.name);
-      aliasedScalarParams.add(originalParam.name);
+      aliasedScalarParams.add(param.name);
       continue;
     }
     if (
-      originalParam &&
+      arg?.kind === "var" &&
       flattenType(param.type, ctx.layouts).length > 1 &&
-      !exprMentionsName(inlineCallee.body, param.name)
+      !exprMentionsName(callee.body, param.name)
     ) {
       renames.set(param.name, param.name);
-      elidedProductParams.add(originalParam.name);
+      elidedProductParams.add(param.name);
       continue;
     }
     renames.set(
@@ -9445,7 +9425,7 @@ function lowerPrivateScalarCallInline(
       substitutions.has(param.name) ? param.name : `${prefix}_${param.name}`,
     );
   }
-  const renamed = renameFunctionLocals(inlineCallee, renames);
+  const renamed = renameFunctionLocalsThenSubstitute(callee, renames, substitutions);
   const localSlotArrays = renamedLocalSlotPlans(
     ctx.localSlotPlansByFunction?.get(callee.name),
     renames,
@@ -9677,6 +9657,34 @@ function renameFunctionLocals(fn: FnDecl, renames: Map<string, string>): FnDecl 
   return { ...fn, params, body: renameBlock(fn.body, renames) };
 }
 
+function renameSubstitutionKeys(
+  substitutions: Map<string, Expr>,
+  renames: Map<string, string>,
+): Map<string, Expr> {
+  if (!substitutions.size) return substitutions;
+  const renamed = new Map<string, Expr>();
+  for (const [name, value] of substitutions) {
+    renamed.set(renameDottedName(name, renames), value);
+  }
+  return renamed;
+}
+
+function renameFunctionLocalsThenSubstitute(
+  fn: FnDecl,
+  renames: Map<string, string>,
+  substitutions: Map<string, Expr>,
+): FnDecl {
+  const renamed = renameFunctionLocals(fn, renames);
+  if (!substitutions.size) return renamed;
+  return {
+    ...renamed,
+    body: substituteExpr(
+      renamed.body as Expr,
+      renameSubstitutionKeys(substitutions, renames),
+    ) as BlockExpr,
+  };
+}
+
 function renameBlock(block: BlockExpr, renames: Map<string, string>): BlockExpr {
   const scoped = new Map(renames);
   const statements = block.statements.map((stmt) => renameStatement(stmt, scoped));
@@ -9690,20 +9698,25 @@ function renameBlock(block: BlockExpr, renames: Map<string, string>): BlockExpr 
 function renameStatement(stmt: Statement, renames: Map<string, string>): Statement {
   if (stmt.kind === "let") {
     const value = renameExpr(stmt.value, renames);
-    const name = renames.get(stmt.name) ?? `${[...renames.values()][0] ?? "__inl"}_${stmt.name}`;
+    const name = renames.get(stmt.name) ?? `${inlineLocalPrefix(renames)}_${stmt.name}`;
     renames.set(stmt.name, name);
     return { ...stmt, name, value };
   }
   if (stmt.kind === "destructure_let") {
     const value = renameExpr(stmt.value, renames);
     const names = stmt.names.map((item) => {
-      const name = renames.get(item) ?? `${[...renames.values()][0] ?? "__inl"}_${item}`;
+      const name = renames.get(item) ?? `${inlineLocalPrefix(renames)}_${item}`;
       renames.set(item, name);
       return name;
     });
     return { ...stmt, names, value };
   }
   return stmt;
+}
+
+function inlineLocalPrefix(renames: Map<string, string>): string {
+  const raw = [...renames.values()][0] ?? "__inl";
+  return raw.replaceAll(/[^A-Za-z0-9_]/g, "_");
 }
 
 function renameExpr(expr: Expr, renames: Map<string, string>): Expr {
@@ -9753,7 +9766,7 @@ function renameExpr(expr: Expr, renames: Map<string, string>): Expr {
     case "pipe_bind": {
       const value = renameExpr(expr.value, renames);
       const scoped = new Map(renames);
-      const name = scoped.get(expr.name) ?? `${[...renames.values()][0] ?? "__inl"}_${expr.name}`;
+      const name = scoped.get(expr.name) ?? `${inlineLocalPrefix(renames)}_${expr.name}`;
       scoped.set(expr.name, name);
       return { ...expr, value, name, body: renameExpr(expr.body, scoped) };
     }
@@ -9790,11 +9803,11 @@ function renameExpr(expr: Expr, renames: Map<string, string>): Expr {
     case "static_for_slots": {
       const scoped = new Map(renames);
       const iterator = scoped.get(expr.iterator) ??
-        `${[...renames.values()][0] ?? "__inl"}_${expr.iterator}`;
+        `${inlineLocalPrefix(renames)}_${expr.iterator}`;
       scoped.set(expr.iterator, iterator);
       const valueIterator = expr.valueIterator
         ? scoped.get(expr.valueIterator) ??
-          `${[...renames.values()][0] ?? "__inl"}_${expr.valueIterator}`
+          `${inlineLocalPrefix(renames)}_${expr.valueIterator}`
         : undefined;
       if (expr.valueIterator && valueIterator) scoped.set(expr.valueIterator, valueIterator);
       return {
@@ -9826,7 +9839,7 @@ function renamePattern(pattern: ParamPattern, renames: Map<string, string>): Par
   switch (pattern.kind) {
     case "binding": {
       const name = renames.get(pattern.name) ??
-        `${[...renames.values()][0] ?? "__inl"}_${pattern.name}`;
+        `${inlineLocalPrefix(renames)}_${pattern.name}`;
       renames.set(pattern.name, name);
       return { ...pattern, name };
     }
@@ -12367,6 +12380,7 @@ function lowerVar(
   if (exactPacked) return lowerPackedArrayMaterialize(exactPacked, ctx, locals);
   const exactScratch = ctx.scratchArrays?.get(name);
   if (exactScratch) return lowerScratchArrayMaterialize(exactScratch, ctx, locals);
+  if (name.includes("$") && locals.has(name)) return [{ op: "local.get", name }];
   const base = baseName(name);
   const projection = projectionSuffix(name);
   const exactConst = ctx.layouts.constRuntimeValues.get(name);
@@ -18658,6 +18672,15 @@ function isPrimitiveType(type: string): boolean {
     unsignedBitWidth(type) !== undefined;
 }
 
+function isInlineScalarParamType(type: string | undefined, layouts: LayoutEnv): boolean {
+  const resolved = resolveAlias(type, layouts) ?? type;
+  if (!resolved) return false;
+  if (parseBackendFnSignature(resolved)) return true;
+  if (parseRefinedI32Type(resolved)) return true;
+  if (literalTypeMembers(resolved)) return true;
+  return isPrimitiveType(resolved);
+}
+
 function unsignedBitWidth(type: string): number | undefined {
   const refined = scalarFactsUnsignedBitWidth(scalarFactsFromRefinedI32Type(type));
   if (refined !== undefined) return refined;
@@ -18727,9 +18750,11 @@ function splitTypeArgs(source: string): string[] {
 function baseName(name: string): string {
   const dot = name.indexOf(".");
   const bracket = name.indexOf("[");
+  const slot = name.indexOf("$");
   const end = Math.min(
     dot >= 0 ? dot : name.length,
     bracket >= 0 ? bracket : name.length,
+    slot >= 0 ? slot : name.length,
   );
   return name.slice(0, end);
 }

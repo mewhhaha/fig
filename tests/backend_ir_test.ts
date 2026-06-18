@@ -12,6 +12,8 @@ import {
   type CompileArtifactsWithWatResult,
   type CompileSourceOptions,
   type CompileTraceEvent,
+  type ModuleResolveContext,
+  type ModuleSource,
   createFigHost,
   instantiateFig,
   wasmFromSource as wasmFromSourceRaw,
@@ -19,6 +21,7 @@ import {
 } from "../src/mod.ts";
 import { emitWasm } from "../src/backend.ts";
 import type { Expr, Program } from "../src/core_ast.ts";
+import { candidateModulePaths } from "../src/lsp/modules.ts";
 import { resolveProjectModule as resolveModule, withOperatorPrelude } from "./operator_prelude.ts";
 
 const watFromSource = (source: string, options: CompileSourceOptions = {}) => {
@@ -53,6 +56,24 @@ function compileArtifactsFromSource(
     prepared.options as CompileArtifactsOptions & { includeWat?: true },
   );
 }
+
+const resolveCompilerModule = async (
+  moduleName: string,
+  context?: ModuleResolveContext,
+): Promise<ModuleSource | undefined> => {
+  const importer = context?.fromSourceId ?? "tmp/backend_ir_test.fig";
+  for (const path of candidateModulePaths(importer, moduleName)) {
+    try {
+      return {
+        text: withOperatorPrelude(await Deno.readTextFile(path)).source,
+        sourceId: path,
+      };
+    } catch {
+      // Keep trying candidate paths.
+    }
+  }
+  return undefined;
+};
 
 function boolLiteral(value: boolean): Expr {
   return {
@@ -136,6 +157,45 @@ function numericFields(value: unknown): unknown[] {
   return Object.entries(value as Record<string, unknown>)
     .sort(([left], [right]) => Number(left) - Number(right))
     .map(([, item]) => item);
+}
+
+function figSummarySignatureMix(total: number, value: number): number {
+  return (Math.imul(total, 131) + value) | 0;
+}
+
+function figSummaryTextHash(text: string): number {
+  const bytes = new TextEncoder().encode(text);
+  let total = 0;
+  for (const code of bytes) {
+    total = (Math.imul(total, 33) + code) | 0;
+  }
+  return total;
+}
+
+function figSummaryDeclarationSignature(kindTag: number, nameHash: number, auxHash: number): number {
+  let total = figSummarySignatureMix(17, kindTag);
+  total = figSummarySignatureMix(total, nameHash);
+  total = figSummarySignatureMix(total, auxHash);
+  return total;
+}
+
+function figSummarySourceImportEdge(aliasHash: number, moduleHash: number): number {
+  let total = figSummarySignatureMix(89, aliasHash);
+  total = figSummarySignatureMix(total, moduleHash);
+  return total;
+}
+
+function figSummarySourceImportGraphDiagnostic(
+  aliasHash: number,
+  moduleHash: number,
+  spanWidth: number,
+  diagnosticCode: number,
+): number {
+  let total = figSummarySignatureMix(97, aliasHash);
+  total = figSummarySignatureMix(total, moduleHash);
+  total = figSummarySignatureMix(total, spanWidth);
+  total = figSummarySignatureMix(total, diagnosticCode);
+  return total;
 }
 
 function decodeBranchHints(
@@ -253,6 +313,183 @@ Deno.test("release backend preserves host calls through private wrappers", async
   const wat = await watFromSource(source, { optMode: "release" });
   assertStringIncludes(wat, "call $draw");
   new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" }));
+});
+
+Deno.test("release inliner keeps caller names free inside substituted arguments", async () => {
+  const source = `
+    type Inner = struct {a: i32, b: i32}
+    type Outer = struct {x: i32, inner: Inner}
+
+    fn root_id(graph: Outer) -> i32 { graph.x }
+    fn out_degree(graph: Inner, node: i32) -> i32 { graph.a + node }
+    fn graph_score(graph: Outer) -> i32 {
+      out_degree(graph.inner, root_id(graph))
+    }
+    pub fn main() -> i32 {
+      graph_score(Outer {x: 5, inner: Inner {a: 2, b: 3}})
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 7);
+});
+
+Deno.test("release scalar inliner preserves compiler reader summaries", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    const textlex = @import("compiler.fig.textlex");
+    const textmodel = @import("compiler.fig.textmodel");
+    const textsummary = @import("compiler.fig.textsummary");
+    const textfacts = @import("compiler.fig.textfacts");
+
+    fn stream(codes: layout.HeapArray(i32)) -> textlex.TextTokenStream {
+      textlex.stream_from_buffer(textlex.buffer_from_codes(0, 0, codes))
+    }
+
+    pub fn function_param_signature(codes: layout.HeapArray(i32)) -> i32 {
+      textsummary.run(stream(codes), textmodel.SummaryKind::FunctionParamSignature, 0)
+    }
+
+    pub fn checked_shape_signature(codes: layout.HeapArray(i32)) -> i32 {
+      textfacts.checked_expression_shape_signature(stream(codes))
+    }
+  `;
+  const input = [..."fn width(span: i32) -> i32 { span }"].map((char) => char.charCodeAt(0));
+
+  for (const optMode of ["debug", "release"] as const) {
+    const artifact = await compileArtifactsFromSource(source, {
+      optMode,
+      includeWat: false,
+      resolveModule: resolveCompilerModule,
+      sourceId: "tmp/backend_ir_test.fig",
+    });
+    const fig = await instantiateFig(artifact.wasm);
+    const host = createFigHost(fig.abi, fig.instance);
+
+    assertEquals(host.call("function_param_signature", input), 4258034);
+    assertEquals(host.call("checked_shape_signature", input), 889890668);
+  }
+});
+
+Deno.test("Fig compiler summaries include destructured source imports", async () => {
+  const source = `
+    const layout = @import("prelude.layout");
+    const textlex = @import("compiler.fig.textlex");
+    const textmodel = @import("compiler.fig.textmodel");
+    const textsummary = @import("compiler.fig.textsummary");
+
+    fn stream(codes: layout.HeapArray(i32)) -> textlex.TextTokenStream {
+      textlex.stream_from_buffer(textlex.buffer_from_codes(0, 0, codes))
+    }
+
+    pub fn source_import_count(codes: layout.HeapArray(i32)) -> i32 {
+      textsummary.run(stream(codes), textmodel.SummaryKind::KindCount, 5)
+    }
+
+    pub fn declaration_signature(codes: layout.HeapArray(i32)) -> i32 {
+      textsummary.run(stream(codes), textmodel.SummaryKind::DeclarationSignature, 0)
+    }
+
+    pub fn source_import_edge_signature(codes: layout.HeapArray(i32)) -> i32 {
+      textsummary.run(stream(codes), textmodel.SummaryKind::SourceImportEdgeSignature, 0)
+    }
+
+    pub fn source_import_graph_diagnostic_signature(codes: layout.HeapArray(i32)) -> i32 {
+      textsummary.run(stream(codes), textmodel.SummaryKind::SourceImportGraphDiagnosticSignature, 0)
+    }
+  `;
+  const importedModule = "prelude.array_static";
+  const inputSource =
+    `const { map4_i32, lane4_add_i32 } = @import(${JSON.stringify(importedModule)});`;
+  const input = [...inputSource].map((char) => char.charCodeAt(0));
+  const moduleHash = figSummaryTextHash(JSON.stringify(importedModule));
+  const declarationSignature = figSummarySignatureMix(
+    0,
+    figSummaryDeclarationSignature(5, 0, moduleHash),
+  );
+  const sourceImportEdgeSignature = figSummarySignatureMix(
+    0,
+    figSummarySourceImportEdge(0, moduleHash),
+  );
+  const sourceImportGraphDiagnosticSignature = figSummarySignatureMix(
+    0,
+    figSummarySourceImportGraphDiagnostic(0, moduleHash, inputSource.length, 0),
+  );
+
+  for (const optMode of ["debug", "release"] as const) {
+    const artifact = await compileArtifactsFromSource(source, {
+      optMode,
+      includeWat: false,
+      resolveModule: resolveCompilerModule,
+      sourceId: "tmp/backend_ir_test.fig",
+    });
+    const fig = await instantiateFig(artifact.wasm);
+    const host = createFigHost(fig.abi, fig.instance);
+
+    assertEquals(host.call("source_import_count", input), 1);
+    assertEquals(host.call("declaration_signature", input), declarationSignature);
+    assertEquals(host.call("source_import_edge_signature", input), sourceImportEdgeSignature);
+    assertEquals(
+      host.call("source_import_graph_diagnostic_signature", input),
+      sourceImportGraphDiagnosticSignature,
+    );
+  }
+});
+
+Deno.test("release scalar inliner assigns locals derived from dotted arguments", async () => {
+  const source = `
+    type Fact = struct {result_val_type: i32}
+    fn byte_value(value: i32) -> i32 {
+      let reduced = value % 256;
+      match reduced < 0 {
+        true => reduced + 256,
+        false => reduced,
+      }
+    }
+    fn push_byte(value: i32) -> i32 {
+      byte_value(value)
+    }
+    fn payload(fact: Fact) -> i32 {
+      push_byte(fact.result_val_type)
+    }
+    pub fn main(value: i32) -> i32 {
+      payload(Fact {result_val_type: value})
+    }
+  `;
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(111), 111);
+  assertEquals(main(-1), 255);
+});
+
+Deno.test("release scalar inliner preserves single-field product helper chains", async () => {
+  const source = `
+    type Signature = struct {value: i32}
+    fn signature(value: i32) -> Signature {
+      Signature {value}
+    }
+    fn append(total: Signature, value: i32) -> Signature {
+      signature(total.value * 131 + value)
+    }
+    fn mix(total: i32, value: i32) -> i32 {
+      let mixed = append(signature(total), value);
+      mixed.value
+    }
+    pub fn main(a: i32, b: i32, c: i32) -> i32 {
+      let first = mix(73, a);
+      let second = mix(first, b);
+      mix(second, c)
+    }
+  `;
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "release" })),
+  );
+  const main = instance.exports.main as CallableFunction;
+  assertEquals(main(2, 3, 4), 164145362);
 });
 
 Deno.test("debug is the default opt mode and emits wasm name section", async () => {
@@ -1301,8 +1538,10 @@ Deno.test("private wrappers keep array-free product tail loops callable", async 
   `;
   const wat = await watFromSource(source, { memoryModel: "branch", optMode: "release" });
   const benchLoop = wat.match(/\(func \$bench_loop[\s\S]*?\n  \)/)?.[0] ?? "";
+  const benchKernel = wat.match(/\(func \$__bench_kernel[\s\S]*?\n  \)/)?.[0] ?? "";
   assertStringIncludes(wat, "(func $run_loop");
-  assertStringIncludes(benchLoop, "call $run_loop");
+  assertStringIncludes(benchLoop, "call $__bench_kernel");
+  assertStringIncludes(benchKernel, "call $run_loop");
   assert(!benchLoop.includes("__inl_run_loop"));
 
   const instance = new WebAssembly.Instance(

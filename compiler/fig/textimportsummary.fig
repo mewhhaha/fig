@@ -1,3 +1,5 @@
+const ast = @import("./ast.fig");
+const combinator = @import("./combinator.fig");
 const parser = @import("./parser.fig");
 const textlex = @import("./textlex.fig");
 const textmodel = @import("./textmodel.fig");
@@ -30,6 +32,37 @@ type ResolutionRecord = struct {
   resolved_export_abi_signature: i32,
 }
 
+type ResolutionRecordScan = struct {
+  current: combinator.ParseState,
+  resolved_declared_type_signature: i32,
+  resolved_declared_abi_signature: i32,
+  resolved_value_body_type_signature: i32,
+  resolved_value_body_abi_signature: i32,
+  resolved_simple_body_type_check_signature: i32,
+  resolved_symbol_environment_signature: i32,
+  resolved_export_abi_signature: i32,
+}
+
+type DirectImportDeclFacts = struct {
+  kind_tag: i32,
+  declaration_name_hash: i32,
+  export_name_hash: i32,
+  param_count: i32,
+  declared_type_class: i32,
+  declared_type_payload: i32,
+  declared_abi_class: i32,
+  expected_body_type_class: i32,
+  actual_body_type_class: i32,
+  body_check_status: i32,
+  export_tag: i32,
+}
+
+type DirectImportDeclTypeFacts = struct {
+  declared_type_class: i32,
+  declared_type_payload: i32,
+  expected_body_type_class: i32,
+}
+
 fn context(
   source: textlex.TextTokenStream,
   import_source: textlex.TextTokenStream,
@@ -52,6 +85,224 @@ fn context_import_source(context_value: Context) -> textlex.TextTokenStream {
 
 fn context_module_hash(context_value: Context) -> i32 {
   context_value.module_hash
+}
+
+fn direct_import_decl_declared_abi_class(
+  kind_tag: i32,
+  declared_type_class: i32
+) -> i32 {
+  match parser.text_declaration_kind_is_function(kind_tag) {
+    true => parser.text_abi_class_function_tag(),
+    false => match parser.text_declaration_kind_is_value_binding(kind_tag) {
+      true => parser.text_abi_class_tag_for_type_class(declared_type_class),
+      false => match parser.text_declaration_kind_is_type(kind_tag) {
+        true => parser.text_abi_class_tag_for_type_class(declared_type_class),
+        false => parser.text_abi_class_void_tag(),
+      },
+    },
+  }
+}
+
+fn direct_import_decl_export_name_hash(
+  source: textlex.TextTokenStream,
+  index: i32,
+  export_tag: i32
+) -> i32 {
+  match export_tag == 1 {
+    true => textlex.text_hash_at(
+      source,
+      parser.text_function_name_index(source, index)
+    ),
+    false => 0,
+  }
+}
+
+fn direct_import_decl_function_type_facts(
+  context_value: Context,
+  type_context: parser.TextDirectImportContext,
+  index: i32,
+  param_count: i32
+) -> DirectImportDeclTypeFacts {
+  let return_type = parser.text_function_return_direct_import_resolved_type_class_tag(
+    context_value.source,
+    context_value.import_source,
+    index,
+    type_context.alias_hash
+  );
+  DirectImportDeclTypeFacts {
+    declared_type_class: parser.text_type_class_function_tag(),
+    declared_type_payload: param_count * 31 + return_type,
+    expected_body_type_class: return_type,
+  }
+}
+
+fn direct_import_decl_value_type_facts(
+  context_value: Context,
+  type_context: parser.TextDirectImportContext,
+  index: i32
+) -> DirectImportDeclTypeFacts {
+  let annotation_type = parser.text_value_annotation_direct_import_resolved_type_class_tag(
+    context_value.source,
+    context_value.import_source,
+    index,
+    type_context.alias_hash
+  );
+  DirectImportDeclTypeFacts {
+    declared_type_class: annotation_type,
+    declared_type_payload: 0,
+    expected_body_type_class: annotation_type,
+  }
+}
+
+fn direct_import_decl_type_declaration_type_facts(
+  context_value: Context,
+  index: i32,
+  kind_tag: i32
+) -> DirectImportDeclTypeFacts {
+  DirectImportDeclTypeFacts {
+    declared_type_class: parser.text_type_declaration_environment_type_class_tag(
+      context_value.source,
+      index,
+      kind_tag
+    ),
+    declared_type_payload: 0,
+    expected_body_type_class: parser.text_type_class_unknown_tag(),
+  }
+}
+
+fn direct_import_decl_unknown_type_facts() -> DirectImportDeclTypeFacts {
+  DirectImportDeclTypeFacts {
+    declared_type_class: parser.text_type_class_unknown_tag(),
+    declared_type_payload: 0,
+    expected_body_type_class: parser.text_type_class_unknown_tag(),
+  }
+}
+
+fn direct_import_decl_type_facts(
+  context_value: Context,
+  type_context: parser.TextDirectImportContext,
+  index: i32,
+  kind_tag: i32,
+  param_count: i32
+) -> DirectImportDeclTypeFacts {
+  match parser.text_declaration_kind_is_function(kind_tag) {
+    true => direct_import_decl_function_type_facts(
+      context_value,
+      type_context,
+      index,
+      param_count
+    ),
+    false => match parser.text_declaration_kind_is_value_binding(kind_tag) {
+      true => direct_import_decl_value_type_facts(
+        context_value,
+        type_context,
+        index
+      ),
+      false => match parser.text_declaration_kind_is_type(kind_tag) {
+        true => direct_import_decl_type_declaration_type_facts(
+          context_value,
+          index,
+          kind_tag
+        ),
+        false => direct_import_decl_unknown_type_facts(),
+      },
+    },
+  }
+}
+
+fn direct_import_decl_actual_body_type_class(
+  type_context: parser.TextDirectImportContext,
+  index: i32,
+  decl: ast.Decl,
+  kind_tag: i32
+) -> i32 {
+  match parser.text_declaration_kind_is_function(kind_tag) {
+    true => parser.text_declaration_direct_import_resolved_value_body_type_class_tag(
+      type_context,
+      index,
+      decl
+    ),
+    false => match parser.text_declaration_kind_is_value_binding(kind_tag) {
+      true => parser.text_declaration_direct_import_resolved_value_body_type_class_tag(
+        type_context,
+        index,
+        decl
+      ),
+      false => parser.text_type_class_unknown_tag(),
+    },
+  }
+}
+
+fn direct_import_decl_export_tag(
+  source: textlex.TextTokenStream,
+  index: i32,
+  kind_tag: i32
+) -> i32 {
+  match parser.text_declaration_kind_is_function(kind_tag) {
+    true => parser.text_function_public_tag(source, index),
+    false => 0,
+  }
+}
+
+fn direct_import_decl_facts(
+  context_value: Context,
+  type_context: parser.TextDirectImportContext,
+  index: i32,
+  decl: ast.Decl
+) -> DirectImportDeclFacts {
+  let kind_tag = parser.text_declaration_kind_tag(
+    context_value.source,
+    index,
+    decl
+  );
+  let declaration_name_hash = parser.text_declaration_name_hash(
+    context_value.source,
+    index,
+    decl
+  );
+  let param_count = ast.decl_param_count(decl);
+  let type_facts = direct_import_decl_type_facts(
+    context_value,
+    type_context,
+    index,
+    kind_tag,
+    param_count
+  );
+  let actual_body_type_class = direct_import_decl_actual_body_type_class(
+    type_context,
+    index,
+    decl,
+    kind_tag
+  );
+  let body_check_status = parser.text_simple_body_type_check_status(
+    type_facts.expected_body_type_class,
+    actual_body_type_class
+  );
+  let export_tag = direct_import_decl_export_tag(
+    context_value.source,
+    index,
+    kind_tag
+  );
+  DirectImportDeclFacts {
+    kind_tag,
+    declaration_name_hash,
+    export_name_hash: direct_import_decl_export_name_hash(
+      context_value.source,
+      index,
+      export_tag
+    ),
+    param_count,
+    declared_type_class: type_facts.declared_type_class,
+    declared_type_payload: type_facts.declared_type_payload,
+    declared_abi_class: direct_import_decl_declared_abi_class(
+      kind_tag,
+      type_facts.declared_type_class
+    ),
+    expected_body_type_class: type_facts.expected_body_type_class,
+    actual_body_type_class,
+    body_check_status,
+    export_tag,
+  }
 }
 
 fn Context::type_environment_signature(context_value: Context) -> i32 {
@@ -275,7 +526,165 @@ fn resolution_record_hash(
 }
 
 fn Context::record(context_value: Context, alias_hash: i32) -> ResolutionRecord {
-  monad.Reader::run(resolution_record_reader(alias_hash), context_value)
+  let resolution = parser.TextResolutionEnv::from_direct_import(
+    context_value.source,
+    context_value.import_source,
+    alias_hash
+  );
+  let type_context = parser.text_direct_import_context_from_resolution(
+    context_value.source,
+    context_value.import_source,
+    textmodel.ImportResolutionMode::TypeClass,
+    alias_hash,
+    resolution
+  );
+  let scan = Context::resolution_record_scan(
+    context_value,
+    type_context,
+    resolution_record_scan_start(context_value.source)
+  );
+  ResolutionRecord {
+    module_hash: context_value.module_hash,
+    alias_hash,
+    type_environment_signature: Context::type_environment_signature(context_value),
+    resolved_declared_type_signature: scan.resolved_declared_type_signature,
+    resolved_declared_abi_signature: scan.resolved_declared_abi_signature,
+    resolved_value_body_type_signature: scan.resolved_value_body_type_signature,
+    resolved_value_body_abi_signature: scan.resolved_value_body_abi_signature,
+    resolved_simple_body_type_check_signature:
+      scan.resolved_simple_body_type_check_signature,
+    resolved_symbol_environment_signature: scan.resolved_symbol_environment_signature,
+    resolved_export_abi_signature: scan.resolved_export_abi_signature,
+  }
+}
+
+fn resolution_record_scan_start(
+  source: textlex.TextTokenStream
+) -> ResolutionRecordScan {
+  ResolutionRecordScan {
+    current: textmodel.full_window_state(source),
+    resolved_declared_type_signature: 0,
+    resolved_declared_abi_signature: 0,
+    resolved_value_body_type_signature: 0,
+    resolved_value_body_abi_signature: 0,
+    resolved_simple_body_type_check_signature: 0,
+    resolved_symbol_environment_signature: 0,
+    resolved_export_abi_signature: 0,
+  }
+}
+
+fn Context::resolution_record_scan(
+  context_value: Context,
+  type_context: parser.TextDirectImportContext,
+  scan: ResolutionRecordScan
+) -> ResolutionRecordScan {
+  match scan.current.cursor < textlex.length(context_value.source) {
+    false => scan,
+    true => match parser.parse_text_declaration_stream(
+      scan.current,
+      context_value.source,
+      scan.resolved_declared_type_signature
+    ) {
+      Err(_) => scan,
+      Ok(result) => rec(
+        context_value,
+        type_context,
+        Context::resolution_record_scan_advance(
+          context_value,
+          type_context,
+          scan,
+          result
+        )
+      ),
+    },
+  }
+}
+
+fn Context::resolution_record_scan_advance(
+  context_value: Context,
+  type_context: parser.TextDirectImportContext,
+  scan: ResolutionRecordScan,
+  result: combinator.Reply(parser.DeclFrame)
+) -> ResolutionRecordScan {
+  let index = scan.current.cursor;
+  let decl = result.value.decl;
+  let facts = direct_import_decl_facts(
+    context_value,
+    type_context,
+    index,
+    decl
+  );
+  ResolutionRecordScan {
+    current: parser.next_text_declaration_state(result.state, context_value.source),
+    resolved_declared_type_signature:
+      textmodel.signature_mix(
+        scan.resolved_declared_type_signature,
+        parser.text_declared_type_class_hash(
+          facts.kind_tag,
+          facts.declared_type_class,
+          facts.declared_type_payload
+        )
+      ),
+    resolved_declared_abi_signature:
+      textmodel.signature_mix(
+        scan.resolved_declared_abi_signature,
+        parser.text_declared_abi_class_hash(
+          facts.kind_tag,
+          facts.declared_abi_class
+        )
+      ),
+    resolved_value_body_type_signature:
+      textmodel.signature_mix(
+        scan.resolved_value_body_type_signature,
+        parser.text_value_body_type_class_hash(
+          facts.kind_tag,
+          facts.actual_body_type_class
+        )
+      ),
+    resolved_value_body_abi_signature:
+      textmodel.signature_mix(
+        scan.resolved_value_body_abi_signature,
+        parser.text_value_body_abi_class_hash(
+          facts.kind_tag,
+          parser.text_abi_class_tag_for_type_class(facts.actual_body_type_class)
+        )
+      ),
+    resolved_simple_body_type_check_signature:
+      textmodel.signature_mix(
+        scan.resolved_simple_body_type_check_signature,
+        parser.text_simple_body_type_check_hash(
+          facts.kind_tag,
+          facts.expected_body_type_class,
+          facts.actual_body_type_class,
+          facts.body_check_status
+        )
+      ),
+    resolved_symbol_environment_signature:
+      textmodel.signature_mix(
+        scan.resolved_symbol_environment_signature,
+        parser.text_symbol_environment_hash(
+          facts.kind_tag,
+          facts.declaration_name_hash,
+          facts.declared_type_class,
+          facts.declared_type_payload,
+          facts.declared_abi_class
+        )
+      ),
+    resolved_export_abi_signature:
+      match facts.export_tag == 1 {
+        true => textmodel.signature_mix(
+          scan.resolved_export_abi_signature,
+          parser.text_export_abi_hash(
+            facts.export_name_hash,
+            facts.param_count,
+            parser.text_abi_class_tag_for_type_class(
+              facts.expected_body_type_class
+            )
+          )
+        ),
+        false => scan.resolved_export_abi_signature,
+      },
+  }
 }
 
 fn Context::resolution_record_signature(context_value: Context) -> i32 {

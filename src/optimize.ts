@@ -4378,7 +4378,10 @@ function foldStaticProjectionLets(
   };
 }
 
-function staticProjectionSource(expr: Expr, functions: Map<string, FnDecl>): Expr | undefined {
+function staticProjectionSource(
+  expr: Expr,
+  functions: Map<string, FnDecl>,
+): Extract<Expr, { kind: "shape" | "product_constructor" }> | undefined {
   if (expr.kind === "block" && expr.statements.length === 0 && expr.expr) {
     return staticProjectionSource(expr.expr, functions);
   }
@@ -4672,12 +4675,10 @@ function rewriteStaticProjections(
         ),
       };
     case "var": {
-      const [base, field] = expr.name.split(".", 2);
-      if (base && field) {
+      const [base, ...fields] = expr.name.split(".");
+      if (base && fields.length) {
         const source = active.get(base);
-        const replacement = source?.kind === "shape" || source?.kind === "product_constructor"
-          ? source.slots.find((slot) => slot.label === field)?.value
-          : undefined;
+        const replacement = source ? projectSubstitutedFieldPath(source, fields) : undefined;
         if (replacement) {
           return rewriteProjectionReplacement(
             replacement,
@@ -5134,11 +5135,17 @@ function optimizeExpr(
         end: optimizeExpr(expr.end, forwarding, inlineable, functions, config),
       };
     case "field":
-      return {
-        ...expr,
-        value: optimizeExpr(expr.value, forwarding, inlineable, functions, config),
-        key: optimizeExpr(expr.key, forwarding, inlineable, functions, config),
-      };
+      {
+        const value = optimizeExpr(expr.value, forwarding, inlineable, functions, config);
+        const key = optimizeExpr(expr.key, forwarding, inlineable, functions, config);
+        const label = literalFieldLabel(key);
+        const source = label ? staticProjectionSource(value, functions) : undefined;
+        const replacement = source?.slots.find((slot) => slot.label === label)?.value;
+        if (replacement) {
+          return optimizeExpr(replacement, forwarding, inlineable, functions, config);
+        }
+        return { ...expr, value, key };
+      }
     case "block": {
       const block = optimizeBlock(expr, forwarding, inlineable, functions, {
         allowMultiValueResult: options.allowMultiValueResult,
@@ -7251,7 +7258,7 @@ function baseName(name: string): string {
   let end = name.length;
   for (let index = 0; index < name.length; index++) {
     const code = name.charCodeAt(index);
-    const isTerminator = code === 46 || code === 91 || code === 40;
+    const isTerminator = code === 36 || code === 46 || code === 91 || code === 40;
     if (!isTerminator) continue;
     end = index;
     break;
@@ -7355,6 +7362,29 @@ function substituteStaticForSource(
     : { ...source, shape: substituteVar(source.shape, name, value) };
 }
 
+function projectSubstitutedFieldPath(value: Expr, fields: string[]): Expr | undefined {
+  let current = value;
+  for (let index = 0; index < fields.length; index++) {
+    const field = fields[index];
+    if (!field) return undefined;
+    if (current.kind === "var") {
+      return { kind: "var", name: `${current.name}.${fields.slice(index).join(".")}` };
+    }
+    if (current.kind === "shape" || current.kind === "product_constructor") {
+      const slot = current.slots.find((item) => item.label === field);
+      if (!slot || slot.spread || slot.index) return undefined;
+      current = slot.value;
+      continue;
+    }
+    current = {
+      kind: "field",
+      value: current,
+      key: { kind: "literal", literalKind: "literalType", value: `#${field}` },
+    };
+  }
+  return current;
+}
+
 function substituteVar(expr: Expr, name: string, value: Expr): Expr {
   switch (expr.kind) {
     case "do":
@@ -7377,23 +7407,12 @@ function substituteVar(expr: Expr, name: string, value: Expr): Expr {
       ) {
         return { kind: "var", name: `${value.name}${expr.name.slice(name.length)}` };
       }
-      if (
-        (value.kind === "shape" || value.kind === "product_constructor") &&
-        expr.name.startsWith(`${name}.`)
-      ) {
-        const [field, ...rest] = expr.name.slice(name.length + 1).split(".");
-        const replacement = field
-          ? value.slots.find((slot) => slot.label === field)?.value
-          : undefined;
-        if (replacement) {
-          return rest.length
-            ? substituteVar(
-              { ...expr, name: `${name}.${rest.join(".")}` },
-              name,
-              replacement,
-            )
-            : replacement;
-        }
+      if (expr.name.startsWith(`${name}.`)) {
+        const replacement = projectSubstitutedFieldPath(
+          value,
+          expr.name.slice(name.length + 1).split("."),
+        );
+        if (replacement) return replacement;
       }
       return expr;
     case "call":

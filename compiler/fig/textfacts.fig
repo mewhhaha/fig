@@ -178,6 +178,20 @@ type WasmBodyPlan = struct {
   instructions: vec.Vec(WasmBodyInstruction),
 }
 
+type WasmBodySummary = struct {
+  first_opcode: i32,
+  first_immediate: i32,
+  byte_size: i32,
+}
+
+type WasmLocalLetSummaryScan = struct {
+  index: i32,
+  limit: i32,
+  brace_depth: i32,
+  paren_depth: i32,
+  total: i32,
+}
+
 type WasmFunctionLookup = struct {
   index: i32,
   runtime_param_count: i32,
@@ -225,9 +239,40 @@ type WasmSectionScan = struct {
   diagnostic_signature: i32,
 }
 
+type WasmFunctionBinding = struct {
+  name_hash: i32,
+  index: i32,
+  cursor: i32,
+  runtime_param_count: i32,
+  local_count: i32,
+  expected_type_class: i32,
+  actual_type_class: i32,
+  body_abi_class: i32,
+  result_val_type: i32,
+  terminator_opcode: i32,
+  diagnostic_code: i32,
+  export_tag: i32,
+  body_start: i32,
+  declaration_limit: i32,
+}
+
+type WasmFunctionLookupSlot = struct {
+  name_hash: i32,
+  index: i32,
+  runtime_param_count: i32,
+  occupied: bool,
+}
+
+type WasmSourceEnv = struct {
+  resolution: parser.TextResolutionEnv,
+  functions: layout.HeapArray(WasmFunctionBinding),
+  lookup_slots: layout.HeapArray(WasmFunctionLookupSlot),
+}
+
 type WasmByteContext = struct {
   source: textlex.TextTokenStream,
   base_offset: i32,
+  env: WasmSourceEnv,
 }
 
 fn wasm_byte_context(
@@ -237,6 +282,7 @@ fn wasm_byte_context(
   WasmByteContext {
     source: source,
     base_offset: base_offset,
+    env: WasmSourceEnv::from_source(source),
   }
 }
 
@@ -246,10 +292,464 @@ fn wasm_byte_context_window_state(
   textmodel.full_window_state(context_value.source)
 }
 
+fn wasm_function_binding(
+  name_hash: i32,
+  index: i32,
+  cursor: i32,
+  runtime_param_count: i32,
+  local_count: i32,
+  expected_type_class: i32,
+  actual_type_class: i32,
+  body_abi_class: i32,
+  result_val_type: i32,
+  terminator_opcode: i32,
+  diagnostic_code: i32,
+  export_tag: i32,
+  body_start: i32,
+  declaration_limit: i32
+) -> WasmFunctionBinding {
+  WasmFunctionBinding {
+    name_hash: name_hash,
+    index: index,
+    cursor: cursor,
+    runtime_param_count: runtime_param_count,
+    local_count: local_count,
+    expected_type_class: expected_type_class,
+    actual_type_class: actual_type_class,
+    body_abi_class: body_abi_class,
+    result_val_type: result_val_type,
+    terminator_opcode: terminator_opcode,
+    diagnostic_code: diagnostic_code,
+    export_tag: export_tag,
+    body_start: body_start,
+    declaration_limit: declaration_limit,
+  }
+}
+
+fn WasmSourceEnv::empty(
+  source: textlex.TextTokenStream
+) -> WasmSourceEnv {
+  WasmSourceEnv {
+    resolution: parser.TextResolutionEnv::from_source(source),
+    functions: layout.HeapArray::empty(WasmFunctionBinding),
+    lookup_slots: layout.HeapArray::empty(WasmFunctionLookupSlot),
+  }
+}
+
+fn WasmSourceEnv::push_function(
+  env: WasmSourceEnv,
+  binding: WasmFunctionBinding
+) -> WasmSourceEnv {
+  WasmSourceEnv {
+    resolution: env.resolution,
+    functions: layout.HeapArray::push(
+      WasmFunctionBinding,
+      env.functions,
+      binding
+    ),
+    lookup_slots: env.lookup_slots,
+  }
+}
+
+fn wasm_function_binding_from_decl(
+  _env: WasmSourceEnv,
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  index: i32,
+  runtime_param_count: i32
+) -> WasmFunctionBinding {
+  let decl = result.value.decl;
+  wasm_function_binding(
+    parser.text_declaration_name_hash(source, current.cursor, decl),
+    index,
+    current.cursor,
+    runtime_param_count,
+    0,
+    parser.text_type_class_unknown_tag(),
+    parser.text_type_class_unknown_tag(),
+    parser.text_abi_class_void_tag(),
+    wasm_no_val_type(),
+    wasm_drop_opcode(),
+    0,
+    0,
+    current.cursor,
+    current.cursor
+  )
+}
+
+fn wasm_function_binding_with_details(
+  context_value: WasmByteContext,
+  binding: WasmFunctionBinding
+) -> WasmFunctionBinding {
+  let source = context_value.source;
+  let expected = parser.text_function_return_resolved_type_class_tag(
+    source,
+    binding.cursor
+  );
+  let actual = parser.TextResolutionEnv::function_body_resolved_type_class_tag(
+    context_value.env.resolution,
+    source,
+    binding.cursor
+  );
+  let body_abi = parser.text_abi_class_tag_for_type_class(actual);
+  let result_val_type = wasm_val_type_for_abi(
+    parser.text_abi_class_tag_for_type_class(expected)
+  );
+  let terminator_opcode = wasm_terminator_opcode(result_val_type);
+  wasm_function_binding(
+    binding.name_hash,
+    binding.index,
+    binding.cursor,
+    binding.runtime_param_count,
+    parser.text_function_local_let_count(source, binding.cursor),
+    expected,
+    actual,
+    body_abi,
+    result_val_type,
+    terminator_opcode,
+    checked_type_status_diagnostic_code(
+      parser.text_simple_body_type_check_status(expected, actual)
+    ),
+    parser.text_function_public_tag(source, binding.cursor),
+    parser.text_function_body_value_start_index(source, binding.cursor),
+    parser.text_declaration_end_from_index(source, binding.cursor)
+  )
+}
+
+fn WasmSourceEnv::add_decl(
+  env: WasmSourceEnv,
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  function_index: i32
+) -> WasmSourceEnv {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(source, current.cursor, decl);
+  let runtime_param_count = parser.text_function_runtime_param_count(
+    source,
+    current.cursor
+  );
+  match parser.text_declaration_kind_is_function(kind_tag) {
+    false => env,
+    true => WasmSourceEnv::push_function(
+      env,
+      wasm_function_binding_from_decl(
+        env,
+        source,
+        current,
+        result,
+        function_index,
+        runtime_param_count
+      )
+    ),
+  }
+}
+
+fn WasmSourceEnv::next_function_index(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  function_index: i32
+) -> i32 {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(source, current.cursor, decl);
+  match parser.text_declaration_kind_is_function(kind_tag) {
+    true => function_index + 1,
+    false => function_index,
+  }
+}
+
+fn WasmSourceEnv::from_source_loop(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  function_index: i32,
+  env: WasmSourceEnv
+) -> WasmSourceEnv {
+  match current.cursor < textlex.length(source) {
+    false => env,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      source,
+      function_index
+    ) {
+      Err(_) => env,
+      Ok(result) => rec(
+        source,
+        parser.next_text_declaration_state(result.state, source),
+        WasmSourceEnv::next_function_index(source, current, result, function_index),
+        WasmSourceEnv::add_decl(env, source, current, result, function_index)
+      ),
+    },
+  }
+}
+
+fn wasm_function_lookup_slot_empty() -> WasmFunctionLookupSlot {
+  WasmFunctionLookupSlot {
+    name_hash: 0,
+    index: 0,
+    runtime_param_count: 0,
+    occupied: false,
+  }
+}
+
+fn wasm_function_lookup_slot_from_binding(
+  binding: WasmFunctionBinding
+) -> WasmFunctionLookupSlot {
+  WasmFunctionLookupSlot {
+    name_hash: binding.name_hash,
+    index: binding.index,
+    runtime_param_count: binding.runtime_param_count,
+    occupied: true,
+  }
+}
+
+fn wasm_lookup_slot_count(function_count: i32) -> i32 {
+  match function_count <= 0 {
+    true => 1,
+    false => function_count * 2 + 1,
+  }
+}
+
+fn wasm_lookup_slots_empty_loop(
+  slots: layout.HeapArray(WasmFunctionLookupSlot),
+  index: i32,
+  count: i32
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  match index >= count {
+    true => slots,
+    false => rec(
+      layout.HeapArray::push(
+        WasmFunctionLookupSlot,
+        slots,
+        wasm_function_lookup_slot_empty()
+      ),
+      index + 1,
+      count
+    ),
+  }
+}
+
+fn wasm_lookup_slots_empty(
+  count: i32
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  wasm_lookup_slots_empty_loop(
+    layout.HeapArray::empty(WasmFunctionLookupSlot),
+    0,
+    count
+  )
+}
+
+fn wasm_positive_mod(value: i32, modulus: i32) -> i32 {
+  let raw = value % modulus;
+  match raw < 0 {
+    true => raw + modulus,
+    false => raw,
+  }
+}
+
+fn wasm_lookup_next_slot(slot: i32, slot_count: i32) -> i32 {
+  match slot + 1 >= slot_count {
+    true => 0,
+    false => slot + 1,
+  }
+}
+
+fn wasm_lookup_slot_insert_at(
+  slots: layout.HeapArray(WasmFunctionLookupSlot),
+  binding: WasmFunctionBinding,
+  slot: i32,
+  probes: i32
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  let slot_count = layout.HeapArray::len(WasmFunctionLookupSlot, slots);
+  match probes >= slot_count {
+    true => slots,
+    false => layout.HeapArray::get(
+      WasmFunctionLookupSlot,
+      slots,
+      slot
+    ) \current -> match current.occupied {
+      false => layout.HeapArray::set(
+        WasmFunctionLookupSlot,
+        slots,
+        slot,
+        wasm_function_lookup_slot_from_binding(binding)
+      ),
+      true => match current.name_hash == binding.name_hash {
+        true => layout.HeapArray::set(
+          WasmFunctionLookupSlot,
+          slots,
+          slot,
+          wasm_function_lookup_slot_from_binding(binding)
+        ),
+        false => rec(
+          slots,
+          binding,
+          wasm_lookup_next_slot(slot, slot_count),
+          probes + 1
+        ),
+      },
+    },
+  }
+}
+
+fn wasm_lookup_slot_insert(
+  slots: layout.HeapArray(WasmFunctionLookupSlot),
+  binding: WasmFunctionBinding
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  let slot_count = layout.HeapArray::len(WasmFunctionLookupSlot, slots);
+  wasm_lookup_slot_insert_at(
+    slots,
+    binding,
+    wasm_positive_mod(binding.name_hash, slot_count),
+    0
+  )
+}
+
+fn WasmSourceEnv::build_lookup_slots_loop(
+  env: WasmSourceEnv,
+  slots: layout.HeapArray(WasmFunctionLookupSlot),
+  index: i32
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  match index >= layout.HeapArray::len(WasmFunctionBinding, env.functions) {
+    true => slots,
+    false => layout.HeapArray::get(
+      WasmFunctionBinding,
+      env.functions,
+      index
+    ) \binding -> rec(
+      env,
+      wasm_lookup_slot_insert(slots, binding),
+      index + 1
+    ),
+  }
+}
+
+fn WasmSourceEnv::with_lookup_slots(env: WasmSourceEnv) -> WasmSourceEnv {
+  let function_count = layout.HeapArray::len(WasmFunctionBinding, env.functions);
+  let slots = wasm_lookup_slots_empty(wasm_lookup_slot_count(function_count));
+  WasmSourceEnv {
+    resolution: env.resolution,
+    functions: env.functions,
+    lookup_slots: WasmSourceEnv::build_lookup_slots_loop(env, slots, 0),
+  }
+}
+
+fn WasmSourceEnv::from_source(source: textlex.TextTokenStream) -> WasmSourceEnv {
+  WasmSourceEnv::with_lookup_slots(
+    WasmSourceEnv::from_source_loop(
+      source,
+      textmodel.full_window_state(source),
+      0,
+      WasmSourceEnv::empty(source)
+    )
+  )
+}
+
+fn WasmSourceEnv::lookup_function_loop(
+  env: WasmSourceEnv,
+  target_hash: i32,
+  index: i32
+) -> WasmFunctionLookup {
+  match index < 0 {
+    true => WasmFunctionLookup {
+      index: 0,
+      runtime_param_count: 0,
+      found: false,
+    },
+    false => layout.HeapArray::get(
+      WasmFunctionBinding,
+      env.functions,
+      index
+    ) \binding -> match binding.name_hash == target_hash {
+      true => WasmFunctionLookup {
+        index: binding.index,
+        runtime_param_count: binding.runtime_param_count,
+        found: true,
+      },
+      false => rec(env, target_hash, index - 1),
+    },
+  }
+}
+
+fn WasmSourceEnv::lookup_function_slot(
+  env: WasmSourceEnv,
+  target_hash: i32,
+  slot: i32,
+  probes: i32
+) -> WasmFunctionLookup {
+  let slot_count = layout.HeapArray::len(WasmFunctionLookupSlot, env.lookup_slots);
+  match probes >= slot_count {
+    true => WasmFunctionLookup {
+      index: 0,
+      runtime_param_count: 0,
+      found: false,
+    },
+    false => layout.HeapArray::get(
+      WasmFunctionLookupSlot,
+      env.lookup_slots,
+      slot
+    ) \current -> match current.occupied {
+      false => WasmFunctionLookup {
+        index: 0,
+        runtime_param_count: 0,
+        found: false,
+      },
+      true => match current.name_hash == target_hash {
+        true => WasmFunctionLookup {
+          index: current.index,
+          runtime_param_count: current.runtime_param_count,
+          found: true,
+        },
+        false => rec(
+          env,
+          target_hash,
+          wasm_lookup_next_slot(slot, slot_count),
+          probes + 1
+        ),
+      },
+    },
+  }
+}
+
+fn WasmSourceEnv::lookup_function(
+  env: WasmSourceEnv,
+  target_hash: i32
+) -> WasmFunctionLookup {
+  match target_hash == 0 {
+    true => WasmFunctionLookup {
+      index: 0,
+      runtime_param_count: 0,
+      found: false,
+    },
+    false => match layout.HeapArray::len(
+      WasmFunctionLookupSlot,
+      env.lookup_slots
+    ) <= 0 {
+      true => WasmSourceEnv::lookup_function_loop(
+        env,
+        target_hash,
+        layout.HeapArray::len(WasmFunctionBinding, env.functions) - 1
+      ),
+      false => WasmSourceEnv::lookup_function_slot(
+        env,
+        target_hash,
+        wasm_positive_mod(
+          target_hash,
+          layout.HeapArray::len(WasmFunctionLookupSlot, env.lookup_slots)
+        ),
+        0
+      ),
+    },
+  }
+}
+
 type WasmCallLowering = struct {
   context_value: WasmByteContext,
   codes: layout.HeapArray(i32),
   current: combinator.ParseState,
+  runtime_param_count: i32,
+  local_count: i32,
 }
 
 type WasmBytePayloadKind = enum(i32) {
@@ -464,6 +964,56 @@ fn checked_decl_fact(
   }
 }
 
+fn checked_decl_fact_with_env(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  env: parser.TextResolutionEnv
+) -> CheckedDeclFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let name_hash = parser.text_declaration_name_hash(source, current.cursor, decl);
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    env,
+    source,
+    current.cursor,
+    decl
+  );
+  let check_status = parser.text_simple_body_type_check_status(expected, actual);
+  CheckedDeclFact {
+    kind_tag: kind_tag,
+    name_hash: name_hash,
+    symbol_type_class: parser.text_declaration_resolved_type_class_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    symbol_payload: parser.text_declaration_resolved_type_class_payload(
+      source,
+      current.cursor,
+      decl
+    ),
+    expected_type_class: expected,
+    actual_type_class: actual,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+    lowered_abi_class: parser.text_declaration_resolved_abi_class_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+  }
+}
+
 fn checked_decl_fact_signature(fact: CheckedDeclFact) -> i32 {
   let with_kind = textmodel.signature_mix(
     53,
@@ -631,6 +1181,94 @@ fn checked_expr_fact(
   }
 }
 
+fn checked_expr_fact_with_env(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  env: parser.TextResolutionEnv
+) -> CheckedExprFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let name_hash = parser.text_declaration_name_hash(source, current.cursor, decl);
+  let root_type = parser.text_declaration_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let resolved = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    env,
+    source,
+    current.cursor,
+    decl
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let abi = parser.text_abi_class_tag_for_type_class(resolved);
+  let check_status = parser.text_simple_body_type_check_status(expected, resolved);
+  CheckedExprFact {
+    kind_tag: kind_tag,
+    name_hash: name_hash,
+    root_kind: parser.text_declaration_root_head_kind_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_hash: parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_child_count: parser.text_declaration_root_child_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_child_signature_hash: parser.text_declaration_root_child_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_grandchild_count: parser.text_declaration_root_grandchild_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_grandchild_signature_hash: parser.text_declaration_root_grandchild_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_descendant_count: parser.text_declaration_root_descendant_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_descendant_signature_hash: parser.text_declaration_root_descendant_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_type_class: root_type,
+    resolved_type_class: resolved,
+    expected_type_class: expected,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+    lowered_value_tag: lowered_value_tag_for_abi(abi),
+    lowered_value_primary: lowered_value_primary(abi, resolved),
+    lowered_value_secondary: lowered_value_secondary(),
+  }
+}
+
 fn checked_expr_fact_signature(fact: CheckedExprFact) -> i32 {
   let with_kind = textmodel.signature_mix(59, fact.kind_tag);
   let with_name = textmodel.signature_mix(with_kind, fact.name_hash);
@@ -705,6 +1343,143 @@ fn checked_expr_shape_fact(
     decl
   );
   let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let check_status = parser.text_simple_body_type_check_status(
+    expected,
+    actual
+  );
+  CheckedExprShapeFact {
+    kind_tag: kind_tag,
+    name_hash: parser.text_declaration_name_hash(source, current.cursor, decl),
+    root_kind: parser.text_declaration_root_head_kind_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_hash: parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_selector_count: parser.text_declaration_root_head_selector_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_slot_count: parser.text_declaration_root_slot_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_call_arg_count: parser.text_declaration_root_call_arg_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_field_count: parser.text_declaration_root_field_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_operator_count: parser.text_declaration_root_operator_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    operator_count: parser.text_declaration_value_operator_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    operator_signature_hash: parser.text_declaration_value_operator_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    match_count: parser.text_declaration_value_match_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    match_arm_count: parser.text_declaration_value_match_arm_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    do_count: parser.text_declaration_value_do_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    do_bind_count: parser.text_declaration_value_do_bind_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    pipe_bind_count: parser.text_declaration_value_pipe_bind_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    call_count: parser.text_declaration_value_call_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    function_match_body_count: parser.text_declaration_function_match_body_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    name_token_count: parser.text_declaration_value_shape_name_token_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    name_token_signature_hash: parser.text_declaration_value_shape_name_token_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    literal_token_count: parser.text_declaration_value_literal_token_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    literal_token_signature_hash: parser.text_declaration_value_literal_token_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn checked_expr_shape_fact_with_env(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  env: parser.TextResolutionEnv
+) -> CheckedExprShapeFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    env,
     source,
     current.cursor,
     decl
@@ -1372,6 +2147,76 @@ fn wasm_body_instruction(opcode: i32, immediate: i32) -> WasmBodyInstruction {
   WasmBodyInstruction {opcode: opcode, immediate: immediate}
 }
 
+fn wasm_body_summary_empty() -> WasmBodySummary {
+  WasmBodySummary {
+    first_opcode: wasm_drop_opcode(),
+    first_immediate: 0,
+    byte_size: 0,
+  }
+}
+
+fn wasm_body_summary_push_instruction(
+  summary: WasmBodySummary,
+  instruction: WasmBodyInstruction
+) -> WasmBodySummary {
+  let is_first = summary.byte_size == 0;
+  WasmBodySummary {
+    first_opcode: match is_first {
+      true => instruction.opcode,
+      false => summary.first_opcode,
+    },
+    first_immediate: match is_first {
+      true => instruction.immediate,
+      false => summary.first_immediate,
+    },
+    byte_size: summary.byte_size + wasm_instruction_size(instruction.opcode),
+  }
+}
+
+fn wasm_body_summary_append(
+  target: WasmBodySummary,
+  source: WasmBodySummary
+) -> WasmBodySummary {
+  match source.byte_size == 0 {
+    true => target,
+    false => match target.byte_size == 0 {
+      true => source,
+      false => WasmBodySummary {
+        first_opcode: target.first_opcode,
+        first_immediate: target.first_immediate,
+        byte_size: target.byte_size + source.byte_size,
+      },
+    },
+  }
+}
+
+fn wasm_instruction_summary(
+  instruction: WasmBodyInstruction
+) -> WasmBodySummary {
+  wasm_body_summary_push_instruction(
+    wasm_body_summary_empty(),
+    instruction
+  )
+}
+
+fn wasm_const_instruction_summary(value: i32) -> WasmBodySummary {
+  wasm_instruction_summary(
+    wasm_body_instruction(
+      wasm_const_opcode(),
+      value
+    )
+  )
+}
+
+fn wasm_local_get_instruction_summary(index: i32) -> WasmBodySummary {
+  wasm_instruction_summary(
+    wasm_body_instruction(
+      wasm_local_get_opcode(),
+      index
+    )
+  )
+}
+
 fn wasm_single_instruction_body_plan(
   instruction: WasmBodyInstruction
 ) -> WasmBodyPlan {
@@ -1497,6 +2342,47 @@ fn wasm_scalar_identifier_body_instruction(
   }
 }
 
+fn wasm_scalar_identifier_body_instruction_from_binding(
+  context_value: WasmByteContext,
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodyInstruction) {
+  let source = context_value.source;
+  let target_hash = parser.text_expression_root_identifier_hash_between(
+    source,
+    binding.body_start,
+    binding.declaration_limit
+  );
+  let param_index = parser.text_function_runtime_param_index_for_name_hash(
+    source,
+    binding.cursor,
+    target_hash
+  );
+  match param_index < binding.runtime_param_count {
+    true => match param_index < wasm_small_immediate_limit() {
+      true => option.some(wasm_body_instruction(
+        wasm_local_get_opcode(),
+        param_index
+      )),
+      false => option.none(),
+    },
+    false => parser.text_function_local_let_index_for_name_hash(
+      source,
+      binding.cursor,
+      target_hash
+    ) \local_index -> match local_index < binding.local_count {
+      false => option.none(),
+      true => binding.runtime_param_count + local_index \wasm_index ->
+        match wasm_index < wasm_small_immediate_limit() {
+          true => option.some(wasm_body_instruction(
+            wasm_local_get_opcode(),
+            wasm_index
+          )),
+          false => option.none(),
+        },
+    },
+  }
+}
+
 fn wasm_type_class_is_scalar(type_class: i32) -> bool {
   match type_class == parser.text_type_class_i32_tag() {
     true => true,
@@ -1513,6 +2399,28 @@ fn wasm_call_lowering(
     context_value: context_value,
     codes: codes,
     current: current,
+    runtime_param_count: parser.text_function_runtime_param_count(
+      context_value.source,
+      current.cursor
+    ),
+    local_count: parser.text_function_local_let_count(
+      context_value.source,
+      current.cursor
+    ),
+  }
+}
+
+fn wasm_call_lowering_for_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmCallLowering {
+  WasmCallLowering {
+    context_value: context_value,
+    codes: codes,
+    current: combinator.state(binding.cursor, textlex.length(context_value.source)),
+    runtime_param_count: binding.runtime_param_count,
+    local_count: binding.local_count,
   }
 }
 
@@ -1611,10 +2519,6 @@ fn WasmCallLowering::identifier_segment_plan(
     start,
     limit
   );
-  let param_count = parser.text_function_runtime_param_count(
-    lowering.context_value.source,
-    lowering.current.cursor
-  );
   let param_index = parser.text_function_runtime_param_index_for_name_hash(
     lowering.context_value.source,
     lowering.current.cursor,
@@ -1625,7 +2529,7 @@ fn WasmCallLowering::identifier_segment_plan(
     lowering.current.cursor,
     target_hash
   );
-  let is_param = param_index < param_count;
+  let is_param = param_index < lowering.runtime_param_count;
   match target_hash == 0 {
     true => option.none(),
     false => match is_param {
@@ -1642,26 +2546,19 @@ fn WasmCallLowering::local_segment_plan(
   lowering: WasmCallLowering,
   target_hash: i32
 ) -> core.Option(WasmBodyPlan) {
-  let param_count = parser.text_function_runtime_param_count(
-    lowering.context_value.source,
-    lowering.current.cursor
-  );
-  let local_count = parser.text_function_local_let_count(
-    lowering.context_value.source,
-    lowering.current.cursor
-  );
   let local_index = parser.text_function_local_let_index_for_name_hash(
     lowering.context_value.source,
     lowering.current.cursor,
     target_hash
   );
-  let local_type = parser.text_function_local_let_resolved_type_class_for_name_hash(
+  let local_type = parser.TextResolutionEnv::function_local_let_resolved_type_class_for_name_hash(
+    lowering.context_value.env.resolution,
     lowering.context_value.source,
     lowering.current.cursor,
     target_hash
   );
-  let wasm_index = param_count + local_index;
-  let is_local = local_index < local_count;
+  let wasm_index = lowering.runtime_param_count + local_index;
+  let is_local = local_index < lowering.local_count;
   do @monad(core.Option(_)) {
     option.guard(is_local);
     wasm_small_scalar_local_get_plan(wasm_index, local_type)
@@ -1834,12 +2731,12 @@ fn WasmCallLowering::call_segment_plan(
     start,
     limit
   );
-  let lookup = wasm_function_lookup_for_hash(
-    lowering.context_value.source,
+  let lookup = WasmSourceEnv::lookup_function(
+    lowering.context_value.env,
     target_hash
   );
-  let return_type = parser.text_function_return_type_class_for_hash(
-    lowering.context_value.source,
+  let return_type = parser.TextResolutionEnv::lookup_return(
+    lowering.context_value.env.resolution,
     target_hash
   );
   do @monad(core.Option(_)) {
@@ -1864,6 +2761,85 @@ fn WasmCallLowering::call_segment_plan(
   }
 }
 
+fn wasm_match_first_pattern_is_bool_literal(
+  source: textlex.TextTokenStream,
+  start: i32,
+  limit: i32
+) -> bool {
+  let open_index = parser.text_root_match_body_open_between(
+    source,
+    start,
+    limit
+  );
+  match open_index >= limit {
+    true => false,
+    false => parser.text_expression_start_skip_trivia(
+      source,
+      open_index + 1,
+      limit
+    ) \pattern_start -> match pattern_start >= limit {
+      true => false,
+      false => match textlex.token_at(source, pattern_start).kind {
+        BoolLiteral => true,
+        _ => false,
+      },
+    },
+  }
+}
+
+fn wasm_segment_can_be_bool_branch(
+  source: textlex.TextTokenStream,
+  start: i32,
+  limit: i32
+) -> bool {
+  let value_start = parser.text_expression_start_skip_trivia(
+    source,
+    start,
+    limit
+  );
+  match value_start >= limit {
+    true => false,
+    false => match textlex.token_at(source, value_start).kind {
+      IfKw => true,
+      MatchKw => wasm_match_first_pattern_is_bool_literal(
+        source,
+        value_start,
+        limit
+      ),
+      _ => false,
+    },
+  }
+}
+
+fn WasmCallLowering::branch_type_from_segments(
+  lowering: WasmCallLowering,
+  segments: parser.TextBoolBranchSegments
+) -> i32 {
+  parser.text_scalar_branch_type_class_from_parts(
+    parser.TextResolutionEnv::function_body_scalar_operator_operand_type_class(
+      lowering.context_value.env.resolution,
+      lowering.context_value.source,
+      lowering.current.cursor,
+      segments.condition_start,
+      segments.condition_limit
+    ),
+    parser.TextResolutionEnv::function_body_scalar_operator_operand_type_class(
+      lowering.context_value.env.resolution,
+      lowering.context_value.source,
+      lowering.current.cursor,
+      segments.true_value_start,
+      segments.true_value_limit
+    ),
+    parser.TextResolutionEnv::function_body_scalar_operator_operand_type_class(
+      lowering.context_value.env.resolution,
+      lowering.context_value.source,
+      lowering.current.cursor,
+      segments.false_value_start,
+      segments.false_value_limit
+    )
+  )
+}
+
 fn WasmCallLowering::branch_segment_plan(
   lowering: WasmCallLowering,
   start: i32,
@@ -1874,14 +2850,12 @@ fn WasmCallLowering::branch_segment_plan(
     start,
     limit
   );
-  let branch_type = parser.text_function_body_scalar_branch_type_class_between(
-    lowering.context_value.source,
-    lowering.current.cursor,
-    start,
-    limit
-  );
   do @monad(core.Option(_)) {
     option.guard(segments.found);
+    let branch_type = WasmCallLowering::branch_type_from_segments(
+      lowering,
+      segments
+    );
     option.guard(wasm_type_class_is_scalar(branch_type));
     condition_plan <- WasmCallLowering::segment_plan(
       lowering,
@@ -1920,6 +2894,21 @@ fn WasmCallLowering::branch_segment_plan(
       with_false,
       wasm_body_instruction(wasm_end_opcode(), 0)
     ))
+  }
+}
+
+fn WasmCallLowering::branch_segment_plan_if_possible(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodyPlan) {
+  match wasm_segment_can_be_bool_branch(
+    lowering.context_value.source,
+    start,
+    limit
+  ) {
+    true => WasmCallLowering::branch_segment_plan(lowering, start, limit),
+    false => option.none(),
   }
 }
 
@@ -2013,7 +3002,7 @@ fn WasmCallLowering::segment_plan(
   );
   match found {
     false => option.none(),
-    true => match WasmCallLowering::branch_segment_plan(
+    true => match WasmCallLowering::branch_segment_plan_if_possible(
       lowering,
       start,
       limit
@@ -2059,6 +3048,421 @@ fn WasmCallLowering::arg_plan(
     segment.limit,
     segment.found
   )
+}
+
+fn wasm_small_scalar_local_get_summary(
+  index: i32,
+  type_class: i32
+) -> core.Option(WasmBodySummary) {
+  do @monad(core.Option(_)) {
+    option.guard(wasm_type_class_is_scalar(type_class));
+    option.guard(index < wasm_small_immediate_limit());
+    pure(wasm_local_get_instruction_summary(index))
+  }
+}
+
+fn WasmCallLowering::number_segment_summary(
+  lowering: WasmCallLowering,
+  start: i32
+) -> core.Option(WasmBodySummary) {
+  let token_span = textlex.token_at(
+    lowering.context_value.source,
+    start
+  ).span;
+  core.Option::map(
+    wasm_const_instruction_summary,
+    wasm_small_u7_decimal_literal(
+      lowering.codes,
+      lowering.context_value.base_offset,
+      token_span
+    )
+  )
+}
+
+fn WasmCallLowering::bool_segment_summary(
+  lowering: WasmCallLowering,
+  start: i32
+) -> core.Option(WasmBodySummary) {
+  let token_span = textlex.token_at(
+    lowering.context_value.source,
+    start
+  ).span;
+  core.Option::map(
+    wasm_const_instruction_summary,
+    wasm_bool_literal_immediate(
+      lowering.codes,
+      lowering.context_value.base_offset,
+      token_span
+    )
+  )
+}
+
+fn WasmCallLowering::local_segment_summary(
+  lowering: WasmCallLowering,
+  target_hash: i32
+) -> core.Option(WasmBodySummary) {
+  let local_index = parser.text_function_local_let_index_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let local_type = parser.TextResolutionEnv::function_local_let_resolved_type_class_for_name_hash(
+    lowering.context_value.env.resolution,
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let wasm_index = lowering.runtime_param_count + local_index;
+  let is_local = local_index < lowering.local_count;
+  do @monad(core.Option(_)) {
+    option.guard(is_local);
+    wasm_small_scalar_local_get_summary(wasm_index, local_type)
+  }
+}
+
+fn WasmCallLowering::identifier_segment_summary(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodySummary) {
+  let target_hash = parser.text_expression_root_identifier_hash_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let param_index = parser.text_function_runtime_param_index_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let param_type = parser.text_function_param_resolved_type_class_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let is_param = param_index < lowering.runtime_param_count;
+  match target_hash == 0 {
+    true => option.none(),
+    false => match is_param {
+      false => WasmCallLowering::local_segment_summary(lowering, target_hash),
+      true => wasm_small_scalar_local_get_summary(param_index, param_type),
+    },
+  }
+}
+
+fn WasmCallLowering::simple_segment_summary(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodySummary) {
+  let root_kind = parser.text_expression_root_head_kind_tag_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let root_type = parser.text_expression_root_type_class_tag_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  match root_kind == parser.text_expression_root_number_tag() {
+    true => match root_type == parser.text_type_class_i32_tag() {
+      true => WasmCallLowering::number_segment_summary(lowering, start),
+      false => option.none(),
+    },
+    false => match root_kind == parser.text_expression_root_bool_tag() {
+      true => match root_type == parser.text_type_class_bool_tag() {
+        true => WasmCallLowering::bool_segment_summary(lowering, start),
+        false => option.none(),
+      },
+      false => match root_kind == parser.text_expression_root_identifier_tag() {
+        true => WasmCallLowering::identifier_segment_summary(
+          lowering,
+          start,
+          limit
+        ),
+        false => option.none(),
+      },
+    },
+  }
+}
+
+fn WasmCallLowering::append_segment_arg_summary(
+  lowering: WasmCallLowering,
+  summary: WasmBodySummary,
+  start: i32,
+  limit: i32,
+  arg_index: i32
+) -> core.Option(WasmBodySummary) {
+  let segment = WasmCallLowering::segment_arg_segment(
+    lowering,
+    start,
+    limit,
+    arg_index
+  );
+  match WasmCallLowering::arg_summary(lowering, segment) {
+    Some(arg_summary) => option.some(
+      wasm_body_summary_append(summary, arg_summary)
+    ),
+    None => option.none(),
+  }
+}
+
+fn WasmCallLowering::append_segment_args_summary(
+  lowering: WasmCallLowering,
+  summary: WasmBodySummary,
+  start: i32,
+  limit: i32,
+  arg_index: i32,
+  arg_count: i32
+) -> core.Option(WasmBodySummary) {
+  match arg_index >= arg_count {
+    true => option.some(summary),
+    false => do @monad(core.Option(_)) {
+      next_summary <- WasmCallLowering::append_segment_arg_summary(
+        lowering,
+        summary,
+        start,
+        limit,
+        arg_index
+      );
+      WasmCallLowering::append_segment_args_summary(
+        lowering,
+        next_summary,
+        start,
+        limit,
+        arg_index + 1,
+        arg_count
+      )
+    },
+  }
+}
+
+fn WasmCallLowering::call_segment_summary(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodySummary) {
+  let encoded_arg_count = parser.text_expression_root_call_arg_count_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let arg_count = wasm_root_call_runtime_arg_count(encoded_arg_count);
+  let target_hash = parser.text_expression_root_head_hash_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let lookup = WasmSourceEnv::lookup_function(
+    lowering.context_value.env,
+    target_hash
+  );
+  let return_type = parser.TextResolutionEnv::lookup_return(
+    lowering.context_value.env.resolution,
+    target_hash
+  );
+  do @monad(core.Option(_)) {
+    option.guard(WasmCallLowering::segment_has_bare_call(lowering, start, limit));
+    option.guard(lookup.found);
+    option.guard(lookup.index < wasm_small_immediate_limit());
+    option.guard(lookup.runtime_param_count == arg_count);
+    option.guard(wasm_type_class_is_scalar(return_type));
+    option.guard(arg_count <= 5);
+    args_summary <- WasmCallLowering::append_segment_args_summary(
+      lowering,
+      wasm_body_summary_empty(),
+      start,
+      limit,
+      0,
+      arg_count
+    );
+    pure(wasm_body_summary_push_instruction(
+      args_summary,
+      wasm_body_instruction(wasm_call_opcode(), lookup.index)
+    ))
+  }
+}
+
+fn WasmCallLowering::branch_segment_summary(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodySummary) {
+  let segments = parser.text_bool_branch_segments_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  do @monad(core.Option(_)) {
+    option.guard(segments.found);
+    let branch_type = WasmCallLowering::branch_type_from_segments(
+      lowering,
+      segments
+    );
+    option.guard(wasm_type_class_is_scalar(branch_type));
+    condition_summary <- WasmCallLowering::segment_summary(
+      lowering,
+      segments.condition_start,
+      segments.condition_limit,
+      true
+    );
+    true_summary <- WasmCallLowering::segment_summary(
+      lowering,
+      segments.true_value_start,
+      segments.true_value_limit,
+      true
+    );
+    false_summary <- WasmCallLowering::segment_summary(
+      lowering,
+      segments.false_value_start,
+      segments.false_value_limit,
+      true
+    );
+    pure(wasm_body_summary_append(
+      wasm_body_summary_empty(),
+      condition_summary
+    ) \with_condition -> wasm_body_summary_push_instruction(
+      with_condition,
+      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+    ) \with_if -> wasm_body_summary_append(
+      with_if,
+      true_summary
+    ) \with_true -> wasm_body_summary_push_instruction(
+      with_true,
+      wasm_body_instruction(wasm_else_opcode(), 0)
+    ) \with_else -> wasm_body_summary_append(
+      with_else,
+      false_summary
+    ) \with_false -> wasm_body_summary_push_instruction(
+      with_false,
+      wasm_body_instruction(wasm_end_opcode(), 0)
+    ))
+  }
+}
+
+fn WasmCallLowering::branch_segment_summary_if_possible(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodySummary) {
+  match wasm_segment_can_be_bool_branch(
+    lowering.context_value.source,
+    start,
+    limit
+  ) {
+    true => WasmCallLowering::branch_segment_summary(lowering, start, limit),
+    false => option.none(),
+  }
+}
+
+fn WasmCallLowering::operator_segment_summary(
+  lowering: WasmCallLowering,
+  parts: parser.TextRootOperatorParts
+) -> core.Option(WasmBodySummary) {
+  match wasm_scalar_operator_opcode(parts.operator_hash) {
+    None => option.none(),
+    Some(opcode) => wasm_scalar_operator_body_summary_from_parts(
+      lowering,
+      parts,
+      opcode
+    ),
+  }
+}
+
+fn WasmCallLowering::non_branch_segment_summary(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  parts: parser.TextRootOperatorParts
+) -> core.Option(WasmBodySummary) {
+  match parts.found {
+    true => WasmCallLowering::operator_segment_summary(lowering, parts),
+    false => match WasmCallLowering::segment_has_bare_call(
+      lowering,
+      start,
+      limit
+    ) {
+      true => WasmCallLowering::call_segment_summary(lowering, start, limit),
+      false => WasmCallLowering::simple_segment_summary(
+        lowering,
+        start,
+        limit
+      ),
+    },
+  }
+}
+
+fn WasmCallLowering::segment_summary(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  found: bool
+) -> core.Option(WasmBodySummary) {
+  let parts = parser.text_expression_root_single_operator_parts_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  match found {
+    false => option.none(),
+    true => match WasmCallLowering::branch_segment_summary_if_possible(
+      lowering,
+      start,
+      limit
+    ) {
+      Some(summary) => option.some(summary),
+      None => WasmCallLowering::non_branch_segment_summary(
+        lowering,
+        start,
+        limit,
+        parts
+      ),
+    },
+  }
+}
+
+fn WasmCallLowering::arg_summary(
+  lowering: WasmCallLowering,
+  segment: parser.TextArgumentSegment
+) -> core.Option(WasmBodySummary) {
+  WasmCallLowering::segment_summary(
+    lowering,
+    segment.start,
+    segment.limit,
+    segment.found
+  )
+}
+
+fn wasm_scalar_operator_body_summary_from_parts(
+  lowering: WasmCallLowering,
+  parts: parser.TextRootOperatorParts,
+  opcode: i32
+) -> core.Option(WasmBodySummary) {
+  do @monad(core.Option(_)) {
+    left <- WasmCallLowering::segment_summary(
+      lowering,
+      parts.left_start,
+      parts.left_limit,
+      parts.found
+    );
+    right <- WasmCallLowering::segment_summary(
+      lowering,
+      parts.right_start,
+      parts.right_limit,
+      parts.found
+    );
+    pure(wasm_body_summary_append(
+      wasm_body_summary_empty(),
+      left
+    ) \with_left -> wasm_body_summary_append(
+      with_left,
+      right
+    ) \with_right -> wasm_body_summary_push_instruction(
+      with_right,
+      wasm_body_instruction(opcode, 0)
+    ))
+  }
 }
 
 fn wasm_scalar_operator_opcode_case(
@@ -2295,11 +3699,7 @@ fn wasm_scalar_local_let_initializer_plan(
     lowering.current.cursor,
     local_index
   );
-  let param_count = parser.text_function_runtime_param_count(
-    lowering.context_value.source,
-    lowering.current.cursor
-  );
-  let wasm_index = param_count + local_index;
+  let wasm_index = lowering.runtime_param_count + local_index;
   match wasm_index < wasm_small_immediate_limit() {
     false => option.none(),
     true => match WasmCallLowering::arg_plan(lowering, segment) {
@@ -2663,11 +4063,12 @@ fn wasm_payload_capacity(kind: WasmBytePayloadKind, scan: WasmSectionScan) -> i3
 
 fn wasm_push_type_payload_function(
   context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
   current: combinator.ParseState,
   result: combinator.Reply(parser.DeclFrame),
   bytes: layout.HeapArray(i32)
 ) -> layout.HeapArray(i32) {
-  let fact = wasm_function_fact(context_value.source, current, result);
+  let fact = wasm_byte_function_fact(context_value, codes, current, result);
   let with_form = wasm_push_byte(bytes, 96);
   let with_param_count = wasm_push_u32_leb(
     with_form,
@@ -2808,6 +4209,7 @@ fn wasm_push_payload_bytes(
   match state.kind {
     WasmBytePayloadKind::TypePayload => wasm_push_type_payload_function(
       context_value,
+      codes,
       state.current,
       result,
       bytes
@@ -3172,7 +4574,32 @@ fn wasm_byte_function_body_plan(
   result: combinator.Reply(parser.DeclFrame)
 ) -> WasmBodyPlan {
   let decl = result.value.decl;
-  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+  let actual = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    context_value.env.resolution,
+    context_value.source,
+    current.cursor,
+    decl
+  );
+  let body_abi = parser.text_abi_class_tag_for_type_class(actual);
+  wasm_byte_body_plan(
+    context_value,
+    codes,
+    current,
+    decl,
+    body_abi
+  )
+}
+
+fn wasm_byte_function_body_plan_with_env(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  env: parser.TextResolutionEnv
+) -> WasmBodyPlan {
+  let decl = result.value.decl;
+  let actual = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    env,
     context_value.source,
     current.cursor,
     decl
@@ -3199,7 +4626,8 @@ fn wasm_byte_function_fact(
     current.cursor,
     decl
   );
-  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+  let actual = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    context_value.env.resolution,
     context_value.source,
     current.cursor,
     decl
@@ -3241,6 +4669,828 @@ fn wasm_byte_function_fact(
       terminator_opcode
     ),
     diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn wasm_byte_function_fact_with_env(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  env: parser.TextResolutionEnv
+) -> WasmFunctionFact {
+  let decl = result.value.decl;
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    context_value.source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    env,
+    context_value.source,
+    current.cursor,
+    decl
+  );
+  let body_plan = wasm_byte_function_body_plan_with_env(
+    context_value,
+    codes,
+    current,
+    result,
+    env
+  );
+  let result_val_type = wasm_val_type_for_abi(
+    parser.text_abi_class_tag_for_type_class(expected)
+  );
+  let terminator_opcode = wasm_terminator_opcode(result_val_type);
+  let check_status = parser.text_simple_body_type_check_status(expected, actual);
+  let local_count = parser.text_function_local_let_count(
+    context_value.source,
+    current.cursor
+  );
+  WasmFunctionFact {
+    name_hash: parser.text_declaration_name_hash(
+      context_value.source,
+      current.cursor,
+      decl
+    ),
+    export_tag: wasm_export_tag(context_value.source, current, result),
+    runtime_param_count: parser.text_function_runtime_param_count(
+      context_value.source,
+      current.cursor
+    ),
+    local_count: local_count,
+    result_val_type: result_val_type,
+    body_opcode: body_plan.first_opcode,
+    body_immediate: body_plan.first_immediate,
+    terminator_opcode: terminator_opcode,
+    body_size: wasm_function_body_size(
+      local_count,
+      body_plan.byte_size,
+      terminator_opcode
+    ),
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn wasm_scalar_body_immediate_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(i32) {
+  let start = parser.text_expression_start_skip_trivia(
+    context_value.source,
+    binding.body_start,
+    binding.declaration_limit
+  );
+  let token_span = textlex.token_at(context_value.source, start).span;
+  let root_kind = parser.text_expression_root_head_kind_tag_between(
+    context_value.source,
+    binding.body_start,
+    binding.declaration_limit
+  );
+  let is_standalone = parser.text_scalar_literal_is_standalone(
+    context_value.source,
+    start,
+    binding.declaration_limit
+  );
+  match is_standalone {
+    false => option.none(),
+    true => match root_kind == parser.text_expression_root_number_tag() {
+      true => wasm_small_u7_decimal_literal(
+        codes,
+        context_value.base_offset,
+        token_span
+      ),
+      false => match root_kind == parser.text_expression_root_bool_tag() {
+        true => wasm_bool_literal_immediate(
+          codes,
+          context_value.base_offset,
+          token_span
+        ),
+        false => option.none(),
+      },
+    },
+  }
+}
+
+fn wasm_byte_body_instruction_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmBodyInstruction {
+  let root_kind = parser.text_expression_root_head_kind_tag_between(
+    context_value.source,
+    binding.body_start,
+    binding.declaration_limit
+  );
+  let semantic: core.Option(WasmBodyInstruction) = match abi_class_is_scalar(
+    binding.body_abi_class
+  ) {
+    false => option.none(),
+    true => match root_kind == parser.text_expression_root_identifier_tag() {
+      true => wasm_scalar_identifier_body_instruction_from_binding(
+        context_value,
+        binding
+      ),
+      false => do @monad(core.Option(_)) {
+        value <- wasm_scalar_body_immediate_from_binding(
+          context_value,
+          codes,
+          binding
+        );
+        pure(wasm_body_instruction(wasm_const_opcode(), value))
+      },
+    },
+  };
+  match semantic {
+    Some(value) => value,
+    None => wasm_body_instruction(
+      wasm_body_opcode_for_abi(binding.body_abi_class),
+      match binding.body_abi_class == parser.text_abi_class_void_tag() {
+        true => 0,
+        false => parser.text_expression_root_head_hash_between(
+          context_value.source,
+          binding.body_start,
+          binding.declaration_limit
+        ),
+      }
+    ),
+  }
+}
+
+fn wasm_function_match_body_plan_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodyPlan) {
+  let segments = parser.text_function_bool_match_body_segments(
+    context_value.source,
+    binding.cursor
+  );
+  let lowering = wasm_call_lowering_for_binding(context_value, codes, binding);
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    option.guard(wasm_type_class_is_scalar(binding.actual_type_class));
+    option.guard(segments.found);
+    true_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.true_value_start,
+      segments.true_value_limit,
+      true
+    );
+    false_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.false_value_start,
+      segments.false_value_limit,
+      true
+    );
+    pure(wasm_body_plan_push_instruction(
+      wasm_body_plan_empty(6),
+      wasm_body_instruction(wasm_local_get_opcode(), 0)
+    ) \with_condition -> wasm_body_plan_push_instruction(
+      with_condition,
+      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+    ) \with_if -> wasm_body_plan_append_plan(
+      with_if,
+      true_plan
+    ) \with_true -> wasm_body_plan_push_instruction(
+      with_true,
+      wasm_body_instruction(wasm_else_opcode(), 0)
+    ) \with_else -> wasm_body_plan_append_plan(
+      with_else,
+      false_plan
+    ) \with_false -> wasm_body_plan_push_instruction(
+      with_false,
+      wasm_body_instruction(wasm_end_opcode(), 0)
+    ))
+  }
+}
+
+fn wasm_scalar_expression_body_plan_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodyPlan) {
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    WasmCallLowering::segment_plan(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      binding.body_start,
+      binding.declaration_limit,
+      true
+    )
+  }
+}
+
+fn wasm_scalar_call_body_plan_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodyPlan) {
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    WasmCallLowering::call_segment_plan(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      binding.body_start,
+      binding.declaration_limit
+    )
+  }
+}
+
+fn wasm_scalar_operator_body_plan_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodyPlan) {
+  let parts = parser.text_expression_root_single_operator_parts_between(
+    context_value.source,
+    binding.body_start,
+    binding.declaration_limit
+  );
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    option.guard(parts.found);
+    opcode <- wasm_scalar_operator_opcode(parts.operator_hash);
+    wasm_scalar_operator_body_plan_from_parts(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      parts,
+      opcode
+    )
+  }
+}
+
+fn wasm_scalar_base_body_plan_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodyPlan) {
+  match wasm_scalar_expression_body_plan_from_binding(context_value, codes, binding) {
+    Some(plan) => option.some(plan),
+    None => match wasm_scalar_call_body_plan_from_binding(
+      context_value,
+      codes,
+      binding
+    ) {
+      Some(plan) => option.some(plan),
+      None => wasm_scalar_operator_body_plan_from_binding(
+        context_value,
+        codes,
+        binding
+      ),
+    },
+  }
+}
+
+fn wasm_byte_base_body_plan_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmBodyPlan {
+  match wasm_function_match_body_plan_from_binding(context_value, codes, binding) {
+    Some(plan) => plan,
+    None => match wasm_scalar_base_body_plan_from_binding(
+      context_value,
+      codes,
+      binding
+    ) {
+      Some(plan) => plan,
+      None => wasm_single_instruction_body_plan(
+        wasm_byte_body_instruction_from_binding(context_value, codes, binding)
+      ),
+    },
+  }
+}
+
+fn wasm_scalar_local_let_prefixed_body_plan_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding,
+  body_plan: WasmBodyPlan
+) -> core.Option(WasmBodyPlan) {
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    match binding.local_count <= 0 {
+      true => option.some(body_plan),
+      false => do @monad(core.Option(_)) {
+        local_plan <- wasm_scalar_local_let_initializer_plans(
+          wasm_call_lowering_for_binding(context_value, codes, binding),
+          wasm_body_plan_empty(binding.local_count + 1),
+          0,
+          binding.local_count
+        );
+        pure(wasm_body_plan_append_plan(local_plan, body_plan))
+      },
+    }
+  }
+}
+
+fn wasm_byte_body_plan_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmBodyPlan {
+  let base_plan = wasm_byte_base_body_plan_from_binding(
+    context_value,
+    codes,
+    binding
+  );
+  match wasm_scalar_local_let_prefixed_body_plan_from_binding(
+    context_value,
+    codes,
+    binding,
+    base_plan
+  ) {
+    Some(plan) => plan,
+    None => base_plan,
+  }
+}
+
+fn wasm_function_match_body_summary_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodySummary) {
+  let segments = parser.text_function_bool_match_body_segments(
+    context_value.source,
+    binding.cursor
+  );
+  let lowering = wasm_call_lowering_for_binding(context_value, codes, binding);
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    option.guard(wasm_type_class_is_scalar(binding.actual_type_class));
+    option.guard(segments.found);
+    true_summary <- WasmCallLowering::segment_summary(
+      lowering,
+      segments.true_value_start,
+      segments.true_value_limit,
+      true
+    );
+    false_summary <- WasmCallLowering::segment_summary(
+      lowering,
+      segments.false_value_start,
+      segments.false_value_limit,
+      true
+    );
+    pure(wasm_body_summary_push_instruction(
+      wasm_body_summary_empty(),
+      wasm_body_instruction(wasm_local_get_opcode(), 0)
+    ) \with_condition -> wasm_body_summary_push_instruction(
+      with_condition,
+      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+    ) \with_if -> wasm_body_summary_append(
+      with_if,
+      true_summary
+    ) \with_true -> wasm_body_summary_push_instruction(
+      with_true,
+      wasm_body_instruction(wasm_else_opcode(), 0)
+    ) \with_else -> wasm_body_summary_append(
+      with_else,
+      false_summary
+    ) \with_false -> wasm_body_summary_push_instruction(
+      with_false,
+      wasm_body_instruction(wasm_end_opcode(), 0)
+    ))
+  }
+}
+
+fn wasm_scalar_expression_body_summary_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodySummary) {
+  let lowering = wasm_call_lowering_for_binding(context_value, codes, binding);
+  let root_kind = parser.text_expression_root_head_kind_tag_between(
+    context_value.source,
+    binding.body_start,
+    binding.declaration_limit
+  );
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    match root_kind == parser.text_expression_root_match_tag() {
+      true => WasmCallLowering::branch_segment_summary_if_possible(
+        lowering,
+        binding.body_start,
+        binding.declaration_limit
+      ),
+      false => match wasm_simple_root_summary_candidate(
+        context_value.source,
+        binding.body_start,
+        binding.declaration_limit,
+        root_kind
+      ) {
+        true => WasmCallLowering::simple_segment_summary(
+          lowering,
+          binding.body_start,
+          binding.declaration_limit
+        ),
+        false => option.none(),
+      },
+    }
+  }
+}
+
+fn wasm_scalar_call_body_summary_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodySummary) {
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    WasmCallLowering::call_segment_summary(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      binding.body_start,
+      binding.declaration_limit
+    )
+  }
+}
+
+fn wasm_scalar_operator_body_summary_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodySummary) {
+  let parts = parser.text_expression_root_single_operator_parts_between(
+    context_value.source,
+    binding.body_start,
+    binding.declaration_limit
+  );
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    option.guard(parts.found);
+    opcode <- wasm_scalar_operator_opcode(parts.operator_hash);
+    wasm_scalar_operator_body_summary_from_parts(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      parts,
+      opcode
+    )
+  }
+}
+
+fn wasm_scalar_base_body_summary_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> core.Option(WasmBodySummary) {
+  match wasm_scalar_expression_body_summary_from_binding(context_value, codes, binding) {
+    Some(summary) => option.some(summary),
+    None => match wasm_scalar_call_body_summary_from_binding(
+      context_value,
+      codes,
+      binding
+    ) {
+      Some(summary) => option.some(summary),
+      None => wasm_scalar_operator_body_summary_from_binding(
+        context_value,
+        codes,
+        binding
+      ),
+    },
+  }
+}
+
+fn wasm_simple_root_kind_can_summarize(root_kind: i32) -> bool {
+  match root_kind == parser.text_expression_root_number_tag() {
+    true => true,
+    false => match root_kind == parser.text_expression_root_bool_tag() {
+      true => true,
+      false => root_kind == parser.text_expression_root_identifier_tag(),
+    },
+  }
+}
+
+fn wasm_simple_root_summary_candidate(
+  source: textlex.TextTokenStream,
+  start: i32,
+  limit: i32,
+  root_kind: i32
+) -> bool {
+  match wasm_simple_root_kind_can_summarize(root_kind) {
+    false => false,
+    true => match parser.text_expression_root_call_arg_count_between(
+      source,
+      start,
+      limit
+    ) == parser.text_no_root_call_arg_count() {
+      false => false,
+      true => match parser.text_expression_root_head_selector_count_between(
+        source,
+        start,
+        limit
+      ) == 0 {
+        false => false,
+        true => match parser.text_expression_root_field_count_between(
+          source,
+          start,
+          limit
+        ) == 0 {
+          false => false,
+          true => match parser.text_expression_root_operator_count_between(
+            source,
+            start,
+            limit
+          ) == 0 {
+            false => false,
+            true => parser.text_value_pipe_bind_count_between(
+              source,
+              start,
+              limit,
+              0
+            ) == 0,
+          },
+        },
+      },
+    },
+  }
+}
+
+fn wasm_byte_base_body_summary_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmBodySummary {
+  match wasm_function_match_body_summary_from_binding(context_value, codes, binding) {
+    Some(summary) => summary,
+    None => match wasm_scalar_base_body_summary_from_binding(
+      context_value,
+      codes,
+      binding
+    ) {
+      Some(summary) => summary,
+      None => wasm_instruction_summary(
+        wasm_byte_body_instruction_from_binding(context_value, codes, binding)
+      ),
+    },
+  }
+}
+
+fn wasm_scalar_local_let_initializer_summary(
+  lowering: WasmCallLowering,
+  local_index: i32
+) -> core.Option(WasmBodySummary) {
+  let segment = parser.text_function_local_let_value_segment_for_index(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    local_index
+  );
+  let wasm_index = lowering.runtime_param_count + local_index;
+  match wasm_index < wasm_small_immediate_limit() {
+    false => option.none(),
+    true => match WasmCallLowering::arg_summary(lowering, segment) {
+      None => option.none(),
+      Some(summary) => option.some(wasm_body_summary_push_instruction(
+        summary,
+        wasm_body_instruction(wasm_local_set_opcode(), wasm_index)
+      )),
+    },
+  }
+}
+
+fn wasm_scalar_local_let_initializer_summaries(
+  lowering: WasmCallLowering,
+  summary: WasmBodySummary,
+  local_index: i32,
+  local_count: i32
+) -> core.Option(WasmBodySummary) {
+  match local_index >= local_count {
+    true => option.some(summary),
+    false => do @monad(core.Option(_)) {
+      local_summary <- wasm_scalar_local_let_initializer_summary(
+        lowering,
+        local_index
+      );
+      wasm_scalar_local_let_initializer_summaries(
+        lowering,
+        wasm_body_summary_append(summary, local_summary),
+        local_index + 1,
+        local_count
+      )
+    },
+  }
+}
+
+fn wasm_local_let_summary_is_current(
+  lowering: WasmCallLowering,
+  scan: WasmLocalLetSummaryScan
+) -> bool {
+  match parser.text_depth_is_top_level(scan.brace_depth, scan.paren_depth) {
+    false => false,
+    true => match textlex.token_at(lowering.context_value.source, scan.index).kind {
+      LetKw => true,
+      _ => false,
+    },
+  }
+}
+
+fn wasm_local_let_summary_scan_from_parser(
+  scan: parser.TextFunctionLocalLetScan
+) -> WasmLocalLetSummaryScan {
+  WasmLocalLetSummaryScan {
+    index: scan.index,
+    limit: scan.limit,
+    brace_depth: scan.brace_depth,
+    paren_depth: scan.paren_depth,
+    total: scan.total,
+  }
+}
+
+fn wasm_local_let_summary_advance(
+  lowering: WasmCallLowering,
+  scan: WasmLocalLetSummaryScan
+) -> WasmLocalLetSummaryScan {
+  WasmLocalLetSummaryScan {
+    index: scan.index + 1,
+    limit: scan.limit,
+    brace_depth: parser.brace_depth_after_token(
+      lowering.context_value.source,
+      scan.index,
+      scan.brace_depth
+    ),
+    paren_depth: parser.paren_depth_after_token(
+      lowering.context_value.source,
+      scan.index,
+      scan.paren_depth
+    ),
+    total: scan.total,
+  }
+}
+
+fn wasm_local_let_summary_after_statement(
+  scan: WasmLocalLetSummaryScan,
+  statement_end: i32
+) -> WasmLocalLetSummaryScan {
+  WasmLocalLetSummaryScan {
+    index: statement_end + 1,
+    limit: scan.limit,
+    brace_depth: scan.brace_depth,
+    paren_depth: scan.paren_depth,
+    total: scan.total + 1,
+  }
+}
+
+fn wasm_local_let_summary_value_segment(
+  lowering: WasmCallLowering,
+  scan: WasmLocalLetSummaryScan,
+  statement_end: i32
+) -> parser.TextArgumentSegment {
+  let equal = parser.text_local_let_equal_index(
+    lowering.context_value.source,
+    scan.index,
+    statement_end
+  );
+  match equal < statement_end {
+    true => parser.text_argument_segment_present(
+      lowering.context_value.source,
+      equal + 1,
+      statement_end
+    ),
+    false => parser.text_argument_segment_none(statement_end),
+  }
+}
+
+fn wasm_local_let_initializer_summary_at_scan(
+  lowering: WasmCallLowering,
+  scan: WasmLocalLetSummaryScan
+) -> core.Option(WasmBodySummary) {
+  let statement_end = parser.text_local_let_statement_end(
+    lowering.context_value.source,
+    scan.index,
+    scan.limit
+  );
+  let segment = wasm_local_let_summary_value_segment(
+    lowering,
+    scan,
+    statement_end
+  );
+  let wasm_index = lowering.runtime_param_count + scan.total;
+  match wasm_index < wasm_small_immediate_limit() {
+    false => option.none(),
+    true => match WasmCallLowering::arg_summary(lowering, segment) {
+      None => option.none(),
+      Some(summary) => option.some(wasm_body_summary_push_instruction(
+        summary,
+        wasm_body_instruction(wasm_local_set_opcode(), wasm_index)
+      )),
+    },
+  }
+}
+
+fn wasm_local_let_initializer_summary_scan(
+  lowering: WasmCallLowering,
+  summary: WasmBodySummary,
+  scan: WasmLocalLetSummaryScan,
+  local_count: i32
+) -> core.Option(WasmBodySummary) {
+  match scan.total >= local_count {
+    true => option.some(summary),
+    false => match scan.index >= scan.limit {
+      true => option.some(summary),
+      false => match wasm_local_let_summary_is_current(lowering, scan) {
+        false => rec(
+          lowering,
+          summary,
+          wasm_local_let_summary_advance(lowering, scan),
+          local_count
+        ),
+        true => parser.text_local_let_statement_end(
+          lowering.context_value.source,
+          scan.index,
+          scan.limit
+        ) \statement_end -> do @monad(core.Option(_)) {
+          local_summary <- wasm_local_let_initializer_summary_at_scan(
+            lowering,
+            scan
+          );
+          wasm_local_let_initializer_summary_scan(
+            lowering,
+            wasm_body_summary_append(summary, local_summary),
+            wasm_local_let_summary_after_statement(scan, statement_end),
+            local_count
+          )
+        },
+      },
+    },
+  }
+}
+
+fn wasm_scalar_local_let_prefixed_body_summary_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding,
+  body_summary: WasmBodySummary
+) -> core.Option(WasmBodySummary) {
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(binding.body_abi_class));
+    match binding.local_count <= 0 {
+      true => option.some(body_summary),
+      false => do @monad(core.Option(_)) {
+        lowering <- pure(wasm_call_lowering_for_binding(
+          context_value,
+          codes,
+          binding
+        ));
+        local_summary <- wasm_local_let_initializer_summary_scan(
+          lowering,
+          wasm_body_summary_empty(),
+          wasm_local_let_summary_scan_from_parser(
+            parser.text_function_local_let_bounds_scan(
+              context_value.source,
+              binding.cursor
+            )
+          ),
+          binding.local_count
+        );
+        pure(wasm_body_summary_append(local_summary, body_summary))
+      },
+    }
+  }
+}
+
+fn wasm_byte_body_summary_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmBodySummary {
+  let base_summary = wasm_byte_base_body_summary_from_binding(
+    context_value,
+    codes,
+    binding
+  );
+  match wasm_scalar_local_let_prefixed_body_summary_from_binding(
+    context_value,
+    codes,
+    binding,
+    base_summary
+  ) {
+    Some(summary) => summary,
+    None => base_summary,
+  }
+}
+
+fn wasm_byte_function_fact_from_binding(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmFunctionFact {
+  let body_plan = wasm_byte_body_plan_from_binding(
+    context_value,
+    codes,
+    binding
+  );
+  WasmFunctionFact {
+    name_hash: binding.name_hash,
+    export_tag: binding.export_tag,
+    runtime_param_count: binding.runtime_param_count,
+    local_count: binding.local_count,
+    result_val_type: binding.result_val_type,
+    body_opcode: body_plan.first_opcode,
+    body_immediate: body_plan.first_immediate,
+    terminator_opcode: binding.terminator_opcode,
+    body_size: wasm_function_body_size(
+      binding.local_count,
+      body_plan.byte_size,
+      binding.terminator_opcode
+    ),
+    diagnostic_code: binding.diagnostic_code,
   }
 }
 
@@ -4092,6 +6342,108 @@ fn FactContext::fact_record_scan(
   }
 }
 
+fn FactContext::checked_declaration_record_scan(
+  context_value: FactContext,
+  env: parser.TextResolutionEnv,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        env,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        textmodel.signature_mix(
+          total,
+          checked_decl_fact_signature(
+            checked_decl_fact_with_env(
+              context_value.source,
+              current,
+              result,
+              env
+            )
+          )
+        )
+      ),
+    },
+  }
+}
+
+fn FactContext::checked_expression_record_scan(
+  context_value: FactContext,
+  env: parser.TextResolutionEnv,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        env,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        textmodel.signature_mix(
+          total,
+          checked_expr_fact_signature(
+            checked_expr_fact_with_env(
+              context_value.source,
+              current,
+              result,
+              env
+            )
+          )
+        )
+      ),
+    },
+  }
+}
+
+fn FactContext::checked_expression_shape_scan(
+  context_value: FactContext,
+  env: parser.TextResolutionEnv,
+  current: combinator.ParseState,
+  total: i32
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        env,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        textmodel.signature_mix(
+          total,
+          checked_expr_shape_fact_signature(
+            checked_expr_shape_fact_with_env(
+              context_value.source,
+              current,
+              result,
+              env
+            )
+          )
+        )
+      ),
+    },
+  }
+}
+
 fn WasmByteContext::wasm_function_record_scan(
   context_value: WasmByteContext,
   codes: layout.HeapArray(i32),
@@ -4126,6 +6478,95 @@ fn WasmByteContext::wasm_function_record_scan(
       ),
     },
   }
+}
+
+fn WasmByteContext::wasm_function_record_scan_with_env(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  total: i32,
+  env: parser.TextResolutionEnv
+) -> i32 {
+  match current.cursor < textlex.length(context_value.source) {
+    false => total,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      context_value.source,
+      total
+    ) {
+      Err(_) => total,
+      Ok(result) => rec(
+        context_value,
+        codes,
+        parser.next_text_declaration_state(result.state, context_value.source),
+        match is_function(
+          context_value.source,
+          current,
+          result
+        ) {
+          true => textmodel.signature_mix(
+            total,
+            wasm_function_fact_signature(
+              wasm_byte_function_fact_with_env(
+                context_value,
+                codes,
+                current,
+                result,
+                env
+              )
+            )
+          ),
+          false => total,
+        },
+        env
+      ),
+    },
+  }
+}
+
+fn WasmSourceEnv::wasm_function_record_signature_loop(
+  env: WasmSourceEnv,
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  index: i32,
+  total: i32
+) -> i32 {
+  match index < layout.HeapArray::len(WasmFunctionBinding, env.functions) {
+    false => total,
+    true => layout.HeapArray::get(
+      WasmFunctionBinding,
+      env.functions,
+      index
+    ) \binding -> rec(
+      env,
+      context_value,
+      codes,
+      index + 1,
+      textmodel.signature_mix(
+        total,
+        wasm_function_fact_signature(
+          wasm_byte_function_fact_from_binding(
+            context_value,
+            codes,
+            wasm_function_binding_with_details(context_value, binding)
+          )
+        )
+      )
+    ),
+  }
+}
+
+fn WasmByteContext::wasm_function_record_signature_from_env(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32)
+) -> i32 {
+  WasmSourceEnv::wasm_function_record_signature_loop(
+    context_value.env,
+    context_value,
+    codes,
+    0,
+    0
+  )
 }
 
 fn WasmByteContext::wasm_section_record_scan(
@@ -4199,18 +6640,22 @@ fn FactContext::fact_record_signature(
 fn FactContext::checked_declaration_record_signature(
   context_value: FactContext
 ) -> i32 {
-  FactContext::fact_record_signature(
+  FactContext::checked_declaration_record_scan(
     context_value,
-    FactRecordScanKind::ScanCheckedDeclaration
+    parser.TextResolutionEnv::from_source(context_value.source),
+    textmodel.full_window_state(context_value.source),
+    0
   )
 }
 
 fn FactContext::checked_expression_record_signature(
   context_value: FactContext
 ) -> i32 {
-  FactContext::fact_record_signature(
+  FactContext::checked_expression_record_scan(
     context_value,
-    FactRecordScanKind::ScanCheckedExpression
+    parser.TextResolutionEnv::from_source(context_value.source),
+    textmodel.full_window_state(context_value.source),
+    0
   )
 }
 
@@ -4235,9 +6680,11 @@ fn FactContext::checked_local_environment_signature(
 fn FactContext::checked_expression_shape_signature(
   context_value: FactContext
 ) -> i32 {
-  FactContext::fact_record_signature(
+  FactContext::checked_expression_shape_scan(
     context_value,
-    FactRecordScanKind::ScanCheckedExpressionShape
+    parser.TextResolutionEnv::from_source(context_value.source),
+    textmodel.full_window_state(context_value.source),
+    0
   )
 }
 
@@ -4259,11 +6706,9 @@ fn wasm_record_signature_reader(
     current <- monad.Reader::asks(wasm_byte_context_window_state);
     monad.Reader::pure(match kind {
       WasmRecordScanKind::ScanWasmFunctionRecord =>
-        WasmByteContext::wasm_function_record_scan(
+        WasmByteContext::wasm_function_record_signature_from_env(
           context_value,
-          codes,
-          current,
-          0
+          codes
         ),
       WasmRecordScanKind::ScanWasmSectionRecord =>
         wasm_section_record_final_signature(

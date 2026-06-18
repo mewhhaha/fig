@@ -41,6 +41,9 @@ const figWasmOpt = optModeArg("--fig-wasm-opt", "debug");
 const figSourceFilters = stringListArg("--fig-source");
 const figImportSourceFilters = stringListArg("--fig-import-source");
 const figDirectCheckFilters = stringListArg("--fig-direct-check");
+const figSourceCheckFilters = stringListArg("--fig-source-check");
+const figDebugPrefixCheckFilters = stringListArg("--fig-debug-prefix-check");
+const figExtraSourcePaths = stringListArg("--fig-extra-source");
 const figSkipDirectImports = Deno.args.includes("--fig-skip-direct-imports");
 const figSkipSourceChecks = Deno.args.includes("--fig-skip-source-checks");
 const progress = Deno.args.includes("--progress");
@@ -48,9 +51,12 @@ const selectedRuntimes = runtimeArgs();
 const runRoot = await Deno.makeTempDir({ prefix: "fig-compiler-source-bench-" });
 const rows: Row[] = [];
 let figWasmSink = 0;
+validateFigSourceCheckFilters();
+validateFigDebugPrefixCheckFilters();
 
 type FigCompilerInput = {
   sourceId: string;
+  source: string;
   codes: number[];
   textTokenSignatureHash: number;
   declarationCount: number;
@@ -320,6 +326,7 @@ const typeResultKindChecks: {
 ];
 
 const figCompilerSources = await readFigSourceRoots([`${root}/compiler/fig`]);
+await readExtraFigSources(figCompilerSources, figExtraSourcePaths);
 const figSources = new Map(figCompilerSources);
 await readFigSources(`${root}/prelude`, figSources);
 const figCompilerBenchmarkSources = filteredFigCompilerSources();
@@ -454,6 +461,11 @@ async function compiledFigSourceRunner(
     return result;
   };
   const encodedSources = await figCompilerInputs();
+  if (figDebugPrefixCheckFilters.length > 0) {
+    for (const input of encodedSources) {
+      await runFigDebugPrefixChecks(host, input);
+    }
+  }
   for (const input of encodedSources) {
     if (progress) {
       console.error(`[fig-input] ${input.sourceId}`);
@@ -464,6 +476,28 @@ async function compiledFigSourceRunner(
       }
       if (progress) {
         console.error(`[fig-import] ${importInput.sourceId} -> ${importInput.importSourceId}`);
+      }
+      if (shouldUseFigDirectResolutionRecordOnly()) {
+        const actualDirectImportResolutionRecordSignatureHash = Number(
+          host.call(
+            "compile_direct_import_resolution_record_signature_hash",
+            importInput.sourceCodes,
+            importInput.importCodes,
+            importInput.moduleHash,
+          ),
+        );
+        const directImportResolutionRecordSignatureMatches =
+          actualDirectImportResolutionRecordSignatureHash ===
+            importInput.resolutionRecordSignatureHash;
+        if (!directImportResolutionRecordSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced direct import resolution-record ` +
+              `signature hash ${actualDirectImportResolutionRecordSignatureHash} ` +
+              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+              `JS parser produced ${importInput.resolutionRecordSignatureHash}`,
+          );
+        }
+        continue;
       }
       if (shouldRunFigDirectCheck("type_environment")) {
         const actualDirectImportTypeEnvironmentSignatureHash = Number(
@@ -657,6 +691,24 @@ async function compiledFigSourceRunner(
       }
     }
     if (figSkipSourceChecks) {
+      continue;
+    }
+    if (figSourceCheckFilters.length > 0) {
+      if (shouldRunFigSourceCheck("resolved_value_body_type_class")) {
+        const actualResolvedValueBodyTypeClassSignatureHash = Number(
+          host.call("compile_resolved_value_body_type_class_signature_hash", input.codes),
+        );
+        const resolvedValueBodyTypeClassSignatureMatches =
+          actualResolvedValueBodyTypeClassSignatureHash ===
+            input.resolvedValueBodyTypeClassSignatureHash;
+        if (!resolvedValueBodyTypeClassSignatureMatches) {
+          throw new Error(
+            `compiled Fig compiler produced resolved value body type-class signature hash ` +
+              `${actualResolvedValueBodyTypeClassSignatureHash} for ${input.sourceId}; ` +
+              `JS parser produced ${input.resolvedValueBodyTypeClassSignatureHash}`,
+          );
+        }
+      }
       continue;
     }
     const actualSourceImportEdgeSignatureHash = Number(
@@ -1454,6 +1506,110 @@ async function compiledFigSourceRunner(
   };
 }
 
+async function runFigDebugPrefixChecks(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): Promise<void> {
+  for (const filter of figDebugPrefixCheckFilters) {
+    if (filter === "resolved_value_body_type_class") {
+      await debugResolvedValueBodyTypeClassPrefix(host, input);
+    }
+  }
+}
+
+type PrefixMismatch = {
+  actual: number;
+  expected: number;
+};
+
+async function debugResolvedValueBodyTypeClassPrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await resolvedValueBodyTypeClassPrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await resolvedValueBodyTypeClassPrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first resolved value body type-class prefix mismatch in ${input.sourceId} ` +
+      `after ${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function resolvedValueBodyTypeClassPrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const typeEnvironment = programNamedTypeEnvironment(prefixProgram);
+  const expected = programResolvedValueBodyTypeClassSignatureHash(
+    prefixProgram,
+    typeEnvironment,
+  );
+  const actual = Number(
+    host.call(
+      "compile_resolved_value_body_type_class_signature_hash",
+      sourceCodes(prefix),
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
+}
+
+function declarationPrefixSource(
+  source: string,
+  program: Program,
+  declarationCount: number,
+): string {
+  if (declarationCount <= 0) {
+    const first = program.declarations[0];
+    return first?.span ? source.slice(0, first.span.start) : "";
+  }
+  const decl = program.declarations[declarationCount - 1];
+  if (!decl?.span) {
+    return source;
+  }
+  return source.slice(0, decl.span.end);
+}
+
 async function figCompilerInputs(): Promise<FigCompilerInput[]> {
   const inputs: FigCompilerInput[] = [];
   for (const [sourceId, source] of figCompilerBenchmarkSources) {
@@ -1463,6 +1619,7 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
     const tokens = tokenize(source);
     inputs.push({
       sourceId,
+      source,
       codes,
       textTokenSignatureHash: textTokenSignatureHash(tokens),
       declarationCount: programDeclarationCount(program),
@@ -1639,6 +1796,44 @@ function shouldRunFigDirectCheck(name: string): boolean {
   return false;
 }
 
+function validateFigSourceCheckFilters(): void {
+  for (const filter of figSourceCheckFilters) {
+    if (figSourceCheckFilterKnown(filter)) {
+      continue;
+    }
+    throw new Error(`unknown --fig-source-check=${filter}`);
+  }
+}
+
+function validateFigDebugPrefixCheckFilters(): void {
+  for (const filter of figDebugPrefixCheckFilters) {
+    if (figSourceCheckFilterKnown(filter)) {
+      continue;
+    }
+    throw new Error(`unknown --fig-debug-prefix-check=${filter}`);
+  }
+}
+
+function figSourceCheckFilterKnown(filter: string): boolean {
+  return filter === "resolved_value_body_type_class";
+}
+
+function shouldRunFigSourceCheck(name: string): boolean {
+  if (figSourceCheckFilters.length === 0) {
+    return true;
+  }
+  for (const filter of figSourceCheckFilters) {
+    if (name === filter) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function shouldUseFigDirectResolutionRecordOnly(): boolean {
+  return figDirectCheckFilters.length === 0;
+}
+
 function figSourceIdMatchesFilters(sourceId: string, filters: string[]): boolean {
   if (filters.length === 0) {
     return true;
@@ -1656,6 +1851,9 @@ function figSourceIdMatchesFilters(sourceId: string, filters: string[]): boolean
 }
 
 function figBenchmarkSourceScope(): string {
+  if (figExtraSourcePaths.length > 0) {
+    return "source_extra";
+  }
   if (figSourceFilters.length === 0) {
     return "source_tree";
   }
@@ -1670,6 +1868,16 @@ function normalizedFigSourceFilter(filter: string): string {
     return `${root}/${filter.slice(2)}`;
   }
   return `${root}/${filter}`;
+}
+
+async function readExtraFigSources(
+  sources: Map<string, string>,
+  paths: string[],
+): Promise<void> {
+  for (const path of paths) {
+    const sourceId = normalizedFigSourceFilter(path);
+    sources.set(sourceId, await Deno.readTextFile(sourceId));
+  }
 }
 
 function programDeclarationCount(program: Program): number {
@@ -8395,19 +8603,25 @@ function numberArg(name: string, fallback: number): number {
 
 function stringListArg(name: string): string[] {
   const values: string[] = [];
-  for (const arg of Deno.args) {
+  for (let index = 0; index < Deno.args.length; index++) {
+    const arg = Deno.args[index];
     if (!arg.startsWith(`${name}=`)) {
       continue;
     }
     appendStringListArg(values, arg.slice(name.length + 1));
   }
-  const flagIndex = Deno.args.indexOf(name);
-  if (flagIndex >= 0) {
-    const raw = Deno.args[flagIndex + 1];
-    if (!raw) {
+  for (let index = 0; index < Deno.args.length; index++) {
+    const arg = Deno.args[index];
+    if (arg !== name) {
+      continue;
+    }
+    const raw = Deno.args[index + 1];
+    const missingValue = !raw || raw.startsWith("--");
+    if (missingValue) {
       throw new Error(`${name} requires a value`);
     }
     appendStringListArg(values, raw);
+    index++;
   }
   return values;
 }
