@@ -46,7 +46,8 @@ type TypeAnnotationFrame = struct {
 type TextDeclarationStart = union {
   TextNoDeclaration, TextRegularDeclaration(kind: token.DeclarationKind),
   TextPubFunctionDeclaration, TextSourceImportDeclaration,
-  TextOperatorDeclaration, TextTypeAssertDeclaration
+  TextExternalImportDeclaration, TextOperatorDeclaration,
+  TextTypeAssertDeclaration
 }
 
 type TextDeclarationScan = struct {
@@ -1345,6 +1346,11 @@ fn is_primitive_type_annotation_atom(kind: token.TokenKind) -> bool {
     U64Kw => true,
     F32Kw => true,
     F64Kw => true,
+    BoolLiteral => true,
+    NumberLiteral => true,
+    StringLiteral => true,
+    CharLiteral => true,
+    MultilineLiteral => true,
     _ => false,
   }
 }
@@ -2868,6 +2874,90 @@ fn text_hash_append_token(
   )
 }
 
+fn text_signature_code_is_whitespace(code: i32) -> bool {
+  match code {
+    textlex.TextCharCode::Tab => true,
+    textlex.TextCharCode::Newline => true,
+    textlex.TextCharCode::CarriageReturn => true,
+    textlex.TextCharCode::Space => true,
+    _ => false,
+  }
+}
+
+fn text_normalized_hash_between(
+  source: textlex.TextTokenStream,
+  offset: i32,
+  limit: i32,
+  total: i32
+) -> i32 {
+  match offset >= limit {
+    true => total,
+    false => match text_signature_code_is_whitespace(
+      textlex.source_code_at(source, offset)
+    ) {
+      true => rec(source, offset + 1, limit, total),
+      false => rec(
+        source,
+        offset + 1,
+        limit,
+        total * 33 + textlex.source_code_at(source, offset)
+      ),
+    },
+  }
+}
+
+fn text_normalized_width_between(
+  source: textlex.TextTokenStream,
+  offset: i32,
+  limit: i32,
+  total: i32
+) -> i32 {
+  match offset >= limit {
+    true => total,
+    false => match text_signature_code_is_whitespace(
+      textlex.source_code_at(source, offset)
+    ) {
+      true => rec(source, offset + 1, limit, total),
+      false => rec(source, offset + 1, limit, total + 1),
+    },
+  }
+}
+
+fn text_token_needs_normalized_signature_hash(current: token.Token) -> bool {
+  match current.kind {
+    StringLiteral => true,
+    CharLiteral => true,
+    MultilineLiteral => true,
+    _ => false,
+  }
+}
+
+fn text_hash_append_signature_token(
+  source: textlex.TextTokenStream,
+  index: i32,
+  total: i32
+) -> i32 {
+  let current = textlex.token_at(source, index);
+  match text_token_needs_normalized_signature_hash(current) {
+    false => text_hash_append_token(source, index, total),
+    true => text_hash_append(
+      total,
+      text_normalized_hash_between(
+        source,
+        current.span.start,
+        current.span.end,
+        0
+      ),
+      text_normalized_width_between(
+        source,
+        current.span.start,
+        current.span.end,
+        0
+      )
+    ),
+  }
+}
+
 fn text_annotation_signature_hash_between(
   source: textlex.TextTokenStream,
   index: i32,
@@ -2887,7 +2977,7 @@ fn text_annotation_signature_hash_between(
         source,
         index + 1,
         limit,
-        text_hash_append_token(source, index, total)
+        text_hash_append_signature_token(source, index, total)
       ),
     },
   }
@@ -3037,6 +3127,216 @@ fn text_param_signature_hash(
   total: i32
 ) -> i32 {
   text_param_signature_hash_between(
+    source,
+    text_param_signature_scan(
+      open_index + 1,
+      close_index,
+      0,
+      true,
+      total
+    )
+  )
+}
+
+fn text_type_param_synthetic_prefix_hash() -> i32 {
+  2012745020
+}
+
+fn text_type_param_type_pattern_json_prefix_hash() -> i32 {
+  38240912
+}
+
+fn text_type_param_wildcard_pattern_json_hash() -> i32 {
+  -1163889916
+}
+
+fn text_abs_i32(value: i32) -> i32 {
+  match value < 0 {
+    true => 0 - value,
+    false => value,
+  }
+}
+
+fn text_decimal_hash_append(total: i32, value: i32) -> i32 {
+  match value >= 10 {
+    true => text_decimal_hash_append(total, value / 10) \prefix ->
+      prefix * 33 + textlex.TextCharCode::Digit0 + value % 10,
+    false => total * 33 + textlex.TextCharCode::Digit0 + value,
+  }
+}
+
+fn text_type_param_synthetic_name_hash(semantic_hash: i32) -> i32 {
+  text_decimal_hash_append(
+    text_type_param_synthetic_prefix_hash(),
+    text_abs_i32(semantic_hash)
+  )
+}
+
+fn text_type_param_type_pattern_json_hash_loop(
+  source: textlex.TextTokenStream,
+  offset: i32,
+  limit: i32,
+  total: i32
+) -> i32 {
+  match offset >= limit {
+    true => (total * 31 + textlex.TextCharCode::Quote) * 31 +
+      textlex.TextCharCode::RightBrace,
+    false => text_type_param_type_pattern_json_hash_loop(
+      source,
+      offset + 1,
+      limit,
+      total * 31 + textlex.source_code_at(source, offset)
+    ),
+  }
+}
+
+fn text_type_param_type_pattern_json_hash(
+  source: textlex.TextTokenStream,
+  name_index: i32
+) -> i32 {
+  let token_span = textlex.token_at(source, name_index).span;
+  text_type_param_type_pattern_json_hash_loop(
+    source,
+    token_span.start,
+    token_span.end,
+    text_type_param_type_pattern_json_prefix_hash()
+  )
+}
+
+fn text_type_param_name_is_scalar_pattern(
+  source: textlex.TextTokenStream,
+  name_index: i32
+) -> bool {
+  match textlex.token_at(source, name_index).kind {
+    I32Kw => true,
+    I64Kw => true,
+    U32Kw => true,
+    U64Kw => true,
+    F32Kw => true,
+    F64Kw => true,
+    _ => false,
+  }
+}
+
+fn text_type_param_signature_name_hash(
+  source: textlex.TextTokenStream,
+  scan: TextParamSignatureScan
+) -> i32 {
+  let name_index = text_param_name_index_at(source, scan.index, scan.close_index);
+  match textlex.text_hash_at(source, name_index) == text_wildcard_pattern_hash() {
+    true => text_type_param_synthetic_name_hash(
+      text_type_param_wildcard_pattern_json_hash()
+    ),
+    false => match text_type_param_name_is_scalar_pattern(source, name_index) {
+      true => text_type_param_synthetic_name_hash(
+        text_type_param_type_pattern_json_hash(source, name_index)
+      ),
+      false => textlex.text_hash_at(source, name_index),
+    },
+  }
+}
+
+fn text_type_param_signature_name_step(
+  source: textlex.TextTokenStream,
+  scan: TextParamSignatureScan
+) -> i32 {
+  text_type_param_signature_hash_between(
+    source,
+    text_param_signature_scan(
+      scan.index + 1,
+      scan.close_index,
+      scan.paren_depth,
+      false,
+      text_signature_mix(
+        scan.total,
+        text_type_param_signature_name_hash(source, scan)
+      )
+    )
+  )
+}
+
+fn text_type_param_signature_token_continue(
+  source: textlex.TextTokenStream,
+  scan: TextParamSignatureScan
+) -> i32 {
+  let punctuation = textlex.punctuation_at(source, scan.index);
+  let next_depth = text_param_signature_next_depth(punctuation, scan.paren_depth);
+  let is_top_comma = text_param_signature_is_top_comma(
+    punctuation,
+    scan.paren_depth
+  );
+  match is_top_comma {
+    true => text_type_param_signature_hash_between(
+      source,
+      text_param_signature_scan(
+        scan.index + 1,
+        scan.close_index,
+        next_depth,
+        true,
+        scan.total
+      )
+    ),
+    false => match scan.need_name {
+      true => text_type_param_signature_name_step(
+        source,
+        text_param_signature_scan(
+          scan.index,
+          scan.close_index,
+          next_depth,
+          scan.need_name,
+          scan.total
+        )
+      ),
+      false => text_type_param_signature_hash_between(
+        source,
+        text_param_signature_scan(
+          scan.index + 1,
+          scan.close_index,
+          next_depth,
+          false,
+          scan.total
+        )
+      ),
+    },
+  }
+}
+
+fn text_type_param_signature_continue(
+  source: textlex.TextTokenStream,
+  scan: TextParamSignatureScan
+) -> i32 {
+  match text_param_signature_is_trivia(source, scan.index) {
+    true => text_type_param_signature_hash_between(
+      source,
+      text_param_signature_scan(
+        scan.index + 1,
+        scan.close_index,
+        scan.paren_depth,
+        scan.need_name,
+        scan.total
+      )
+    ),
+    false => text_type_param_signature_token_continue(source, scan),
+  }
+}
+
+fn text_type_param_signature_hash_between(
+  source: textlex.TextTokenStream,
+  scan: TextParamSignatureScan
+) -> i32 {
+  match scan.index >= scan.close_index {
+    true => scan.total,
+    false => text_type_param_signature_continue(source, scan),
+  }
+}
+
+fn text_type_param_list_signature_hash(
+  source: textlex.TextTokenStream,
+  open_index: i32,
+  close_index: i32,
+  total: i32
+) -> i32 {
+  text_type_param_signature_hash_between(
     source,
     text_param_signature_scan(
       open_index + 1,
@@ -3488,13 +3788,26 @@ fn text_function_attached_owner_hash(
   )
 }
 
+fn text_function_lexical_name_hash(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  text_declaration_end_from_index(source, index) \next ->
+    text_token_text_hash_between(
+      source,
+      text_function_name_index(source, index),
+      text_function_open_paren_index(source, index, next),
+      0
+    )
+}
+
 fn text_function_primary_name_hash(
   source: textlex.TextTokenStream,
   index: i32
 ) -> i32 {
   match text_function_has_attached_member(source, index) {
     true => text_function_attached_owner_hash(source, index),
-    false => textlex.text_hash_at(source, text_function_name_index(source, index)),
+    false => text_function_lexical_name_hash(source, index),
   }
 }
 
@@ -5966,7 +6279,7 @@ fn text_type_param_signature_hash(
   let name_index = text_type_name_index(source, index);
   match punctuation_score_matches(source, name_index + 1, 2) {
     false => total,
-    true => text_param_signature_hash(
+    true => text_type_param_list_signature_hash(
       source,
       name_index + 1,
       find_text_matching_right_paren(
@@ -6317,8 +6630,77 @@ fn value_tail_from_annotation(
   _context, Err(error) => err_decl(error),
 }
 
-fn value_expression_limit(equal_index: i32) -> i32 {
-  equal_index + 2
+fn value_expression_limit_before_end(
+  source: textlex.TextTokenStream,
+  next: i32
+) -> i32 {
+  match punctuation_matches(source, next - 1, textlex.PunctSemicolon) {
+    true => next - 1,
+    false => next,
+  }
+}
+
+fn value_initializer_should_parse(
+  source: textlex.TextTokenStream,
+  index: i32,
+  limit: i32
+) -> bool {
+  match index >= limit {
+    true => false,
+    false => match textlex.punctuation_at(source, index) {
+      PunctLeftBrace => false,
+      PunctOther => match textlex.token_is_collection_open(source, index) {
+        true => false,
+        false => match text_left_bracket_token_matches(source, index) {
+          true => false,
+          false => true,
+        },
+      },
+      _ => true,
+    },
+  }
+}
+
+fn declaration_from_named_annotated_expr_result(
+  context: TextNamedAnnotatedDeclContext,
+  next: i32,
+  result: combinator.Parser(ExprFrame)
+) -> combinator.Parser(DeclFrame) {
+  ok_decl(
+    combinator.state(next, context.limit),
+    declaration_frame(
+      declaration_from_named_annotated_expr(
+        context.kind,
+        context.name,
+        context.annotation,
+        context.seed,
+        match result {
+          Ok(reply) => reply.value.expr,
+          Err(_) => ast.Missing,
+        }
+      ),
+      next - context.start
+    )
+  )
+}
+
+fn declaration_from_named_annotated_missing_expr(
+  context: TextNamedAnnotatedDeclContext,
+  next: i32
+) -> combinator.Parser(DeclFrame) {
+  ok_decl(
+    combinator.state(next, context.limit),
+    declaration_frame(
+      declaration_from_named_annotated_expr(
+        context.kind,
+        context.name,
+        context.annotation,
+        context.seed,
+        ast.Missing
+      ),
+      next - context.start
+    )
+  )
 }
 
 fn decl_keyword(kind: token.DeclarationKind) -> token.TokenKind {
@@ -6454,6 +6836,20 @@ fn parse_text_source_import_tail(
   )
 }
 
+fn parse_text_external_import_tail(
+  current: combinator.ParseState,
+  source: textlex.TextTokenStream
+) -> combinator.Parser(DeclFrame) {
+  let next = text_declaration_end_from_index(source, current.cursor);
+  ok_decl(
+    combinator.state(next, current.limit),
+    declaration_frame(
+      ast.empty_decl(),
+      next - current.cursor
+    )
+  )
+}
+
 fn parse_text_operator_tail(
   current: combinator.ParseState,
   source: textlex.TextTokenStream
@@ -6501,24 +6897,41 @@ fn parse_text_value_body(
       equal_index,
       textlex.PunctEqual
     ),
-    true => declaration_from_named_annotated_result(
-      text_named_annotated_decl_context(
-        context.kind,
-        context.name,
-        context.start,
-        context.limit,
-        annotation,
-        context.seed
+    true => text_declaration_end_from_index(
+      context.source,
+      context.start
+    ) \next -> text_named_annotated_decl_context(
+      context.kind,
+      context.name,
+      context.start,
+      context.limit,
+      annotation,
+      context.seed
+    ) \decl_context -> value_expression_limit_before_end(
+      context.source,
+      next
+    ) \expr_limit -> match value_initializer_should_parse(
+      context.source,
+      equal_index + 1,
+      expr_limit
+    ) {
+      false => declaration_from_named_annotated_missing_expr(
+        decl_context,
+        next
       ),
-      parse_text_expression(
-        combinator.state(
-          equal_index + 1,
-          value_expression_limit(equal_index)
-        ),
-        context.source,
-        context.seed
-      )
-    ),
+      true => declaration_from_named_annotated_expr_result(
+        decl_context,
+        next,
+        parse_text_expression(
+          combinator.state(
+            equal_index + 1,
+            expr_limit
+          ),
+          context.source,
+          context.seed
+        )
+      ),
+    },
   }
 }
 
@@ -6629,6 +7042,45 @@ fn is_text_source_import_destructured_start(
   let has_close = punctuation_matches(source, equal_index + 5, textlex.PunctRightParen);
   let has_import_call = has_import && has_open && has_string && has_close;
   starts_with_const && has_open_list && has_close_list && has_equal && has_import_call
+}
+
+fn text_external_import_equal_index(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  text_find_top_level_punctuation_score(
+    source,
+    index + 2,
+    textlex.length(source),
+    0,
+    1
+  )
+}
+
+fn is_text_external_import_start(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> bool {
+  let starts_with_const = text_token_weight_matches(source, index, 19);
+  match starts_with_const {
+    false => false,
+    true => text_external_import_equal_index(source, index) \equal -> match
+      equal < textlex.length(source) {
+      false => false,
+      true => match punctuation_matches(source, equal + 1, textlex.PunctOther) {
+        false => false,
+        true => match textlex.text_hash_at(source, equal + 1) ==
+          text_static_marker_hash() {
+          false => false,
+          true => text_token_weight_matches(
+            source,
+            equal + 2,
+            token.TokenKindWeight::External
+          ),
+        },
+      },
+    },
+  }
 }
 
 fn text_source_import_equal_index(
@@ -6863,11 +7315,14 @@ fn text_declaration_start(
 ) -> TextDeclarationStart {
   match text_pub_function_declaration_start_matches(source, index) {
     true => TextPubFunctionDeclaration,
-    false => match is_text_type_assert_declaration_start(source, index) {
-      true => TextTypeAssertDeclaration,
-      false => match is_text_operator_declaration_start(source, index) {
-        true => TextOperatorDeclaration,
-        false => text_regular_declaration_start(source, index),
+    false => match is_text_external_import_start(source, index) {
+      true => TextExternalImportDeclaration,
+      false => match is_text_type_assert_declaration_start(source, index) {
+        true => TextTypeAssertDeclaration,
+        false => match is_text_operator_declaration_start(source, index) {
+          true => TextOperatorDeclaration,
+          false => text_regular_declaration_start(source, index),
+        },
       },
     },
   }
@@ -6946,6 +7401,7 @@ fn text_declaration_start_width(
   match start {
     TextPubFunctionDeclaration => 2,
     TextRegularDeclaration(kind) => regular_text_declaration_start_width(kind, source, index),
+    TextExternalImportDeclaration => 1,
     TextOperatorDeclaration => 1,
     TextTypeAssertDeclaration => text_type_assert_declaration_start_width(source, index),
     _ => 1,
@@ -7318,6 +7774,25 @@ fn text_source_import_declaration_end_from_index(
   )
 }
 
+fn text_external_import_declaration_end_from_index(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> i32 {
+  text_declaration_end_index(
+    source,
+    textlex.length(source),
+    text_token_line(source, index),
+    TextDeclarationScan {
+      index: index + 1,
+      brace_depth: 0,
+      paren_depth: 0,
+      entered_brace: false,
+      done: false,
+      result: textlex.length(source),
+    }
+  )
+}
+
 fn text_declaration_uses_braced_end(
   start: TextDeclarationStart,
   source: textlex.TextTokenStream,
@@ -7342,6 +7817,10 @@ fn text_declaration_end_from_index(
   let width = text_declaration_start_width(start, source, index);
   match start {
     TextSourceImportDeclaration => text_source_import_declaration_end_from_index(
+      source,
+      index
+    ),
+    TextExternalImportDeclaration => text_external_import_declaration_end_from_index(
       source,
       index
     ),
@@ -7398,9 +7877,12 @@ fn is_text_non_value_declaration_start(
   source: textlex.TextTokenStream,
   index: i32
 ) -> bool {
-  match is_text_type_assert_declaration_start(source, index) {
+  match is_text_external_import_start(source, index) {
     true => true,
-    false => is_text_operator_declaration_start(source, index),
+    false => match is_text_type_assert_declaration_start(source, index) {
+      true => true,
+      false => is_text_operator_declaration_start(source, index),
+    },
   }
 }
 
@@ -7959,6 +8441,40 @@ fn text_declaration_simple_body_type_check_signature_total_reader(
   }
 }
 
+fn text_named_type_environment_has_later_duplicate_scan(
+  source: textlex.TextTokenStream,
+  scan: TextNamedTypeLookupScan
+) -> bool {
+  match scan.index >= scan.limit {
+    true => false,
+    false => match text_named_lookup_scan_type_matches(source, scan) {
+      true => true,
+      false => text_named_type_environment_has_later_duplicate_scan(
+        source,
+        text_named_lookup_scan_next(source, scan)
+      ),
+    },
+  }
+}
+
+fn text_named_type_environment_has_later_duplicate(
+  source: textlex.TextTokenStream,
+  index: i32,
+  name_hash: i32
+) -> bool {
+  text_named_type_environment_has_later_duplicate_scan(
+    source,
+    TextNamedTypeLookupScan {
+      index: index + 1,
+      limit: textlex.length(source),
+      brace_depth: 0,
+      paren_depth: 0,
+      target_hash: name_hash,
+      depth: 0,
+    }
+  )
+}
+
 fn text_declaration_named_type_environment_signature_total_reader(
   total: i32
 ) -> monad.Reader(TextValueBodyContext, i32) {
@@ -7968,17 +8484,25 @@ fn text_declaration_named_type_environment_signature_total_reader(
     decl <- monad.Reader::asks(text_value_body_context_decl);
     let kind_tag = text_declaration_kind_tag(source, index, decl);
     match text_declaration_kind_is_type(kind_tag) {
-      true => pure(text_signature_mix(
-        total,
-        text_named_type_environment_hash(
-          text_declaration_name_hash(source, index, decl),
-          text_type_declaration_environment_type_class_tag(
-            source,
-            index,
-            kind_tag
-          )
-        )
-      )),
+      true => text_declaration_name_hash(source, index, decl) \name_hash ->
+        match text_named_type_environment_has_later_duplicate(
+          source,
+          index,
+          name_hash
+        ) {
+          true => pure(total),
+          false => pure(text_signature_mix(
+            total,
+            text_named_type_environment_hash(
+              name_hash,
+              text_type_declaration_environment_type_class_tag(
+                source,
+                index,
+                kind_tag
+              )
+            )
+          )),
+        },
       false => pure(total),
     }
   }
@@ -7994,18 +8518,26 @@ fn text_declaration_direct_import_type_environment_signature_total_reader(
     decl <- monad.Reader::asks(text_value_body_context_decl);
     let kind_tag = text_declaration_kind_tag(source, index, decl);
     match text_declaration_kind_is_type(kind_tag) {
-      true => pure(text_signature_mix(
-        total,
-        text_direct_import_type_environment_hash(
-          alias_hash,
-          text_declaration_name_hash(source, index, decl),
-          text_type_declaration_environment_type_class_tag(
-            source,
-            index,
-            kind_tag
-          )
-        )
-      )),
+      true => text_declaration_name_hash(source, index, decl) \name_hash ->
+        match text_named_type_environment_has_later_duplicate(
+          source,
+          index,
+          name_hash
+        ) {
+          true => pure(total),
+          false => pure(text_signature_mix(
+            total,
+            text_direct_import_type_environment_hash(
+              alias_hash,
+              name_hash,
+              text_type_declaration_environment_type_class_tag(
+                source,
+                index,
+                kind_tag
+              )
+            )
+          )),
+        },
       false => pure(total),
     }
   }
@@ -8314,10 +8846,16 @@ fn text_declaration_summary_total(
   context: TextSummaryContext,
   total: i32
 ) -> i32 {
-  monad.Reader::run(
-    text_declaration_summary_total_reader(context, total),
-    text_value_body_context(source, index, decl)
-  )
+  match is_text_external_import_start(source, index) {
+    true => match context.summary_kind {
+      textmodel.SummaryKind::Declarations => total + 1,
+      _ => total,
+    },
+    false => monad.Reader::run(
+      text_declaration_summary_total_reader(context, total),
+      text_value_body_context(source, index, decl)
+    ),
+  }
 }
 
 fn text_declaration_summary_total_for_slice(
@@ -8526,6 +9064,10 @@ fn text_declaration_kind_source_import_tag() -> i32 {
   5
 }
 
+fn text_declaration_kind_external_import_tag() -> i32 {
+  6
+}
+
 fn text_declaration_kind_is_function(kind_tag: i32) -> bool {
   kind_tag == text_declaration_kind_function_tag()
 }
@@ -8592,13 +9134,16 @@ fn text_declaration_kind_tag(
   index: i32,
   decl: ast.Decl
 ) -> i32 {
-  match is_text_type_assert_declaration_start(source, index) {
-    true => text_declaration_kind_const_tag(),
-    false => match is_text_operator_declaration_start(source, index) {
+  match is_text_external_import_start(source, index) {
+    true => text_declaration_kind_external_import_tag(),
+    false => match is_text_type_assert_declaration_start(source, index) {
       true => text_declaration_kind_const_tag(),
-      false => match is_text_source_import_start(source, index) {
-        true => text_declaration_kind_source_import_tag(),
-        false => text_regular_declaration_kind_tag(source, index, decl),
+      false => match is_text_operator_declaration_start(source, index) {
+        true => text_declaration_kind_const_tag(),
+        false => match is_text_source_import_start(source, index) {
+          true => text_declaration_kind_source_import_tag(),
+          false => text_regular_declaration_kind_tag(source, index, decl),
+        },
       },
     },
   }
@@ -8901,6 +9446,35 @@ fn text_annotation_type_class_tag_from_hash(value_hash: i32) -> i32 {
   }
 }
 
+fn text_literal_type_token_has_marker(
+  source: textlex.TextTokenStream,
+  index: i32
+) -> bool {
+  let token_span = textlex.token_at(source, index).span;
+  textlex.source_code_at(source, token_span.start) == textlex.TextCharCode::Hash
+}
+
+fn text_annotation_literal_type_class_tag_for_token(
+  source: textlex.TextTokenStream,
+  index: i32,
+  limit: i32
+) -> i32 {
+  match textlex.token_at(source, index).kind {
+    BoolLiteral => text_type_class_bool_tag(),
+    NumberLiteral => text_type_class_i32_tag(),
+    StringLiteral => text_type_class_i32_tag(),
+    CharLiteral => text_type_class_i32_tag(),
+    MultilineLiteral => text_type_class_i32_tag(),
+    LiteralType if text_literal_type_token_has_marker(source, index) =>
+      text_type_class_i32_tag(),
+    _ => match textlex.punctuation_at(source, index) {
+      PunctOther if text_signed_number_start_matches(source, index, limit) =>
+        text_type_class_i32_tag(),
+      _ => text_type_class_unknown_tag(),
+    },
+  }
+}
+
 fn text_annotation_type_class_tag_between(
   source: textlex.TextTokenStream,
   index: i32,
@@ -8914,9 +9488,16 @@ fn text_annotation_type_class_tag_between(
         index + 1,
         limit
       ),
-      false => text_annotation_type_class_tag_from_hash(
-        textlex.text_hash_at(source, index)
-      ),
+      false => text_annotation_literal_type_class_tag_for_token(
+        source,
+        index,
+        limit
+      ) \literal_type -> match literal_type == text_type_class_unknown_tag() {
+        false => literal_type,
+        true => text_annotation_type_class_tag_from_hash(
+          textlex.text_hash_at(source, index)
+        ),
+      },
     },
   }
 }
@@ -9433,13 +10014,18 @@ fn text_expression_literal_index_head_hash(
           NumberLiteral => match textlex.punctuation_at(source, close) {
             PunctOther => match textlex.text_hash_at(source, close) ==
               text_right_bracket_hash() {
-              true => text_hash_append_token(
+              true => text_expression_literal_index_head_hash(
                 source,
                 close,
+                limit,
                 text_hash_append_token(
                   source,
-                  value,
-                  text_hash_append_token(source, open, head_hash)
+                  close,
+                  text_hash_append_token(
+                    source,
+                    value,
+                    text_hash_append_token(source, open, head_hash)
+                  )
                 )
               ),
               false => head_hash,
@@ -9497,11 +10083,24 @@ fn text_expression_qualified_head_hash_after_segment(
       limit,
       text_signature_mix(
         text_signature_mix(total, step.selector_score),
-        textlex.text_hash_at(source, step.segment_index)
+        text_expression_head_segment_hash(source, step.segment_index, limit)
       )
     ),
     false => total,
   }
+}
+
+fn text_expression_head_segment_hash(
+  source: textlex.TextTokenStream,
+  segment_index: i32,
+  limit: i32
+) -> i32 {
+  text_expression_literal_index_head_hash(
+    source,
+    segment_index,
+    limit,
+    textlex.text_hash_at(source, segment_index)
+  )
 }
 
 fn text_expression_root_qualified_head_hash_between(
@@ -9529,7 +10128,7 @@ fn text_expression_root_qualified_head_hash_between(
         source,
         start,
         limit,
-        textlex.text_hash_at(source, start)
+        text_expression_head_segment_hash(source, start, limit)
       ),
     },
     false => 0,
@@ -9713,19 +10312,90 @@ fn text_root_slot_open_after_head(
   }
 }
 
+fn text_find_top_level_value_punctuation_score(
+  source: textlex.TextTokenStream,
+  index: i32,
+  limit: i32,
+  paren_depth: i32,
+  brace_depth: i32,
+  bracket_depth: i32,
+  expected_score: i32
+) -> i32 {
+  match index >= limit {
+    true => limit,
+    false => textlex.punctuation_at(source, index) \punctuation -> match
+      paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 &&
+        textlex.punctuation_score(punctuation) == expected_score {
+      true => index,
+      false => rec(
+        source,
+        index + 1,
+        limit,
+        text_argument_scan_next_paren_depth(punctuation, paren_depth),
+        text_argument_scan_next_brace_depth(punctuation, brace_depth),
+        text_argument_scan_bracket_delta(source, index, bracket_depth),
+        expected_score
+      ),
+    },
+  }
+}
+
 fn text_bracket_root_is_repeat(
   source: textlex.TextTokenStream,
   open_index: i32,
   close_index: i32
 ) -> bool {
-  let semicolon = text_find_top_level_punctuation_score(
+  text_bracket_root_repeat_semicolon(source, open_index, close_index) <
+    close_index
+}
+
+fn text_bracket_root_repeat_semicolon(
+  source: textlex.TextTokenStream,
+  open_index: i32,
+  close_index: i32
+) -> i32 {
+  text_find_top_level_value_punctuation_score(
     source,
     open_index + 1,
     close_index,
     0,
+    0,
+    0,
     textlex.punctuation_score(textlex.PunctSemicolon)
-  );
-  semicolon < close_index
+  )
+}
+
+fn text_bracket_root_repeat_count(
+  source: textlex.TextTokenStream,
+  open_index: i32,
+  close_index: i32
+) -> i32 {
+  let semicolon = text_bracket_root_repeat_semicolon(source, open_index, close_index);
+  match semicolon < close_index {
+    false => 0,
+    true => text_expression_start_skip_trivia(
+      source,
+      semicolon + 1,
+      close_index
+    ) \count_index -> match count_index < close_index {
+      false => 1,
+      true => match textlex.token_at(source, count_index).kind {
+        NumberLiteral => textlex.decimal_token_value(source, count_index),
+        _ => 1,
+      },
+    },
+  }
+}
+
+fn text_bracket_root_repeat_slot_count(
+  source: textlex.TextTokenStream,
+  open_index: i32,
+  close_index: i32
+) -> i32 {
+  match text_bracket_root_is_repeat(source, open_index, close_index) {
+    true => text_bracket_root_repeat_count(source, open_index, close_index),
+    false => text_slot_count(source, open_index, close_index),
+  }
 }
 
 fn text_expression_root_slot_count_between(
@@ -9756,7 +10426,7 @@ fn text_expression_root_slot_count_between(
           0
         ) \close_index -> match close_index < limit {
           true => match text_bracket_root_is_repeat(source, start, close_index) {
-            true => 0,
+            true => text_bracket_root_repeat_slot_count(source, start, close_index),
             false => text_slot_count(source, start, close_index),
           },
           false => 0,
@@ -12960,7 +13630,19 @@ fn text_root_literal_type_class(
         true => text_type_class_bool_tag(),
         false => text_type_class_unknown_tag(),
       },
-      false => text_type_class_unknown_tag(),
+      false => match root_kind == text_expression_root_text_tag() {
+        true => match root_type == text_type_class_i32_tag() {
+          true => text_type_class_i32_tag(),
+          false => text_type_class_unknown_tag(),
+        },
+        false => match root_kind == text_expression_root_literal_type_tag() {
+          true => match root_type == text_type_class_i32_tag() {
+            true => text_type_class_i32_tag(),
+            false => text_type_class_unknown_tag(),
+          },
+          false => text_type_class_unknown_tag(),
+        },
+      },
     },
   }
 }
@@ -13406,17 +14088,24 @@ fn text_bool_branch_segments_between(
   let value_start = text_expression_start_skip_trivia(source, start, limit);
   match value_start >= limit {
     true => text_bool_branch_segments_missing(limit),
-    false => match textlex.token_at(source, value_start).kind {
-      IfKw => text_bool_if_segments_between(source, value_start, limit),
-      MatchKw => match text_match_first_pattern_is_bool_literal(
-        source,
-        value_start,
-        limit
-      ) {
-        true => text_bool_match_segments_between(source, value_start, limit),
-        false => text_bool_branch_segments_missing(limit),
+    false => match text_root_pipe_bind_index_from_start(
+      source,
+      value_start,
+      limit
+    ) < limit {
+      true => text_bool_branch_segments_missing(limit),
+      false => match textlex.token_at(source, value_start).kind {
+        IfKw => text_bool_if_segments_between(source, value_start, limit),
+        MatchKw => match text_match_first_pattern_is_bool_literal(
+          source,
+          value_start,
+          limit
+        ) {
+          true => text_bool_match_segments_between(source, value_start, limit),
+          false => text_bool_branch_segments_missing(limit),
+        },
+        _ => text_bool_branch_segments_missing(limit),
       },
-      _ => text_bool_branch_segments_missing(limit),
     },
   }
 }
@@ -14353,6 +15042,48 @@ fn text_root_child_scan_append_value(
   )
 }
 
+fn text_root_child_scan_append_repeat_value(
+  source: textlex.TextTokenStream,
+  scan: TextRootChildScan,
+  value_start: i32,
+  value_limit: i32,
+  remaining: i32
+) -> TextRootChildScan {
+  match remaining <= 0 {
+    true => scan,
+    false => rec(
+      source,
+      text_root_child_scan_append_value(source, scan, value_start, value_limit),
+      value_start,
+      value_limit,
+      remaining - 1
+    ),
+  }
+}
+
+fn text_bracket_root_repeat_child_scan(
+  source: textlex.TextTokenStream,
+  open_index: i32,
+  close_index: i32,
+  scan: TextRootChildScan
+) -> TextRootChildScan {
+  let semicolon = text_bracket_root_repeat_semicolon(
+    source,
+    open_index,
+    close_index
+  );
+  match semicolon < close_index {
+    false => scan,
+    true => text_root_child_scan_append_repeat_value(
+      source,
+      scan,
+      open_index + 1,
+      semicolon,
+      text_bracket_root_repeat_count(source, open_index, close_index)
+    ),
+  }
+}
+
 fn text_match_values_child_scan_between(
   source: textlex.TextTokenStream,
   index: i32,
@@ -14676,7 +15407,12 @@ fn text_expression_root_child_scan_between(
                 start,
                 close_index
               ) {
-                true => empty,
+                true => text_bracket_root_repeat_child_scan(
+                  source,
+                  start,
+                  close_index,
+                  empty
+                ),
                 false => text_root_child_scan(
                   source,
                   start,
@@ -14777,6 +15513,74 @@ fn text_expression_root_descendant_signature_between(
 ) -> i32 {
   text_expression_root_child_scan_between(source, index, limit, 0, 0, total)
     .total_descendant_signature
+}
+
+fn text_root_child_record_append_repeat_value(
+  source: textlex.TextTokenStream,
+  value_start: i32,
+  value_limit: i32,
+  parent_kind_tag: i32,
+  parent_name_hash: i32,
+  child_index: i32,
+  total: i32,
+  remaining: i32
+) -> TextRootChildRecordState {
+  match remaining <= 0 {
+    true => TextRootChildRecordState {
+      child_index: child_index,
+      total: total,
+    },
+    false => text_root_child_record_fact_signature(
+      source,
+      value_start,
+      value_limit,
+      parent_kind_tag,
+      parent_name_hash,
+      child_index,
+      text_root_child_slot_role_tag()
+    ) \fact_signature -> rec(
+      source,
+      value_start,
+      value_limit,
+      parent_kind_tag,
+      parent_name_hash,
+      child_index + 1,
+      textmodel.signature_mix(total, fact_signature),
+      remaining - 1
+    ),
+  }
+}
+
+fn text_bracket_root_repeat_child_record_state(
+  source: textlex.TextTokenStream,
+  open_index: i32,
+  close_index: i32,
+  parent_kind_tag: i32,
+  parent_name_hash: i32,
+  child_index: i32,
+  total: i32
+) -> TextRootChildRecordState {
+  let semicolon = text_bracket_root_repeat_semicolon(
+    source,
+    open_index,
+    close_index
+  );
+  match semicolon < close_index {
+    false => TextRootChildRecordState {
+      child_index: child_index,
+      total: total,
+    },
+    true => text_root_child_record_append_repeat_value(
+      source,
+      open_index + 1,
+      semicolon,
+      parent_kind_tag,
+      parent_name_hash,
+      child_index,
+      total,
+      text_bracket_root_repeat_count(source, open_index, close_index)
+    ),
+  }
 }
 
 fn text_expression_root_child_record_signature_between(
@@ -14890,10 +15694,15 @@ fn text_expression_root_child_record_signature_between_state(
                 start,
                 close_index
               ) {
-                true => TextRootChildRecordState {
-                  child_index: child_index,
-                  total: total,
-                },
+                true => text_bracket_root_repeat_child_record_state(
+                  source,
+                  start,
+                  close_index,
+                  parent_kind_tag,
+                  parent_name_hash,
+                  child_index,
+                  total
+                ),
                 false => text_root_child_record_state_in_delimiters(
                   source,
                   start,
@@ -15464,6 +16273,16 @@ fn text_expression_root_type_class_tag_between(
         text_type_class_bool_tag(),
       NumberLiteral if text_scalar_literal_is_standalone(source, start, limit) =>
         text_type_class_i32_tag(),
+      StringLiteral if text_scalar_literal_is_standalone(source, start, limit) =>
+        text_type_class_i32_tag(),
+      CharLiteral if text_scalar_literal_is_standalone(source, start, limit) =>
+        text_type_class_i32_tag(),
+      MultilineLiteral if text_scalar_literal_is_standalone(source, start, limit) =>
+        text_type_class_i32_tag(),
+      LiteralType
+        if text_literal_type_token_has_marker(source, start)
+          && text_scalar_literal_is_standalone(source, start, limit) =>
+        text_type_class_i32_tag(),
       _ => match textlex.punctuation_at(source, start) {
         PunctOther if text_signed_number_start_matches(source, start, limit) =>
           match text_scalar_literal_is_standalone(source, start + 1, limit) {
@@ -15708,11 +16527,18 @@ fn text_function_scalar_operator_operand_type_class_unwrapped(
             start,
             limit
           ) \call_arg_count -> match call_arg_count == text_no_root_call_arg_count() {
-            true => text_function_param_resolved_type_class_for_name_hash(
+            true => match text_expression_root_is_bare_identifier_between(
               source,
-              function_index,
-              target_hash
-            ),
+              start,
+              limit
+            ) {
+              true => text_function_param_resolved_type_class_for_name_hash(
+                source,
+                function_index,
+                target_hash
+              ),
+              false => text_type_class_unknown_tag(),
+            },
             false => text_root_call_return_type_class_for_hash_between(
               source,
               start,
@@ -15787,21 +16613,28 @@ fn text_function_body_scalar_operator_operand_type_class_unwrapped(
       function_index,
       start,
       limit
-    ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
-      false => branch_type,
-      true => match root_kind == text_expression_root_identifier_tag() {
-        false => text_type_class_unknown_tag(),
-        true => text_expression_root_identifier_hash_between(
+      ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
+        false => branch_type,
+        true => match text_expression_root_is_bare_identifier_between(
           source,
           start,
           limit
-        ) \target_hash -> text_function_local_let_resolved_type_class_for_name_hash(
-          source,
-          function_index,
-          target_hash
-        ),
+        ) {
+          false => text_type_class_unknown_tag(),
+          true => match root_kind == text_expression_root_identifier_tag() {
+            false => text_type_class_unknown_tag(),
+            true => text_expression_root_identifier_hash_between(
+              source,
+              start,
+              limit
+            ) \target_hash -> text_function_local_let_resolved_type_class_for_name_hash(
+              source,
+              function_index,
+              target_hash
+            ),
+          },
+        },
       },
-    },
   }
 }
 
@@ -16816,15 +17649,13 @@ fn text_root_call_head_limit(
 
 fn text_root_call_has_no_return_target_blockers(
   operator_count: i32,
-  selector_count: i32,
   field_count: i32,
   pipe_bind_count: i32
 ) -> bool {
   let no_operator = operator_count == 0;
-  let no_selector = selector_count == 0;
   let no_field = field_count == 0;
   let no_pipe_bind = pipe_bind_count == 0;
-  no_operator && no_selector && no_field && no_pipe_bind
+  no_operator && no_field && no_pipe_bind
 }
 
 fn text_root_call_has_return_target(
@@ -16865,13 +17696,34 @@ fn text_root_call_has_return_target(
   );
   let has_no_blockers = text_root_call_has_no_return_target_blockers(
     operator_count,
-    selector_count,
     field_count,
     pipe_bind_count
   );
   match has_no_blockers {
     true => call_arg_count != text_no_root_call_arg_count(),
     false => false,
+  }
+}
+
+fn text_root_call_return_target_hash_between(
+  source: textlex.TextTokenStream,
+  index: i32,
+  limit: i32,
+  fallback_hash: i32
+) -> i32 {
+  let head_limit = text_root_call_head_limit(source, index, limit);
+  match text_expression_root_head_selector_count_between(
+    source,
+    index,
+    head_limit
+  ) == 0 {
+    true => fallback_hash,
+    false => text_token_text_hash_between(
+      source,
+      index,
+      head_limit,
+      0
+    ),
   }
 }
 
@@ -16882,7 +17734,15 @@ fn text_root_call_return_type_class_for_hash_between(
   target_hash: i32
 ) -> i32 {
   match text_root_call_has_return_target(source, index, limit) {
-    true => text_function_return_type_class_for_hash(source, target_hash),
+    true => text_function_return_type_class_for_hash(
+      source,
+      text_root_call_return_target_hash_between(
+        source,
+        index,
+        limit,
+        target_hash
+      )
+    ),
     false => text_type_class_unknown_tag(),
   }
 }
@@ -17417,7 +18277,15 @@ fn TextResolutionEnv::root_call_return_type_class_for_hash_between(
   target_hash: i32
 ) -> i32 {
   match text_root_call_has_return_target(source, index, limit) {
-    true => TextResolutionEnv::lookup_return(env, target_hash),
+    true => TextResolutionEnv::lookup_return(
+      env,
+      text_root_call_return_target_hash_between(
+        source,
+        index,
+        limit,
+        target_hash
+      )
+    ),
     false => text_type_class_unknown_tag(),
   }
 }
@@ -17495,11 +18363,18 @@ fn TextResolutionEnv::function_scalar_operator_operand_type_class_unwrapped(
             start,
             limit
           ) \call_arg_count -> match call_arg_count == text_no_root_call_arg_count() {
-            true => text_function_param_resolved_type_class_for_name_hash(
+            true => match text_expression_root_is_bare_identifier_between(
               source,
-              function_index,
-              target_hash
-            ),
+              start,
+              limit
+            ) {
+              true => text_function_param_resolved_type_class_for_name_hash(
+                source,
+                function_index,
+                target_hash
+              ),
+              false => text_type_class_unknown_tag(),
+            },
             false => TextResolutionEnv::root_call_return_type_class_for_hash_between(
               env,
               source,
@@ -17646,20 +18521,27 @@ fn TextResolutionEnv::function_body_scalar_operator_operand_type_class_unwrapped
       function_index,
       start,
       limit
-    ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
+      ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
       false => branch_type,
-      true => match root_kind == text_expression_root_identifier_tag() {
+      true => match text_expression_root_is_bare_identifier_between(
+        source,
+        start,
+        limit
+      ) {
         false => text_type_class_unknown_tag(),
-        true => text_expression_root_identifier_hash_between(
-          source,
-          start,
-          limit
-        ) \target_hash -> TextResolutionEnv::function_local_let_resolved_type_class_for_name_hash(
-          env,
-          source,
-          function_index,
-          target_hash
-        ),
+        true => match root_kind == text_expression_root_identifier_tag() {
+          false => text_type_class_unknown_tag(),
+          true => text_expression_root_identifier_hash_between(
+            source,
+            start,
+            limit
+          ) \target_hash -> TextResolutionEnv::function_local_let_resolved_type_class_for_name_hash(
+            env,
+            source,
+            function_index,
+            target_hash
+          ),
+        },
       },
     },
   }
@@ -18098,17 +18980,19 @@ fn TextResolutionEnv::declaration_resolved_value_body_type_signature_total(
   decl: ast.Decl,
   total: i32
 ) -> i32 {
-  let kind_tag = text_declaration_kind_tag(source, index, decl);
-  let type_class = TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
-    env,
-    source,
-    index,
-    decl
-  );
-  text_signature_mix(
-    total,
-    text_value_body_type_class_hash(kind_tag, type_class)
-  )
+  match is_text_external_import_start(source, index) {
+    true => total,
+    false => text_declaration_kind_tag(source, index, decl) \kind_tag ->
+      TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+        env,
+        source,
+        index,
+        decl
+      ) \type_class -> text_signature_mix(
+        total,
+        text_value_body_type_class_hash(kind_tag, type_class)
+      ),
+  }
 }
 
 fn TextResolutionEnv::declaration_resolved_value_body_abi_signature_total(
@@ -18118,20 +19002,22 @@ fn TextResolutionEnv::declaration_resolved_value_body_abi_signature_total(
   decl: ast.Decl,
   total: i32
 ) -> i32 {
-  let kind_tag = text_declaration_kind_tag(source, index, decl);
-  let type_class = TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
-    env,
-    source,
-    index,
-    decl
-  );
-  text_signature_mix(
-    total,
-    text_value_body_abi_class_hash(
-      kind_tag,
-      text_abi_class_tag_for_type_class(type_class)
-    )
-  )
+  match is_text_external_import_start(source, index) {
+    true => total,
+    false => text_declaration_kind_tag(source, index, decl) \kind_tag ->
+      TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+        env,
+        source,
+        index,
+        decl
+      ) \type_class -> text_signature_mix(
+        total,
+        text_value_body_abi_class_hash(
+          kind_tag,
+          text_abi_class_tag_for_type_class(type_class)
+        )
+      ),
+  }
 }
 
 fn TextResolutionEnv::declaration_resolved_simple_body_type_check_signature_total(
@@ -18141,27 +19027,28 @@ fn TextResolutionEnv::declaration_resolved_simple_body_type_check_signature_tota
   decl: ast.Decl,
   total: i32
 ) -> i32 {
-  let kind_tag = text_declaration_kind_tag(source, index, decl);
-  let expected = text_declaration_resolved_expected_body_type_class_tag(
-    source,
-    index,
-    decl
-  );
-  let actual = TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
-    env,
-    source,
-    index,
-    decl
-  );
-  text_signature_mix(
-    total,
-    text_simple_body_type_check_hash(
-      kind_tag,
-      expected,
-      actual,
-      text_simple_body_type_check_status(expected, actual)
-    )
-  )
+  match is_text_external_import_start(source, index) {
+    true => total,
+    false => text_declaration_kind_tag(source, index, decl) \kind_tag ->
+      text_declaration_resolved_expected_body_type_class_tag(
+        source,
+        index,
+        decl
+      ) \expected -> TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+        env,
+        source,
+        index,
+        decl
+      ) \actual -> text_signature_mix(
+        total,
+        text_simple_body_type_check_hash(
+          kind_tag,
+          expected,
+          actual,
+          text_simple_body_type_check_status(expected, actual)
+        )
+      ),
+  }
 }
 
 fn TextResolutionEnv::resolved_value_body_signature_loop(
@@ -19229,19 +20116,26 @@ fn text_direct_import_annotation_resolved_type_class_tag_from_index(
   limit: i32,
   alias_hash: i32
 ) -> i32 {
-  let imported = text_imported_qualified_type_class_tag_at(
+  let literal_type = text_annotation_literal_type_class_tag_for_token(
     source,
-    import_source,
     index,
-    limit,
-    alias_hash
+    limit
   );
-  match imported == text_type_class_unknown_tag() {
-    false => imported,
-    true => text_annotation_resolved_type_class_tag_from_hash(
+  match literal_type == text_type_class_unknown_tag() {
+    false => literal_type,
+    true => text_imported_qualified_type_class_tag_at(
       source,
-      textlex.text_hash_at(source, index)
-    ),
+      import_source,
+      index,
+      limit,
+      alias_hash
+    ) \imported -> match imported == text_type_class_unknown_tag() {
+      false => imported,
+      true => text_annotation_resolved_type_class_tag_from_hash(
+        source,
+        textlex.text_hash_at(source, index)
+      ),
+    },
   }
 }
 
@@ -19775,11 +20669,18 @@ fn text_function_direct_import_scalar_operator_operand_type_class_unwrapped(
             start,
             limit
           ) \call_arg_count -> match call_arg_count == text_no_root_call_arg_count() {
-            true => text_function_param_direct_import_resolved_type_class_for_name_hash(
-              context,
-              function_index,
-              target_hash
-            ),
+            true => match text_expression_root_is_bare_identifier_between(
+              context.source,
+              start,
+              limit
+            ) {
+              true => text_function_param_direct_import_resolved_type_class_for_name_hash(
+                context,
+                function_index,
+                target_hash
+              ),
+              false => text_type_class_unknown_tag(),
+            },
             false => text_root_call_direct_import_return_type_class_for_hash_between(
               context,
               start,
@@ -19854,19 +20755,26 @@ fn text_function_body_direct_import_scalar_operator_operand_type_class_unwrapped
       function_index,
       start,
       limit
-    ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
+      ) \branch_type -> match branch_type == text_type_class_unknown_tag() {
       false => branch_type,
-      true => match root_kind == text_expression_root_identifier_tag() {
+      true => match text_expression_root_is_bare_identifier_between(
+        context.source,
+        start,
+        limit
+      ) {
         false => text_type_class_unknown_tag(),
-        true => text_expression_root_identifier_hash_between(
-          context.source,
-          start,
-          limit
-        ) \target_hash -> text_function_local_let_direct_import_type_class_for_name_hash(
-          context,
-          function_index,
-          target_hash
-        ),
+        true => match root_kind == text_expression_root_identifier_tag() {
+          false => text_type_class_unknown_tag(),
+          true => text_expression_root_identifier_hash_between(
+            context.source,
+            start,
+            limit
+          ) \target_hash -> text_function_local_let_direct_import_type_class_for_name_hash(
+            context,
+            function_index,
+            target_hash
+          ),
+        },
       },
     },
   }
@@ -20279,7 +21187,12 @@ fn text_root_call_direct_import_return_type_class_for_hash_between(
   match text_root_call_has_return_target(context.source, index, limit) {
     true => text_function_return_direct_import_type_class_for_hash(
       context,
-      target_hash
+      text_root_call_return_target_hash_between(
+        context.source,
+        index,
+        limit,
+        target_hash
+      )
     ),
     false => text_type_class_unknown_tag(),
   }
@@ -20496,20 +21409,32 @@ fn text_declaration_direct_import_resolved_value_body_signature_total_reader(
     import_context <- monad.Reader::asks(text_direct_import_decl_import_context);
     index <- monad.Reader::asks(text_direct_import_decl_index);
     decl <- monad.Reader::asks(text_direct_import_decl_decl);
-    kind_tag <- text_direct_import_decl_kind_tag_reader();
-    let type_class = text_declaration_direct_import_resolved_value_body_type_class_tag(
-      import_context,
-      index,
-      decl
-    );
-    let fact = match textmodel.import_resolution_mode_is_abi(import_context.mode) {
-      true => text_value_body_abi_class_hash(
-        kind_tag,
-        text_abi_class_tag_for_type_class(type_class)
-      ),
-      false => text_value_body_type_class_hash(kind_tag, type_class),
-    };
-    pure(text_signature_mix(total, fact))
+    pure(match is_text_external_import_start(import_context.source, index) {
+      true => total,
+      false => text_declaration_kind_tag(
+        import_context.source,
+        index,
+        decl
+      ) \kind_tag -> text_declaration_direct_import_resolved_value_body_type_class_tag(
+        import_context,
+        index,
+        decl
+      ) \type_class -> match textmodel.import_resolution_mode_is_abi(
+        import_context.mode
+      ) {
+        true => text_signature_mix(
+          total,
+          text_value_body_abi_class_hash(
+            kind_tag,
+            text_abi_class_tag_for_type_class(type_class)
+          )
+        ),
+        false => text_signature_mix(
+          total,
+          text_value_body_type_class_hash(kind_tag, type_class)
+        ),
+      },
+    })
   }
 }
 
@@ -20560,26 +21485,30 @@ fn text_declaration_direct_import_resolved_simple_body_type_check_total_reader(
     import_context <- monad.Reader::asks(text_direct_import_decl_import_context);
     index <- monad.Reader::asks(text_direct_import_decl_index);
     decl <- monad.Reader::asks(text_direct_import_decl_decl);
-    kind_tag <- text_direct_import_decl_kind_tag_reader();
-    let expected = text_declaration_direct_import_resolved_expected_body_type_class_tag(
-      import_context,
-      index,
-      decl
-    );
-    let actual = text_declaration_direct_import_resolved_value_body_type_class_tag(
-      import_context,
-      index,
-      decl
-    );
-    pure(text_signature_mix(
-      total,
-      text_simple_body_type_check_hash(
-        kind_tag,
-        expected,
-        actual,
-        text_simple_body_type_check_status(expected, actual)
-      )
-    ))
+    pure(match is_text_external_import_start(import_context.source, index) {
+      true => total,
+      false => text_declaration_kind_tag(
+        import_context.source,
+        index,
+        decl
+      ) \kind_tag -> text_declaration_direct_import_resolved_expected_body_type_class_tag(
+        import_context,
+        index,
+        decl
+      ) \expected -> text_declaration_direct_import_resolved_value_body_type_class_tag(
+        import_context,
+        index,
+        decl
+      ) \actual -> text_signature_mix(
+        total,
+        text_simple_body_type_check_hash(
+          kind_tag,
+          expected,
+          actual,
+          text_simple_body_type_check_status(expected, actual)
+        )
+      ),
+    })
   }
 }
 
@@ -20772,22 +21701,39 @@ fn text_named_type_class_for_hash_scan(
   source: textlex.TextTokenStream,
   scan: TextNamedTypeLookupScan
 ) -> i32 {
-  if scan.index >= scan.limit {
+  text_named_type_class_for_hash_scan_result(
+    source,
+    scan,
     text_type_class_unknown_tag()
+  )
+}
+
+fn text_named_type_class_for_hash_scan_result(
+  source: textlex.TextTokenStream,
+  scan: TextNamedTypeLookupScan,
+  result: i32
+) -> i32 {
+  if scan.index >= scan.limit {
+    result
   } else {
     match scan.depth <= 0 {
       true => text_type_class_unknown_tag(),
       false => match text_named_lookup_scan_type_matches(source, scan) {
-        true => text_named_type_class_result(
-          text_type_declaration_environment_type_class_tag(
-            source,
-            scan.index,
-            scan.depth - 1
+        true => text_named_type_class_for_hash_scan_result(
+          source,
+          text_named_lookup_scan_next(source, scan),
+          text_named_type_class_result(
+            text_type_declaration_environment_type_class_tag(
+              source,
+              scan.index,
+              scan.depth - 1
+            )
           )
         ),
-        false => text_named_type_class_for_hash_scan(
+        false => text_named_type_class_for_hash_scan_result(
           source,
-          text_named_lookup_scan_next(source, scan)
+          text_named_lookup_scan_next(source, scan),
+          result
         ),
       },
     }
@@ -20840,10 +21786,17 @@ fn text_annotation_resolved_type_class_tag_between(
         index + 1,
         limit
       ),
-      false => text_annotation_resolved_type_class_tag_from_hash(
+      false => text_annotation_literal_type_class_tag_for_token(
         source,
-        textlex.text_hash_at(source, index)
-      ),
+        index,
+        limit
+      ) \literal_type -> match literal_type == text_type_class_unknown_tag() {
+        false => literal_type,
+        true => text_annotation_resolved_type_class_tag_from_hash(
+          source,
+          textlex.text_hash_at(source, index)
+        ),
+      },
     },
   }
 }
@@ -20897,10 +21850,9 @@ fn text_declaration_resolved_type_class_tag(
     false => match text_declaration_kind_is_value_binding(kind_tag) {
       true => text_value_annotation_resolved_type_class_tag(source, index),
       false => match text_declaration_kind_is_type(kind_tag) {
-        true => text_type_declaration_environment_type_class_tag(
+        true => text_named_type_class_for_hash(
           source,
-          index,
-          kind_tag
+          text_declaration_name_hash(source, index, decl)
         ),
         false => text_type_class_unknown_tag(),
       },
@@ -21054,40 +22006,43 @@ fn text_direct_import_resolved_fold_total(
   decl: ast.Decl,
   total: i32
 ) -> i32 {
-  match fold {
-    DirectImportDeclaredSignature => text_direct_import_resolved_declared_signature_total(
-      context,
-      index,
-      decl,
-      total
-    ),
-    DirectImportSymbolEnvironment =>
-      text_declaration_direct_import_resolved_symbol_environment_total(
+  match is_text_external_import_start(context.source, index) {
+    true => total,
+    false => match fold {
+      DirectImportDeclaredSignature => text_direct_import_resolved_declared_signature_total(
         context,
         index,
         decl,
         total
       ),
-    DirectImportExportAbi => text_declaration_direct_import_resolved_export_abi_total(
-      context,
-      index,
-      decl,
-      total
-    ),
-    DirectImportValueBody =>
-      text_declaration_direct_import_resolved_value_body_signature_total(
+      DirectImportSymbolEnvironment =>
+        text_declaration_direct_import_resolved_symbol_environment_total(
+          context,
+          index,
+          decl,
+          total
+        ),
+      DirectImportExportAbi => text_declaration_direct_import_resolved_export_abi_total(
         context,
         index,
         decl,
         total
       ),
-    DirectImportSimpleBodyTypeCheck =>
-      text_declaration_direct_import_resolved_simple_body_type_check_total(
-        context,
-        index,
-        decl,
-        total
-      ),
+      DirectImportValueBody =>
+        text_declaration_direct_import_resolved_value_body_signature_total(
+          context,
+          index,
+          decl,
+          total
+        ),
+      DirectImportSimpleBodyTypeCheck =>
+        text_declaration_direct_import_resolved_simple_body_type_check_total(
+          context,
+          index,
+          decl,
+          total
+        ),
+    },
   }
 }
 
@@ -21435,6 +22390,7 @@ fn parse_text_declaration_start(
 ) -> combinator.Parser(DeclFrame) {
   match start {
     TextSourceImportDeclaration => parse_text_source_import_tail(current, source, seed),
+    TextExternalImportDeclaration => parse_text_external_import_tail(current, source),
     TextPubFunctionDeclaration => parse_text_pub_function_tail(current, source, seed),
     TextOperatorDeclaration => parse_text_operator_tail(current, source),
     TextTypeAssertDeclaration => parse_text_type_assert_tail(current, source),

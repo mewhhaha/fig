@@ -607,6 +607,38 @@ fn Context::resolution_record_scan_advance(
   result: combinator.Reply(parser.DeclFrame)
 ) -> ResolutionRecordScan {
   let index = scan.current.cursor;
+  let current = parser.next_text_declaration_state(result.state, context_value.source);
+  match parser.is_text_external_import_start(context_value.source, index) {
+    true => ResolutionRecordScan {
+      current,
+      resolved_declared_type_signature: scan.resolved_declared_type_signature,
+      resolved_declared_abi_signature: scan.resolved_declared_abi_signature,
+      resolved_value_body_type_signature: scan.resolved_value_body_type_signature,
+      resolved_value_body_abi_signature: scan.resolved_value_body_abi_signature,
+      resolved_simple_body_type_check_signature:
+        scan.resolved_simple_body_type_check_signature,
+      resolved_symbol_environment_signature: scan.resolved_symbol_environment_signature,
+      resolved_export_abi_signature: scan.resolved_export_abi_signature,
+    },
+    false => Context::resolution_record_scan_advance_decl(
+      context_value,
+      type_context,
+      scan,
+      result,
+      index,
+      current
+    ),
+  }
+}
+
+fn Context::resolution_record_scan_advance_decl(
+  context_value: Context,
+  type_context: parser.TextDirectImportContext,
+  scan: ResolutionRecordScan,
+  result: combinator.Reply(parser.DeclFrame),
+  index: i32,
+  current: combinator.ParseState
+) -> ResolutionRecordScan {
   let decl = result.value.decl;
   let facts = direct_import_decl_facts(
     context_value,
@@ -615,7 +647,7 @@ fn Context::resolution_record_scan_advance(
     decl
   );
   ResolutionRecordScan {
-    current: parser.next_text_declaration_state(result.state, context_value.source),
+    current,
     resolved_declared_type_signature:
       textmodel.signature_mix(
         scan.resolved_declared_type_signature,

@@ -2149,7 +2149,8 @@ function lowerCollectionValueTail(node: Node): Extract<Expr, { kind: "shape" }>[
 }
 
 function lowerTupleValue(node: Node): Expr {
-  const repeat = optional(node, "TupleValueRepeat");
+  const items = optional(node, "TupleValueItems") ?? node;
+  const repeat = optional(items, "TupleValueRepeat");
   if (repeat) {
     const value = lowerExpr(first(repeat, "Expr"));
     const count = lowerTupleRepeatCount(first(repeat, "TypeRepeatCount"));
@@ -2160,7 +2161,6 @@ function lowerTupleValue(node: Node): Expr {
       slots: expandRepeatedValueSlot(value, count, spanOnly(repeat)),
     };
   }
-  const items = optional(node, "TupleValueItems") ?? node;
   const slots = lowerTupleValueItems(items);
   if (slots.some((slot) => slot.spread || slot.index)) {
     return {

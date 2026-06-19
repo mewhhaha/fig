@@ -1322,7 +1322,7 @@ Deno.test("record value punning lowers in records and product constructors", asy
 });
 
 Deno.test("tuple values types repeats and destructuring check", async () => {
-  await checkSource(`
+  const source = `
     type fn Pair() -> type {
       let Pair = [i32, [i32; 3]];
       struct(Pair)
@@ -1336,7 +1336,17 @@ Deno.test("tuple values types repeats and destructuring check", async () => {
       let [head, values] = make_pair();
       head + values[0] + values[1] + values[2]
     }
-  `);
+  `;
+  await checkSource(source);
+  const parsed = await parse(source);
+  const makePair = parsed.declarations.find((decl): decl is FnDecl =>
+    decl.kind === "fn" && decl.name === "make_pair"
+  );
+  const outer = makePair?.body.expr;
+  assert(outer?.kind === "shape");
+  const inner = outer.slots[1]?.value;
+  assert(inner?.kind === "shape");
+  assertEquals(inner.slots.length, 3);
 });
 
 Deno.test("tuple match patterns consume all tuple values", async () => {
@@ -2513,6 +2523,83 @@ Deno.test("literal unions reject values outside the closed set", async () => {
       fn tag(x: #why | #this | #tag) -> i32 { 1 }
       pub fn main() -> i32 { tag(#other) }
     `,
+    "type.literal_mismatch",
+  );
+});
+
+Deno.test("literal annotations work on const bindings and type function results", async () => {
+  const source = `
+    type fn Pick(x: const) -> type {
+      match x {
+        "hello" => "hello",
+        'c' => 'c',
+        1 => 1,
+      }
+    }
+    type fn Id(x: const) -> type { x }
+
+    const a: "hello" = "hello";
+    const escaped: "line\\n" = "line\\n";
+    const b: 1 = 1;
+    const c: 'c' = 'c';
+    const picked_word: Pick("hello") = "hello";
+    const picked_number: Pick(1) = 1;
+    const picked_char: Pick('c') = 'c';
+    const id_word: Id("hello") = "hello";
+    const id_number: Id(1) = 1;
+    const id_char: Id('c') = 'c';
+
+    fn exact_word(value: "hello") -> "hello" { value }
+    fn exact_escaped(value: "line\\n") -> "line\\n" { value }
+    fn exact_number(value: 1) -> 1 { value }
+    fn exact_char(value: 'c') -> 'c' { value }
+
+    pub fn main() -> Pick(1) {
+      let local_word: "hello" = exact_word(picked_word);
+      let local_escaped: "line\\n" = exact_escaped(escaped);
+      let local_number: 1 = exact_number(picked_number);
+      let local_char: 'c' = exact_char(picked_char);
+      let direct_word: Id("hello") = exact_word(id_word);
+      let direct_number: Id(1) = exact_number(id_number);
+      let direct_char: Id('c') = exact_char(id_char);
+      local_number
+    }
+  `;
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(await wasmFromSource(source)));
+  assertEquals((instance.exports.main as () => number)(), 1);
+});
+
+Deno.test("literal annotations reject mismatches", async () => {
+  await assertThrowsCompile(
+    `const a: "hello" = "bye"; pub fn main() -> i32 { 1 }`,
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    `const b: 1 = 2; pub fn main() -> i32 { 1 }`,
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    `const c: 'c' = 'd'; pub fn main() -> i32 { 1 }`,
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    `type Letter = 'c'; fn f(value: Letter) -> Letter { value } pub fn main() -> Letter { f('d') }`,
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    `
+      type fn Pick(x: const) -> type { match x { "hello" => "hello", 1 => 1 } }
+      const picked: Pick("hello") = "bye";
+      pub fn main() -> i32 { 1 }
+    `,
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    `fn f() -> "hello" { "bye" } pub fn main() -> i32 { 1 }`,
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    `fn f(value: 1) -> i32 { value } pub fn main() -> i32 { f(2) }`,
     "type.literal_mismatch",
   );
 });

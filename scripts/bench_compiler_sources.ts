@@ -35,7 +35,7 @@ type Row = {
 
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const samples = numberArg("--samples", 5);
-const warmup = numberArg("--warmup", 1);
+const warmup = nonNegativeNumberArg("--warmup", 1);
 const figRunIters = numberArg("--fig-run-iters", 1);
 const figWasmOpt = optModeArg("--fig-wasm-opt", "debug");
 const figSourceFilters = stringListArg("--fig-source");
@@ -43,16 +43,67 @@ const figImportSourceFilters = stringListArg("--fig-import-source");
 const figDirectCheckFilters = stringListArg("--fig-direct-check");
 const figSourceCheckFilters = stringListArg("--fig-source-check");
 const figDebugPrefixCheckFilters = stringListArg("--fig-debug-prefix-check");
+const figDebugDirectPrefixCheckFilters = stringListArg("--fig-debug-direct-prefix-check");
 const figExtraSourcePaths = stringListArg("--fig-extra-source");
 const figSkipDirectImports = Deno.args.includes("--fig-skip-direct-imports");
 const figSkipSourceChecks = Deno.args.includes("--fig-skip-source-checks");
 const progress = Deno.args.includes("--progress");
 const selectedRuntimes = runtimeArgs();
+const figSourceCheckFilterNames = [
+  "source_import_edge_signature",
+  "source_import_graph_diagnostic_signature",
+  "text_token_signature",
+  "declaration_dependency_signature",
+  "declaration_dependency_diagnostic_signature",
+  "function_body_signature",
+  "declared_type_class",
+  "declared_abi_class",
+  "symbol_environment",
+  "export_abi",
+  "value_body_type_class",
+  "value_body_abi_class",
+  "resolved_value_body_type_class",
+  "resolved_value_body_abi_class",
+  "simple_body_type_check",
+  "named_type_environment",
+  "resolved_declared_type_class",
+  "resolved_declared_abi_class",
+  "resolved_symbol_environment",
+  "resolved_export_abi",
+  "resolved_simple_body_type_check",
+  "checked_declaration_type",
+  "checked_diagnostic",
+  "lowered_declaration",
+  "checked_declaration_record",
+  "checked_expression_record",
+  "checked_expression_child_record",
+  "checked_local_environment",
+  "checked_expression_shape",
+  "lowered_export_record",
+  "wasm_function_record",
+  "wasm_section_record",
+  "wasm_byte_record",
+  "wasm_byte_buffer",
+];
+const figDebugPrefixCheckFilterNames = [
+  "resolved_value_body_type_class",
+  "function_body_signature",
+  "declared_type_class",
+  "checked_declaration_record",
+  "checked_expression_record",
+  "checked_expression_shape",
+  "declaration_dependency_signature",
+];
+const figDebugDirectPrefixCheckFilterNames = [
+  "resolved_value_body_type_class",
+  "resolved_declared_type_class",
+];
 const runRoot = await Deno.makeTempDir({ prefix: "fig-compiler-source-bench-" });
 const rows: Row[] = [];
 let figWasmSink = 0;
 validateFigSourceCheckFilters();
 validateFigDebugPrefixCheckFilters();
+validateFigDebugDirectPrefixCheckFilters();
 
 type FigCompilerInput = {
   sourceId: string;
@@ -129,6 +180,9 @@ type FigCompilerInput = {
 type FigDirectImportTypeEnvironmentInput = {
   sourceId: string;
   importSourceId: string;
+  source: string;
+  importSource: string;
+  alias: string;
   sourceCodes: number[];
   importCodes: number[];
   moduleHash: number;
@@ -326,8 +380,11 @@ const typeResultKindChecks: {
 ];
 
 const figCompilerSources = await readFigSourceRoots([`${root}/compiler/fig`]);
-await readExtraFigSources(figCompilerSources, figExtraSourcePaths);
 const figSources = new Map(figCompilerSources);
+const figExtraSources = await readExtraFigSources(figExtraSourcePaths);
+for (const [sourceId, source] of figExtraSources) {
+  figSources.set(sourceId, source);
+}
 await readFigSources(`${root}/prelude`, figSources);
 const figCompilerBenchmarkSources = filteredFigCompilerSources();
 const figRoot = `${root}/compiler/fig/main.fig`;
@@ -424,6 +481,53 @@ function byteWindow(values: number[], index: number): string {
   return `[${items.join(", ")}] len=${values.length}`;
 }
 
+function assertFigSourceNumberCheck(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+  filter: string,
+  exportName: string,
+  expected: number,
+  label: string,
+): void {
+  if (!shouldRunFigSourceCheck(filter)) {
+    return;
+  }
+  const actual = Number(host.call(exportName, input.codes));
+  if (actual === expected) {
+    return;
+  }
+  throw new Error(
+    `compiled Fig compiler produced ${label} ${actual} for ${input.sourceId}; ` +
+      `JS parser produced ${expected}`,
+  );
+}
+
+function assertFigSourceByteBufferCheck(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): void {
+  if (!shouldRunFigSourceCheck("wasm_byte_buffer")) {
+    return;
+  }
+  const actualWasmByteBuffer = host.call(
+    "compile_wasm_byte_buffer",
+    input.codes,
+  ) as number[];
+  const wasmByteBufferMismatch = firstNumberArrayMismatch(
+    actualWasmByteBuffer,
+    input.wasmByteBuffer,
+  );
+  if (wasmByteBufferMismatch === undefined) {
+    return;
+  }
+  throw new Error(
+    `compiled Fig compiler produced Wasm byte buffer mismatch ` +
+      `for ${input.sourceId} at ${wasmByteBufferMismatch}; ` +
+      `actual ${byteWindow(actualWasmByteBuffer, wasmByteBufferMismatch)}; ` +
+      `expected ${byteWindow(input.wasmByteBuffer, wasmByteBufferMismatch)}`,
+  );
+}
+
 async function figCompile(source: string, sourceId: string): Promise<void> {
   await compileArtifactsFromSource(source, {
     sourceId,
@@ -476,6 +580,9 @@ async function compiledFigSourceRunner(
       }
       if (progress) {
         console.error(`[fig-import] ${importInput.sourceId} -> ${importInput.importSourceId}`);
+      }
+      if (figDebugDirectPrefixCheckFilters.length > 0) {
+        await runFigDebugDirectPrefixChecks(host, importInput);
       }
       if (shouldUseFigDirectResolutionRecordOnly()) {
         const actualDirectImportResolutionRecordSignatureHash = Number(
@@ -694,21 +801,271 @@ async function compiledFigSourceRunner(
       continue;
     }
     if (figSourceCheckFilters.length > 0) {
-      if (shouldRunFigSourceCheck("resolved_value_body_type_class")) {
-        const actualResolvedValueBodyTypeClassSignatureHash = Number(
-          host.call("compile_resolved_value_body_type_class_signature_hash", input.codes),
-        );
-        const resolvedValueBodyTypeClassSignatureMatches =
-          actualResolvedValueBodyTypeClassSignatureHash ===
-            input.resolvedValueBodyTypeClassSignatureHash;
-        if (!resolvedValueBodyTypeClassSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced resolved value body type-class signature hash ` +
-              `${actualResolvedValueBodyTypeClassSignatureHash} for ${input.sourceId}; ` +
-              `JS parser produced ${input.resolvedValueBodyTypeClassSignatureHash}`,
-          );
-        }
-      }
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "source_import_edge_signature",
+        "compile_source_import_edge_signature_hash",
+        input.sourceImportEdgeSignatureHash,
+        "source import-edge signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "source_import_graph_diagnostic_signature",
+        "compile_source_import_graph_diagnostic_signature_hash",
+        input.sourceImportGraphDiagnosticSignatureHash,
+        "source import graph-diagnostic signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "text_token_signature",
+        "compile_text_token_signature_hash",
+        input.textTokenSignatureHash,
+        "text-token signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "declaration_dependency_signature",
+        "compile_declaration_dependency_signature_hash",
+        input.declarationDependencySignatureHash,
+        "declaration dependency signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "declaration_dependency_diagnostic_signature",
+        "compile_declaration_dependency_diagnostic_signature_hash",
+        input.declarationDependencyDiagnosticSignatureHash,
+        "declaration dependency diagnostic signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_body_signature",
+        "compile_function_body_signature_hash",
+        input.functionBodySignatureHash,
+        "function body signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "declared_type_class",
+        "compile_declared_type_class_signature_hash",
+        input.declaredTypeClassSignatureHash,
+        "declared type-class signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "declared_abi_class",
+        "compile_declared_abi_class_signature_hash",
+        input.declaredAbiClassSignatureHash,
+        "declared ABI-class signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "symbol_environment",
+        "compile_symbol_environment_signature_hash",
+        input.symbolEnvironmentSignatureHash,
+        "symbol environment signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "export_abi",
+        "compile_export_abi_signature_hash",
+        input.exportAbiSignatureHash,
+        "export ABI signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_body_type_class",
+        "compile_value_body_type_class_signature_hash",
+        input.valueBodyTypeClassSignatureHash,
+        "value body type-class signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_body_abi_class",
+        "compile_value_body_abi_class_signature_hash",
+        input.valueBodyAbiClassSignatureHash,
+        "value body ABI-class signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "resolved_value_body_type_class",
+        "compile_resolved_value_body_type_class_signature_hash",
+        input.resolvedValueBodyTypeClassSignatureHash,
+        "resolved value body type-class signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "resolved_value_body_abi_class",
+        "compile_resolved_value_body_abi_class_signature_hash",
+        input.resolvedValueBodyAbiClassSignatureHash,
+        "resolved value body ABI-class signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "simple_body_type_check",
+        "compile_simple_body_type_check_signature_hash",
+        input.simpleBodyTypeCheckSignatureHash,
+        "simple body type-check signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "named_type_environment",
+        "compile_named_type_environment_signature_hash",
+        input.namedTypeEnvironmentSignatureHash,
+        "named type environment signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "resolved_declared_type_class",
+        "compile_resolved_declared_type_class_signature_hash",
+        input.resolvedDeclaredTypeClassSignatureHash,
+        "resolved declared type-class signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "resolved_declared_abi_class",
+        "compile_resolved_declared_abi_class_signature_hash",
+        input.resolvedDeclaredAbiClassSignatureHash,
+        "resolved declared ABI-class signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "resolved_symbol_environment",
+        "compile_resolved_symbol_environment_signature_hash",
+        input.resolvedSymbolEnvironmentSignatureHash,
+        "resolved symbol-environment signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "resolved_export_abi",
+        "compile_resolved_export_abi_signature_hash",
+        input.resolvedExportAbiSignatureHash,
+        "resolved export ABI signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "resolved_simple_body_type_check",
+        "compile_resolved_simple_body_type_check_signature_hash",
+        input.resolvedSimpleBodyTypeCheckSignatureHash,
+        "resolved simple body type-check signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "checked_declaration_type",
+        "compile_checked_declaration_type_signature_hash",
+        input.checkedDeclarationTypeSignatureHash,
+        "checked declaration type signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "checked_diagnostic",
+        "compile_checked_diagnostic_signature_hash",
+        input.checkedDiagnosticSignatureHash,
+        "checked diagnostic signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "lowered_declaration",
+        "compile_lowered_declaration_signature_hash",
+        input.loweredDeclarationSignatureHash,
+        "lowered declaration signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "checked_declaration_record",
+        "compile_checked_declaration_record_signature_hash",
+        input.checkedDeclarationRecordSignatureHash,
+        "checked declaration record signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "checked_expression_record",
+        "compile_checked_expression_record_signature_hash",
+        input.checkedExpressionRecordSignatureHash,
+        "checked expression record signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "checked_expression_child_record",
+        "compile_checked_expression_child_record_signature_hash",
+        input.checkedExpressionChildRecordSignatureHash,
+        "checked expression child-record signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "checked_local_environment",
+        "compile_checked_local_environment_signature_hash",
+        input.checkedLocalEnvironmentSignatureHash,
+        "checked local-environment signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "checked_expression_shape",
+        "compile_checked_expression_shape_signature_hash",
+        input.checkedExpressionShapeSignatureHash,
+        "checked expression-shape signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "lowered_export_record",
+        "compile_lowered_export_record_signature_hash",
+        input.loweredExportRecordSignatureHash,
+        "lowered export-record signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "wasm_function_record",
+        "compile_wasm_function_record_signature_hash",
+        input.wasmFunctionRecordSignatureHash,
+        "Wasm function-record signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "wasm_section_record",
+        "compile_wasm_section_record_signature_hash",
+        input.wasmSectionRecordSignatureHash,
+        "Wasm section-record signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "wasm_byte_record",
+        "compile_wasm_byte_record_signature_hash",
+        input.wasmByteRecordSignatureHash,
+        "Wasm byte-record signature hash",
+      );
+      assertFigSourceByteBufferCheck(host, input);
       continue;
     }
     const actualSourceImportEdgeSignatureHash = Number(
@@ -1513,6 +1870,31 @@ async function runFigDebugPrefixChecks(
   for (const filter of figDebugPrefixCheckFilters) {
     if (filter === "resolved_value_body_type_class") {
       await debugResolvedValueBodyTypeClassPrefix(host, input);
+    } else if (filter === "function_body_signature") {
+      await debugFunctionBodySignaturePrefix(host, input);
+    } else if (filter === "declared_type_class") {
+      await debugDeclaredTypeClassPrefix(host, input);
+    } else if (filter === "checked_declaration_record") {
+      await debugCheckedDeclarationRecordPrefix(host, input);
+    } else if (filter === "checked_expression_record") {
+      await debugCheckedExpressionRecordPrefix(host, input);
+    } else if (filter === "checked_expression_shape") {
+      await debugCheckedExpressionShapePrefix(host, input);
+    } else if (filter === "declaration_dependency_signature") {
+      await debugDeclarationDependencySignaturePrefix(host, input);
+    }
+  }
+}
+
+async function runFigDebugDirectPrefixChecks(
+  host: ReturnType<typeof createFigHost>,
+  input: FigDirectImportTypeEnvironmentInput,
+): Promise<void> {
+  for (const filter of figDebugDirectPrefixCheckFilters) {
+    if (filter === "resolved_value_body_type_class") {
+      await debugDirectResolvedValueBodyTypeClassPrefix(host, input);
+    } else if (filter === "resolved_declared_type_class") {
+      await debugDirectResolvedDeclaredTypeClassPrefix(host, input);
     }
   }
 }
@@ -1594,6 +1976,427 @@ async function resolvedValueBodyTypeClassPrefixMismatch(
   return { actual, expected };
 }
 
+async function debugFunctionBodySignaturePrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await functionBodySignaturePrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await functionBodySignaturePrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first function body signature prefix mismatch in ${input.sourceId} ` +
+      `after ${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function functionBodySignaturePrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const expected = programFunctionBodySignatureHash(prefixProgram, prefix);
+  const actual = Number(
+    host.call(
+      "compile_function_body_signature_hash",
+      sourceCodes(prefix),
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
+}
+
+async function debugDeclaredTypeClassPrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await declaredTypeClassPrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await declaredTypeClassPrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first declared type-class prefix mismatch in ${input.sourceId} ` +
+      `after ${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function declaredTypeClassPrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const expected = programDeclaredTypeClassSignatureHash(prefixProgram);
+  const actual = Number(
+    host.call(
+      "compile_declared_type_class_signature_hash",
+      sourceCodes(prefix),
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
+}
+
+async function debugDeclarationDependencySignaturePrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await declarationDependencySignaturePrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await declarationDependencySignaturePrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first declaration dependency prefix mismatch in ${input.sourceId} ` +
+      `after ${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function declarationDependencySignaturePrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const expected = programDeclarationDependencySignatureHash(prefixProgram);
+  const actual = Number(
+    host.call(
+      "compile_declaration_dependency_signature_hash",
+      sourceCodes(prefix),
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
+}
+
+async function debugCheckedDeclarationRecordPrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await checkedDeclarationRecordPrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await checkedDeclarationRecordPrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first checked declaration record prefix mismatch in ${input.sourceId} ` +
+      `after ${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function checkedDeclarationRecordPrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const typeEnvironment = programNamedTypeEnvironment(prefixProgram);
+  const expected = programCheckedDeclarationRecordSignatureHash(
+    prefixProgram,
+    typeEnvironment,
+  );
+  const actual = Number(
+    host.call(
+      "compile_checked_declaration_record_signature_hash",
+      sourceCodes(prefix),
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
+}
+
+async function debugCheckedExpressionRecordPrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await checkedExpressionRecordPrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await checkedExpressionRecordPrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first checked expression record prefix mismatch in ${input.sourceId} ` +
+      `after ${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function checkedExpressionRecordPrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const typeEnvironment = programNamedTypeEnvironment(prefixProgram);
+  const expected = programCheckedExpressionRecordSignatureHash(
+    prefixProgram,
+    typeEnvironment,
+  );
+  const actual = Number(
+    host.call(
+      "compile_checked_expression_record_signature_hash",
+      sourceCodes(prefix),
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
+}
+
+async function debugCheckedExpressionShapePrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await checkedExpressionShapePrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await checkedExpressionShapePrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first checked expression-shape prefix mismatch in ${input.sourceId} ` +
+      `after ${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function checkedExpressionShapePrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const typeEnvironment = programNamedTypeEnvironment(prefixProgram);
+  const expected = programCheckedExpressionShapeSignatureHash(
+    prefixProgram,
+    typeEnvironment,
+    tokenize(prefix),
+  );
+  const actual = Number(
+    host.call(
+      "compile_checked_expression_shape_signature_hash",
+      sourceCodes(prefix),
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
+}
+
 function declarationPrefixSource(
   source: string,
   program: Program,
@@ -1608,6 +2411,182 @@ function declarationPrefixSource(
     return source;
   }
   return source.slice(0, decl.span.end);
+}
+
+async function debugDirectResolvedValueBodyTypeClassPrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigDirectImportTypeEnvironmentInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await directResolvedValueBodyTypeClassPrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await directResolvedValueBodyTypeClassPrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first direct import resolved value body type-class prefix mismatch in ` +
+      `${input.sourceId} importing ${input.importSourceId} after ` +
+      `${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function directResolvedValueBodyTypeClassPrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigDirectImportTypeEnvironmentInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const importedProgram = await parse(input.importSource, {
+    sourceId: input.importSourceId,
+  });
+  const importedEnvironment = programNamedTypeEnvironment(importedProgram);
+  const combinedEnvironment = new Map<string, number>();
+  for (const [name, typeClass] of programNamedTypeEnvironment(prefixProgram)) {
+    combinedEnvironment.set(name, typeClass);
+  }
+  for (const [name, typeClass] of qualifiedImportTypeEnvironment(
+    input.alias,
+    importedEnvironment,
+  )) {
+    combinedEnvironment.set(name, typeClass);
+  }
+  const expected = programResolvedValueBodyTypeClassSignatureHash(
+    prefixProgram,
+    combinedEnvironment,
+  );
+  const actual = Number(
+    host.call(
+      "compile_direct_import_resolved_value_body_type_class_signature_hash",
+      sourceCodes(prefix),
+      input.importCodes,
+      input.moduleHash,
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
+}
+
+async function debugDirectResolvedDeclaredTypeClassPrefix(
+  host: ReturnType<typeof createFigHost>,
+  input: FigDirectImportTypeEnvironmentInput,
+): Promise<void> {
+  const fullProgram = await parse(input.source, { sourceId: input.sourceId });
+  let low = 0;
+  let high = fullProgram.declarations.length;
+  let firstMismatch = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const mismatch = await directResolvedDeclaredTypeClassPrefixMismatch(
+      host,
+      input,
+      fullProgram,
+      mid,
+    );
+    if (mismatch) {
+      firstMismatch = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (firstMismatch < 0) {
+    return;
+  }
+  const mismatch = await directResolvedDeclaredTypeClassPrefixMismatch(
+    host,
+    input,
+    fullProgram,
+    firstMismatch,
+  );
+  if (!mismatch) {
+    return;
+  }
+  const decl = fullProgram.declarations[firstMismatch - 1];
+  const label = decl
+    ? `${decl.kind} ${"name" in decl ? decl.name : "<anonymous>"}`
+    : "source imports";
+  const line = decl?.span?.line ?? 1;
+  throw new Error(
+    `first direct import resolved declared type-class prefix mismatch in ` +
+      `${input.sourceId} importing ${input.importSourceId} after ` +
+      `${firstMismatch} declaration(s), at ${label} line ${line}; ` +
+      `Fig ${mismatch.actual}; JS ${mismatch.expected}`,
+  );
+}
+
+async function directResolvedDeclaredTypeClassPrefixMismatch(
+  host: ReturnType<typeof createFigHost>,
+  input: FigDirectImportTypeEnvironmentInput,
+  fullProgram: Program,
+  declarationCount: number,
+): Promise<PrefixMismatch | undefined> {
+  const prefix = declarationPrefixSource(input.source, fullProgram, declarationCount);
+  const prefixProgram = await parse(prefix, { sourceId: input.sourceId });
+  const importedProgram = await parse(input.importSource, {
+    sourceId: input.importSourceId,
+  });
+  const importedEnvironment = programNamedTypeEnvironment(importedProgram);
+  const combinedEnvironment = new Map<string, number>();
+  for (const [name, typeClass] of programNamedTypeEnvironment(prefixProgram)) {
+    combinedEnvironment.set(name, typeClass);
+  }
+  for (const [name, typeClass] of qualifiedImportTypeEnvironment(
+    input.alias,
+    importedEnvironment,
+  )) {
+    combinedEnvironment.set(name, typeClass);
+  }
+  const expected = programResolvedDeclaredTypeClassSignatureHash(
+    prefixProgram,
+    combinedEnvironment,
+  );
+  const actual = Number(
+    host.call(
+      "compile_direct_import_resolved_declared_type_class_signature_hash",
+      sourceCodes(prefix),
+      input.importCodes,
+      input.moduleHash,
+    ),
+  );
+  if (actual === expected) {
+    return undefined;
+  }
+  return { actual, expected };
 }
 
 async function figCompilerInputs(): Promise<FigCompilerInput[]> {
@@ -1753,6 +2732,7 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
       directImportTypeEnvironmentInputs: await programDirectImportTypeEnvironmentInputs(
         program,
         sourceId,
+        source,
         codes,
       ),
     });
@@ -1762,6 +2742,9 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
 
 function filteredFigCompilerSources(): Map<string, string> {
   if (figSourceFilters.length === 0) {
+    if (figExtraSources.size > 0) {
+      return figExtraSources;
+    }
     return figCompilerSources;
   }
   const sources = new Map<string, string>();
@@ -1807,15 +2790,41 @@ function validateFigSourceCheckFilters(): void {
 
 function validateFigDebugPrefixCheckFilters(): void {
   for (const filter of figDebugPrefixCheckFilters) {
-    if (figSourceCheckFilterKnown(filter)) {
+    if (figDebugPrefixCheckFilterKnown(filter)) {
       continue;
     }
     throw new Error(`unknown --fig-debug-prefix-check=${filter}`);
   }
 }
 
+function validateFigDebugDirectPrefixCheckFilters(): void {
+  for (const filter of figDebugDirectPrefixCheckFilters) {
+    if (figDebugDirectPrefixCheckFilterKnown(filter)) {
+      continue;
+    }
+    throw new Error(`unknown --fig-debug-direct-prefix-check=${filter}`);
+  }
+}
+
 function figSourceCheckFilterKnown(filter: string): boolean {
-  return filter === "resolved_value_body_type_class";
+  return stringListContains(figSourceCheckFilterNames, filter);
+}
+
+function figDebugPrefixCheckFilterKnown(filter: string): boolean {
+  return stringListContains(figDebugPrefixCheckFilterNames, filter);
+}
+
+function figDebugDirectPrefixCheckFilterKnown(filter: string): boolean {
+  return stringListContains(figDebugDirectPrefixCheckFilterNames, filter);
+}
+
+function stringListContains(values: readonly string[], target: string): boolean {
+  for (const value of values) {
+    if (value === target) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function shouldRunFigSourceCheck(name: string): boolean {
@@ -1870,14 +2879,13 @@ function normalizedFigSourceFilter(filter: string): string {
   return `${root}/${filter}`;
 }
 
-async function readExtraFigSources(
-  sources: Map<string, string>,
-  paths: string[],
-): Promise<void> {
+async function readExtraFigSources(paths: string[]): Promise<Map<string, string>> {
+  const sources = new Map<string, string>();
   for (const path of paths) {
     const sourceId = normalizedFigSourceFilter(path);
     sources.set(sourceId, await Deno.readTextFile(sourceId));
   }
+  return sources;
 }
 
 function programDeclarationCount(program: Program): number {
@@ -2543,6 +3551,7 @@ function programNamedTypeEnvironmentSignatureHash(environment: Map<string, numbe
 async function programDirectImportTypeEnvironmentInputs(
   program: Program,
   sourceId: string,
+  source: string,
   codes: number[],
 ): Promise<FigDirectImportTypeEnvironmentInput[]> {
   const inputs: FigDirectImportTypeEnvironmentInput[] = [];
@@ -2588,6 +3597,9 @@ async function programDirectImportTypeEnvironmentInputs(
     inputs.push({
       sourceId,
       importSourceId,
+      source,
+      importSource: resolved.text,
+      alias,
       sourceCodes: codes,
       importCodes: sourceCodes(resolved.text),
       moduleHash,
@@ -4945,13 +5957,7 @@ function expressionRootTypeClassTag(expr: Expr | undefined): number {
     return typeClassUnknownTag();
   }
   if (root.kind === "literal") {
-    if (root.literalKind === "number") {
-      return typeClassI32Tag();
-    }
-    if (root.literalKind === "bool") {
-      return typeClassBoolTag();
-    }
-    return typeClassUnknownTag();
+    return expressionLiteralTypeClassTag(root);
   }
   if (root.kind === "const_fn") {
     return typeClassFunctionTag();
@@ -5017,11 +6023,25 @@ function expressionSimpleLiteralTypeClassTag(expr: Expr | undefined): number {
   if (root.kind !== "literal") {
     return typeClassUnknownTag();
   }
+  return expressionLiteralTypeClassTag(root);
+}
+
+function expressionLiteralTypeClassTag(
+  root: Extract<Expr, { kind: "literal" }>,
+): number {
   if (root.literalKind === "number") {
     return typeClassI32Tag();
   }
   if (root.literalKind === "bool") {
     return typeClassBoolTag();
+  }
+  if (
+    root.literalKind === "string" ||
+    root.literalKind === "char" ||
+    root.literalKind === "multiline" ||
+    root.literalKind === "literalType"
+  ) {
+    return typeClassI32Tag();
   }
   return typeClassUnknownTag();
 }
@@ -5197,13 +6217,7 @@ function expressionSimpleScalarOperandTypeClassTag(
     return boolMatchTypeClass;
   }
   if (root.kind === "literal") {
-    if (root.literalKind === "number") {
-      return typeClassI32Tag();
-    }
-    if (root.literalKind === "bool") {
-      return typeClassBoolTag();
-    }
-    return typeClassUnknownTag();
+    return expressionLiteralTypeClassTag(root);
   }
   if (root.kind === "var") {
     const typeClass = environment.get(root.name);
@@ -5309,9 +6323,96 @@ function declarationTypeClassPayload(decl: Program["declarations"][number]): num
   return decl.params.length * 31 + typeClassFromAnnotation(decl.returnType);
 }
 
+function typeClassFromLiteralAnnotation(type: string): number {
+  const parts = splitTopLevelLiteralUnion(type);
+  if (parts.length === 0) {
+    return typeClassUnknownTag();
+  }
+  let hasNonBool = false;
+  for (const part of parts) {
+    const typeClass = typeClassFromSingleLiteralAnnotation(part.trim());
+    if (typeClass === typeClassUnknownTag()) {
+      return typeClassUnknownTag();
+    }
+    if (typeClass !== typeClassBoolTag()) {
+      hasNonBool = true;
+    }
+  }
+  if (hasNonBool) {
+    return typeClassI32Tag();
+  }
+  return typeClassBoolTag();
+}
+
+function splitTopLevelLiteralUnion(source: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index] ?? "";
+    if (quote !== "") {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")" || char === "]" || char === "}") {
+      depth -= 1;
+      continue;
+    }
+    if (char === "|" && depth === 0) {
+      parts.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function typeClassFromSingleLiteralAnnotation(type: string): number {
+  if (/^-?[0-9]+(?:\.[0-9]+)?(?:i32|u32|i64|u64|f32|f64)?$/.test(type)) {
+    return typeClassI32Tag();
+  }
+  if (type === "true" || type === "false") {
+    return typeClassBoolTag();
+  }
+  if (type.startsWith("\"") && type.endsWith("\"")) {
+    return typeClassI32Tag();
+  }
+  if (type.startsWith("'") && type.endsWith("'")) {
+    return typeClassI32Tag();
+  }
+  if (/^#(?:[a-z_][a-z0-9_]*|[A-Z][A-Za-z0-9]*)$/.test(type)) {
+    return typeClassI32Tag();
+  }
+  return typeClassUnknownTag();
+}
+
 function typeClassFromAnnotation(type: string | undefined, environment?: Map<string, number>): number {
   if (type === undefined) {
     return typeClassUnknownTag();
+  }
+  const literalTypeClass = typeClassFromLiteralAnnotation(type.trim());
+  if (literalTypeClass !== typeClassUnknownTag()) {
+    return literalTypeClass;
   }
   const normalized = type.replace(/\s+/g, "");
   if (normalized === "i32") {
@@ -8213,9 +9314,11 @@ function declarationAuxHash(decl: Program["declarations"][number]): number {
 function textTokenSignatureHash(tokens: SourceToken[]): number {
   let total = figTextTokenCount(tokens);
   for (const token of tokens) {
-    if (token.kind === "symbol" && token.text === "@assert") {
-      total = signatureMix(total, figSyntheticTextTokenScore("symbol", "@"));
-      total = signatureMix(total, figSyntheticTextTokenScore("identifier", "assert"));
+    const builtinParts = splitFigBuiltinSymbolToken(token);
+    if (builtinParts) {
+      for (const part of builtinParts) {
+        total = signatureMix(total, figSyntheticTextTokenScore(part.kind, part.text));
+      }
       continue;
     }
     if (isGeneratedRepeatPrefixToken(token)) {
@@ -8238,8 +9341,9 @@ function textTokenSignatureHash(tokens: SourceToken[]): number {
 function figTextTokenCount(tokens: SourceToken[]): number {
   let total = 0;
   for (const token of tokens) {
-    if (token.kind === "symbol" && token.text === "@assert") {
-      total += 2;
+    const builtinParts = splitFigBuiltinSymbolToken(token);
+    if (builtinParts) {
+      total += builtinParts.length;
       continue;
     }
     if (isGeneratedRepeatPrefixToken(token)) {
@@ -8253,6 +9357,28 @@ function figTextTokenCount(tokens: SourceToken[]): number {
     }
   }
   return total;
+}
+
+type SyntheticTextToken = {
+  kind: string;
+  text: string;
+};
+
+function splitFigBuiltinSymbolToken(token: SourceToken): SyntheticTextToken[] | undefined {
+  if (token.kind !== "symbol") return undefined;
+  if (token.text === "@assert") {
+    return [
+      { kind: "symbol", text: "@" },
+      { kind: "identifier", text: "assert" },
+    ];
+  }
+  if (token.text === "@external") {
+    return [
+      { kind: "symbol", text: "@" },
+      { kind: "external", text: "external" },
+    ];
+  }
+  return undefined;
 }
 
 function shouldSplitFigSymbolToken(text: string): boolean {
@@ -8598,6 +9724,15 @@ function numberArg(name: string, fallback: number): number {
   if (!raw || Deno.args.indexOf(name) < 0 && !eq) return fallback;
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be positive`);
+  return Math.floor(value);
+}
+
+function nonNegativeNumberArg(name: string, fallback: number): number {
+  const eq = Deno.args.find((arg) => arg.startsWith(`${name}=`));
+  const raw = eq ? eq.slice(name.length + 1) : Deno.args[Deno.args.indexOf(name) + 1];
+  if (!raw || Deno.args.indexOf(name) < 0 && !eq) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be non-negative`);
   return Math.floor(value);
 }
 

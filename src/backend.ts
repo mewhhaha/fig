@@ -12036,7 +12036,9 @@ function renderBackendTypeExprWithBindings(
   if (expr.kind === "type_number") return expr.value;
   if (expr.kind === "type_literal") return `#${expr.value}`;
   if (expr.kind === "type_string") return JSON.stringify(expr.value);
-  if (expr.kind === "type_char") return expr.value;
+  if (expr.kind === "type_char") {
+    return `'${expr.value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  }
   if (expr.kind === "type_bool") return expr.value ? "true" : "false";
   if (expr.kind === "type_call") {
     const callee = renderBackendTypeExprWithBindings(expr.callee, bindings);
@@ -12119,10 +12121,13 @@ function renderBackendTypeExpr(expr: import("./core_ast.ts").TypeExpr): string {
     case "type_bool":
       return String(expr.value);
     case "type_number":
-    case "type_char":
-    case "type_string":
-    case "type_literal":
       return expr.value;
+    case "type_char":
+      return `'${expr.value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+    case "type_string":
+      return JSON.stringify(expr.value);
+    case "type_literal":
+      return `#${expr.value}`;
   }
 }
 
@@ -14670,7 +14675,7 @@ function lowerPatternTest(
   if (text === "false") return [{ op: "binary", wasm: "i32.eqz" }];
   if (pattern.kind === "literal") {
     const member = pattern.literalKind === "string"
-      ? { kind: "string" as const, value: pattern.value.slice(1, -1) }
+      ? { kind: "string" as const, value: decodeStringLiteralValue(pattern.value) }
       : pattern.literalKind === "char"
       ? { kind: "char" as const, value: JSON.parse(`"${pattern.value.slice(1, -1)}"`) }
       : pattern.literalKind === "literalType"
@@ -14821,7 +14826,9 @@ function lowerProductPatternTest(
     const label = slot.label ?? String(index);
     const field = fieldByLabel.get(label);
     if (!field || isCatchAllPattern(field.pattern)) continue;
-    tests.push(lowerPatternTestFromTemps(field.pattern, slot.type, tempGroups[index]!, ctx, locals));
+    tests.push(
+      lowerPatternTestFromTemps(field.pattern, slot.type, tempGroups[index]!, ctx, locals),
+    );
   }
   return [...stores, ...combinePatternTests(tests, "i32.and")];
 }
@@ -17629,7 +17636,7 @@ function splitLiteralUnion(type: string): string[] {
 }
 
 function parseLiteralTypeMember(source: string): LiteralTypeMember | undefined {
-  if (/^[0-9]+(?:\.[0-9]+)?(?:i32|u32|i64|u64|f32|f64)?$/.test(source)) {
+  if (/^-?[0-9]+(?:\.[0-9]+)?(?:i32|u32|i64|u64|f32|f64)?$/.test(source)) {
     return { kind: "number", value: source };
   }
   if (source === "true" || source === "false") return { kind: "bool", value: source };
@@ -17645,6 +17652,10 @@ function parseLiteralTypeMember(source: string): LiteralTypeMember | undefined {
   return undefined;
 }
 
+function decodeStringLiteralValue(source: string): string {
+  return JSON.parse(source);
+}
+
 function literalRuntimeValue(member: LiteralTypeMember): number {
   if (member.kind === "bool") return member.value === "true" ? 1 : 0;
   if (member.kind === "number") return Number.parseInt(member.value, 10);
@@ -17658,7 +17669,7 @@ function literalExprRuntimeValue(expr: Extract<Expr, { kind: "literal" }>): numb
     : expr.literalKind === "bool"
     ? { kind: "bool" as const, value: expr.value }
     : expr.literalKind === "string"
-    ? { kind: "string" as const, value: expr.value.slice(1, -1) }
+    ? { kind: "string" as const, value: decodeStringLiteralValue(expr.value) }
     : expr.literalKind === "char"
     ? { kind: "char" as const, value: JSON.parse(`"${expr.value.slice(1, -1)}"`) }
     : expr.literalKind === "literalType"
@@ -18477,6 +18488,9 @@ function exprRuntimeTypeWithLiteralDefault(expr: Expr, ctx: LowerContext): strin
     if (expr.inferredType) return expr.inferredType;
     if (expr.literalKind === "number") return "i32";
     if (expr.literalKind === "bool") return "bool";
+    if (expr.literalKind === "char") return "char";
+    if (expr.literalKind === "string" || expr.literalKind === "multiline") return "string";
+    if (expr.literalKind === "literalType") return "literal";
   }
   return exprArgumentType(expr, ctx);
 }

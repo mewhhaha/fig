@@ -10,6 +10,7 @@ export type ConstPluginValue =
     | { kind: "never" }
     | { kind: "bool"; value: boolean }
     | { kind: "number"; value: string }
+    | { kind: "char"; value: string }
     | { kind: "string"; value: string }
     | { kind: "literal_type"; value: string }
     | { kind: "type"; name: string; normalized?: TypeBody }

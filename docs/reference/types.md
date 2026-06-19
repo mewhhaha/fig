@@ -29,6 +29,19 @@ the compiler-owned IO executor type `io`, and unsigned widths `u1` through `u64`
 Use `@type_is_number(t)` in compile-time contracts to test whether `t` is one of the numeric scalar
 types, including arbitrary unsigned widths such as `u3` or `u17`.
 
+Literal values can also appear in type positions. Number, string, character, and `#Tag` literal
+types describe exactly that runtime value:
+
+```fig
+const a: "hello" = "hello";
+const b: 1 = 1;
+const c: 'c' = 'c';
+fn choose(x: 1 | 2 | 3) -> i32 { x }
+```
+
+Literal types can be combined with `|` to form closed sets. They are valid type-function inputs and
+results, so compile-time helpers can match on literal values and return literal-specific types.
+
 Function types are `fn(params) -> Type`. Host imports use an explicit first `io` executor parameter
 and return `io(T)` actions. Library-level reader/state effects use typed rows such as
 `prelude.effect.Eff({state: Store, reader: Env}, A)` and must be handled with `run_state`,

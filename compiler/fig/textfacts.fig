@@ -5960,6 +5960,31 @@ fn checked_local_equal_index(
   )
 }
 
+fn checked_local_is_multi_bind(
+  context_value: FactContext,
+  index: i32,
+  equal: i32
+) -> bool {
+  parser.text_find_top_level_punctuation_score(
+    context_value.source,
+    index + 1,
+    equal,
+    0,
+    textlex.punctuation_score(textlex.PunctComma)
+  ) < equal
+}
+
+fn checked_local_name_hash(
+  context_value: FactContext,
+  index: i32,
+  equal: i32
+) -> i32 {
+  match checked_local_is_multi_bind(context_value, index, equal) {
+    true => 0,
+    false => checked_local_identifier_hash(context_value, index + 1),
+  }
+}
+
 fn checked_local_value_root_kind(
   context_value: FactContext,
   index: i32,
@@ -6037,6 +6062,7 @@ fn checked_local_let_fact(
   index: i32,
   statement_end: i32
 ) -> CheckedLocalFact {
+  let equal = checked_local_equal_index(context_value, index, statement_end);
   let expected = checked_local_expected_type_class(
     context_value,
     index,
@@ -6051,7 +6077,7 @@ fn checked_local_let_fact(
   CheckedLocalFact {
     function_name_hash: function_name_hash,
     local_kind_tag: CheckedLocalFactKind::LocalLet,
-    local_name_hash: checked_local_identifier_hash(context_value, index + 1),
+    local_name_hash: checked_local_name_hash(context_value, index, equal),
     value_root_kind: checked_local_value_root_kind(
       context_value,
       index,
@@ -6263,57 +6289,60 @@ fn fact_record_scan_next_total(
   total: i32,
   result: combinator.Reply(parser.DeclFrame)
 ) -> i32 {
-  match kind {
-    FactRecordScanKind::ScanCheckedDeclaration => textmodel.signature_mix(
-      total,
-      checked_decl_fact_signature(
-        checked_decl_fact(context_value.source, current, result)
-      )
-    ),
-    FactRecordScanKind::ScanCheckedExpression => textmodel.signature_mix(
-      total,
-      checked_expr_fact_signature(
-        checked_expr_fact(context_value.source, current, result)
-      )
-    ),
-    FactRecordScanKind::ScanCheckedExpressionChild =>
-      parser.text_declaration_root_child_record_signature(
-        context_value.source,
-        current.cursor,
-        result.value.decl,
-        total
-      ),
-    FactRecordScanKind::ScanCheckedExpressionShape => textmodel.signature_mix(
-      total,
-      checked_expr_shape_fact_signature(
-        checked_expr_shape_fact(context_value.source, current, result)
-      )
-    ),
-    FactRecordScanKind::ScanCheckedLocal => match is_function(
-      context_value.source,
-      current,
-      result
-    ) {
-      true => checked_local_function_signature(
-        context_value,
-        current,
+  match parser.is_text_external_import_start(context_value.source, current.cursor) {
+    true => total,
+    false => match kind {
+      FactRecordScanKind::ScanCheckedDeclaration => textmodel.signature_mix(
         total,
-        result
-      ),
-      false => total,
-    },
-    FactRecordScanKind::ScanLoweredExport => match is_pub_function(
-      context_value.source,
-      current,
-      result
-    ) {
-      true => textmodel.signature_mix(
-        total,
-        lowered_export_fact_signature(
-          lowered_export_fact(context_value.source, current, result)
+        checked_decl_fact_signature(
+          checked_decl_fact(context_value.source, current, result)
         )
       ),
-      false => total,
+      FactRecordScanKind::ScanCheckedExpression => textmodel.signature_mix(
+        total,
+        checked_expr_fact_signature(
+          checked_expr_fact(context_value.source, current, result)
+        )
+      ),
+      FactRecordScanKind::ScanCheckedExpressionChild =>
+        parser.text_declaration_root_child_record_signature(
+          context_value.source,
+          current.cursor,
+          result.value.decl,
+          total
+        ),
+      FactRecordScanKind::ScanCheckedExpressionShape => textmodel.signature_mix(
+        total,
+        checked_expr_shape_fact_signature(
+          checked_expr_shape_fact(context_value.source, current, result)
+        )
+      ),
+      FactRecordScanKind::ScanCheckedLocal => match is_function(
+        context_value.source,
+        current,
+        result
+      ) {
+        true => checked_local_function_signature(
+          context_value,
+          current,
+          total,
+          result
+        ),
+        false => total,
+      },
+      FactRecordScanKind::ScanLoweredExport => match is_pub_function(
+        context_value.source,
+        current,
+        result
+      ) {
+        true => textmodel.signature_mix(
+          total,
+          lowered_export_fact_signature(
+            lowered_export_fact(context_value.source, current, result)
+          )
+        ),
+        false => total,
+      },
     },
   }
 }
@@ -6360,17 +6389,23 @@ fn FactContext::checked_declaration_record_scan(
         context_value,
         env,
         parser.next_text_declaration_state(result.state, context_value.source),
-        textmodel.signature_mix(
-          total,
-          checked_decl_fact_signature(
-            checked_decl_fact_with_env(
-              context_value.source,
-              current,
-              result,
-              env
+        match parser.is_text_external_import_start(
+          context_value.source,
+          current.cursor
+        ) {
+          true => total,
+          false => textmodel.signature_mix(
+            total,
+            checked_decl_fact_signature(
+              checked_decl_fact_with_env(
+                context_value.source,
+                current,
+                result,
+                env
+              )
             )
-          )
-        )
+          ),
+        }
       ),
     },
   }
@@ -6394,17 +6429,23 @@ fn FactContext::checked_expression_record_scan(
         context_value,
         env,
         parser.next_text_declaration_state(result.state, context_value.source),
-        textmodel.signature_mix(
-          total,
-          checked_expr_fact_signature(
-            checked_expr_fact_with_env(
-              context_value.source,
-              current,
-              result,
-              env
+        match parser.is_text_external_import_start(
+          context_value.source,
+          current.cursor
+        ) {
+          true => total,
+          false => textmodel.signature_mix(
+            total,
+            checked_expr_fact_signature(
+              checked_expr_fact_with_env(
+                context_value.source,
+                current,
+                result,
+                env
+              )
             )
-          )
-        )
+          ),
+        }
       ),
     },
   }
@@ -6428,17 +6469,23 @@ fn FactContext::checked_expression_shape_scan(
         context_value,
         env,
         parser.next_text_declaration_state(result.state, context_value.source),
-        textmodel.signature_mix(
-          total,
-          checked_expr_shape_fact_signature(
-            checked_expr_shape_fact_with_env(
-              context_value.source,
-              current,
-              result,
-              env
+        match parser.is_text_external_import_start(
+          context_value.source,
+          current.cursor
+        ) {
+          true => total,
+          false => textmodel.signature_mix(
+            total,
+            checked_expr_shape_fact_signature(
+              checked_expr_shape_fact_with_env(
+                context_value.source,
+                current,
+                result,
+                env
+              )
             )
-          )
-        )
+          ),
+        }
       ),
     },
   }

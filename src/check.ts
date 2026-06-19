@@ -35,7 +35,6 @@ import {
   annotationBranchHint,
   type CompilerPluginOptions,
   type CompilerPluginRegistry,
-  type TypePluginValue,
   compilerSpecialForm,
   createCompilerPluginRegistry,
   defaultCompilerPluginRegistry,
@@ -44,6 +43,7 @@ import {
   isStaticBuiltinName,
   staticBuiltinName,
   staticBuiltinParamKind,
+  type TypePluginValue,
 } from "./plugins.ts";
 import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
 import { checkPluginRewrites } from "./rewrites.ts";
@@ -1532,16 +1532,17 @@ function checkProgramInternal(
   recordPhase("evaluateTypeDecls", () => evaluateTypeDecls(typeDecls, diagnostics));
   recordPhase(
     "evaluateDeclarationTagExpressions",
-    () => evaluateDeclarationTagExpressions(
-      program,
-      typeDecls,
-      fnDecls,
-      hostIoImports,
-      new Map(),
-      addShader,
-      diagnostics,
-      pluginRegistry,
-    ),
+    () =>
+      evaluateDeclarationTagExpressions(
+        program,
+        typeDecls,
+        fnDecls,
+        hostIoImports,
+        new Map(),
+        addShader,
+        diagnostics,
+        pluginRegistry,
+      ),
   );
   fnDecls = program.declarations.filter((decl): decl is FnDecl => decl.kind === "fn");
   recordPhase(
@@ -1586,15 +1587,16 @@ function checkProgramInternal(
     ));
   recordPhase(
     "evaluateTypeTestDeclarations",
-    () => evaluateTypeTestDeclarations(
-      typeDecls,
-      fnDecls,
-      hostIoImports,
-      constValues,
-      addShader,
-      diagnostics,
-      pluginRegistry,
-    ),
+    () =>
+      evaluateTypeTestDeclarations(
+        typeDecls,
+        fnDecls,
+        hostIoImports,
+        constValues,
+        addShader,
+        diagnostics,
+        pluginRegistry,
+      ),
   );
   recordPhase(
     "resolveAttachedMemberCalls #1",
@@ -6791,6 +6793,29 @@ function checkConstDictionaries(
       continue;
     }
     if (decl.value.kind !== "shape") {
+      const expectedLiteralType = decl.type
+        ? constLiteralAnnotationType(
+          decl,
+          types,
+          typesByName,
+          functionsByName,
+          hostIoImports,
+          diagnostics,
+        )
+        : undefined;
+      if (
+        decl.value.kind === "literal" && expectedLiteralType &&
+        literalTypeMembers(expectedLiteralType)
+      ) {
+        if (!literalExprFitsType(decl.value, expectedLiteralType)) {
+          diagnostics.push(diagnosticAt(
+            "type.literal_mismatch",
+            `literal ${decl.value.value} is not assignable to ${decl.type}`,
+            decl.value,
+          ));
+        }
+        continue;
+      }
       if (isRuntimeScalarConstInitializer(decl)) {
         continue;
       }
@@ -6913,6 +6938,32 @@ function removeConstShapeSlotFallbackDiagnostics(
   }
 }
 
+function constLiteralAnnotationType(
+  decl: ConstDecl,
+  types: TypeDecl[],
+  typesByName: Map<string, TypeDecl>,
+  functions: Map<string, FnDecl>,
+  hostIoImports: Map<string, string[]>,
+  diagnostics: Diagnostic[],
+): string | undefined {
+  if (!decl.type) return undefined;
+  const resolved = resolveAliasType(decl.type, types) ?? decl.type;
+  if (literalTypeMembers(resolved)) return resolved;
+  const normalized = instantiateAnnotation(
+    decl.type,
+    typesByName,
+    functions,
+    hostIoImports,
+    new Map(),
+    diagnostics,
+    decl.span,
+  );
+  if (normalized?.kind === "alias" && literalTypeMembers(normalized.type)) {
+    return normalized.type;
+  }
+  return resolved;
+}
+
 function isScalarConstInitializer(decl: ConstDecl): boolean {
   if (!decl.type || decl.value.kind !== "literal") return false;
   const type = decl.type.trim();
@@ -7033,6 +7084,7 @@ type ConstValue =
     | { kind: "never" }
     | { kind: "bool"; value: boolean }
     | { kind: "number"; value: string }
+    | { kind: "char"; value: string }
     | { kind: "string"; value: string }
     | { kind: "literal_type"; value: string }
     | { kind: "type"; name: string; normalized?: TypeBody }
@@ -7045,6 +7097,10 @@ type ConstValue =
     | { kind: "shape"; slots: { label?: string; value: ConstValue }[]; runtime?: boolean }
   )
   & { type?: string; span?: Span };
+
+function decodeStringLiteralValue(source: string): string {
+  return JSON.parse(source);
+}
 
 function evaluateConstDecls(
   consts: ConstDecl[],
@@ -7170,7 +7226,7 @@ class ConstEvaluator {
         if (expr.literalKind === "string") {
           return this.withSpan({
             kind: "string",
-            value: expr.value.slice(1, -1),
+            value: decodeStringLiteralValue(expr.value),
             ...(expr.inferredType ? { type: expr.inferredType } : {}),
           }, expr.span);
         }
@@ -7178,6 +7234,13 @@ class ConstEvaluator {
           return this.withSpan({
             kind: "string",
             value: expr.value,
+            ...(expr.inferredType ? { type: expr.inferredType } : {}),
+          }, expr.span);
+        }
+        if (expr.literalKind === "char") {
+          return this.withSpan({
+            kind: "char",
+            value: JSON.parse(`"${expr.value.slice(1, -1)}"`),
             ...(expr.inferredType ? { type: expr.inferredType } : {}),
           }, expr.span);
         }
@@ -8196,6 +8259,7 @@ function constPatternMatches(pattern: ParamPattern, value: ConstValue): boolean 
   const text = renderParamPattern(pattern);
   if (value.kind === "bool") return text === (value.value ? "true" : "false");
   if (value.kind === "number") return text === value.value;
+  if (value.kind === "char") return text === renderLiteralTypeMember(value);
   if (value.kind === "string") return text === JSON.stringify(value.value);
   if (value.kind === "literal_type") return text === `#${value.value}`;
   if (value.kind === "type") return text === value.name;
@@ -8205,7 +8269,10 @@ function constPatternMatches(pattern: ParamPattern, value: ConstValue): boolean 
 function renderConstTypeArg(value: ConstValue): string {
   if (value.kind === "type") return value.name;
   if (value.kind === "fn") return value.name;
+  if (value.kind === "bool") return value.value ? "true" : "false";
   if (value.kind === "number") return value.value;
+  if (value.kind === "char") return renderLiteralTypeMember(value);
+  if (value.kind === "string") return JSON.stringify(value.value);
   if (value.kind === "literal_type") return `#${value.value}`;
   if (value.kind === "shape") {
     return `{${
@@ -8282,6 +8349,14 @@ function constValueToExpr(value: ConstValue): Expr | undefined {
       kind: "literal",
       literalKind: "string",
       value: JSON.stringify(value.value),
+      ...(value.type ? { inferredType: value.type } : {}),
+    };
+  }
+  if (value.kind === "char") {
+    return {
+      kind: "literal",
+      literalKind: "char",
+      value: renderLiteralTypeMember(value),
       ...(value.type ? { inferredType: value.type } : {}),
     };
   }
@@ -9669,7 +9744,12 @@ function typeHasFreeInferredVars(annotation: string, consts?: Map<string, ConstV
 function literalConstValue(expr: Extract<Expr, { kind: "literal" }>): ConstValue | undefined {
   if (expr.literalKind === "bool") return { kind: "bool", value: expr.value === "true" };
   if (expr.literalKind === "number") return { kind: "number", value: expr.value };
-  if (expr.literalKind === "string") return { kind: "string", value: expr.value.slice(1, -1) };
+  if (expr.literalKind === "char") {
+    return { kind: "char", value: JSON.parse(`"${expr.value.slice(1, -1)}"`) };
+  }
+  if (expr.literalKind === "string") {
+    return { kind: "string", value: decodeStringLiteralValue(expr.value) };
+  }
   if (expr.literalKind === "multiline") return { kind: "string", value: expr.value };
   if (expr.literalKind === "literalType") {
     return { kind: "literal_type", value: expr.value.slice(1) };
@@ -9685,6 +9765,8 @@ function literalValueMatchesType(value: ConstValue, expectedType: string): boole
       ? `bool:${value.value ? "true" : "false"}`
       : value.kind === "number"
       ? `number:${value.value}`
+      : value.kind === "char"
+      ? `char:${value.value}`
       : value.kind === "string"
       ? `string:${value.value}`
       : value.kind === "literal_type"
@@ -9696,6 +9778,7 @@ function literalValueMatchesType(value: ConstValue, expectedType: string): boole
   if (type === "literal") return true;
   if (value.kind === "bool") return type === "bool";
   if (value.kind === "number") return type === "i32" || type === "numeric" || type === "count";
+  if (value.kind === "char") return type === "char";
   if (value.kind === "string") return type === "string" || type === "multiline";
   if (value.kind === "literal_type") return type === "literal";
   if (value.kind === "type") return type === "type";
@@ -9706,6 +9789,7 @@ function literalValueMatchesType(value: ConstValue, expectedType: string): boole
 function literalConstName(value: ConstValue): string {
   if (value.kind === "bool") return value.value ? "true" : "false";
   if (value.kind === "number") return value.value;
+  if (value.kind === "char") return `char_${value.value.codePointAt(0) ?? 0}`;
   if (value.kind === "string") return `str_${wgslShaderId(value.value)}`;
   if (value.kind === "literal_type") return `#${value.value}`;
   return constValueKey(value);
@@ -9713,7 +9797,7 @@ function literalConstName(value: ConstValue): string {
 
 function stringLiteralValue(expr: Expr | undefined): string | undefined {
   if (expr?.kind !== "literal") return undefined;
-  if (expr.literalKind === "string") return expr.value.slice(1, -1);
+  if (expr.literalKind === "string") return decodeStringLiteralValue(expr.value);
   if (expr.literalKind === "multiline") return expr.value;
   return undefined;
 }
@@ -11269,7 +11353,15 @@ function constValueFromRenderedTypeArg(source: string): ConstValue {
   const nestedShape = constShapeValueFromTypeArg(source);
   if (nestedShape) return nestedShape;
   if (source === "true" || source === "false") return { kind: "bool", value: source === "true" };
-  if (/^-?[0-9]+$/.test(source)) return { kind: "number", value: source };
+  if (/^-?[0-9]+(?:\.[0-9]+)?(?:i32|u32|i64|u64|f32|f64)?$/.test(source)) {
+    return { kind: "number", value: source };
+  }
+  if (source.startsWith("'") && source.endsWith("'")) {
+    return { kind: "char", value: JSON.parse(`"${source.slice(1, -1)}"`) };
+  }
+  if (source.startsWith('"') && source.endsWith('"')) {
+    return { kind: "string", value: JSON.parse(source) };
+  }
   if (source.startsWith("#")) return { kind: "literal_type", value: source.slice(1) };
   return { kind: "type", name: source };
 }
@@ -11278,8 +11370,8 @@ function isConstValue(value: unknown): value is ConstValue {
   if (!value || typeof value !== "object" || !("kind" in value)) return false;
   const kind = (value as { kind?: unknown }).kind;
   if (
-    kind === "bool" || kind === "number" || kind === "string" || kind === "literal_type" ||
-    kind === "type" || kind === "fn" || kind === "never"
+    kind === "bool" || kind === "number" || kind === "char" || kind === "string" ||
+    kind === "literal_type" || kind === "type" || kind === "fn" || kind === "never"
   ) {
     return true;
   }
@@ -14496,6 +14588,8 @@ function evaluateAliasTypeExpr(
   const value = evaluator.eval(expr, new Map());
   diagnostics.splice(before);
   if (value?.kind === "type") return value.name;
+  const literalMembers = value ? literalTypeMembersFromTypeResult(value) : undefined;
+  if (literalMembers) return renderLiteralUnionType(literalMembers);
   if (value?.kind === "shape") return renderTypeExpr(expr);
   if (value?.kind === "never" || !value) return renderTypeExpr(expr);
   return undefined;
@@ -14708,6 +14802,12 @@ function literalTypeMembersFromEval(value: TypeEvalValue): LiteralTypeMember[] |
   return undefined;
 }
 
+function literalTypeMembersFromTypeResult(value: TypeEvalValue): LiteralTypeMember[] | undefined {
+  const members = literalTypeMembersFromEval(value);
+  if (!members || members.some((member) => member.kind === "bool")) return undefined;
+  return members;
+}
+
 function canonicalLiteralMembers(members: LiteralTypeMember[]): LiteralTypeMember[] {
   const byKey = new Map<string, LiteralTypeMember>();
   for (const member of members) byKey.set(literalTypeMemberKey(member), member);
@@ -14737,7 +14837,9 @@ function literalExprMember(expr: Expr): LiteralTypeMember | undefined {
   if (expr.kind !== "literal") return undefined;
   if (expr.literalKind === "number") return { kind: "number", value: expr.value };
   if (expr.literalKind === "bool") return { kind: "bool", value: expr.value };
-  if (expr.literalKind === "string") return { kind: "string", value: expr.value.slice(1, -1) };
+  if (expr.literalKind === "string") {
+    return { kind: "string", value: decodeStringLiteralValue(expr.value) };
+  }
   if (expr.literalKind === "char") {
     return { kind: "char", value: JSON.parse(`"${expr.value.slice(1, -1)}"`) };
   }
@@ -14763,14 +14865,20 @@ function literalTypeCarrier(type: string | undefined): string | undefined {
 function runtimeValueTypeAssignable(
   expected: string | undefined,
   actual: string | undefined,
+  types: TypeDecl[] = [],
 ): boolean {
   if (!expected || !actual) return true;
-  const refined = refinedI32Assignable(resolveAliasFree(expected), resolveAliasFree(actual));
+  const refined = refinedI32Assignable(
+    resolveAliasFree(expected),
+    resolveAliasFree(actual),
+  );
   if (refined !== undefined) return refined;
-  const expectedLiteral = canonicalLiteralType(expected);
-  const actualLiteral = canonicalLiteralType(actual);
+  const resolvedExpected = resolveAliasType(expected, types) ?? expected.trim();
+  const resolvedActual = resolveAliasType(actual, types) ?? actual.trim();
+  const expectedLiteral = canonicalLiteralType(resolvedExpected);
+  const actualLiteral = canonicalLiteralType(resolvedActual);
   if (expectedLiteral) return actualLiteral === expectedLiteral;
-  if (actualLiteral && literalTypeCarrier(actualLiteral) === expected.trim()) return true;
+  if (actualLiteral && literalTypeCarrier(actualLiteral) === resolvedExpected.trim()) return true;
   const expectedRuntime = scalarDomainRuntimeType(expected);
   const actualRuntime = scalarDomainRuntimeType(actual);
   if (expectedRuntime && actualRuntime && expectedRuntime === actualRuntime) return true;
@@ -15178,7 +15286,9 @@ function lowerMemberwiseEql(
     return changed ? lowered : items;
   };
   const lowerExpr = (expr: Expr, currentFn?: FnDecl): Expr => {
-    if (expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "@memberwise_eql") {
+    if (
+      expr.kind === "call" && expr.callee.kind === "var" && expr.callee.name === "@memberwise_eql"
+    ) {
       return lowerMemberwiseEqlCall(expr, types, diagnostics);
     }
     switch (expr.kind) {
@@ -15284,8 +15394,7 @@ function lowerMemberwiseEql(
   for (const decl of program.declarations) {
     if (decl.kind === "fn") {
       decl.body = lowerExpr(decl.body, decl) as Extract<Expr, { kind: "block" }>;
-    }
-    else if (decl.kind === "let" || decl.kind === "const") decl.value = lowerExpr(decl.value);
+    } else if (decl.kind === "let" || decl.kind === "const") decl.value = lowerExpr(decl.value);
   }
 }
 
@@ -15812,9 +15921,7 @@ class TypeEvaluator {
         ? undefined
         : this.eval(expr.callee, locals);
     const callee = expr.callee.kind === "type_ref"
-      ? localCallee?.kind === "type"
-        ? localCallee.name
-        : expr.callee.name
+      ? localCallee?.kind === "type" ? localCallee.name : expr.callee.name
       : expr.callee.kind === "type_static_ref"
       ? `@${expr.callee.name}`
       : evaluatedCallee?.kind === "type"
@@ -15966,7 +16073,9 @@ class TypeEvaluator {
     return {
       kind: "members",
       target: target.name,
-      functions: expr.functions.map((fn) => this.instantiateMemberFunction(fn, target.name, locals)),
+      functions: expr.functions.map((fn) =>
+        this.instantiateMemberFunction(fn, target.name, locals)
+      ),
       span: expr.span,
     };
   }
@@ -16380,9 +16489,12 @@ class TypeEvaluator {
         if (expr.literalKind === "bool") return { kind: "bool", value: expr.value === "true" };
         if (expr.literalKind === "number") return { kind: "number", value: expr.value };
         if (expr.literalKind === "string") {
-          return { kind: "string", value: expr.value.slice(1, -1) };
+          return { kind: "string", value: decodeStringLiteralValue(expr.value) };
         }
         if (expr.literalKind === "multiline") return { kind: "string", value: expr.value };
+        if (expr.literalKind === "char") {
+          return { kind: "char", value: JSON.parse(`"${expr.value.slice(1, -1)}"`) };
+        }
         if (expr.literalKind === "literalType") {
           return { kind: "literal", value: expr.value.slice(1) };
         }
@@ -16546,6 +16658,8 @@ class TypeEvaluator {
         return { kind: "bool", value: value.value };
       case "number":
         return { kind: "number", value: value.value };
+      case "char":
+        return { kind: "char", value: value.value };
       case "string":
         return { kind: "string", value: value.value };
       case "literal_type":
@@ -16658,8 +16772,7 @@ class TypeEvaluator {
       if (result?.kind !== "members") {
         this.reportDiagnostic({
           code: "type.result_kind",
-          message:
-            `type function ${selected.name} declares -> members but does not return members`,
+          message: `type function ${selected.name} declares -> members but does not return members`,
         });
       }
       return result;
@@ -16667,7 +16780,8 @@ class TypeEvaluator {
     if (result?.kind === "members") {
       this.reportDiagnostic({
         code: "type.result_kind",
-        message: `type function ${selected.name} returns members but declares -> ${selected.resultKind}`,
+        message:
+          `type function ${selected.name} returns members but declares -> ${selected.resultKind}`,
       });
       return result;
     }
@@ -16680,6 +16794,14 @@ class TypeEvaluator {
         ...result,
         normalized,
         name: `${callee}(${args.map(renderTypeEvalValue).join(", ")})`,
+      };
+    }
+    const literalMembers = result ? literalTypeMembersFromTypeResult(result) : undefined;
+    if (selected.resultKind === "type" && literalMembers) {
+      return {
+        kind: "type",
+        name: `${callee}(${args.map(renderTypeEvalValue).join(", ")})`,
+        normalized: { kind: "alias", type: renderLiteralUnionType(literalMembers) },
       };
     }
     return result;
@@ -17929,6 +18051,8 @@ function constToTypeEvalValue(value: ConstValue): TypeEvalValue {
       return { kind: "bool", value: value.value };
     case "number":
       return { kind: "number", value: value.value };
+    case "char":
+      return { kind: "char", value: value.value };
     case "string":
       return { kind: "string", value: value.value };
     case "literal_type":
@@ -18223,6 +18347,8 @@ function substituteTypeExpr(expr: TypeExpr, locals: Map<string, TypeEvalValue>):
     if (local?.kind === "literal") return { kind: "type_literal", value: local.value };
     if (local?.kind === "char") return { kind: "type_char", value: local.value };
     if (local?.kind === "string") return { kind: "type_string", value: local.value };
+    if (local?.kind === "number") return { kind: "type_number", value: local.value };
+    if (local?.kind === "bool") return { kind: "type_bool", value: local.value };
     return expr;
   }
   if (expr.kind === "type_static_ref") return expr;
@@ -18597,6 +18723,9 @@ class AnnotationTypeParser {
 
   private parsePrimaryType(): TypeExpr | undefined {
     this.skip();
+    if (this.peekKeyword("match")) {
+      return this.parseMatchType();
+    }
     if (this.peekKeyword("fn")) {
       return { kind: "type_fn", source: this.source.slice(this.index).trim() };
     }
@@ -18645,7 +18774,9 @@ class AnnotationTypeParser {
         ? undefined
         : { kind: "type_char", value: JSON.parse(`"${text.slice(1, -1)}"`) };
     }
-    const number = this.source.slice(this.index).match(/^[0-9]+/);
+    const number = this.source.slice(this.index).match(
+      /^-?[0-9]+(?:\.[0-9]+)?(?:i32|u32|i64|u64|f32|f64)?/,
+    );
     if (number) {
       this.index += number[0].length;
       return { kind: "type_number", value: number[0] };
@@ -18684,6 +18815,76 @@ class AnnotationTypeParser {
       this.skip();
     }
     return expr;
+  }
+
+  private parseMatchType(): TypeExpr | undefined {
+    this.index += "match".length;
+    const value = this.parseType();
+    if (!value) return undefined;
+    this.skip();
+    if (!this.peek("{")) return undefined;
+    this.index++;
+    const arms: Extract<TypeExpr, { kind: "type_match" }>["arms"] = [];
+    this.skip();
+    while (!this.peek("}") && this.index < this.source.length) {
+      const pattern = this.parseTypePattern();
+      this.skip();
+      if (!this.peek("=>")) return undefined;
+      this.index += 2;
+      const armValue = this.parseType();
+      if (!pattern || !armValue) return undefined;
+      arms.push({ pattern, value: armValue });
+      this.skip();
+      if (this.peek(",")) {
+        this.index++;
+        this.skip();
+      } else {
+        break;
+      }
+    }
+    if (!this.peek("}")) return undefined;
+    this.index++;
+    return { kind: "type_match", value, arms };
+  }
+
+  private parseTypePattern(): TypePattern | undefined {
+    this.skip();
+    if (this.peek("_")) {
+      this.index++;
+      return { kind: "wildcard" };
+    }
+    if (this.peekKeyword("true")) {
+      this.index += "true".length;
+      return { kind: "bool", value: true };
+    }
+    if (this.peekKeyword("false")) {
+      this.index += "false".length;
+      return { kind: "bool", value: false };
+    }
+    if (this.peek("#")) {
+      this.index++;
+      const value = this.ident();
+      return value ? { kind: "literal", value } : undefined;
+    }
+    if (this.peek('"')) {
+      const text = this.quoted('"');
+      return text === undefined ? undefined : { kind: "string", value: JSON.parse(text) };
+    }
+    if (this.peek("'")) {
+      const text = this.quoted("'");
+      return text === undefined
+        ? undefined
+        : { kind: "char", value: JSON.parse(`"${text.slice(1, -1)}"`) };
+    }
+    const number = this.source.slice(this.index).match(
+      /^-?[0-9]+(?:\.[0-9]+)?(?:i32|u32|i64|u64|f32|f64)?/,
+    );
+    if (number) {
+      this.index += number[0].length;
+      return { kind: "number", value: number[0] };
+    }
+    const name = this.ident();
+    return name ? { kind: "type", name } : undefined;
   }
 
   private parseScalarDomainType(carrier: string): TypeExpr | undefined {
@@ -19929,7 +20130,7 @@ function checkExprImpl(
       }
       if (
         expectedType && actualType &&
-        !runtimeValueTypeAssignable(expectedType, actualType)
+        !runtimeValueTypeAssignable(expectedType, actualType, types)
       ) {
         diagnostics.push(diagnosticAt(
           "type.literal_mismatch",
@@ -19981,7 +20182,7 @@ function checkExprImpl(
           const actual = exprBindingType(arg, env, types, functions, options);
           if (
             expected && actual &&
-            !runtimeValueTypeAssignable(expected, actual)
+            !runtimeValueTypeAssignable(expected, actual, types)
           ) {
             diagnostics.push(diagnosticAt(
               "type.literal_mismatch",
@@ -19993,7 +20194,7 @@ function checkExprImpl(
         if (
           expectedType &&
           currentFn.returnType &&
-          !runtimeValueTypeAssignable(expectedType, currentFn.returnType)
+          !runtimeValueTypeAssignable(expectedType, currentFn.returnType, types)
         ) {
           diagnostics.push(diagnosticAt(
             "type.literal_mismatch",
@@ -20126,7 +20327,7 @@ function checkExprImpl(
         const actual = exprBindingType(arg, env, types, functions, options);
         if (
           expected && actual &&
-          !runtimeValueTypeAssignable(expected, actual)
+          !runtimeValueTypeAssignable(expected, actual, types)
         ) {
           diagnostics.push(diagnosticAt(
             "type.literal_mismatch",
@@ -20148,7 +20349,7 @@ function checkExprImpl(
       }
       if (expectedType) {
         const actual = exprBindingType(expr, env, types, functions, options);
-        if (actual && !runtimeValueTypeAssignable(expectedType, actual)) {
+        if (actual && !runtimeValueTypeAssignable(expectedType, actual, types)) {
           diagnostics.push(diagnosticAt(
             "type.literal_mismatch",
             `expected ${expectedType} but got ${actual}`,
@@ -20234,7 +20435,7 @@ function checkExprImpl(
       }
       if (expectedType) {
         const actual = exprBindingType(expr, env, types, functions, options);
-        if (actual && !runtimeValueTypeAssignable(expectedType, actual)) {
+        if (actual && !runtimeValueTypeAssignable(expectedType, actual, types)) {
           diagnostics.push(diagnosticAt(
             "type.literal_mismatch",
             `expected ${expectedType} but got ${actual}`,
@@ -20314,7 +20515,7 @@ function checkExprImpl(
             options,
           );
           const guardType = exprBindingType(arm.guard, armEnv, types, functions, options);
-          if (guardType && !runtimeValueTypeAssignable("bool", guardType)) {
+          if (guardType && !runtimeValueTypeAssignable("bool", guardType, types)) {
             diagnostics.push(diagnosticAt(
               "type.guard",
               `match guard must be bool, got ${guardType}`,
@@ -20496,9 +20697,9 @@ function checkExprImpl(
         }
         return;
       }
-      if (expectedType && literalTypeMembers(expectedType)) {
-        if (literalExprFitsType(expr, expectedType)) {
-          expr.inferredType = canonicalLiteralType(expectedType);
+      if (refinedExpectedType && literalTypeMembers(refinedExpectedType)) {
+        if (literalExprFitsType(expr, refinedExpectedType)) {
+          expr.inferredType = canonicalLiteralType(refinedExpectedType);
         } else {
           diagnostics.push(diagnosticAt(
             "type.literal_mismatch",
@@ -21282,6 +21483,9 @@ function literalRuntimeType(expr: Expr): string | undefined {
   if (expr.kind !== "literal") return undefined;
   if (expr.literalKind === "number") return "i32";
   if (expr.literalKind === "bool") return "bool";
+  if (expr.literalKind === "char") return "char";
+  if (expr.literalKind === "string" || expr.literalKind === "multiline") return "string";
+  if (expr.literalKind === "literalType") return "literal";
   return expr.inferredType;
 }
 
@@ -22205,7 +22409,10 @@ function checkOrPatternBindings(
       const left = expected.get(name);
       const right = actual.get(name);
       if (!left || !right) continue;
-      if (runtimeValueTypeAssignable(left, right) && runtimeValueTypeAssignable(right, left)) {
+      if (
+        runtimeValueTypeAssignable(left, right, types) &&
+        runtimeValueTypeAssignable(right, left, types)
+      ) {
         continue;
       }
       diagnostics.push(diagnosticAt(
@@ -22467,6 +22674,11 @@ function resolveAliasType(type: string | undefined, types: TypeDecl[]): string |
   const find = (name: string) =>
     byName.get(name) ??
       (isQualifiedTypeName(name) ? undefined : byTerminal.get(terminalName(name)));
+  const evaluateAlias = (source: string, currentName: string): string | undefined => {
+    const expr = parseAnnotationType(source);
+    if (!expr) return undefined;
+    return evaluateAliasTypeExpr(expr, currentName, byName, []);
+  };
   const seen = new Set<string>();
   while (current && !seen.has(current)) {
     seen.add(current);
@@ -22485,11 +22697,12 @@ function resolveAliasType(type: string | undefined, types: TypeDecl[]): string |
     const callDecl = find(callName);
     const callArgs = typeCallArgsForBase(current, callName);
     if (callDecl?.normalized?.kind === "alias" && callArgs !== undefined) {
-      current = substituteAliasTypeParams(
+      const substituted = substituteAliasTypeParams(
         callDecl.normalized.type,
         callDecl,
         splitTypeArgs(callArgs),
       );
+      current = evaluateAlias(substituted, callDecl.name) ?? substituted;
       continue;
     }
     return current;

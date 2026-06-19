@@ -56,10 +56,25 @@ match a { i32 => bool, _ => a }
 @type_has_slot(t, #x)
 ```
 
+Literal values are type-level values and can be returned as literal types:
+
+```fig
+type fn Pick(x: const) -> type {
+  match x {
+    "hello" => "hello",
+    'c' => 'c',
+    1 => 1,
+  }
+}
+
+const word: Pick("hello") = "hello";
+const count: Pick(1) = 1;
+```
+
 `struct(ShapeBinding)` creates a product type. `union(a, b, ...)` creates a sum type.
 `enum(i32) {Name = value}` creates a scalar alias with named integer members. Enum members are
-referenced with associated value syntax, for example `Color::Red`.
-Current expression syntax resolves runtime binary operators through visible operator declarations:
+referenced with associated value syntax, for example `Color::Red`. Current expression syntax
+resolves runtime binary operators through visible operator declarations:
 
 ```fig
 fn append(a: Box, b: Box) -> Box { Box::append(a, b) }
@@ -135,16 +150,16 @@ and erased from runtime calls.
 
 Use these patterns when choosing how to express static intent:
 
-| Intent                                         | Pattern                                                                                         |
-| ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Intent                                         | Pattern                                                                                                       |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | Define a fixed runtime data layout             | Use `type Name = struct ...`, `type Name(a) = union ...`, `type Name = enum(...) ...`, or `type Alias = ...`. |
-| Compute a runtime data layout                  | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.        |
-| Require behavior on a concrete type            | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`. |
-| Call required behavior carried by a value      | Annotate a value as `contract(t)` and call the attached member as `t::member(...)`.             |
-| Call required behavior without a runtime value | Write `@assert(contract(t));` or use a small wrapper type in an annotation.                   |
-| Abstract over a unary type constructor         | Accept `t: type fn(a: type) -> type`, use values as `t(a)`, and reflect members on `t`.         |
-| Choose dispatch from a type value              | Pass the type as `const t` or `const t: type`; do not model types as runtime Values.            |
-| Specialize layout or counts                    | Pass static shape data as `const n: count`, `const a: type`, or another `const` parameter.      |
+| Compute a runtime data layout                  | Write a `type fn`, bind a PascalCase shape, then return `struct(Shape)` or `union(...)`.                      |
+| Require behavior on a concrete type            | Write a contract `type fn` with `@require(@type_has_member(...))` and `@type_member_type(...)`.               |
+| Call required behavior carried by a value      | Annotate a value as `contract(t)` and call the attached member as `t::member(...)`.                           |
+| Call required behavior without a runtime value | Write `@assert(contract(t));` or use a small wrapper type in an annotation.                                   |
+| Abstract over a unary type constructor         | Accept `t: type fn(a: type) -> type`, use values as `t(a)`, and reflect members on `t`.                       |
+| Choose dispatch from a type value              | Pass the type as `const t` or `const t: type`; do not model types as runtime Values.                          |
+| Specialize layout or counts                    | Pass static shape data as `const n: count`, `const a: type`, or another `const` parameter.                    |
 
 Prefer inference when ordinary value parameters already determine the type. Pass an explicit
 `const t` only when the function needs a type that is otherwise not pinned by a value argument, such

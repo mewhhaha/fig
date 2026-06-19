@@ -181,8 +181,8 @@ Top-level `@assert(TypeExpr);` evaluates a type-level expression and discards th
 @assert(Functor(Vec));
 ```
 
-The argument is a type expression. Contract type functions still run their `@require` checks
-while evaluating. Concrete arguments are checked immediately; generic arguments are checked when the
+The argument is a type expression. Contract type functions still run their `@require` checks while
+evaluating. Concrete arguments are checked immediately; generic arguments are checked when the
 surrounding generic code is instantiated.
 
 Top-level `let` binds a simple value:
@@ -356,6 +356,9 @@ false
 ```
 
 Fenced text literals use triple backticks and are useful for shader source.
+
+Number, character, string, and `#Tag` literals can also be used as exact literal types in
+annotations and type functions.
 
 ## Rejected Syntax
 

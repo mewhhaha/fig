@@ -1,0 +1,29 @@
+type fn Pick(x: const) -> type {
+  match x {
+    "hello" => "hello",
+    'c' => 'c',
+    1 => 1,
+  }
+}
+type fn Id(x: const) -> type { x }
+
+const a: "hello" = "hello";
+const b: 1 = 1;
+const c: 'c' = 'c';
+const id_word: Id("hello") = "hello";
+const id_number: Id(1) = 1;
+const id_char: Id('c') = 'c';
+
+fn exact_word(value: Pick("hello")) -> "hello" { value }
+fn exact_number(value: Pick(1)) -> 1 { value }
+fn exact_char(value: Pick('c')) -> 'c' { value }
+
+pub fn main() -> i32 {
+  let word: "hello" = exact_word(a);
+  let number: 1 = exact_number(b);
+  let mark: 'c' = exact_char(c);
+  let direct_word: Id("hello") = id_word;
+  let direct_number: Id(1) = id_number;
+  let direct_char: Id('c') = id_char;
+  number
+}

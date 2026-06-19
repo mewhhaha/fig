@@ -1,21 +1,29 @@
 # Fig
 
-Fig is an experimental language/compiler focused on static type functions, Branch-Bit values, and
-WebAssembly output.
+Fig is an experimental language and compiler for building portable WebAssembly modules from
+statically checked source. It is designed around compile-time type functions, erased contracts,
+immutable reusable values, and explicit host IO, so libraries can describe data layout and behavior
+in Fig instead of relying on hidden compiler shortcuts.
 
-See `docs/LANGUAGE.md` for the full core-language syntax, semantics, and compiler builtin reference.
-For migration-style guides, see `docs/guides/rust-patterns.md`, `docs/guides/haskell-patterns.md`,
-and `docs/guides/zig-patterns.md`.
+Fig is useful when you want the shape control of systems programming, the static composition
+patterns of functional languages, and a Wasm-first output target with a predictable host boundary.
 
-## Using Fig
+## What Makes Fig Different
 
-Use the compiler library from a source checkout:
+- **Type functions compute types.** Use ordinary compile-time programs to build product layouts,
+  union layouts, aliases, fixed inline arrays, refined domains, and contracts.
+- **Contracts erase.** Trait- or typeclass-like APIs are checked through `type fn` contracts and
+  attached members, then disappear from the runtime representation.
+- **Values stay reusable.** Fig source models ordinary data as immutable values. The backend chooses
+  whether a value lives in Wasm locals, flattened parameters, or ABI-managed heap storage.
+- **WebAssembly is the default target.** Public exports, host imports, and compound values lower to
+  a stable Fig ABI with metadata for host embeddings.
+- **Familiar patterns translate cleanly.** The standard prelude includes Option/Result, fixed
+  arrays, functional helpers, operators, Reader/State/Eff helpers, and pure collection modules.
 
-```ts
-import { checkSource, wasmFromSource } from "./src/mod.ts";
-```
+## Quick Start
 
-Run the CLI from a source checkout:
+From a source checkout:
 
 ```bash
 deno run --allow-read src/cli.ts check examples/hello.fig
@@ -25,13 +33,7 @@ deno run --allow-read --allow-write src/cli.ts build examples/hello.fig
 deno run --allow-read src/cli.ts run examples/hello.fig
 ```
 
-Run the language server over stdio from a source checkout:
-
-```bash
-deno run --allow-read src/lsp/main.ts
-```
-
-Download native `fig` binaries from GitHub Releases:
+Native `fig` binaries are published on GitHub Releases:
 
 ```bash
 fig check examples/hello.fig
@@ -43,198 +45,550 @@ fig lsp
 fig version
 ```
 
-Release archives are published at `https://github.com/mewhhaha/fig/releases` with `SHA256SUMS`.
+Use the compiler as a TypeScript library from a source checkout:
 
-Use `--compile-profile` with `check`, `wat`, `build`, or `run` to print compiler phase timings. Use
-`--runtime-profile` with `run` to collect `@profile("label") { ... }` sites. Debug builds keep
-`@trace("message");` statements available to `fig run`; release builds erase trace statements.
-
-## Type Function Surface
-
-Type functions currently cover several compile-time concepts:
-
-- Layout constructors: products, sums, aliases, function types, shape types, and counted inline
-  arrays.
-- Type declaration sugar for fixed layouts, such as `type Point = struct {x: i32, y: i32}`,
-  `type Option(a) = union {None, Some(value: a)}`, and
-  `type Mode = enum(i32) {Idle = 0, Run = 1}`, plus `type fn` for computed layouts.
-- Static reflection: product/sum/alias checks, slot lookup, variant lookup, and attached member
-  lookup.
-- Static contracts: `@require`-checked proofs such as `Eq(t)`, `Functor(t)`, `Droppable(t)`, and
-  layout predicates.
-- Source-level derive tags: providers such as `prelude.derive.Eq(Self)` generate attached members
-  before follow-up contracts such as `prelude.core.Eq(Self)` validate them.
-- Constructor-polymorphic helpers: generic functions can infer type constructors at call sites and
-  evaluate local type-level checks such as `@assert(Functor(t));`.
-- Reader, state, and effect carriers: `prelude.monad` exposes compiler-lowered `Reader` and `State`
-  computations with `run`, `eval`, and `exec`; `prelude.effect` supports typed reader/state rows
-  such as `effect.Eff({state: Store, reader: Env}, A)` with explicit handlers.
-- Reader and state examples: `examples/prelude_reader_config.fig`,
-  `examples/prelude_state_counter.fig`, and `examples/prelude_reader_state_common.fig` show the
-  current explicit helper and named pipe-bind handler style.
-- Value-layout modeling: examples encode products, sums, fixed inline buffers, compact arrays, and
-  static constraints as compile-time type-function contracts.
-
-See `examples/type_fn_memory.fig` for a checked memory-model sketch that ties these pieces together
-without adding runtime evidence values.
-
-## Branch-Bit Memory Model
-
-Fig source uses Branch-Bit values. Ordinary values are immutable and reusable: passing a value to a
-function does not consume it. Local `let` names are unique within a block, so pure update chains use
-fresh names for each logical version.
-
-```fig
-let stepped = step(world);
-let integrated = integrate(stepped);
-integrated
+```ts
+import { checkSource, wasmFromSource } from "./src/mod.ts";
 ```
 
-When source order is the point of the computation, use explicit do notation with the effect type
-written at its real arity:
+Run the language server over stdio:
+
+```bash
+deno run --allow-read src/lsp/main.ts
+```
+
+Use `--compile-profile` with `check`, `wat`, `build`, or `run` to print compiler phase timings. Use
+`--runtime-profile` with `run` to collect `@profile("label") { ... }` sites.
+
+## A Small Fig Program
 
 ```fig
-let world = do @monad(State(World, _)) {
-  step();
-  integrate();
+const operators = @import("prelude.operators");
+
+type Point = struct {x: i32, y: i32}
+
+fn Point::add(a: Point, b: Point) -> Point {
+  Point {x: a.x + b.x, y: a.y + b.y}
+}
+
+pub fn main() -> i32 {
+  let total = Point::add(
+    Point {x: 1, y: 2},
+    Point {x: 3, y: 4}
+  );
+  total.x + total.y
 }
 ```
 
-Product-return destructuring still uses multi-bind:
+`pub fn` declarations become WebAssembly exports. Non-public functions, type functions, contracts,
+and attached members are ordinary Fig declarations checked by the compiler.
+
+## Examples by Task
+
+### Define Records, Variants, and Enums
+
+Fig product types look like records. Union types model tagged variants. Numeric enums use explicit
+backing values.
 
 ```fig
-let left, right = split(value);
+const operators = @import("prelude.operators");
+
+type Point = struct {x: i32, y: i32}
+
+type Option(a) = union {
+  None, Some(value: a)
+}
+
+type Mode = enum(i32) {Idle = 0, Run = 1, Back = -1}
+
+fn unwrap_or(value: Option(i32), fallback: i32) -> i32 {
+  match value {
+    Some(inner) => inner,
+    None => fallback
+  }
+}
+
+fn mode_score(mode: Mode) -> i32 match {
+  Idle => 0,
+  Run => 1,
+  Mode::Back => -1,
+  _ => 0,
+}
+
+pub fn main() -> i32 {
+  unwrap_or(Some(3), 0) + mode_score(Mode::Run)
+}
 ```
 
-Fig code does not expose `fork`, borrowed types or expressions, frozen references, pointer wrappers,
-explicit `memory` parameters, or `@memory_*`/`@ptr_*`/`@freeze` intrinsics. Lower-level storage is
-an implementation detail of the backend.
+### Add Behavior to a Type
 
-For fixed-size value data, the backend flattens products and inline arrays into scalar Wasm locals
-and parameters where possible. Reusing a value usually becomes additional `local.get` instructions,
-not a runtime copy. Update-heavy fixed data paths use new flattened values and rely on Wasm locals,
-tail-loop lowering, specialization, and SIMD pattern recognition for performance.
+Attached members give types namespaced behavior. Contracts can then check for those members at
+compile time.
 
-The public Wasm ABI is the stable Fig memory ABI. Scalars cross `pub fn` exports and `@external`
-imports directly; products, fixed inline arrays, strings, heap arrays, sums, and wider flattened
-values cross as `i32` handles into `fig_objects`. Fig modules include a `fig.abi` custom section
-with stable layout metadata for objects, fixed arrays, strings, sums, and heap arrays, plus helpers
-such as `fig_alloc_object`, `fig_alloc_buffer`, `fig_retain`, and `fig_release`. The TypeScript API
-exports `instantiateFig`, `createFigHost`, `encodeFigValue`, and `decodeFigValue` for host-side
-calls into Fig modules, including UTF-8 string slots stored through `fig_buffers`.
-Runtime function values are internal values only; `pub fn` exports and `@external` imports cannot
-import or export function-typed values.
+```fig
+const operators = @import("prelude.operators");
 
-The Branch-Bit heap runtime uses separate Wasm memories named `fig_objects` and `fig_buffers` for
-heap objects and large byte buffers. Transitional internal branch handles are `i64` values whose
-high 32 bits are zero and whose low 32 bits contain the object pointer. Heap object headers store
-`layout_id`, payload size, flags, and refcount; writes go through copy-before-write when an object
-is branched or pinned.
+type Point = struct {x: i32, y: i32}
 
-## Performance Layout Sketches
+fn Point::eql(a: Point, b: Point) -> bool {
+  a.x == b.x && a.y == b.y
+}
 
-For normal performance-oriented code, prefer `const std = @import("prelude.std");`. The prelude is
-pure: it exposes common fragments as nested namespaces for core value data, static contracts such as
-`eq`, `semigroup`, `monoid`, `functor`, `applicative`, and `monad`, fixed inline layouts,
-fixed-array/lane helpers, functional helpers, pure option/result methods, tuple methods, and
-schedule metadata. Existing fragment imports such as `prelude.core`, `prelude.layout`,
-`prelude.array_static`, `prelude.function`, `prelude.option`, `prelude.result`, `prelude.tuple`,
-`prelude.scalar`, `prelude.bool`, and `prelude.schedule` remain available for smaller surfaces.
+type fn HasEql(t: type) -> type {
+  let Expected = fn(a: t, b: t) -> bool;
+  @require(@type_has_member(t, #eql), "type requires eql");
+  @require(@type_member_type(t, #eql) == Expected, "eql has wrong type");
+  t
+}
+
+pub fn main() -> i32 {
+  let point: HasEql(Point) = Point {x: 1, y: 1};
+  match Point::eql(point, point) {
+    true => 1,
+    false => 0,
+  }
+}
+```
+
+### Write Generic Functional Code
+
+Const function parameters specialize at compile time. Prelude contracts such as Functor,
+Applicative, and Monad use attached members and erased checks.
 
 ```fig
 const std = @import("prelude.std");
 
-fn inc(x: i32) -> i32 { x + 1 }
+type Box(a) = struct {value: a}
+
+fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+  Box {value: f(v.value)}
+}
+
+fn Box::pure(value: a) -> Box(a) {
+  Box {value}
+}
+
+fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
+  f(v.value)
+}
+
+fn inc(x: i32) -> i32 {
+  x + 1
+}
+
+fn wrap(x: i32) -> Box(i32) {
+  Box {value: x + 10}
+}
 
 pub fn main() -> i32 {
-  let maybe = Option.map(inc, some(1));
-  let value = Option.unwrap_or(maybe, 0);
-  let bounded = value + 8;
-  let pair: Pair(i32, i32) = {first: bounded, second: Result.unwrap_or(ok(2), 0)};
-  let swapped = Pair.swap(pair);
-  swapped.first + swapped.second
+  bind(fmap(Box {value: 1}, inc), wrap).value
 }
 ```
 
-The `examples/perf_*.fig` files are checked catalog modules for comparing static performance layout
-styles under the current language surface:
+### Pipe Values Through a Flow
 
-- `examples/perf_arrays.fig` is the canonical static-kernel sketch. It uses counted inline layouts,
-  fixed lane/tile aliases, and const dictionary specialization to show source-level static dispatch.
-- `examples/perf_array_dsl.fig` is a Futhark/Dex-inspired array API shape. It keeps regular lane,
-  tile, and tensor helpers explicit while making map-style code easier to read.
-- `examples/perf_schedule_dsl.fig` is a Halide-inspired schedule vocabulary. It records tile,
-  vectorize, and unroll intent as static contracts and metadata.
+Fig does not use `|>` pipeline syntax. Use pipe-bind to give the value on the left a scoped name in
+the expression on the right.
 
-These examples use value layouts rather than source-level memory tokens. The prelude provides fixed
-inline arrays and lane/tile aliases such as `lane4_i32`, `tile2x4_i32`, and `mat4_i32`.
+```fig
+const operators = @import("prelude.operators");
 
-Use fixed inline arrays and iterators when collection size is static. `prelude.std` includes the
-pure fixed helpers from `prelude.array_static`, including explicit `lane4_*` helpers,
-`range_i32`/range iterators, `Iter.map`/`Iter.filter`/`Iter.fold`, and `compact_array` collection
-for fixed-capacity filtered results.
+fn inc(x: i32) -> i32 {
+  x + 1
+}
 
-Use the heap-backed collection modules when a compiler-style workload needs growth or persistent
-structure: `prelude.vec` (`Vec`, `Slice`, `Builder`), `prelude.list`, `prelude.nonempty`,
-`prelude.queue`, `prelude.tree`, `prelude.zipper`, `prelude.map`, `prelude.set`, and
-`prelude.graph`. These are ordinary pure Fig modules built on the backend heap runtime; import the
-specific module when you want its qualified API.
+fn double(x: i32) -> i32 {
+  x * 2
+}
 
-`prelude.geometry2d` is a tiny pure playground layer for geometry-shaped programs. It provides
-integer `vec2`, `vec3`, packed `rgba8`, `vertex2d_i32`, `quad2d_i32`, and `geometry2d_i32` helpers.
-The first entry point is quad-first 2D rendering data: `emit_rect2d` and `emit_quad2d` produce fixed
-inline vertex geometry that can later be uploaded by explicit host IO imports.
+fn clamp(value: i32) -> i32 {
+  match value > 10 {
+    true => 10,
+    false => value,
+  }
+}
 
-Browser canvas, GPU, shader metadata, and event IO imports live outside the prelude in `web.canvas`:
+pub fn main() -> i32 {
+  3
+    \next -> inc(next)
+    \doubled -> double(doubled)
+    \bounded -> clamp(bounded)
+}
+```
+
+### Compute Layouts at Compile Time
+
+Type functions are the Fig answer to many `comptime`, macro, and generic-layout use cases.
+
+```fig
+type fn InlineArray(n: count, a: type) -> struct {
+  let InlineArray = {n*a};
+  struct(InlineArray)
+}
+
+fn first(xs: InlineArray(4, i32)) -> i32 {
+  xs[0]
+}
+
+pub fn main() -> i32 {
+  first(#[1, 2, 3, 4])
+}
+```
+
+Shape reflection can inspect and transform layouts:
+
+```fig
+type Payload = struct {id: i32, score: i32, debug: bool}
+
+type fn KeepRuntimeSlot(key: const, _value: const) -> type {
+  match key {
+    #id => true,
+    #score => true,
+    _ => false,
+  }
+}
+
+type fn RuntimeSlots(row: type) -> type {
+  @shape_filter(@type_slots(row), KeepRuntimeSlot)
+}
+```
+
+### Advanced Type Machinery
+
+Fig is not a full dependent type language like Idris: there is no totality checker, implicit proof
+search, or default laziness. The advanced surface is still useful for type-level programming:
+compile-time functions can compute layouts, `@require` can reject invalid types, refined scalar
+domains can carry bounds, declaration tags can generate members, and erased contracts can make
+static evidence available without changing runtime data.
+
+When a computation can fail, prefer a Maybe-style `core.Option` pipeline written with
+`do @monad(core.Option(_))`. Dynamic checks can produce proof-carrying values: `core.Index(4)` is a
+refined `i32(0..4)`, so array access only accepts a checked index.
+
+```fig
+const core = @import("prelude.core");
+const fixed = @import("prelude.fixed");
+const option = @import("prelude.option");
+const operators = @import("prelude.operators");
+
+fn checked_sum4(
+  xs: fixed.Array(4, i32),
+  left_raw: i32,
+  right_raw: i32
+) -> core.Option(i32) {
+  do @monad(core.Option(_)) {
+    left <- core.Index::try(4, left_raw);
+    right <- core.Index::try(4, right_raw);
+    pure(xs[left] + xs[right])
+  }
+}
+
+pub fn main() -> i32 {
+  let xs: fixed.Array(4, i32) = #[10, 20, 30, 40];
+  core.Option::unwrap_or(checked_sum4(xs, 1, 3), 0)
+}
+```
+
+You can use types as route definitions, similar to Haskell Servant-style APIs. Fig can match a
+literal string path as a whole, but it does not currently split `"/items/:id"` strings at type
+level. For a real route DSL, encode the URL as structured type-level segments. Here
+`{items: #lit, id: core.Index(1000)}` represents `/items/:id`; `#lit` marks a fixed segment and the
+typed `id` segment becomes a request parameter.
+
+```fig
+const core = @import("prelude.core");
+const option = @import("prelude.option");
+const operators = @import("prelude.operators");
+
+const item_path = {items: #lit, id: core.Index(1000)};
+
+type Item = struct {id: core.Index(1000), stock: i32}
+
+type fn KeepParam(_segment: const, value: const) -> type {
+  match value {
+    #lit => false,
+    _ => true,
+  }
+}
+
+type fn Request(path: const) -> type {
+  let Request = @shape_filter(path, KeepParam);
+  struct(Request)
+}
+
+type fn Response(method: const, path: const) -> type {
+  match method {
+    #get => match @shape_first_key(path) {
+      #items => match @shape_has_slot(@shape_tail(path), #id) {
+        true => Item,
+        false => i32,
+      },
+      _ => @compile_error("unknown route root"),
+    },
+    _ => @compile_error("unknown method"),
+  }
+}
+
+type fn Handler(method: const, path: const) -> type {
+  fn(request: Request(path)) -> Response(method, path)
+}
+
+fn call_item(
+  handler: Handler(#get, item_path),
+  request: Request(item_path)
+) -> Response(#get, item_path) {
+  handler(request)
+}
+
+fn parse_item(raw_id: i32) -> core.Option(Request(item_path)) {
+  do @monad(core.Option(_)) {
+    id <- core.Index::try(1000, raw_id);
+    pure({id})
+  }
+}
+
+fn get_item(request: Request(item_path)) -> Response(#get, item_path) {
+  Item {id: request.id, stock: 42}
+}
+
+pub fn main() -> i32 {
+  let item = do @monad(core.Option(_)) {
+    request <- parse_item(7);
+    pure(call_item(get_item, request))
+  };
+  match item {
+    Some(value) => value.stock,
+    None => 0,
+  }
+}
+```
+
+Type functions can derive precise data structures from other types. This `Patch(row)` turns every
+field in a product into an optional field of the same type.
+
+```fig
+const core = @import("prelude.core");
+const option = @import("prelude.option");
+const operators = @import("prelude.operators");
+
+type Profile = struct {id: i32, score: i32, active: bool}
+
+type fn MaybeSlot(_key: const, value: const) -> type {
+  core.Option(value)
+}
+
+type fn Patch(row: type) -> type {
+  @require(@type_is_product(row), "Patch expects a product type");
+  let Slots = @type_slots(row);
+  let MaybeSlots = @shape_map_with_key(Slots, MaybeSlot);
+  struct(MaybeSlots)
+}
+
+fn apply_patch(row: Profile, patch: Patch(Profile)) -> Profile {
+  Profile {
+    id: core.Option::unwrap_or(patch.id, row.id),
+    score: core.Option::unwrap_or(patch.score, row.score),
+    active: core.Option::unwrap_or(patch.active, row.active),
+  }
+}
+
+pub fn main() -> i32 {
+  let row = Profile {id: 7, score: 10, active: true};
+  let no_id: core.Option(i32) = option.none();
+  let patch: Patch(Profile) = {
+    id: no_id,
+    score: option.some(99),
+    active: option.some(false)
+  };
+  let updated = apply_patch(row, patch);
+  match updated.active {
+    true => updated.score,
+    false => updated.id + updated.score,
+  }
+}
+```
+
+Shape filters can derive views by inspecting slot types rather than field names.
+
+```fig
+const operators = @import("prelude.operators");
+
+type Telemetry = struct {id: i32, label: string, score: i32, enabled: bool}
+
+type fn KeepNumber(_key: const, value: const) -> type {
+  @type_is_number(value)
+}
+
+type fn NumberView(row: type) -> type {
+  @require(@type_is_product(row), "NumberView expects a product type");
+  let Numeric = @shape_filter(@type_slots(row), KeepNumber);
+  @require(@shape_count(Numeric) == 2, "expected id and score");
+  struct(Numeric)
+}
+
+fn numbers(row: Telemetry) -> NumberView(Telemetry) {
+  {id: row.id, score: row.score}
+}
+
+pub fn main() -> i32 {
+  let row = Telemetry {
+    id: 7,
+    label: "search",
+    score: 35,
+    enabled: true
+  };
+  let numeric = numbers(row);
+  numeric.id + numeric.score
+}
+```
+
+Declaration tags can generate attached members from a type and immediately validate the generated
+surface with a normal contract.
+
+```fig
+const derive = @import("prelude.derive");
+const core = @import("prelude.core");
+const operators = @import("prelude.operators");
+
+@[derive.Eq(Self), core.Eq(Self)]
+type Key = struct {id: i32, shard: i32}
+
+pub fn main() -> i32 {
+  match Key::eql(Key {id: 1, shard: 2}, Key {id: 1, shard: 2}) {
+    true => 1,
+    false => 0,
+  }
+}
+```
+
+Fig is strict by default, but delayed computation is explicit. Use a `const fn() -> T` thunk for
+specialized lazy fallback APIs, or keep runtime function values inside Fig when a closure must
+capture runtime locals. Function values cannot cross public Wasm exports or host imports.
+
+```fig
+const option = @import("prelude.option");
+const core = @import("prelude.core");
+
+fn expensive_default() -> core.Option(i32) {
+  option.some(99)
+}
+
+pub fn main() -> i32 {
+  let cached = option.some(1);
+  let missing: core.Option(i32) = option.none();
+  core.Option::unwrap_or(core.Option::or_else(cached, expensive_default), 0) +
+    core.Option::unwrap_or(core.Option::or_else(missing, \() -> option.some(41)), 0)
+}
+```
+
+### Work with Fixed-Size Data
+
+Use fixed inline arrays and static helpers when the length is known. These patterns are intended for
+small kernels, vector lanes, compact buffers, and predictable Wasm lowering.
+
+```fig
+const operators = @import("prelude.operators");
+const array = @import("prelude.array_static");
+const layout = @import("prelude.layout");
+
+fn inc(x: i32) -> i32 {
+  x + 1
+}
+
+fn add(a: i32, b: i32) -> i32 {
+  a + b
+}
+
+pub fn main() -> i32 {
+  let xs: layout.Lane4I32 = #[1, 2, 3, 4];
+  array.fold4_i32(add, 0, array.map4_i32(inc, xs))
+}
+```
+
+Use heap-backed modules such as `prelude.vec`, `prelude.map`, `prelude.set`, `prelude.tree`, and
+`prelude.graph` when growth or persistent structures matter more than fixed layout.
+
+### Call Host IO
+
+Host imports are explicit. An external IO action takes the `io` executor and returns `io(T)`;
+`do @io(_)` sequences those actions.
+
+```fig
+const operators = @import("prelude.operators");
+
+const clock = @external("clock", fn(host: io) -> io(i32));
+const random = @external("random", fn(host: io) -> io(i32));
+
+pub fn main(host: io) -> io(i32) {
+  do @io(_) {
+    now <- clock(host);
+    entropy <- random(host);
+    return(now + entropy)
+  }
+}
+```
+
+Browser canvas, GPU, shader metadata, and event IO helpers live in `web.canvas`:
 
 ```fig
 const canvas = @import("web.canvas");
 ```
 
-Host IO imports are declared with `@external("name", fn(host: io, ...) -> io(T))`. Runtime entry
-points pass the primitive `io` executor explicitly and use `do @io(_)` to sequence actions.
-External signatures cannot include runtime function values; use const function parameters inside Fig
-or represent host-side callbacks with explicit handles.
+## Coming from Another Language
 
-## Benchmarking
+| If you reach for...           | In Fig, start with...                                                        |
+| ----------------------------- | ---------------------------------------------------------------------------- |
+| Rust traits                   | Attached members plus `type fn` contracts such as `Eq(t)` or `HasEql(t)`.    |
+| Rust enums and `Result`       | `union` types, `match`, and the `prelude.option` / `prelude.result` modules. |
+| Rust ownership updates        | Immutable value bindings and fresh names for each logical version.           |
+| Haskell ADTs                  | `struct`, `union`, and pattern matching.                                     |
+| Haskell typeclasses           | Prelude contracts with erased evidence and attached members.                 |
+| Haskell `do` notation         | `do @monad(T(_))`, `do @applicative(T(_))`, and `do @io(_)`.                 |
+| Haskell laziness              | Explicit thunks: `const fn() -> T` or internal runtime `fn() -> T` values.   |
+| Idris-style indexed data      | Refined scalar domains, `type fn` contracts, and proof-carrying values.      |
+| Pipeline operators            | Pipe-bind syntax: `expr \name -> next_expr`.                                 |
+| Zig `comptime`                | `type fn`, `const` parameters, shape reflection, and `@require`.             |
+| Zig packed/static layout work | Counted inline arrays, refined scalar domains, and fixed prelude layouts.    |
+| TypeScript/Wasm host glue     | `pub fn`, `@external`, the Fig ABI manifest, and `src/mod.ts` helpers.       |
 
-From a source checkout, run the memory model benchmark harness with:
+Detailed guides:
 
-```bash
-deno run --allow-read scripts/bench_memory_model.ts 50000
-```
+- [Rust Patterns in Fig](docs/guides/rust-patterns.md)
+- [Haskell Patterns in Fig](docs/guides/haskell-patterns.md)
+- [Zig Patterns in Fig](docs/guides/zig-patterns.md)
 
-The harness compiles each scenario to Wasm, validates the result, runs the exported `main` many
-times, and reports timing plus WAT-shape counters. Current scenarios cover:
+## Checked Example Programs
 
-- Scalar n-way reuse.
-- Product reuse and repeated product updates.
-- A 1k-iteration tail-recursive product loop.
-- `InlineArray.tabulate` plus `InlineArray.map` builder loops.
-- Iterator filter/map/collect into `CompactArray`.
-- A 1k-item range fold lowered to a Wasm loop.
-- A fixed 4x4 matrix kernel that lowers to SIMD operations.
+The `examples/` directory is the fastest way to see complete programs:
 
-The numbers are machine-local, but the important regressions to watch are extra helper calls,
-unexpected heap/memory operations, missing loops for recursive folds, or missing SIMD operations in
-the matrix kernel.
+| Example                                     | What it shows                                                         |
+| ------------------------------------------- | --------------------------------------------------------------------- |
+| `examples/prelude_typeclasses.fig`          | Attached members, Eq-style checks, Functor/Applicative/Monad members. |
+| `examples/prelude_functional.fig`           | Functional helpers, composition, and prelude abstractions.            |
+| `examples/haskell_validation_pipeline.fig`  | Applicative validation and dependent monadic flow.                    |
+| `examples/haskell_reader_state_program.fig` | Reader configuration, State updates, and sequencing.                  |
+| `examples/zig_comptime_record_layout.fig`   | Shape reflection and compile-time layout checks.                      |
+| `examples/zig_static_matrix_schedule.fig`   | Count-parameterized arrays and static schedule metadata.              |
+| `examples/prelude_array_static.fig`         | Fixed lane helpers, map, and fold.                                    |
+| `examples/prelude_effect_state.fig`         | Typed state effects through `prelude.effect`.                         |
+| `examples/effects.fig`                      | Explicit host IO imports and `do @io`.                                |
+| `examples/type_fn_memory.fig`               | A larger layout/modeling sketch built from type functions.            |
 
-From a source checkout, compare the same scenarios against idiomatic JavaScript and optimized Rust:
+See [docs/EXAMPLES.md](docs/EXAMPLES.md) for the tested good/bad language examples and why the bad
+patterns fail.
 
-```bash
-deno run --allow-read --allow-write --allow-run scripts/bench_memory_model_compare.ts 50000
-```
+## Documentation Map
 
-That script benchmarks Fig/Wasm, JavaScript running in the current V8 runtime, and Rust compiled
-with `rustc -C opt-level=3 -C target-cpu=native`. Rust inputs are passed through `black_box` so the
-pure kernels do not disappear into compile-time constants.
+- [Language Reference](docs/LANGUAGE.md) is the main syntax and semantics index.
+- [Prelude Reference](docs/reference/prelude.md) lists standard modules, contracts, operators,
+  collections, and effect helpers.
+- [Builtins Reference](docs/reference/builtins.md) lists compiler builtins and backend intrinsics.
+- [Semantics Reference](docs/reference/semantics.md) covers Branch-Bit values, effects, const
+  evaluation, reflection, and Wasm portability.
+- [Guides](docs/guides/README.md) translate familiar Rust, Haskell, and Zig patterns into Fig.
 
-From a source checkout, compare the dense ECS batch primitives against a similar optimized Rust
-fixed-array kernel:
+## Project Status
 
-```bash
-deno task bench:ecs-compare -- 100000
-```
-
-That benchmark fills a 128-entity position batch, maps it with a velocity, folds the moved positions
-into a checksum, and validates the Fig/Wasm and Rust checksums match.
+Fig is experimental. The compiler, language server, TypeScript API, prelude, examples, and Wasm
+backend live in this repository and evolve together. The default portability target is WebAssembly
+features available in current Chromium- and Firefox-family browsers and Deno.

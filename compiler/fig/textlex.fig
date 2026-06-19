@@ -7,17 +7,20 @@ const operators = @import("prelude.operators");
 
 type TextCharClass = union {
   TextSpace, TextNewline, TextLower, TextUpper, TextDigit,
-  TextQuote, TextSlash, TextPunctuation, TextEof
+  TextQuote, TextCharQuote, TextBacktick, TextSlash, TextPunctuation, TextEof
 }
 
 type TextCharCode = enum(i32) {
   Eof = 0,
+  Tab = 9,
   Newline = 10,
+  CarriageReturn = 13,
   Space = 32,
   Bang = 33,
   Quote = 34,
   Hash = 35,
   Percent = 37,
+  CharQuote = 39,
   LeftParen = 40,
   RightParen = 41,
   Asterisk = 42,
@@ -43,6 +46,7 @@ type TextCharCode = enum(i32) {
   LeftBracket = 91,
   RightBracket = 93,
   Underscore = 95,
+  Backtick = 96,
   LowerA = 97,
   LowerB = 98,
   LowerC = 99,
@@ -423,9 +427,13 @@ fn is_digit_code(code: i32) -> bool {
 fn classify(code: i32) -> TextCharClass {
   match code {
     TextCharCode::Eof => TextEof,
+    TextCharCode::Tab => TextSpace,
     TextCharCode::Newline => TextNewline,
+    TextCharCode::CarriageReturn => TextNewline,
     TextCharCode::Space => TextSpace,
     TextCharCode::Quote => TextQuote,
+    TextCharCode::CharQuote => TextCharQuote,
+    TextCharCode::Backtick => TextBacktick,
     TextCharCode::Slash => TextSlash,
     TextCharCode::Underscore => TextLower,
     _ if is_lower_code(code) => TextLower,
@@ -526,6 +534,8 @@ fn token_kind(class: TextCharClass) -> token.TokenKind {
     TextUpper => token.LiteralType,
     TextDigit => token.NumberLiteral,
     TextQuote => token.StringLiteral,
+    TextCharQuote => token.CharLiteral,
+    TextBacktick => token.MultilineLiteral,
     _ => token.Symbol,
   }
 }
@@ -588,6 +598,93 @@ fn string_width_loop(
 
 fn string_width(text: TextBuffer, start: i32) -> i32 {
   string_width_loop(text, start, start + 1)
+}
+
+fn is_char_end(text: TextBuffer, index: i32) -> bool {
+  code_at(text, index) == TextCharCode::CharQuote
+}
+
+fn char_width_loop(
+  text: TextBuffer,
+  start: i32,
+  index: i32
+) -> i32 {
+  match index < text.length {
+    false => 0,
+    true => match is_char_end(text, index) {
+      true => index - start + 1,
+      false => rec(text, start, index + 1),
+    },
+  }
+}
+
+fn char_width(text: TextBuffer, start: i32) -> i32 {
+  char_width_loop(text, start, start + 1)
+}
+
+fn is_backtick_at(text: TextBuffer, index: i32) -> bool {
+  code_at(text, index) == TextCharCode::Backtick
+}
+
+fn is_fenced_text_boundary(text: TextBuffer, index: i32) -> bool {
+  is_backtick_at(text, index)
+    && is_backtick_at(text, index + 1)
+    && is_backtick_at(text, index + 2)
+}
+
+fn fenced_text_width_loop(
+  text: TextBuffer,
+  start: i32,
+  index: i32
+) -> i32 {
+  match index < text.length {
+    false => 0,
+    true => match is_fenced_text_boundary(text, index) {
+      true => index - start + 3,
+      false => rec(text, start, index + 1),
+    },
+  }
+}
+
+fn fenced_text_width(text: TextBuffer, start: i32) -> i32 {
+  match is_fenced_text_boundary(text, start) {
+    true => fenced_text_width_loop(text, start, start + 3),
+    false => 0,
+  }
+}
+
+fn advance_text_width_loop(
+  text: TextBuffer,
+  cursor: TextCursor,
+  remaining: i32
+) -> TextCursor {
+  match remaining <= 0 {
+    true => cursor,
+    false => match code_at(text, cursor.index) == TextCharCode::Newline {
+      true => rec(text, advance_newline(cursor), remaining - 1),
+      false => rec(text, advance(cursor, 1), remaining - 1),
+    },
+  }
+}
+
+fn advance_text_width(
+  text: TextBuffer,
+  cursor: TextCursor,
+  width: i32
+) -> TextCursor {
+  advance_text_width_loop(text, cursor, width)
+}
+
+fn lex_multiline_width(
+  text: TextBuffer,
+  kind: token.TokenKind,
+  cursor: TextCursor,
+  width: i32
+) -> TextLexResult {
+  TextLexed(
+    lexeme(kind, PunctNone, text, cursor, width),
+    advance_text_width(text, cursor, width)
+  )
 }
 
 fn is_arrow_start(text: TextBuffer, start: i32) -> bool {
@@ -720,6 +817,17 @@ fn lex_one_class(
         text.length - cursor.index
       ))),
       width => lex_width(text, token_kind(class), PunctNone, cursor, width),
+    },
+    TextCharQuote => match char_width(text, cursor.index) {
+      0 => TextLexFailed(UnterminatedString(cursor_span(
+        cursor,
+        text.length - cursor.index
+      ))),
+      width => lex_width(text, token_kind(class), PunctNone, cursor, width),
+    },
+    TextBacktick => match fenced_text_width(text, cursor.index) {
+      0 => lex_width(text, token.Symbol, PunctOther, cursor, 1),
+      width => lex_multiline_width(text, token_kind(class), cursor, width),
     },
     TextSlash => lex_width(text, token_kind(class), PunctSlash, cursor, 1),
     TextPunctuation => match punctuation_width(text, cursor.index) {
