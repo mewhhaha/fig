@@ -77,6 +77,7 @@ export interface FnDecl extends AstNodeMeta {
   matchBody?: boolean;
   generated?: boolean;
   generatedInlineable?: boolean;
+  tailRecTarget?: string;
   imported?: boolean;
   rootPublic?: boolean;
   primitiveId?: string;
@@ -384,7 +385,13 @@ export type Expr =
     }
     & AstNodeMeta
   )
-  | ({ kind: "const_fn"; params: string[]; body: Expr; allowCaptures?: boolean } & AstNodeMeta)
+  | ({
+    kind: "const_fn";
+    params: string[];
+    body: Expr;
+    allowCaptures?: boolean;
+    tailRecTarget?: string;
+  } & AstNodeMeta)
   | ({ kind: "pipe_bind"; value: Expr; name: string; doc?: string; body: Expr } & AstNodeMeta)
   | (
     & {
@@ -395,7 +402,7 @@ export type Expr =
     }
     & AstNodeMeta
   )
-  | ({ kind: "call"; callee: Expr; args: Expr[]; tailRec?: true } & AstNodeMeta)
+  | ({ kind: "call"; callee: Expr; args: Expr[]; tailRec?: true; tailRecTarget?: string } & AstNodeMeta)
   | ({ kind: "index"; target: Expr; index: Expr } & AstNodeMeta)
   | ({ kind: "binary"; op: string; left: Expr; right: Expr } & AstNodeMeta)
   | (

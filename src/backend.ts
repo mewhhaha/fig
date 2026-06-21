@@ -1701,8 +1701,16 @@ function tailLoopCallArgs(call: Extract<Expr, { kind: "call" }>, callee: FnDecl)
   return runtimeCallArgs(call, callee);
 }
 
+function tailRecTargetName(call: Extract<Expr, { kind: "call" }>, fn: FnDecl): string {
+  return call.tailRecTarget ?? fn.tailRecTarget ?? fn.name;
+}
+
+function tailRecTargetsFunction(call: Extract<Expr, { kind: "call" }>, fn: FnDecl): boolean {
+  return tailRecTargetName(call, fn) === fn.name;
+}
+
 function isTailLoopStepCall(call: Extract<Expr, { kind: "call" }>, name: string): boolean {
-  if (call.tailRec) return true;
+  if (call.tailRec) return !call.tailRecTarget || call.tailRecTarget === name;
   return call.callee.kind === "var" && call.callee.name === name;
 }
 
@@ -5460,12 +5468,16 @@ function lowerTailOpcodeExpr(
   }
   if (
     expr.kind === "call" &&
-    (expr.tailRec || (expr.callee.kind === "var" && expr.callee.name === fn.name))
+    (expr.tailRec
+      ? tailRecTargetsFunction(expr, fn)
+      : expr.callee.kind === "var" && expr.callee.name === fn.name)
   ) {
     let callee: FnDecl | undefined;
     let runtimeArgs: Expr[];
+    let targetName = fn.name;
     if (expr.tailRec) {
-      callee = fn;
+      targetName = tailRecTargetName(expr, fn);
+      callee = ctx.signatures.get(targetName) ?? fn;
       runtimeArgs = expr.args;
     } else {
       callee = expr.callee.kind === "var" ? ctx.signatures.get(expr.callee.name) : undefined;
@@ -5477,7 +5489,7 @@ function lowerTailOpcodeExpr(
       ...runtimeArgs.flatMap((arg, index) =>
         lowerExpr(arg, ctx, locals, callee?.params[index]?.type)
       ),
-      { op: "return_call", name: fn.name },
+      { op: "return_call", name: targetName },
     ];
   }
   if (expr.kind === "match") {
@@ -6249,7 +6261,9 @@ function lowerTailLoopExpr(
   }
   if (
     expr.kind === "call" &&
-    (expr.tailRec || (expr.callee.kind === "var" && expr.callee.name === fn.name))
+    (expr.tailRec
+      ? tailRecTargetsFunction(expr, fn)
+      : expr.callee.kind === "var" && expr.callee.name === fn.name)
   ) {
     const transient = lowerTransientFixedArrayTailCall(expr, fn, ctx, locals, continueDepth);
     if (transient) return transient;
@@ -7715,6 +7729,16 @@ function lowerExpr(
       return lowerProfileExpr(expr, ctx, locals, expectedType);
     case "call": {
       if (expr.tailRec) {
+        const targetName = ctx.currentFn ? tailRecTargetName(expr, ctx.currentFn) : expr.tailRecTarget;
+        if (targetName && targetName !== ctx.currentFn?.name) {
+          const target = ctx.signatures.get(targetName);
+          return [
+            ...expr.args.flatMap((arg, index) =>
+              lowerExpr(arg, ctx, locals, target?.params[index]?.type)
+            ),
+            { op: "call", name: targetName },
+          ];
+        }
         throw new Error("backend cannot lower rec(...) outside a tail-recursive function body");
       }
       const closureMake = lowerClosureMake(expr, ctx, locals);
@@ -15291,7 +15315,7 @@ interface TailCallAnalysis {
 
 function analyzeTailCalls(fn: FnDecl): TailCallAnalysis {
   const hasDirectSelfCall = hasSelfCall(fn.body, fn.name);
-  const hasExplicitRec = hasExplicitRecCall(fn.body);
+  const hasExplicitRec = hasExplicitRecCall(fn.body, fn.name);
   return {
     hasDirectSelfCall,
     hasExplicitRec,
@@ -15323,7 +15347,9 @@ function exprHasOnlyTailSelfCalls(expr: Expr, name: string): boolean {
   }
   if (
     expr.kind === "call" &&
-    (expr.tailRec || (expr.callee.kind === "var" && expr.callee.name === name))
+    (expr.tailRec
+      ? !expr.tailRecTarget || expr.tailRecTarget === name
+      : expr.callee.kind === "var" && expr.callee.name === name)
   ) {
     return !expr.args.some((arg) => exprHasSelfCall(arg, name));
   }
@@ -15364,7 +15390,7 @@ function exprHasSelfCall(expr: Expr, name: string): boolean {
       return expr.args.some((arg) => exprHasSelfCall(arg, name)) ||
         exprHasSelfCall(expr.body, name);
     case "call":
-      return expr.tailRec ||
+      return (expr.tailRec && (!expr.tailRecTarget || expr.tailRecTarget === name)) ||
         (expr.callee.kind === "var" && expr.callee.name === name) ||
         exprHasSelfCall(expr.callee, name) ||
         expr.args.some((arg) => exprHasSelfCall(arg, name));
@@ -15397,23 +15423,25 @@ function exprHasSelfCall(expr: Expr, name: string): boolean {
   }
 }
 
-function hasExplicitRecCall(block: BlockExpr): boolean {
+function hasExplicitRecCall(block: BlockExpr, name: string): boolean {
   for (const stmt of block.statements) {
     if (stmt.kind === "let" || stmt.kind === "destructure_let") {
-      if (exprHasExplicitRecCall(stmt.value)) return true;
+      if (exprHasExplicitRecCall(stmt.value, name)) return true;
     } else if (stmt.kind === "debug_trace") {
       for (const arg of stmt.args) {
-        if (exprHasExplicitRecCall(arg)) return true;
+        if (exprHasExplicitRecCall(arg, name)) return true;
       }
     }
   }
-  if (block.expr && exprHasExplicitRecCall(block.expr)) return true;
+  if (block.expr && exprHasExplicitRecCall(block.expr, name)) return true;
   return false;
 }
 
-function exprHasExplicitRecCall(expr: Expr): boolean {
-  if (expr.kind === "call" && expr.tailRec) return true;
-  return exprChildren(expr).some((child) => exprHasExplicitRecCall(child));
+function exprHasExplicitRecCall(expr: Expr, name: string): boolean {
+  if (expr.kind === "call" && expr.tailRec) {
+    return !expr.tailRecTarget || expr.tailRecTarget === name;
+  }
+  return exprChildren(expr).some((child) => exprHasExplicitRecCall(child, name));
 }
 
 function calledFunctions(expr: Expr | BlockExpr): Set<string> {
@@ -15447,6 +15475,7 @@ function calledFunctions(expr: Expr | BlockExpr): Set<string> {
         return;
       case "call":
         if (item.tailRec) {
+          if (item.tailRecTarget) calls.add(item.tailRecTarget);
           for (const arg of item.args) visit(arg);
           return;
         }

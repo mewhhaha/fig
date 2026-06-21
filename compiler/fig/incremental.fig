@@ -186,15 +186,28 @@ fn change_from_seed(seed: i32) -> SourceChange {
   }
 }
 
+fn module_role_matches(left: ModuleRole, right: ModuleRole) -> bool {
+  role_score(left) == role_score(right)
+}
+
+fn changed_source_for_edit(
+  node: ModuleNode,
+  role: ModuleRole,
+  delta: i32
+) -> source.SourceText {
+  if module_role_matches(role, node.role) {
+    source.from_seed(node.record.module_id + delta)
+  } else {
+    node.record.source
+  }
+}
+
 fn changed_source(
   node: ModuleNode,
   other: SourceChange
 ) -> source.SourceText match {
   node, NoChange => node.record.source,
-  node, EditModule(role, delta) => match role_score(role) == role_score(node.role) {
-    true => source.from_seed(node.record.module_id + delta),
-    false => node.record.source,
-  },
+  node, EditModule(role, delta) => changed_source_for_edit(node, role, delta),
 }
 
 fn apply_change(
@@ -316,16 +329,38 @@ fn initial_cache(cluster: ModuleCluster, seed: i32) -> ArtifactCache {
   }
 }
 
+fn cache_source_matches_node(entry: CacheEntry, node: ModuleNode) -> bool {
+  entry.source_revision == node.source_revision
+}
+
+fn cache_dependencies_match_node(entry: CacheEntry, node: ModuleNode) -> bool {
+  entry.dependency_revision == node.dependency_revision
+}
+
 fn invalidation_reason(
   entry: CacheEntry,
   node: ModuleNode
 ) -> InvalidationReason {
-  match entry.source_revision == node.source_revision {
-    false => SourceChanged(node.record.module_id),
-    true => match entry.dependency_revision == node.dependency_revision {
-      false => DependencyChanged(node.record.module_id),
-      true => NoInvalidation,
-    },
+  if cache_source_matches_node(entry, node) {
+    if cache_dependencies_match_node(entry, node) {
+      NoInvalidation
+    } else {
+      DependencyChanged(node.record.module_id)
+    }
+  } else {
+    SourceChanged(node.record.module_id)
+  }
+}
+
+fn refreshed_entry(
+  before: CacheEntry,
+  node: ModuleNode,
+  seed: i32,
+  reason: InvalidationReason
+) -> CacheEntry {
+  match is_invalidated(reason) {
+    true => cache_entry(node, CacheFresh, seed),
+    false => with_state(before, CacheFresh),
   }
 }
 
@@ -339,10 +374,7 @@ fn refresh_entry(
     before,
     state_from_reason(reason)
   );
-  let after = match is_invalidated(reason) {
-    true => cache_entry(node, CacheFresh, seed),
-    false => with_state(before, CacheFresh),
-  };
+  let after = refreshed_entry(before, node, seed, reason);
   RefreshStep {
     before: marked,
     after: after,

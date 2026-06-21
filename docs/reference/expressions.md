@@ -86,6 +86,19 @@ match value {
 }
 ```
 
+When a branch needs local bindings, use a block-valued arm. Arm blocks must contain at least one
+statement, which keeps `{field: value}` and `{field}` shape literals unambiguous:
+
+```fig
+match value {
+  Some(inner) => {
+    let doubled = inner + inner;
+    doubled + 1
+  },
+  None => 0,
+}
+```
+
 Boolean `if` is pure expression sugar:
 
 ```fig

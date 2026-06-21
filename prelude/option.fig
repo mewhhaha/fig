@@ -77,6 +77,22 @@ fn core.Option::or_else(value: core.Option(a), const fallback: fn() -> core.Opti
   match value { Some => value, None => fallback() }
 }
 
+fn core.Option::or_else_with(
+  value: core.Option(a),
+  context: c,
+  const fallback: fn(context: c) -> core.Option(a)
+) -> core.Option(a) {
+  match value { Some => value, None => fallback(context) }
+}
+
+fn core.Option::unwrap_or_else_with(
+  value: core.Option(a),
+  context: c,
+  const fallback: fn(context: c) -> a
+) -> a {
+  match value { Some(inner) => inner, None => fallback(context) }
+}
+
 fn core.Option::fold(
   value: core.Option(a),
   initial: b,

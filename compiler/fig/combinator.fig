@@ -79,10 +79,15 @@ fn or_else(left: Parser(a), right: Parser(a)) -> Parser(a) {
   }
 }
 
+fn state_has_more(current: ParseState) -> bool {
+  current.cursor < current.limit
+}
+
 fn advance(current: ParseState, source_span: span.Span) -> Parser(ParseState) {
-  match current.cursor < current.limit {
-    true => ok(next_state(current), current),
-    false => err(UnexpectedEnd(source_span)),
+  if state_has_more(current) {
+    ok(next_state(current), current)
+  } else {
+    err(UnexpectedEnd(source_span))
   }
 }
 

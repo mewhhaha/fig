@@ -1411,6 +1411,49 @@ Deno.test("match guards can use pattern bindings", async () => {
   assertEquals(main(12), 12);
 });
 
+Deno.test("match arms accept statement blocks without stealing shape literals", async () => {
+  const source = `
+    fn block_score(value: i32) -> i32 {
+      match value {
+        0 => {
+          let next = value + 10;
+          next
+        },
+        _ => value,
+      }
+    }
+
+    fn shape_score(value: i32) -> i32 {
+      let x = value + 1;
+      let shaped = match value {
+        0 => {x},
+        _ => {x: value},
+      };
+      shaped.x
+    }
+
+    pub fn main(value: i32) -> i32 {
+      block_score(value) + shape_score(value)
+    }
+  `;
+  const checked = await checkSource(source);
+  const blockScore = findFn(checked.program, "block_score");
+  assert(blockScore?.body.expr?.kind === "match");
+  assertEquals(blockScore.body.expr.arms[0]?.value.kind, "block");
+  const shapeScore = findFn(checked.program, "shape_score");
+  const shaped = shapeScore?.body.statements[1];
+  assert(shaped?.kind === "let");
+  assert(shaped.value.kind === "match");
+  assertEquals(shaped.value.arms[0]?.value.kind, "shape");
+  assertEquals(shaped.value.arms[1]?.value.kind, "shape");
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { optMode: "debug" })),
+  );
+  const main = instance.exports.main as (value: number) => number;
+  assertEquals(main(0), 11);
+  assertEquals(main(4), 8);
+});
+
 Deno.test("source import qualification preserves match guards", async () => {
   const source = `
     const lib = @import("./guard_lib.fig");

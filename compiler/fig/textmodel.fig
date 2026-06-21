@@ -114,11 +114,19 @@ fn full_window_state(source: textlex.TextTokenStream) -> combinator.ParseState {
   token_window_state(full_window(source))
 }
 
+fn token_window_starts_before(value: TokenWindow, index: i32) -> bool {
+  index >= value.start
+}
+
+fn token_window_ends_after(value: TokenWindow, index: i32) -> bool {
+  index < value.end
+}
+
 fn token_window_contains(value: TokenWindow, index: i32) -> bool {
-  let after_start = index >= value.start;
-  match after_start {
-    true => index < value.end,
-    false => false,
+  if token_window_starts_before(value, index) {
+    token_window_ends_after(value, index)
+  } else {
+    false
   }
 }
 
@@ -169,9 +177,10 @@ fn entry(seed: i32) -> i32 {
   let source = textlex.stream_from_buffer(textlex.from_seed(seed));
   let window_value = full_window(source);
   let budget = lookup_budget(4);
-  let mode_score = match lookup_budget_exhausted(budget) {
-    true => 0,
-    false => ImportResolutionMode::AbiClass,
+  let mode_score = if lookup_budget_exhausted(budget) {
+    0
+  } else {
+    ImportResolutionMode::AbiClass
   };
   seed + SummaryKind::Declarations + window_value.end + mode_score
 }

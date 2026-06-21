@@ -14,42 +14,64 @@ fn width(span: Span) -> i32 {
   span.end - span.start
 }
 
+fn offset_at_or_after(value: i32, after: i32) -> bool {
+  value >= after
+}
+
+fn offset_before(value: i32, limit: i32) -> bool {
+  value < limit
+}
+
 fn contains(span: Span, offset: i32) -> bool {
-  match span.start <= offset {
-    true => offset < span.end,
-    false => false,
+  if offset_at_or_after(offset, span.start) {
+    offset_before(offset, span.end)
+  } else {
+    false
+  }
+}
+
+fn shift_offset_after(value: i32, after: i32, delta: i32) -> i32 {
+  if offset_at_or_after(value, after) {
+    value + delta
+  } else {
+    value
   }
 }
 
 fn shift_after(span: Span, after: i32, delta: i32) -> Span {
-  let next_start = match span.start >= after {
-    true => span.start + delta,
-    false => span.start,
-  };
-  let next_end = match span.end >= after {
-    true => span.end + delta,
-    false => span.end,
-  };
+  let next_start = shift_offset_after(span.start, after, delta);
+  let next_end = shift_offset_after(span.end, after, delta);
   Span {start: next_start, end: next_end, line: span.line, column: span.column}
 }
 
+fn min_i32(left: i32, right: i32) -> i32 {
+  if left < right {
+    left
+  } else {
+    right
+  }
+}
+
+fn max_i32(left: i32, right: i32) -> i32 {
+  if left > right {
+    left
+  } else {
+    right
+  }
+}
+
 fn merge(left: Span, right: Span) -> Span {
-  let start = match left.start < right.start {
-    true => left.start,
-    false => right.start,
-  };
-  let end = match left.end > right.end {
-    true => left.end,
-    false => right.end,
-  };
+  let start = min_i32(left.start, right.start);
+  let end = max_i32(left.end, right.end);
   Span {start: start, end: end, line: left.line, column: left.column}
 }
 
 fn entry(seed: i32) -> i32 {
   let first = make(seed, seed + 12, 1, 1);
   let second = shift_after(first, seed + 4, 3);
-  width(second) +(match contains(second, seed + 7) {
-    true => 1,
-    false => 0,
-  })
+  if contains(second, seed + 7) {
+    width(second) + 1
+  } else {
+    width(second)
+  }
 }

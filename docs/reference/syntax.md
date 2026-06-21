@@ -313,6 +313,19 @@ match n {
 }
 ```
 
+Match arm values may also be statement-bearing blocks, useful when a branch result needs local
+bindings:
+
+```fig
+match maybe {
+  Some(value) => {
+    let next = value + 1;
+    next
+  },
+  None => 0,
+}
+```
+
 Boolean `if` is expression sugar for `match` on `bool`, and `else if` nests another boolean match in
 the fallback arm. Parenthesized `if (let Pattern = value)` is expression sugar for
 `match value { Pattern => ..., _ => ... }`, with pattern bindings scoped to the first block:

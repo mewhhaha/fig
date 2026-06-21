@@ -1671,15 +1671,20 @@ function lowerMatchArm(
   arm: Node,
 ): Extract<Expr, { kind: "match" }>["arms"][number] {
   const guard = optional(arm, "MatchGuard");
-  const exprs = named(arm).filter(is("Expr"));
-  const valueExpr = guard ? exprs[exprs.length - 1] : exprs[0];
+  const value = first(arm, "ArmValue");
   return {
     ...spanOnly(arm),
     ...(lowerBranchHint(optional(arm, "BranchHint")) ?? {}),
     pattern: lowerMatchPatterns(first(arm, "MatchPatterns")),
     ...(guard ? { guard: lowerExpr(first(guard, "Expr")) } : {}),
-    value: lowerExpr(valueExpr),
+    value: lowerMatchArmValue(value),
   };
+}
+
+function lowerMatchArmValue(value: Node): Expr {
+  const valueBlock = optional(value, "ArmBlock");
+  if (valueBlock) return lowerBlock(valueBlock);
+  return lowerExpr(first(value, "Expr"));
 }
 
 function lowerMatchValues(node: Node): Expr {

@@ -2526,6 +2526,7 @@ function lowerDoExpressions(
     expr: Expr,
     env: Map<string, string> = new Map(),
     expectedType?: string,
+    currentFn?: FnDecl,
   ): Expr => {
     switch (expr.kind) {
       case "do":
@@ -2533,49 +2534,65 @@ function lowerDoExpressions(
         return lowerDoExpression(
           expr,
           diagnostics,
-          (child) => lowerExpr(child, env),
+          (child) => lowerExpr(child, env, undefined, currentFn),
           functionNames,
           env,
           typeDecls,
           allFnDecls,
           deferUntyped,
           resolvedTypeHoles,
+          currentFn?.name,
         );
       case "const_fn":
-        return { ...expr, body: lowerExpr(expr.body, env) };
+        return { ...expr, body: lowerExpr(expr.body, env, undefined, currentFn) };
       case "call":
         return {
           ...expr,
-          callee: lowerExpr(expr.callee, env),
-          args: expr.args.map((arg) => lowerExpr(arg, env)),
+          callee: lowerExpr(expr.callee, env, undefined, currentFn),
+          args: expr.args.map((arg) => lowerExpr(arg, env, undefined, currentFn)),
         };
       case "index":
-        return { ...expr, target: lowerExpr(expr.target, env), index: lowerExpr(expr.index, env) };
+        return {
+          ...expr,
+          target: lowerExpr(expr.target, env, undefined, currentFn),
+          index: lowerExpr(expr.index, env, undefined, currentFn),
+        };
       case "binary":
-        return { ...expr, left: lowerExpr(expr.left, env), right: lowerExpr(expr.right, env) };
+        return {
+          ...expr,
+          left: lowerExpr(expr.left, env, undefined, currentFn),
+          right: lowerExpr(expr.right, env, undefined, currentFn),
+        };
       case "operator_chain":
         return {
           ...expr,
-          first: lowerExpr(expr.first, env),
-          rest: expr.rest.map((item) => ({ ...item, value: lowerExpr(item.value, env) })),
+          first: lowerExpr(expr.first, env, undefined, currentFn),
+          rest: expr.rest.map((item) => ({
+            ...item,
+            value: lowerExpr(item.value, env, undefined, currentFn),
+          })),
         };
       case "pipe_bind": {
-        return { ...expr, value: lowerExpr(expr.value, env), body: lowerExpr(expr.body, env) };
+        return {
+          ...expr,
+          value: lowerExpr(expr.value, env, undefined, currentFn),
+          body: lowerExpr(expr.body, env, undefined, currentFn),
+        };
       }
       case "profile":
         return {
           ...expr,
-          args: expr.args.map((arg) => lowerExpr(arg, env)),
-          body: lowerExpr(expr.body, env, expectedType),
+          args: expr.args.map((arg) => lowerExpr(arg, env, undefined, currentFn)),
+          body: lowerExpr(expr.body, env, expectedType, currentFn),
         };
       case "match":
         return {
           ...expr,
-          value: lowerExpr(expr.value, env),
+          value: lowerExpr(expr.value, env, undefined, currentFn),
           arms: expr.arms.map((arm) => ({
             ...arm,
-            ...(arm.guard ? { guard: lowerExpr(arm.guard, env) } : {}),
-            value: lowerExpr(arm.value, env),
+            ...(arm.guard ? { guard: lowerExpr(arm.guard, env, undefined, currentFn) } : {}),
+            value: lowerExpr(arm.value, env, expectedType, currentFn),
           })),
         };
       case "shape":
@@ -2584,8 +2601,8 @@ function lowerDoExpressions(
           ...expr,
           slots: expr.slots.map((slot) => ({
             ...slot,
-            index: slot.index ? lowerExpr(slot.index, env) : undefined,
-            value: lowerExpr(slot.value, env),
+            index: slot.index ? lowerExpr(slot.index, env, undefined, currentFn) : undefined,
+            value: lowerExpr(slot.value, env, undefined, currentFn),
           })),
         };
       case "static_for_slots":
@@ -2594,45 +2611,59 @@ function lowerDoExpressions(
           source: expr.source.kind === "range"
             ? {
               kind: "range",
-              start: lowerExpr(expr.source.start, env),
-              end: lowerExpr(expr.source.end, env),
+              start: lowerExpr(expr.source.start, env, undefined, currentFn),
+              end: lowerExpr(expr.source.end, env, undefined, currentFn),
             }
-            : { kind: "shape", shape: lowerExpr(expr.source.shape, env) },
-          value: lowerExpr(expr.value, env),
+            : { kind: "shape", shape: lowerExpr(expr.source.shape, env, undefined, currentFn) },
+          value: lowerExpr(expr.value, env, undefined, currentFn),
         };
       case "field":
-        return { ...expr, value: lowerExpr(expr.value, env), key: lowerExpr(expr.key, env) };
+        return {
+          ...expr,
+          value: lowerExpr(expr.value, env, undefined, currentFn),
+          key: lowerExpr(expr.key, env, undefined, currentFn),
+        };
       case "range":
-        return { ...expr, start: lowerExpr(expr.start, env), end: lowerExpr(expr.end, env) };
+        return {
+          ...expr,
+          start: lowerExpr(expr.start, env, undefined, currentFn),
+          end: lowerExpr(expr.end, env, undefined, currentFn),
+        };
       case "profile":
         return {
           ...expr,
-          args: expr.args.map((arg) => lowerExpr(arg, env)),
-          body: lowerExpr(expr.body, env),
+          args: expr.args.map((arg) => lowerExpr(arg, env, undefined, currentFn)),
+          body: lowerExpr(expr.body, env, undefined, currentFn),
         };
       case "block": {
         const scoped = new Map(env);
         const statements = expr.statements.map((stmt) => {
           if (stmt.kind === "let") {
             const explicit = explicitTypeAnnotation(stmt.type);
-            const value = lowerExpr(stmt.value, scoped, explicit);
+            const value = lowerExpr(stmt.value, scoped, explicit, currentFn);
             const type = explicit ??
               exprBindingType(value, ownershipEnvFromTypes(scoped), typeDecls, allFnDecls);
             if (type) scoped.set(stmt.name, type);
             return { ...stmt, value } as Statement;
           }
           if (stmt.kind === "destructure_let") {
-            return { ...stmt, value: lowerExpr(stmt.value, scoped) } as Statement;
+            return {
+              ...stmt,
+              value: lowerExpr(stmt.value, scoped, undefined, currentFn),
+            } as Statement;
           }
           if (stmt.kind === "debug_trace") {
-            return { ...stmt, args: stmt.args.map((arg) => lowerExpr(arg, scoped)) } as Statement;
+            return {
+              ...stmt,
+              args: stmt.args.map((arg) => lowerExpr(arg, scoped, undefined, currentFn)),
+            } as Statement;
           }
           return stmt;
         });
         return {
           ...expr,
           statements,
-          expr: expr.expr ? lowerExpr(expr.expr, scoped, expectedType) : undefined,
+          expr: expr.expr ? lowerExpr(expr.expr, scoped, expectedType, currentFn) : undefined,
         };
       }
       case "literal":
@@ -2645,10 +2676,11 @@ function lowerDoExpressions(
       decl.body = lowerExpr(
         decl.body,
         new Map(
-          decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
-        ),
-        decl.returnType,
-      ) as BlockExpr;
+        decl.params.filter((param) => !param.const).map((param) => [param.name, param.type]),
+      ),
+      decl.returnType,
+      decl,
+    ) as BlockExpr;
     } else if (decl.kind === "let" || decl.kind === "const") {
       decl.value = lowerExpr(decl.value, new Map(), explicitTypeAnnotation(decl.type));
     }
@@ -2665,6 +2697,7 @@ function lowerDoExpression(
   functions: FnDecl[] = [],
   deferUntyped = false,
   resolvedTypeHoles: ResolvedTypeHole[] = [],
+  tailRecTarget?: string,
 ): Expr {
   const proofEffect = renderTypeExpr(expr.strategy.effect);
   const effect = doRuntimeEffectName(
@@ -2767,6 +2800,8 @@ function lowerDoExpression(
         state.name,
         stateStatements,
         finalIsEffectOperation ? lowerDoChild(expr.expr!, shadowedDoNames) : undefined,
+        0,
+        tailRecTarget,
       ),
       types,
     );
@@ -2798,7 +2833,7 @@ function lowerDoExpression(
   return withDoStrategyProof(
     expr.strategy.effect,
     strategy,
-    monadicDo(effect, loweredStatements, finalExpr),
+    monadicDo(effect, loweredStatements, finalExpr, tailRecTarget),
     types,
   );
 }
@@ -3541,26 +3576,155 @@ function stateMonadicDo(
   statements: DoStatement[],
   finalExpr: Expr | undefined,
   depth = 0,
+  tailRecTarget?: string,
 ): Expr {
   const [head, ...tail] = statements;
-  if (!head) return finalExpr ?? callExpr(`${effect}::pure`, [{ kind: "var", name: stateName }]);
+  if (!head) {
+    const result = finalExpr ?? callExpr(`${effect}::pure`, [{ kind: "var", name: stateName }]);
+    return annotateTailRecTarget(result, tailRecTarget);
+  }
   if (head.kind === "do_bind" || head.kind === "do_expr") {
     const nextStateName = head.kind === "do_bind" ? head.name : `__state${depth}`;
+    const body = stateMonadicDo(effect, nextStateName, tail, finalExpr, depth + 1, tailRecTarget);
     return callExpr(`${effect}::bind`, [
       injectStateArgument(head.value, stateName),
       {
         kind: "const_fn",
         params: [nextStateName],
-        body: stateMonadicDo(effect, nextStateName, tail, finalExpr, depth + 1),
+        body,
         allowCaptures: true,
+        ...(tailRecTarget ? { tailRecTarget } : {}),
       },
     ]);
   }
   return {
     kind: "block",
     statements: [head],
-    expr: stateMonadicDo(effect, stateName, tail, finalExpr, depth),
+    expr: stateMonadicDo(effect, stateName, tail, finalExpr, depth, tailRecTarget),
   };
+}
+
+function annotateTailRecTarget(expr: Expr, target: string | undefined): Expr {
+  if (!target) return expr;
+  const annotateStatement = (stmt: DoStatement): DoStatement => {
+    if (
+      stmt.kind === "do_bind" || stmt.kind === "do_expr" || stmt.kind === "let" ||
+      stmt.kind === "destructure_let"
+    ) {
+      return { ...stmt, value: annotateTailRecTarget(stmt.value, target) };
+    }
+    if (stmt.kind === "debug_trace") {
+      return { ...stmt, args: stmt.args.map((arg) => annotateTailRecTarget(arg, target)) };
+    }
+    return stmt;
+  };
+  switch (expr.kind) {
+    case "do":
+      return {
+        ...expr,
+        statements: expr.statements.map(annotateStatement),
+        expr: expr.expr ? annotateTailRecTarget(expr.expr, target) : undefined,
+      };
+    case "const_fn":
+      return { ...expr, body: annotateTailRecTarget(expr.body, target) };
+    case "call": {
+      const args = expr.args.map((arg) => annotateTailRecTarget(arg, target));
+      if (expr.tailRec) {
+        return { ...expr, args, tailRecTarget: expr.tailRecTarget ?? target };
+      }
+      return {
+        ...expr,
+        callee: annotateTailRecTarget(expr.callee, target),
+        args,
+      };
+    }
+    case "index":
+      return {
+        ...expr,
+        target: annotateTailRecTarget(expr.target, target),
+        index: annotateTailRecTarget(expr.index, target),
+      };
+    case "binary":
+      return {
+        ...expr,
+        left: annotateTailRecTarget(expr.left, target),
+        right: annotateTailRecTarget(expr.right, target),
+      };
+    case "operator_chain":
+      return {
+        ...expr,
+        first: annotateTailRecTarget(expr.first, target),
+        rest: expr.rest.map((item) => ({
+          ...item,
+          value: annotateTailRecTarget(item.value, target),
+        })),
+      };
+    case "pipe_bind":
+      return {
+        ...expr,
+        value: annotateTailRecTarget(expr.value, target),
+        body: annotateTailRecTarget(expr.body, target),
+      };
+    case "profile":
+      return {
+        ...expr,
+        args: expr.args.map((arg) => annotateTailRecTarget(arg, target)),
+        body: annotateTailRecTarget(expr.body, target),
+      };
+    case "match":
+      return {
+        ...expr,
+        value: annotateTailRecTarget(expr.value, target),
+        arms: expr.arms.map((arm) => ({
+          ...arm,
+          ...(arm.guard ? { guard: annotateTailRecTarget(arm.guard, target) } : {}),
+          value: annotateTailRecTarget(arm.value, target),
+        })),
+      };
+    case "shape":
+    case "product_constructor":
+      return {
+        ...expr,
+        slots: expr.slots.map((slot) => ({
+          ...slot,
+          index: slot.index ? annotateTailRecTarget(slot.index, target) : undefined,
+          value: annotateTailRecTarget(slot.value, target),
+        })),
+      };
+    case "static_for_slots":
+      return {
+        ...expr,
+        source: expr.source.kind === "range"
+          ? {
+            kind: "range",
+            start: annotateTailRecTarget(expr.source.start, target),
+            end: annotateTailRecTarget(expr.source.end, target),
+          }
+          : { kind: "shape", shape: annotateTailRecTarget(expr.source.shape, target) },
+        value: annotateTailRecTarget(expr.value, target),
+      };
+    case "field":
+      return {
+        ...expr,
+        value: annotateTailRecTarget(expr.value, target),
+        key: annotateTailRecTarget(expr.key, target),
+      };
+    case "range":
+      return {
+        ...expr,
+        start: annotateTailRecTarget(expr.start, target),
+        end: annotateTailRecTarget(expr.end, target),
+      };
+    case "block":
+      return {
+        ...expr,
+        statements: expr.statements.map(annotateStatement) as Statement[],
+        expr: expr.expr ? annotateTailRecTarget(expr.expr, target) : undefined,
+      };
+    case "literal":
+    case "var":
+      return expr;
+  }
 }
 
 function injectStateArgument(expr: Expr, stateName: string): Expr {
@@ -3614,32 +3778,45 @@ function needsDoStrategyProof(effect: TypeExpr, types: TypeDecl[]): boolean {
   return decl ? effect.args.length >= decl.params.length : false;
 }
 
-function monadicDo(effect: string, statements: DoStatement[], finalExpr: Expr): Expr {
+function monadicDo(
+  effect: string,
+  statements: DoStatement[],
+  finalExpr: Expr,
+  tailRecTarget?: string,
+): Expr {
   const [head, ...tail] = statements;
-  if (!head) return finalExpr;
+  if (!head) return annotateTailRecTarget(finalExpr, tailRecTarget);
   if (head.kind === "do_bind") {
+    const body = monadicDo(effect, tail, finalExpr, tailRecTarget);
     return callExpr(`${effect}::bind`, [
       head.value,
       {
         kind: "const_fn",
         params: [head.name],
-        body: monadicDo(effect, tail, finalExpr),
+        body,
         allowCaptures: true,
+        ...(tailRecTarget ? { tailRecTarget } : {}),
       },
     ]);
   }
   if (head.kind === "do_expr") {
+    const body = monadicDo(effect, tail, finalExpr, tailRecTarget);
     return callExpr(`${effect}::bind`, [
       head.value,
       {
         kind: "const_fn",
         params: ["_"],
-        body: monadicDo(effect, tail, finalExpr),
+        body,
         allowCaptures: true,
+        ...(tailRecTarget ? { tailRecTarget } : {}),
       },
     ]);
   }
-  return { kind: "block", statements: [head], expr: monadicDo(effect, tail, finalExpr) };
+  return {
+    kind: "block",
+    statements: [head],
+    expr: monadicDo(effect, tail, finalExpr, tailRecTarget),
+  };
 }
 
 function validateApplicativeDoDependencies(
@@ -3882,7 +4059,7 @@ function structuralExprKey(expr: Expr): string | undefined {
       if (expr.tailRec) {
         const args = expr.args.map(structuralExprKey);
         if (args.some((arg) => !arg)) return undefined;
-        return `rec(${args.join(",")})`;
+        return `rec:${expr.tailRecTarget ?? ""}(${args.join(",")})`;
       }
       const callee = structuralExprKey(expr.callee);
       if (!callee) return undefined;
@@ -9140,6 +9317,7 @@ function inferFromValuePattern(
     consts?: Map<string, ConstValue>;
     typeConstructors: Map<string, TypeDecl>;
     types?: TypeDecl[];
+    currentFn?: FnDecl;
   },
   env = new Map<string, string>(),
 ) {
@@ -9243,6 +9421,7 @@ function renderConstructedType(
     consts?: Map<string, ConstValue>;
     typeConstructors: Map<string, TypeDecl>;
     types?: TypeDecl[];
+    currentFn?: FnDecl;
   },
 ): string {
   if (!decl.params.length) return decl.name;
@@ -9265,6 +9444,7 @@ function inferExprType(
     consts?: Map<string, ConstValue>;
     typeConstructors: Map<string, TypeDecl>;
     types?: TypeDecl[];
+    currentFn?: FnDecl;
   },
   env = new Map<string, string>(),
 ): string | undefined {
@@ -9299,6 +9479,14 @@ function inferExprType(
   }
   if (expr.kind === "operator_chain") {
     return inferOperatorChainResultType(expr, (child) => inferExprType(child, context, env));
+  }
+  if (expr.kind === "call" && expr.tailRec) {
+    const currentFn = context.currentFn;
+    const targetName = expr.tailRecTarget ?? currentFn?.tailRecTarget ?? currentFn?.name;
+    const targetFn = targetName
+      ? (targetName === currentFn?.name ? currentFn : context.functions.get(targetName))
+      : undefined;
+    return targetFn?.returnType;
   }
   if (expr.kind === "call" && expr.callee.kind === "var") {
     if (isIoReturnCall(expr)) {
@@ -11041,6 +11229,7 @@ function inferConstFnLiteralTypeArgs(
     types: TypeDecl[];
     typeConstructors: Map<string, TypeDecl>;
     runtimeEnv?: Map<string, string>;
+    currentFn?: FnDecl;
   },
 ) {
   const substitutedExpected = substituteTypeVars(expectedType, bindings);
@@ -11526,8 +11715,8 @@ function synthesizeConstFnHelper(
     });
     return undefined;
   }
-  const body = arg.body;
-  const key = `__const_fn\0${expectedType}\0${JSON.stringify(body)}`;
+  const body = annotateTailRecTarget(arg.body, arg.tailRecTarget);
+  const key = `__const_fn\0${expectedType}\0${arg.tailRecTarget ?? ""}\0${JSON.stringify(body)}`;
   let fn = context.cache.get(key);
   if (!fn) {
     const name = allocateSpecializationName(
@@ -11547,6 +11736,7 @@ function synthesizeConstFnHelper(
       effects: [],
       body: { kind: "block", statements: [], expr: body },
       generated: true,
+      ...(arg.tailRecTarget ? { tailRecTarget: arg.tailRecTarget } : {}),
     };
     fn.generatedInlineable = !exprCallsFunction(fn.body, fn.name);
     context.cache.set(key, fn);
@@ -11601,6 +11791,7 @@ function synthesizeRuntimeClosureExpr(
     });
     return undefined;
   }
+  body = annotateTailRecTarget(body, arg.tailRecTarget);
   const paramNames = new Set(arg.params);
   const captureNames = [...exprRuntimeCaptures(body)].filter((name) =>
     !paramNames.has(name) && !context.functions.has(name) && !context.consts.has(name) &&
@@ -11620,7 +11811,7 @@ function synthesizeRuntimeClosureExpr(
     return undefined;
   }
   const captureParams = captures.filter((capture): capture is Param => !!capture);
-  const key = `__closure_fn\0${expectedType}\0${JSON.stringify(body)}\0${
+  const key = `__closure_fn\0${expectedType}\0${arg.tailRecTarget ?? ""}\0${JSON.stringify(body)}\0${
     captureParams.map((capture) => `${capture.name}:${capture.type}`).join("\0")
   }`;
   let fn = context.runtimeClosureCache.get(key);
@@ -11643,6 +11834,7 @@ function synthesizeRuntimeClosureExpr(
       body: { kind: "block", statements: [], expr: body },
       generated: true,
       generatedInlineable: false,
+      ...(arg.tailRecTarget ? { tailRecTarget: arg.tailRecTarget } : {}),
     };
     context.runtimeClosureCache.set(key, fn);
     context.functions.set(name, fn);
@@ -19247,7 +19439,7 @@ function checkFn(
   options: RuntimeCheckOptions,
 ) {
   checkRuntimeScalarDomainSymbols(fn, diagnostics);
-  checkRecExpressions(fn, diagnostics);
+  checkRecExpressions(fn, diagnostics, functions);
   if (exprContainsStaticExpansion(fn.body) || isInlineArrayExprBuiltinWrapper(fn)) return;
   const env = new Map<string, OwnershipBinding>();
   const runtimeOptions = {
@@ -19321,8 +19513,17 @@ function checkBlockScalarDomainSymbols(
   if (block.expr) checkExprScalarDomainSymbols(block.expr, staticParams, diagnostics);
 }
 
-function checkRecExpressions(fn: FnDecl, diagnostics: Diagnostic[]) {
-  const params = runtimeParams(fn.params);
+function checkRecExpressions(fn: FnDecl, diagnostics: Diagnostic[], functions: FnDecl[] = []) {
+  const functionMap = new Map(functions.map((item) => [item.name, item]));
+  functionMap.set(fn.name, fn);
+  const recTargetName = (expr: Extract<Expr, { kind: "call" }>): string =>
+    expr.tailRecTarget ?? fn.tailRecTarget ?? fn.name;
+  const recTargetFn = (expr: Extract<Expr, { kind: "call" }>): FnDecl | undefined => {
+    const target = recTargetName(expr);
+    return target === fn.name ? fn : functionMap.get(target);
+  };
+  const targetMatchesFn = (target: string | undefined): boolean =>
+    !target || target === fn.name || target === fn.tailRecTarget;
   const visitStatement = (stmt: Statement) => {
     if (stmt.kind === "let" || stmt.kind === "destructure_let") {
       visitExpr(stmt.value, false, false);
@@ -19344,10 +19545,20 @@ function checkRecExpressions(fn: FnDecl, diagnostics: Diagnostic[]) {
   };
   const visitExpr = (expr: Expr, tailPosition: boolean, inConstFn: boolean) => {
     if (expr.kind === "call" && expr.tailRec) {
-      if (inConstFn) {
+      const targetFn = recTargetFn(expr);
+      const targetName = recTargetName(expr);
+      const activeParams = runtimeParams(targetFn?.params ?? fn.params);
+      const validConstTarget = targetMatchesFn(expr.tailRecTarget ?? fn.tailRecTarget);
+      if (inConstFn && !validConstTarget) {
         diagnostics.push(diagnosticAt(
           "rec.context",
           "rec(...) is only valid in a runtime function body",
+          expr,
+        ));
+      } else if (!targetFn) {
+        diagnostics.push(diagnosticAt(
+          "rec.context",
+          `rec(...) target ${targetName} is not a known runtime function`,
           expr,
         ));
       } else if (!tailPosition) {
@@ -19357,10 +19568,10 @@ function checkRecExpressions(fn: FnDecl, diagnostics: Diagnostic[]) {
           expr,
         ));
       }
-      if (expr.args.length !== params.length) {
+      if (expr.args.length !== activeParams.length) {
         diagnostics.push(diagnosticAt(
           "rec.arity",
-          `rec(...) expects ${params.length} runtime arguments for ${fn.name}, got ${expr.args.length}`,
+          `rec(...) expects ${activeParams.length} runtime arguments for ${targetName}, got ${expr.args.length}`,
           expr,
         ));
       }
@@ -19382,7 +19593,11 @@ function checkRecExpressions(fn: FnDecl, diagnostics: Diagnostic[]) {
         if (expr.expr) visitExpr(expr.expr, tailPosition, inConstFn);
         return;
       case "const_fn":
-        visitExpr(expr.body, false, true);
+        if (targetMatchesFn(expr.tailRecTarget)) {
+          visitExpr(expr.body, tailPosition, false);
+        } else {
+          visitExpr(expr.body, false, true);
+        }
         return;
       case "profile":
         for (const arg of expr.args) visitExpr(arg, false, inConstFn);
@@ -19390,7 +19605,12 @@ function checkRecExpressions(fn: FnDecl, diagnostics: Diagnostic[]) {
         return;
       case "call":
         visitExpr(expr.callee, false, inConstFn);
-        for (const arg of expr.args) visitExpr(arg, false, inConstFn);
+        for (const arg of expr.args) {
+          const argTailPosition = arg.kind === "const_fn" &&
+            targetMatchesFn(arg.tailRecTarget) &&
+            tailPosition;
+          visitExpr(arg, argTailPosition, inConstFn);
+        }
         return;
       case "index":
         visitExpr(expr.target, false, inConstFn);
@@ -20238,7 +20458,11 @@ function checkExprImpl(
     case "call": {
       if (expr.tailRec) {
         const currentFn = options.currentFn;
-        if (!currentFn) {
+        const targetName = expr.tailRecTarget ?? currentFn?.tailRecTarget ?? currentFn?.name;
+        const targetFn = targetName
+          ? (targetName === currentFn?.name ? currentFn : options.functionMap?.get(targetName))
+          : undefined;
+        if (!targetFn) {
           diagnostics.push(diagnosticAt(
             "rec.context",
             "rec(...) is only valid in a runtime function body",
@@ -20259,7 +20483,7 @@ function checkExprImpl(
           }
           return;
         }
-        const params = runtimeParams(currentFn.params);
+        const params = runtimeParams(targetFn.params);
         for (let index = 0; index < expr.args.length; index++) {
           const arg = expr.args[index];
           const expected = params[index]?.type;
@@ -20288,12 +20512,12 @@ function checkExprImpl(
         }
         if (
           expectedType &&
-          currentFn.returnType &&
-          !runtimeValueTypeAssignable(expectedType, currentFn.returnType, types)
+          targetFn.returnType &&
+          !runtimeValueTypeAssignable(expectedType, targetFn.returnType, types)
         ) {
           diagnostics.push(diagnosticAt(
             "type.literal_mismatch",
-            `expected ${expectedType} but got ${currentFn.returnType}`,
+            `expected ${expectedType} but got ${targetFn.returnType}`,
             expr,
           ));
         }
@@ -20918,6 +21142,10 @@ function exprBindingTypeImpl(
     let currentFn: FnDecl | undefined;
     if (typeof options !== "boolean") {
       currentFn = options.currentFn;
+      const targetName = expr.tailRecTarget ?? currentFn?.tailRecTarget;
+      if (targetName && targetName !== currentFn?.name) {
+        currentFn = options.functionMap?.get(targetName) ?? currentFn;
+      }
     }
     return finish(currentFn?.returnType);
   }

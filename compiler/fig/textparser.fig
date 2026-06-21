@@ -112,32 +112,50 @@ fn unexpected_token(
   combinator.UnexpectedToken(expected, actual, at)
 }
 
+fn scores_match(actual: i32, expected: i32) -> bool {
+  actual == expected
+}
+
+fn unexpected_current_token(
+  expected: i32,
+  actual: i32,
+  current: token.Token
+) -> combinator.Parser(token.Token) {
+  combinator.err(unexpected_token(
+    expected,
+    actual,
+    current.span
+  ))
+}
+
 fn expect_punctuation(expected: textlex.TextPunctuation) -> TextParser(token.Token) {
   \input_value -> {
     let current = token_at_current(input_value);
     let actual = punctuation_at_current(input_value);
     let actual_score = textlex.punctuation_score(actual);
     let expected_score = textlex.punctuation_score(expected);
-    match actual_score == expected_score {
-      true => combinator.ok(advance_one(input_value), current),
-      false => combinator.err(unexpected_token(
+    if scores_match(actual_score, expected_score) {
+      combinator.ok(advance_one(input_value), current)
+    } else {
+      unexpected_current_token(
         expected_score,
         actual_score,
-        current.span
-      )),
+        current
+      )
     }
   }
 }
 
 fn any_token() -> TextParser(token.Token) {
-  \input_value -> match input_value.state.cursor < input_value.state.limit {
-    true => combinator.ok(
+  \input_value -> if combinator.state_has_more(input_value.state) {
+    combinator.ok(
       advance_one(input_value),
       token_at_current(input_value)
-    ),
-    false => combinator.err(combinator.UnexpectedEnd(
+    )
+  } else {
+    combinator.err(combinator.UnexpectedEnd(
       textlex.source_span(input_value.source)
-    )),
+    ))
   }
 }
 
@@ -146,13 +164,14 @@ fn expect_kind(expected: token.TokenKind, _expected_score: i32) -> TextParser(to
     let current = token_at_current(input_value);
     let actual_score = token.keyword_weight(current.kind);
     let required_score = token.keyword_weight(expected);
-    match actual_score == required_score {
-      true => combinator.ok(advance_one(input_value), current),
-      false => combinator.err(unexpected_token(
+    if scores_match(actual_score, required_score) {
+      combinator.ok(advance_one(input_value), current)
+    } else {
+      unexpected_current_token(
         required_score,
         actual_score,
-        current.span
-      )),
+        current
+      )
     }
   }
 }

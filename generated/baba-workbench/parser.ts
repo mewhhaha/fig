@@ -135,6 +135,8 @@ export type AstNode =
   | MatchValuesAstNode
   | MatchValuesParenAstNode
   | ArmAstNode
+  | ArmValueAstNode
+  | ArmBlockAstNode
   | MatchGuardAstNode
   | MatchPatternsAstNode
   | PipeBindNameAstNode
@@ -917,6 +919,20 @@ export interface MatchValuesParenAstNode {
 export interface ArmAstNode {
   kind: "Arm";
   type: "Arm";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ArmValueAstNode {
+  kind: "ArmValue";
+  type: "ArmValue";
+  node: RuleParseNode;
+  children: AstNode[];
+}
+
+export interface ArmBlockAstNode {
+  kind: "ArmBlock";
+  type: "ArmBlock";
   node: RuleParseNode;
   children: AstNode[];
 }
@@ -2825,8 +2841,21 @@ const rules: Record<string, Expression> = {
       { kind: "ref", name: "MatchPatterns" },
       { kind: "optional", expression: { kind: "ref", name: "MatchGuard" } },
       { kind: "literal", value: "=>" },
-      { kind: "ref", name: "Expr" },
+      { kind: "ref", name: "ArmValue" },
       { kind: "optional", expression: { kind: "literal", value: "," } },
+    ],
+  },
+  "ArmValue": {
+    kind: "choice",
+    options: [{ kind: "ref", name: "ArmBlock" }, { kind: "ref", name: "Expr" }],
+  },
+  "ArmBlock": {
+    kind: "sequence",
+    items: [
+      { kind: "literal", value: "{" },
+      { kind: "repeat1", expression: { kind: "ref", name: "BlockStmt" } },
+      { kind: "optional", expression: { kind: "ref", name: "Expr" } },
+      { kind: "literal", value: "}" },
     ],
   },
   "MatchGuard": {
@@ -4899,6 +4928,24 @@ export function projectParseNode(node: ParseNode): AstNode | null {
       return {
         kind: "Arm",
         type: "Arm",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "ArmValue":
+      return {
+        kind: "ArmValue",
+        type: "ArmValue",
+        node,
+        children: node.children.map(projectParseNode).filter((
+          child,
+        ): child is AstNode => child !== null),
+      };
+    case "ArmBlock":
+      return {
+        kind: "ArmBlock",
+        type: "ArmBlock",
         node,
         children: node.children.map(projectParseNode).filter((
           child,

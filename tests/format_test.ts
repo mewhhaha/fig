@@ -163,6 +163,12 @@ pub fn main(host:io)->i32{clock(host)}`,
       "fn main() -> i32 {\n  let box = {\n    value: match 1 {\n      0 => {x: 1},\n      _ => {x: 2}\n    }\n  };\n  Box.value.x\n}\n",
   },
   {
+    name: "match arm statement blocks",
+    input: "fn main(value:i32)->i32{match value{0=>{let next=value+1;next},_=>{x:value}.x}}",
+    expected:
+      "fn main(value: i32) -> i32 {\n  match value {\n    0 => {\n      let next = value + 1;\n      next\n    },\n    _ => {x: value}.x\n  }\n}\n",
+  },
+  {
     name: "type repeat prefixes",
     input:
       "type fn Fixed(n:count,a:type)->struct{let Fixed={n*a};let Mixed={header:i32,3*bool,tail:a};struct(Mixed)}",

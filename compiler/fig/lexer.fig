@@ -58,10 +58,15 @@ fn at_span(current: LexerCursor, width: i32) -> span.Span {
   )
 }
 
+fn cursor_has_width(current: LexerCursor, width: i32) -> bool {
+  current.remaining > width
+}
+
 fn bounded_remaining(current: LexerCursor, width: i32) -> i32 {
-  match current.remaining > width {
-    true => current.remaining - width,
-    false => 0,
+  if cursor_has_width(current, width) {
+    current.remaining - width
+  } else {
+    0
   }
 }
 
@@ -150,15 +155,15 @@ fn lex_one(
 ) -> LexResult {
   let width = lex_width(class, seed);
   let source_span = at_span(current, width);
-  match is_end(class) {
-    true => LexFailed(UnknownChar(source_span)),
-    false => match is_unterminated(class, seed) {
-      true => LexFailed(UnterminatedText(source_span)),
-      false => Lexed(
-        lexeme(kind_from_class(class), source_span),
-        advance(current, width)
-      ),
-    },
+  if is_end(class) {
+    LexFailed(UnknownChar(source_span))
+  } else if is_unterminated(class, seed) {
+    LexFailed(UnterminatedText(source_span))
+  } else {
+    Lexed(
+      lexeme(kind_from_class(class), source_span),
+      advance(current, width)
+    )
   }
 }
 

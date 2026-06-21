@@ -102,19 +102,28 @@ fn record_cache_probe(
   }
 }
 
+fn resolve_found_module(
+  graph: modgraph.ModuleGraph,
+  request: ResolveRequest,
+  module: modgraph.ModuleRecord
+) -> ResolveResult {
+  if modgraph.has_import_edge(
+    graph,
+    request.importer_id,
+    request.import_id
+  ) {
+    Resolved(module)
+  } else {
+    MissingImportEdge(request)
+  }
+}
+
 fn resolve_graph(
   graph: modgraph.ModuleGraph,
   request: ResolveRequest
 ) -> ResolveResult {
   match modgraph.find_module(graph, request.import_id) {
-    Some(module) => match modgraph.has_import_edge(
-      graph,
-      request.importer_id,
-      request.import_id
-    ) {
-      true => Resolved(module),
-      false => MissingImportEdge(request),
-    },
+    Some(module) => resolve_found_module(graph, request, module),
     None => Missing(request),
   }
 }

@@ -204,10 +204,15 @@ fn func_score(value: WasmFunc) -> i32 {
     + diagnostic.bag_score(value.diagnostics)
 }
 
+fn module_has_second_function(value: WasmModule) -> bool {
+  value.function_count > 1
+}
+
 fn active_second_func_score(value: WasmModule) -> i32 {
-  match value.function_count > 1 {
-    true => func_score(value.second),
-    false => 0,
+  if module_has_second_function(value) {
+    func_score(value.second)
+  } else {
+    0
   }
 }
 
@@ -278,10 +283,15 @@ fn emit_module(
   }
 }
 
+fn program_has_second_function(program: ast.Program) -> bool {
+  program.declaration_count > 1
+}
+
 fn program_function_count(program: ast.Program) -> i32 {
-  match program.declaration_count > 1 {
-    true => 2,
-    false => 1,
+  if program_has_second_function(program) {
+    2
+  } else {
+    1
   }
 }
 
@@ -290,12 +300,13 @@ fn program_module_diagnostics(
   first: WasmFunc,
   second: WasmFunc
 ) -> diagnostic.DiagnosticBag {
-  match program.declaration_count > 1 {
-    true => diagnostic.merge(
+  if program_has_second_function(program) {
+    diagnostic.merge(
       first.diagnostics,
       second.diagnostics
-    ),
-    false => first.diagnostics,
+    )
+  } else {
+    first.diagnostics
   }
 }
 
@@ -387,16 +398,18 @@ fn body_size(function: WasmFunc) -> i32 {
 }
 
 fn second_body_size(value: WasmModule) -> i32 {
-  match value.function_count > 1 {
-    true => body_size(value.second),
-    false => 0,
+  if module_has_second_function(value) {
+    body_size(value.second)
+  } else {
+    0
   }
 }
 
 fn second_opcode(value: WasmModule) -> i32 {
-  match value.function_count > 1 {
-    true => instr_opcode(value.second.first),
-    false => 0,
+  if module_has_second_function(value) {
+    instr_opcode(value.second.first)
+  } else {
+    0
   }
 }
 

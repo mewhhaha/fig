@@ -300,14 +300,19 @@ fn three_function_from_seed(seed: i32) -> TextBuffer {
   buffer_from_codes(seed, seed * 16, codes26)
 }
 
+fn text_index_in_bounds(text: TextBuffer, index: i32) -> bool {
+  if index >= 0 {
+    index < text.length
+  } else {
+    false
+  }
+}
+
 fn code_at(text: TextBuffer, index: i32) -> i32 {
-  let in_bounds = match index >= 0 {
-    true => index < text.length,
-    false => false,
-  };
-  match in_bounds {
-    true => layout.HeapArray::get(i32, text.codes, index),
-    false => 0,
+  if text_index_in_bounds(text, index) {
+    layout.HeapArray::get(i32, text.codes, index)
+  } else {
+    0
   }
 }
 
@@ -329,14 +334,15 @@ fn decimal_span_value_loop(
   limit: i32,
   total: i32
 ) -> i32 {
-  match offset >= limit {
-    true => total,
-    false => rec(
+  if offset >= limit {
+    total
+  } else {
+    rec(
       source,
       offset + 1,
       limit,
       total * 10 + decimal_digit_value(source_code_at(source, offset))
-    ),
+    )
   }
 }
 
@@ -351,14 +357,15 @@ fn text_hash_loop(
   limit: i32,
   total: i32
 ) -> i32 {
-  match index < limit {
-    true => rec(
+  if index < limit {
+    rec(
       text,
       index + 1,
       limit,
       total * 33 + code_at(text, index)
-    ),
-    false => total,
+    )
+  } else {
+    total
   }
 }
 
@@ -546,12 +553,14 @@ fn scan_width_loop(
   start: i32,
   index: i32
 ) -> i32 {
-  match index < text.length {
-    false => index - start,
-    true => match can_continue(classify(code_at(text, index))) {
-      true => rec(can_continue, text, start, index + 1),
-      false => index - start,
-    },
+  if text_index_in_bounds(text, index) {
+    if can_continue(classify(code_at(text, index))) {
+      rec(can_continue, text, start, index + 1)
+    } else {
+      index - start
+    }
+  } else {
+    index - start
   }
 }
 
@@ -587,12 +596,14 @@ fn string_width_loop(
   start: i32,
   index: i32
 ) -> i32 {
-  match index < text.length {
-    false => 0,
-    true => match is_string_end(text, index) {
-      true => index - start + 1,
-      false => rec(text, start, index + 1),
-    },
+  if text_index_in_bounds(text, index) {
+    if is_string_end(text, index) {
+      index - start + 1
+    } else {
+      rec(text, start, index + 1)
+    }
+  } else {
+    0
   }
 }
 
@@ -609,12 +620,14 @@ fn char_width_loop(
   start: i32,
   index: i32
 ) -> i32 {
-  match index < text.length {
-    false => 0,
-    true => match is_char_end(text, index) {
-      true => index - start + 1,
-      false => rec(text, start, index + 1),
-    },
+  if text_index_in_bounds(text, index) {
+    if is_char_end(text, index) {
+      index - start + 1
+    } else {
+      rec(text, start, index + 1)
+    }
+  } else {
+    0
   }
 }
 
@@ -637,12 +650,14 @@ fn fenced_text_width_loop(
   start: i32,
   index: i32
 ) -> i32 {
-  match index < text.length {
-    false => 0,
-    true => match is_fenced_text_boundary(text, index) {
-      true => index - start + 3,
-      false => rec(text, start, index + 1),
-    },
+  if text_index_in_bounds(text, index) {
+    if is_fenced_text_boundary(text, index) {
+      index - start + 3
+    } else {
+      rec(text, start, index + 1)
+    }
+  } else {
+    0
   }
 }
 
@@ -658,12 +673,12 @@ fn advance_text_width_loop(
   cursor: TextCursor,
   remaining: i32
 ) -> TextCursor {
-  match remaining <= 0 {
-    true => cursor,
-    false => match code_at(text, cursor.index) == TextCharCode::Newline {
-      true => rec(text, advance_newline(cursor), remaining - 1),
-      false => rec(text, advance(cursor, 1), remaining - 1),
-    },
+  if remaining <= 0 {
+    cursor
+  } else if code_at(text, cursor.index) == TextCharCode::Newline {
+    rec(text, advance_newline(cursor), remaining - 1)
+  } else {
+    rec(text, advance(cursor, 1), remaining - 1)
   }
 }
 
@@ -700,10 +715,15 @@ fn is_collection_open_start(text: TextBuffer, start: i32) -> bool {
 }
 
 fn punctuation_width(text: TextBuffer, start: i32) -> i32 {
-  match is_arrow_start(text, start) {
-    true => 2,
-    false => 1,
+  if is_arrow_start(text, start) {
+    2
+  } else {
+    1
   }
+}
+
+fn punctuation_width_is_arrow(width: i32) -> bool {
+  width == 2
 }
 
 fn punctuation_kind(text: TextBuffer, start: i32, width: i32) -> TextPunctuation {
@@ -712,7 +732,7 @@ fn punctuation_kind(text: TextBuffer, start: i32, width: i32) -> TextPunctuation
     TextCharCode::LeftParen => PunctLeftParen,
     TextCharCode::RightParen => PunctRightParen,
     TextCharCode::Comma => PunctComma,
-    TextCharCode::Minus => match width == 2 {
+    TextCharCode::Minus => match punctuation_width_is_arrow(width) {
       true => PunctArrow,
       false => PunctOther,
     },
@@ -771,18 +791,18 @@ fn lex_name(class: TextCharClass, text: TextBuffer, cursor: TextCursor) -> TextL
 
 fn lex_one(text: TextBuffer, cursor: TextCursor) -> TextLexResult {
   let code = code_at(text, cursor.index);
-  match is_collection_open_start(text, cursor.index) {
-    true => lex_width(text, token.Symbol, PunctNone, cursor, 2),
-    false => match code == TextCharCode::Hash {
-      true => lex_width(
+  if is_collection_open_start(text, cursor.index) {
+    lex_width(text, token.Symbol, PunctNone, cursor, 2)
+  } else if code == TextCharCode::Hash {
+    lex_width(
       text,
       token.LiteralType,
       PunctNone,
       cursor,
       literal_type_marker_width(text, cursor.index)
-      ),
-      false => lex_one_class(text, cursor, code, classify(code)),
-    },
+    )
+  } else {
+    lex_one_class(text, cursor, code, classify(code))
   }
 }
 
@@ -853,26 +873,30 @@ fn is_line_end(text: TextBuffer, cursor: TextCursor) -> bool {
 }
 
 fn skip_line_comment(text: TextBuffer, cursor: TextCursor) -> TextCursor {
-  match cursor.index < text.length {
-    false => cursor,
-    true => match is_line_end(text, cursor) {
-      true => cursor,
-      false => rec(text, advance(cursor, 1)),
-    },
+  if text_index_in_bounds(text, cursor.index) {
+    if is_line_end(text, cursor) {
+      cursor
+    } else {
+      rec(text, advance(cursor, 1))
+    }
+  } else {
+    cursor
   }
 }
 
 fn skip_trivia(text: TextBuffer, cursor: TextCursor) -> TextCursor {
-  match cursor.index < text.length {
-    false => cursor,
-    true => match is_line_comment_start(text, cursor) {
-      true => rec(text, skip_line_comment(text, cursor)),
-      false => match classify(code_at(text, cursor.index)) {
+  if text_index_in_bounds(text, cursor.index) {
+    if is_line_comment_start(text, cursor) {
+      rec(text, skip_line_comment(text, cursor))
+    } else {
+      match classify(code_at(text, cursor.index)) {
         TextSpace => rec(text, advance(cursor, 1)),
         TextNewline => rec(text, advance_newline(cursor)),
         _ => cursor,
-      },
-    },
+      }
+    }
+  } else {
+    cursor
   }
 }
 
@@ -917,9 +941,10 @@ fn safe_cursor_from_result(
   fallback: TextCursor
 ) -> TextCursor {
   let candidate = cursor_from_result(result, fallback);
-  match candidate.index > current.index {
-    true => candidate,
-    false => fallback,
+  if candidate.index > current.index {
+    candidate
+  } else {
+    fallback
   }
 }
 
@@ -949,10 +974,7 @@ fn push_error(
 }
 
 fn result_count(value: TextLexResult) -> i32 match {
-  TextLexed(value, _) => match value.byte_width > 0 {
-    true => 1,
-    false => 0,
-  },
+  TextLexed(value, _) => if value.byte_width > 0 { 1 } else { 0 },
   TextLexFailed(_) => 1,
 }
 
@@ -961,9 +983,10 @@ fn next_stream_span(
   current_span: span.Span,
   next: TextLexResult
 ) -> span.Span {
-  match count == 0 {
-    true => token_from_result(next).span,
-    false => span.merge(current_span, token_from_result(next).span),
+  if count == 0 {
+    token_from_result(next).span
+  } else {
+    span.merge(current_span, token_from_result(next).span)
   }
 }
 
@@ -1016,15 +1039,8 @@ fn stream_loop(
   source_span: span.Span
 ) -> TextTokenStream {
   let token_cursor = skip_trivia(text, cursor);
-  match token_cursor.index < text.length {
-    false => TextTokenStream {
-      text: text,
-      tokens: tokens,
-      count: count,
-      diagnostics: diagnostics,
-      source_span: source_span,
-    },
-    true => match lex_one(text, token_cursor) {
+  if text_index_in_bounds(text, token_cursor.index) {
+    match lex_one(text, token_cursor) {
       result => rec(
         text,
         safe_cursor_from_result(
@@ -1044,7 +1060,15 @@ fn stream_loop(
           result
         )
       ),
-    },
+    }
+  } else {
+    TextTokenStream {
+      text: text,
+      tokens: tokens,
+      count: count,
+      diagnostics: diagnostics,
+      source_span: source_span,
+    }
   }
 }
 
@@ -1081,18 +1105,23 @@ fn missing_text_token(source: TextTokenStream) -> TextToken {
   }
 }
 
+fn stream_index_in_bounds(source: TextTokenStream, index: i32) -> bool {
+  if index >= 0 {
+    index < source.count
+  } else {
+    false
+  }
+}
+
 fn text_token_at(source: TextTokenStream, index: i32) -> TextToken {
-  let in_bounds = match index >= 0 {
-    true => index < source.count,
-    false => false,
-  };
-  match in_bounds {
-    true => vec.Vec::get_t(
+  if stream_index_in_bounds(source, index) {
+    vec.Vec::get_t(
       TextToken,
       source.tokens,
       index
-    ),
-    false => missing_text_token(source),
+    )
+  } else {
+    missing_text_token(source)
   }
 }
 
@@ -1161,13 +1190,14 @@ fn stream_token_score_loop(
   index: i32,
   total: i32
 ) -> i32 {
-  match index < stream.count {
-    true => rec(
+  if stream_index_in_bounds(stream, index) {
+    rec(
       stream,
       index + 1,
       total + text_token_score(text_token_at(stream, index))
-    ),
-    false => total,
+    )
+  } else {
+    total
   }
 }
 
@@ -1182,13 +1212,14 @@ fn stream_token_signature_loop(
   index: i32,
   total: i32
 ) -> i32 {
-  match index < stream.count {
-    true => rec(
+  if stream_index_in_bounds(stream, index) {
+    rec(
       stream,
       index + 1,
       total * 131 + text_token_score(text_token_at(stream, index))
-    ),
-    false => total,
+    )
+  } else {
+    total
   }
 }
 
@@ -1201,13 +1232,14 @@ fn buffer_code_score_loop(
   index: i32,
   total: i32
 ) -> i32 {
-  match index < text.length {
-    true => rec(
+  if text_index_in_bounds(text, index) {
+    rec(
       text,
       index + 1,
       total + code_at(text, index)
-    ),
-    false => total,
+    )
+  } else {
+    total
   }
 }
 

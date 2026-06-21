@@ -1554,6 +1554,13 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
     fn inc(x: i32) -> i32 { x + 1 }
     fn bump_to_option(x: i32) -> core.Option(i32) { option.some(x + 1) }
     fn fallback() -> core.Option(i32) { option.some(9) }
+    type FallbackContext = struct {base: i32, extra: i32}
+    fn fallback_with(context: FallbackContext) -> core.Option(i32) {
+      option.some(context.base + context.extra)
+    }
+    fn unwrap_with(context: FallbackContext) -> i32 {
+      context.base * context.extra
+    }
     fn guarded_value(x: i32) -> core.Option(i32) {
       do @monad(core.Option(_)) {
         option.guard(x > 0);
@@ -1568,8 +1575,15 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
       let picked = core.Option::append(empty, bound);
       let guarded = core.Option::unwrap_or(guarded_value(4), 0);
       let blocked = core.Option::unwrap_or(guarded_value(0), 7);
+      let context = FallbackContext {base: 2, extra: 5};
+      let picked_with = core.Option::or_else_with(empty, context, fallback_with);
+      let unwrapped_with = core.Option::unwrap_or_else_with(empty, context, unwrap_with);
+      let skipped_unwrap = core.Option::unwrap_or_else_with(option.some(4), context, unwrap_with);
       core.Option::unwrap_or(picked, 0) +
         core.Option::unwrap_or(core.Option::or_else(empty, fallback), 0) +
+        core.Option::unwrap_or(picked_with, 0) +
+        unwrapped_with +
+        skipped_unwrap +
         guarded +
         blocked
     }
@@ -1577,7 +1591,7 @@ Deno.test("prelude option concept methods construct map bind append and unwrap",
     { resolveModule },
   );
   const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
-  assertEquals((instance.exports.main as () => number)(), 26);
+  assertEquals((instance.exports.main as () => number)(), 47);
 });
 
 Deno.test("prelude option do strategies use imported attached members", async () => {

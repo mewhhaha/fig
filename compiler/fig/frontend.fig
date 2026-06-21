@@ -115,19 +115,38 @@ fn TextSource::text_token_signature(input: TextSource) -> i32 {
   textlex.stream_token_signature_hash(input.stream)
 }
 
+fn TextSource::has_diagnostics(input: TextSource) -> bool {
+  diagnostic.count(input.stream.diagnostics) > 0
+}
+
+fn parse_state_has_more(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState
+) -> bool {
+  current.cursor < textlex.length(source)
+}
+
+fn parse_status_parse(
+  source: textlex.TextTokenStream,
+  seed: i32,
+  current: combinator.ParseState,
+  count: i32
+) -> combinator.Parser(parser.DeclFrame) {
+  parser.parse_text_declaration_stream(
+    current,
+    source,
+    seed + count
+  )
+}
+
 fn parse_status_loop(
   source: textlex.TextTokenStream,
   seed: i32,
   current: combinator.ParseState,
   count: i32
 ) -> i32 {
-  match current.cursor < textlex.length(source) {
-    false => 0,
-    true => match parser.parse_text_declaration_stream(
-      current,
-      source,
-      seed + count
-    ) {
+  if parse_state_has_more(source, current) {
+    match parse_status_parse(source, seed, current, count) {
       Ok(result) => rec(
         source,
         seed,
@@ -135,19 +154,22 @@ fn parse_status_loop(
         count + 1
       ),
       Err(_) => 1,
-    },
+    }
+  } else {
+    0
   }
 }
 
 fn TextSource::parse_status(input: TextSource) -> i32 {
-  match diagnostic.count(input.stream.diagnostics) > 0 {
-    true => 1,
-    false => parse_status_loop(
+  if TextSource::has_diagnostics(input) {
+    1
+  } else {
+    parse_status_loop(
       input.stream,
       input.seed,
       combinator.state(0, textlex.length(input.stream)),
       0
-    ),
+    )
   }
 }
 
@@ -429,9 +451,8 @@ fn compile_text_declaration_state_loop(
   seed: i32,
   state: TextCompileState
 ) -> TextCompileState {
-  match state.current.cursor < textlex.length(source) {
-    false => state,
-    true => compile_text_declaration_state_loop(
+  if parse_state_has_more(source, state.current) {
+    rec(
       source,
       source_span,
       seed,
@@ -441,7 +462,9 @@ fn compile_text_declaration_state_loop(
         seed,
         state
       )
-    ),
+    )
+  } else {
+    state
   }
 }
 

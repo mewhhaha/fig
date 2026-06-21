@@ -64,9 +64,8 @@ fn Context::scan(
   current: combinator.ParseState,
   total: i32
 ) -> i32 {
-  match current.cursor < textlex.length(source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
       current,
       source,
       total
@@ -78,7 +77,9 @@ fn Context::scan(
         parser.next_text_declaration_state(result.state, source),
         Context::apply_decl(context_value, source, current, total, result)
       ),
-    },
+    }
+  } else {
+    total
   }
 }
 

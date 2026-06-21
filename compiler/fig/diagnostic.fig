@@ -135,47 +135,22 @@ fn diagnostic_score(diagnostic: Diagnostic) -> i32 {
     - diagnostic.secondary
 }
 
-fn bag_diagnostic_score_loop(
-  diagnostics: vec.Vec(Diagnostic),
-  index: i32,
-  total: i32
-) -> i32 {
-  match index < vec.Vec::len(diagnostics) {
-    true => rec(
-      diagnostics,
-      index + 1,
-      total + diagnostic_score(vec.Vec::get_t(Diagnostic, diagnostics, index))
-    ),
-    false => total,
-  }
+fn add_diagnostic_score(acc: i32, diagnostic: Diagnostic) -> i32 {
+  acc + diagnostic_score(diagnostic)
 }
 
 fn bag_score(bag: DiagnosticBag) -> i32 {
-  bag_diagnostic_score_loop(bag.diagnostics, 0, 0)
+  vec.Vec::fold(bag.diagnostics, 0, add_diagnostic_score)
     + count(bag)
     + bag.error_count
 }
 
-fn merge_loop(
-  left: DiagnosticBag,
-  right: DiagnosticBag,
-  index: i32
-) -> DiagnosticBag {
-  match index < count(right) {
-    true => rec(
-      push(
-        left,
-        vec.Vec::get_t(Diagnostic, right.diagnostics, index)
-      ),
-      right,
-      index + 1
-    ),
-    false => left,
-  }
+fn push_diagnostic(acc: DiagnosticBag, diagnostic: Diagnostic) -> DiagnosticBag {
+  push(acc, diagnostic)
 }
 
 fn merge(left: DiagnosticBag, right: DiagnosticBag) -> DiagnosticBag {
-  merge_loop(left, right, 0)
+  vec.Vec::fold(right.diagnostics, left, push_diagnostic)
 }
 
 fn count(bag: DiagnosticBag) -> i32 {

@@ -330,6 +330,18 @@ fn edge_forms_cycle(graph: SymbolGraph, edge: DeclEdge) -> bool {
   )
 }
 
+fn cycle_count_after_edge(
+  graph: SymbolGraph,
+  edge: DeclEdge,
+  total: i32
+) -> i32 {
+  if edge_forms_cycle(graph, edge) {
+    total + 1
+  } else {
+    total
+  }
+}
+
 fn cycle_count_scan(graph: SymbolGraph) -> CycleCountScan {
   CycleCountScan {
     graph: graph,
@@ -338,13 +350,9 @@ fn cycle_count_scan(graph: SymbolGraph) -> CycleCountScan {
 }
 
 fn cycle_count_step(scan: CycleCountScan, edge: DeclEdge) -> CycleCountScan {
-  let next_total = match edge_forms_cycle(scan.graph, edge) {
-    true => scan.total + 1,
-    false => scan.total,
-  };
   CycleCountScan {
     graph: scan.graph,
-    total: next_total,
+    total: cycle_count_after_edge(scan.graph, edge, scan.total),
   }
 }
 
@@ -389,20 +397,32 @@ fn cycle_diagnostic_scan(graph: SymbolGraph) -> CycleDiagnosticScan {
   }
 }
 
+fn cycle_diagnostics_after_edge(
+  graph: SymbolGraph,
+  diagnostics: diagnostic.DiagnosticBag,
+  edge: DeclEdge
+) -> diagnostic.DiagnosticBag {
+  if edge_forms_cycle(graph, edge) {
+    diagnostic.push(
+      diagnostics,
+      cycle_diagnostic(graph, edge)
+    )
+  } else {
+    diagnostics
+  }
+}
+
 fn cycle_diagnostic_step(
   scan: CycleDiagnosticScan,
   edge: DeclEdge
 ) -> CycleDiagnosticScan {
-  let next_diagnostics = match edge_forms_cycle(scan.graph, edge) {
-    true => diagnostic.push(
-      scan.diagnostics,
-      cycle_diagnostic(scan.graph, edge)
-    ),
-    false => scan.diagnostics,
-  };
   CycleDiagnosticScan {
     graph: scan.graph,
-    diagnostics: next_diagnostics,
+    diagnostics: cycle_diagnostics_after_edge(
+      scan.graph,
+      scan.diagnostics,
+      edge
+    ),
   }
 }
 
@@ -422,17 +442,27 @@ fn bind_node(env: checker.CheckEnv, node: DeclNode) -> checker.CheckEnv {
   )
 }
 
+fn diagnostics_are_empty(diagnostics: diagnostic.DiagnosticBag) -> bool {
+  diagnostic.count(diagnostics) == 0
+}
+
+fn resolution_state_from_diagnostics(
+  diagnostics: diagnostic.DiagnosticBag
+) -> ResolutionState {
+  if diagnostics_are_empty(diagnostics) {
+    Resolved
+  } else {
+    Failed(diagnostics)
+  }
+}
+
 fn resolve_node(env: checker.CheckEnv, node: DeclNode) -> DeclNode {
   let checked = checker.check_declaration(
     env,
     node.decl,
     node.span
   );
-  let next_state: ResolutionState = match diagnostic.count(checked.env.diagnostics)
-    == 0 {
-    true => Resolved,
-    false => Failed(checked.env.diagnostics),
-  };
+  let next_state = resolution_state_from_diagnostics(checked.env.diagnostics);
   DeclNode {
     node_id: node.node_id,
     name: node.name,

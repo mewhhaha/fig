@@ -144,18 +144,31 @@ fn lower_declaration(
   }
 }
 
+fn program_has_secondary_declaration(program: ast.Program) -> bool {
+  program.declaration_count > 1
+}
+
+fn lowered_program_diagnostics(
+  program: ast.Program,
+  entry: LoweredDecl,
+  secondary: LoweredDecl
+) -> diagnostic.DiagnosticBag {
+  if program_has_secondary_declaration(program) {
+    diagnostic.merge(
+      entry.diagnostics,
+      secondary.diagnostics
+    )
+  } else {
+    entry.diagnostics
+  }
+}
+
 fn lowered_program(
   program: ast.Program,
   entry: LoweredDecl,
   secondary: LoweredDecl
 ) -> LoweredProgram {
-  let diagnostics = match program.declaration_count > 1 {
-    true => diagnostic.merge(
-      entry.diagnostics,
-      secondary.diagnostics
-    ),
-    false => entry.diagnostics,
-  };
+  let diagnostics = lowered_program_diagnostics(program, entry, secondary);
   LoweredProgram {
     program: program,
     entry: entry,

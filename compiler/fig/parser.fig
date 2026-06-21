@@ -18139,7 +18139,7 @@ fn text_bool_if_segments_between(
     start,
     limit
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     false => text_bool_branch_segments_missing(limit),
     true => text_bool_branch_segments_present(
       blocks.condition_start,
@@ -18484,6 +18484,52 @@ fn text_if_child_blocks_missing(limit: i32) -> TextIfChildBlocks {
   }
 }
 
+fn text_if_child_blocks_found(blocks: TextIfChildBlocks) -> bool {
+  match blocks.condition_start < blocks.condition_limit {
+    false => false,
+    true => match blocks.true_value_start < blocks.true_close {
+      false => false,
+      true => blocks.false_value_start < blocks.false_close,
+    },
+  }
+}
+
+fn text_if_child_blocks_expression_limit(
+  source: textlex.TextTokenStream,
+  blocks: TextIfChildBlocks
+) -> i32 {
+  match textlex.token_at(source, blocks.false_value_start).kind {
+    IfKw => blocks.false_close,
+    _ => blocks.false_close + 1,
+  }
+}
+
+fn text_if_child_blocks_present(
+  source: textlex.TextTokenStream,
+  start: i32,
+  true_open: i32,
+  true_close: i32,
+  false_value_start: i32,
+  false_close: i32
+) -> TextIfChildBlocks {
+  TextIfChildBlocks {
+    condition_start: text_expression_start_skip_trivia(
+      source,
+      start + 1,
+      true_open
+    ),
+    condition_limit: true_open,
+    true_value_start: text_if_block_value_start(
+      source,
+      true_open,
+      true_close
+    ),
+    true_close: true_close,
+    false_value_start: false_value_start,
+    false_close: false_close,
+  }
+}
+
 fn text_if_child_blocks_between(
   source: textlex.TextTokenStream,
   start: i32,
@@ -18512,45 +18558,66 @@ fn text_if_child_blocks_between(
         true_close + 1,
         limit
       )
-        \else_index -> match else_index < limit {
+        \else_index -> text_expression_start_skip_trivia(
+        source,
+        else_index + 1,
+        limit
+      )
+        \false_start -> match else_index < limit {
         false => text_if_child_blocks_missing(limit),
-        true => text_if_false_block_open_after_else(
-          source,
-          else_index + 1,
-          limit,
-          0,
-          0,
-          0
-        )
-          \false_open -> match false_open < limit {
+        true => match false_start < limit {
           false => text_if_child_blocks_missing(limit),
-          true => find_text_right_brace(
-            source,
-            false_open + 1,
-            limit,
-            0
-          )
-            \false_close -> match false_close < limit {
-            false => text_if_child_blocks_missing(limit),
-            true => TextIfChildBlocks {
-              condition_start: text_expression_start_skip_trivia(
+          true => match textlex.token_at(source, false_start).kind {
+            IfKw => text_if_child_blocks_between(
+              source,
+              false_start,
+              limit
+            )
+              \nested -> match text_if_child_blocks_found(nested) {
+              false => text_if_child_blocks_missing(limit),
+              true => text_if_child_blocks_present(
                 source,
-                start + 1,
-                true_open
-              ),
-              condition_limit: true_open,
-              true_value_start: text_if_block_value_start(
-                source,
+                start,
                 true_open,
-                true_close
+                true_close,
+                false_start,
+                text_if_child_blocks_expression_limit(
+                  source,
+                  nested
+                )
               ),
-              true_close: true_close,
-              false_value_start: text_if_block_value_start(
+            },
+            _ => text_if_false_block_open_after_else(
+              source,
+              else_index + 1,
+              limit,
+              0,
+              0,
+              0
+            )
+              \false_open -> match false_open < limit {
+              false => text_if_child_blocks_missing(limit),
+              true => find_text_right_brace(
                 source,
-                false_open,
-                false_close
-              ),
-              false_close: false_close,
+                false_open + 1,
+                limit,
+                0
+              )
+                \false_close -> match false_close < limit {
+                false => text_if_child_blocks_missing(limit),
+                true => text_if_child_blocks_present(
+                  source,
+                  start,
+                  true_open,
+                  true_close,
+                  text_if_block_value_start(
+                    source,
+                    false_open,
+                    false_close
+                  ),
+                  false_close
+                ),
+              },
             },
           },
         },
@@ -18569,7 +18636,7 @@ fn text_root_if_child_count_between(
     start,
     limit
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     true => 3,
     false => 0,
   }
@@ -18586,7 +18653,7 @@ fn text_root_if_child_signature_between(
     start,
     limit
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     false => total,
     true => match blocks.condition_start < blocks.condition_limit {
       true => text_child_value_segment_signature(
@@ -18622,7 +18689,7 @@ fn text_root_if_grandchild_count_between(
     start,
     limit
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     false => 0,
     true => match blocks.condition_start
       < blocks.condition_limit {
@@ -18658,7 +18725,7 @@ fn text_root_if_grandchild_signature_between(
     start,
     limit
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     false => total,
     true => match blocks.condition_start < blocks.condition_limit {
       true => text_expression_root_child_signature_between(
@@ -18694,7 +18761,7 @@ fn text_root_if_descendant_count_between(
     start,
     limit
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     false => 0,
     true => match blocks.condition_start
       < blocks.condition_limit {
@@ -18731,7 +18798,7 @@ fn text_root_if_descendant_signature_between(
     start,
     limit
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     false => total,
     true => match blocks.condition_start < blocks.condition_limit {
       true => text_expression_root_descendant_signature_between(
@@ -18786,7 +18853,7 @@ fn text_root_if_child_record_state_between(
     start,
     limit
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     false => TextRootChildRecordState {
       child_index: child_index,
       total: total,
@@ -19625,7 +19692,7 @@ fn text_root_if_child_scan_between(
     total_grandchild_signature,
     total_descendant_signature
   );
-  match blocks.false_close < limit {
+  match text_if_child_blocks_found(blocks) {
     false => empty,
     true => match blocks.condition_start < blocks.condition_limit {
       true => text_root_child_scan_append_value(

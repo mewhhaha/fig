@@ -89,11 +89,28 @@ fn type_score(value_type: Type) -> i32 {
   type_tag(value_type) * 31 + type_payload(value_type)
 }
 
+fn type_tags_match(left: Type, right: Type) -> bool {
+  type_tag(left) == type_tag(right)
+}
+
+fn type_payloads_match(left: Type, right: Type) -> bool {
+  type_payload(left) == type_payload(right)
+}
+
 fn same_type(left: Type, right: Type) -> bool {
-  match type_tag(left) == type_tag(right) {
-    true => type_payload(left) == type_payload(right),
-    false => false,
+  if type_tags_match(left, right) {
+    type_payloads_match(left, right)
+  } else {
+    false
   }
+}
+
+fn type_is_unknown(value_type: Type) -> bool {
+  same_type(value_type, unknown_type())
+}
+
+fn type_is_i32(value_type: Type) -> bool {
+  same_type(value_type, i32_type())
 }
 
 fn type_from_symbol(name: ast.SymbolId) -> Type {
@@ -209,27 +226,37 @@ fn check_var(
 ) -> CheckedExpr {
   let name = ast.expr_first(expr);
   let value_type = lookup_type(env, name);
-  match type_tag(value_type) == type_tag(unknown_type()) {
-    true => checked_expr(
+  if type_is_unknown(value_type) {
+    checked_expr(
       expr,
       error_type(),
       diagnostic.push(
         env.diagnostics,
         unknown_symbol_diagnostic(name, source_span)
       )
-    ),
-    false => checked_expr(
+    )
+  } else {
+    checked_expr(
       expr,
       value_type,
       env.diagnostics
-    ),
+    )
   }
 }
 
 fn binary_operand_type(value: i32) -> Type {
-  match value >= 0 {
-    true => i32_type(),
-    false => error_type(),
+  if value >= 0 {
+    i32_type()
+  } else {
+    error_type()
+  }
+}
+
+fn binary_types_are_i32(left_type: Type, right_type: Type) -> bool {
+  if type_is_i32(left_type) {
+    type_is_i32(right_type)
+  } else {
+    false
   }
 }
 
@@ -240,10 +267,7 @@ fn check_binary(
 ) -> CheckedExpr {
   let left_type = binary_operand_type(ast.expr_first(expr));
   let right_type = binary_operand_type(ast.expr_third(expr));
-  let ok = match same_type(left_type, i32_type()) {
-    true => same_type(right_type, i32_type()),
-    false => false,
-  };
+  let ok = binary_types_are_i32(left_type, right_type);
   match ok {
     true => checked_expr(
       expr,
@@ -272,10 +296,7 @@ fn check_call(
 ) -> CheckedExpr {
   let callee_type = binary_operand_type(ast.expr_first(expr));
   let arg_type = binary_operand_type(ast.expr_second(expr));
-  let ok = match same_type(callee_type, i32_type()) {
-    true => same_type(arg_type, i32_type()),
-    false => false,
-  };
+  let ok = binary_types_are_i32(callee_type, arg_type);
   match ok {
     true => checked_expr(
       expr,
@@ -463,10 +484,15 @@ fn check_secondary_declaration(
   decl: ast.Decl,
   source_span: span.Span
 ) -> CheckedDecl {
-  match has_secondary {
-    true => check_declaration(env, decl, source_span),
-    false => checked_decl(decl, unknown_type(), env),
+  if has_secondary {
+    check_declaration(env, decl, source_span)
+  } else {
+    checked_decl(decl, unknown_type(), env)
   }
+}
+
+fn program_has_secondary_declaration(program: ast.Program) -> bool {
+  program.declaration_count > 1
 }
 
 fn check_program(
@@ -480,7 +506,7 @@ fn check_program(
     source_span
   );
   let secondary = check_secondary_declaration(
-    program.declaration_count > 1,
+    program_has_secondary_declaration(program),
     entry.env,
     program.secondary_decl,
     source_span
@@ -502,13 +528,14 @@ fn env_symbol_score_loop(
   index: i32,
   total: i32
 ) -> i32 {
-  match index < vec.Vec::len(symbols) {
-    true => rec(
+  if index < vec.Vec::len(symbols) {
+    rec(
       symbols,
       index + 1,
       total + symbol_score(vec.Vec::get_t(Symbol, symbols, index))
-    ),
-    false => total,
+    )
+  } else {
+    total
   }
 }
 

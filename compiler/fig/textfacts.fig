@@ -43,6 +43,19 @@ type WasmRecordScanKind = enum(i32) {
   ScanWasmByteRecord = 3
 }
 
+type WasmSimpleSegmentKind = enum(i32) {
+  Unsupported = 0,
+  NumberI32 = 1,
+  Bool = 2,
+  Identifier = 3
+}
+
+type WasmNonBranchSegmentKind = enum(i32) {
+  Operator = 1,
+  Call = 2,
+  Simple = 3
+}
+
 type CheckedLocalFactKind = enum(i32) {
   LocalLet = 1,
   LocalTypeAssert = 2
@@ -74,6 +87,18 @@ type CheckedLocalScan = struct {
   paren_depth: i32,
   total: i32,
   function_name_hash: i32,
+}
+
+type WasmLocalGetTarget = struct {
+  found: bool,
+  index: i32,
+  type_class: i32,
+}
+
+type WasmCallTarget = struct {
+  found: bool,
+  function_index: i32,
+  arg_count: i32,
 }
 
 type CheckedDeclFact = struct {
@@ -198,6 +223,14 @@ type WasmFunctionLookup = struct {
   found: bool,
 }
 
+fn wasm_function_lookup_missing() -> WasmFunctionLookup {
+  WasmFunctionLookup {
+    index: 0,
+    runtime_param_count: 0,
+    found: false,
+  }
+}
+
 type WasmSectionFact = struct {
   section_id: i32,
   item_count: i32,
@@ -275,6 +308,27 @@ type WasmByteContext = struct {
   env: WasmSourceEnv,
 }
 
+type WasmBindingBody = struct {
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding,
+}
+
+type WasmScalarBody = struct {
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32,
+}
+
+type WasmCurrentBody = struct {
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32,
+}
+
 fn wasm_byte_context(
   source: textlex.TextTokenStream,
   base_offset: i32
@@ -283,6 +337,48 @@ fn wasm_byte_context(
     source: source,
     base_offset: base_offset,
     env: WasmSourceEnv::from_source(source),
+  }
+}
+
+fn wasm_binding_body(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmBindingBody {
+  WasmBindingBody {
+    context_value,
+    codes,
+    binding,
+  }
+}
+
+fn wasm_scalar_body(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32
+) -> WasmScalarBody {
+  WasmScalarBody {
+    context_value,
+    codes,
+    current,
+    body_abi,
+  }
+}
+
+fn wasm_current_body(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> WasmCurrentBody {
+  WasmCurrentBody {
+    context_value,
+    codes,
+    current,
+    decl,
+    body_abi,
   }
 }
 
@@ -430,9 +526,9 @@ fn WasmSourceEnv::add_decl(
     source,
     current.cursor
   );
-  match parser.text_declaration_kind_is_function(kind_tag) {
-    false => env,
-    true => WasmSourceEnv::push_function(
+  let is_function_decl = parser.text_declaration_kind_is_function(kind_tag);
+  if is_function_decl {
+    WasmSourceEnv::push_function(
       env,
       wasm_function_binding_from_decl(
         env,
@@ -442,7 +538,9 @@ fn WasmSourceEnv::add_decl(
         function_index,
         runtime_param_count
       )
-    ),
+    )
+  } else {
+    env
   }
 }
 
@@ -454,9 +552,11 @@ fn WasmSourceEnv::next_function_index(
 ) -> i32 {
   let decl = result.value.decl;
   let kind_tag = parser.text_declaration_kind_tag(source, current.cursor, decl);
-  match parser.text_declaration_kind_is_function(kind_tag) {
-    true => function_index + 1,
-    false => function_index,
+  let is_function_decl = parser.text_declaration_kind_is_function(kind_tag);
+  if is_function_decl {
+    function_index + 1
+  } else {
+    function_index
   }
 }
 
@@ -466,9 +566,8 @@ fn WasmSourceEnv::from_source_loop(
   function_index: i32,
   env: WasmSourceEnv
 ) -> WasmSourceEnv {
-  match current.cursor < textlex.length(source) {
-    false => env,
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
       current,
       source,
       function_index
@@ -480,7 +579,9 @@ fn WasmSourceEnv::from_source_loop(
         WasmSourceEnv::next_function_index(source, current, result, function_index),
         WasmSourceEnv::add_decl(env, source, current, result, function_index)
       ),
-    },
+    }
+  } else {
+    env
   }
 }
 
@@ -505,9 +606,10 @@ fn wasm_function_lookup_slot_from_binding(
 }
 
 fn wasm_lookup_slot_count(function_count: i32) -> i32 {
-  match function_count <= 0 {
-    true => 1,
-    false => function_count * 2 + 1,
+  if function_count <= 0 {
+    1
+  } else {
+    function_count * 2 + 1
   }
 }
 
@@ -516,9 +618,10 @@ fn wasm_lookup_slots_empty_loop(
   index: i32,
   count: i32
 ) -> layout.HeapArray(WasmFunctionLookupSlot) {
-  match index >= count {
-    true => slots,
-    false => rec(
+  if index >= count {
+    slots
+  } else {
+    rec(
       layout.HeapArray::push(
         WasmFunctionLookupSlot,
         slots,
@@ -526,7 +629,7 @@ fn wasm_lookup_slots_empty_loop(
       ),
       index + 1,
       count
-    ),
+    )
   }
 }
 
@@ -542,16 +645,40 @@ fn wasm_lookup_slots_empty(
 
 fn wasm_positive_mod(value: i32, modulus: i32) -> i32 {
   let raw = value % modulus;
-  match raw < 0 {
-    true => raw + modulus,
-    false => raw,
+  if raw < 0 {
+    raw + modulus
+  } else {
+    raw
   }
 }
 
 fn wasm_lookup_next_slot(slot: i32, slot_count: i32) -> i32 {
-  match slot + 1 >= slot_count {
-    true => 0,
-    false => slot + 1,
+  if slot + 1 >= slot_count {
+    0
+  } else {
+    slot + 1
+  }
+}
+
+fn wasm_lookup_probe_exhausted(probes: i32, slot_count: i32) -> bool {
+  probes >= slot_count
+}
+
+fn wasm_lookup_slot_matches(
+  current: WasmFunctionLookupSlot,
+  binding: WasmFunctionBinding
+) -> bool {
+  current.name_hash == binding.name_hash
+}
+
+fn wasm_lookup_slot_replaces_binding(
+  current: WasmFunctionLookupSlot,
+  binding: WasmFunctionBinding
+) -> bool {
+  if current.occupied {
+    wasm_lookup_slot_matches(current, binding)
+  } else {
+    true
   }
 }
 
@@ -562,34 +689,28 @@ fn wasm_lookup_slot_insert_at(
   probes: i32
 ) -> layout.HeapArray(WasmFunctionLookupSlot) {
   let slot_count = layout.HeapArray::len(WasmFunctionLookupSlot, slots);
-  match probes >= slot_count {
-    true => slots,
-    false => layout.HeapArray::get(
+  if wasm_lookup_probe_exhausted(probes, slot_count) {
+    slots
+  } else {
+    layout.HeapArray::get(
       WasmFunctionLookupSlot,
       slots,
       slot
-    ) \current -> match current.occupied {
-      false => layout.HeapArray::set(
+    ) \current -> if wasm_lookup_slot_replaces_binding(current, binding) {
+      layout.HeapArray::set(
         WasmFunctionLookupSlot,
         slots,
         slot,
         wasm_function_lookup_slot_from_binding(binding)
-      ),
-      true => match current.name_hash == binding.name_hash {
-        true => layout.HeapArray::set(
-          WasmFunctionLookupSlot,
-          slots,
-          slot,
-          wasm_function_lookup_slot_from_binding(binding)
-        ),
-        false => rec(
-          slots,
-          binding,
-          wasm_lookup_next_slot(slot, slot_count),
-          probes + 1
-        ),
-      },
-    },
+      )
+    } else {
+      rec(
+        slots,
+        binding,
+        wasm_lookup_next_slot(slot, slot_count),
+        probes + 1
+      )
+    }
   }
 }
 
@@ -611,9 +732,10 @@ fn WasmSourceEnv::build_lookup_slots_loop(
   slots: layout.HeapArray(WasmFunctionLookupSlot),
   index: i32
 ) -> layout.HeapArray(WasmFunctionLookupSlot) {
-  match index >= layout.HeapArray::len(WasmFunctionBinding, env.functions) {
-    true => slots,
-    false => layout.HeapArray::get(
+  if index >= layout.HeapArray::len(WasmFunctionBinding, env.functions) {
+    slots
+  } else {
+    layout.HeapArray::get(
       WasmFunctionBinding,
       env.functions,
       index
@@ -621,7 +743,7 @@ fn WasmSourceEnv::build_lookup_slots_loop(
       env,
       wasm_lookup_slot_insert(slots, binding),
       index + 1
-    ),
+    )
   }
 }
 
@@ -651,24 +773,22 @@ fn WasmSourceEnv::lookup_function_loop(
   target_hash: i32,
   index: i32
 ) -> WasmFunctionLookup {
-  match index < 0 {
-    true => WasmFunctionLookup {
-      index: 0,
-      runtime_param_count: 0,
-      found: false,
-    },
-    false => layout.HeapArray::get(
+  if index < 0 {
+    wasm_function_lookup_missing()
+  } else {
+    layout.HeapArray::get(
       WasmFunctionBinding,
       env.functions,
       index
-    ) \binding -> match binding.name_hash == target_hash {
-      true => WasmFunctionLookup {
+    ) \binding -> if binding.name_hash == target_hash {
+      WasmFunctionLookup {
         index: binding.index,
         runtime_param_count: binding.runtime_param_count,
         found: true,
-      },
-      false => rec(env, target_hash, index - 1),
-    },
+      }
+    } else {
+      rec(env, target_hash, index - 1)
+    }
   }
 }
 
@@ -679,59 +799,49 @@ fn WasmSourceEnv::lookup_function_slot(
   probes: i32
 ) -> WasmFunctionLookup {
   let slot_count = layout.HeapArray::len(WasmFunctionLookupSlot, env.lookup_slots);
-  match probes >= slot_count {
-    true => WasmFunctionLookup {
-      index: 0,
-      runtime_param_count: 0,
-      found: false,
-    },
-    false => layout.HeapArray::get(
+  if wasm_lookup_probe_exhausted(probes, slot_count) {
+    wasm_function_lookup_missing()
+  } else {
+    layout.HeapArray::get(
       WasmFunctionLookupSlot,
       env.lookup_slots,
       slot
-    ) \current -> match current.occupied {
-      false => WasmFunctionLookup {
-        index: 0,
-        runtime_param_count: 0,
-        found: false,
-      },
-      true => match current.name_hash == target_hash {
-        true => WasmFunctionLookup {
+    ) \current -> if current.occupied {
+      if current.name_hash == target_hash {
+        WasmFunctionLookup {
           index: current.index,
           runtime_param_count: current.runtime_param_count,
           found: true,
-        },
-        false => rec(
+        }
+      } else {
+        rec(
           env,
           target_hash,
           wasm_lookup_next_slot(slot, slot_count),
           probes + 1
-        ),
-      },
-    },
+        )
+      }
+    } else {
+      wasm_function_lookup_missing()
+    }
   }
+}
+
+fn wasm_function_lookup_has_target(target_hash: i32) -> bool {
+  target_hash != 0
+}
+
+fn wasm_lookup_slots_available(env: WasmSourceEnv) -> bool {
+  layout.HeapArray::len(WasmFunctionLookupSlot, env.lookup_slots) > 0
 }
 
 fn WasmSourceEnv::lookup_function(
   env: WasmSourceEnv,
   target_hash: i32
 ) -> WasmFunctionLookup {
-  match target_hash == 0 {
-    true => WasmFunctionLookup {
-      index: 0,
-      runtime_param_count: 0,
-      found: false,
-    },
-    false => match layout.HeapArray::len(
-      WasmFunctionLookupSlot,
-      env.lookup_slots
-    ) <= 0 {
-      true => WasmSourceEnv::lookup_function_loop(
-        env,
-        target_hash,
-        layout.HeapArray::len(WasmFunctionBinding, env.functions) - 1
-      ),
-      false => WasmSourceEnv::lookup_function_slot(
+  if wasm_function_lookup_has_target(target_hash) {
+    if wasm_lookup_slots_available(env) {
+      WasmSourceEnv::lookup_function_slot(
         env,
         target_hash,
         wasm_positive_mod(
@@ -739,8 +849,16 @@ fn WasmSourceEnv::lookup_function(
           layout.HeapArray::len(WasmFunctionLookupSlot, env.lookup_slots)
         ),
         0
-      ),
-    },
+      )
+    } else {
+      WasmSourceEnv::lookup_function_loop(
+        env,
+        target_hash,
+        layout.HeapArray::len(WasmFunctionBinding, env.functions) - 1
+      )
+    }
+  } else {
+    wasm_function_lookup_missing()
   }
 }
 
@@ -750,6 +868,13 @@ type WasmCallLowering = struct {
   current: combinator.ParseState,
   runtime_param_count: i32,
   local_count: i32,
+}
+
+type WasmSegmentBody = struct {
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  parts: parser.TextRootOperatorParts,
 }
 
 type WasmBytePayloadKind = enum(i32) {
@@ -910,9 +1035,11 @@ fn fact_record_signature_reader(
 }
 
 fn checked_type_status_diagnostic_code(status: i32) -> i32 {
-  match status == parser.text_type_check_mismatch_tag() {
-    true => diagnostic.code_score(diagnostic.CodeTypeMismatch),
-    false => 0,
+  let is_mismatch = status == parser.text_type_check_mismatch_tag();
+  if is_mismatch {
+    diagnostic.code_score(diagnostic.CodeTypeMismatch)
+  } else {
+    0
   }
 }
 
@@ -1061,19 +1188,25 @@ fn abi_class_is_function(abi_class: i32) -> bool {
 }
 
 fn abi_class_is_scalar_or_function(abi_class: i32) -> bool {
-  match abi_class_is_scalar(abi_class) {
-    true => true,
-    false => abi_class_is_function(abi_class),
+  let is_scalar = abi_class_is_scalar(abi_class);
+  if is_scalar {
+    true
+  } else {
+    abi_class_is_function(abi_class)
   }
 }
 
 fn abi_class_is_runtime_value(abi_class: i32) -> bool {
-  match abi_class_is_scalar(abi_class) {
-    true => true,
-    false => match abi_class_is_handle(abi_class) {
-      true => true,
-      false => abi_class_is_function(abi_class),
-    },
+  let is_scalar = abi_class_is_scalar(abi_class);
+  if is_scalar {
+    true
+  } else {
+    let is_handle = abi_class_is_handle(abi_class);
+    if is_handle {
+      true
+    } else {
+      abi_class_is_function(abi_class)
+    }
   }
 }
 
@@ -1085,9 +1218,11 @@ fn lowered_value_primary(
   abi_class: i32,
   resolved_type_class: i32
 ) -> i32 {
-  match lowered_value_has_primary(abi_class) {
-    true => resolved_type_class,
-    _ => 0,
+  let has_primary = lowered_value_has_primary(abi_class);
+  if has_primary {
+    resolved_type_class
+  } else {
+    0
   }
 }
 
@@ -1817,17 +1952,19 @@ fn wasm_emitted_section_count() -> i32 {
 fn wasm_u32_leb_byte(value: i32) -> i32 {
   let payload = value % 128;
   let remaining = value / 128;
-  match remaining > 0 {
-    true => payload + 128,
-    false => payload,
+  if remaining > 0 {
+    payload + 128
+  } else {
+    payload
   }
 }
 
 fn wasm_byte_value(value: i32) -> i32 {
   let reduced = value % 256;
-  match reduced < 0 {
-    true => reduced + 256,
-    false => reduced,
+  if reduced < 0 {
+    reduced + 256
+  } else {
+    reduced
   }
 }
 
@@ -1849,9 +1986,10 @@ fn wasm_push_u32_leb(
   let byte_value = wasm_u32_leb_byte(value);
   let remaining = value / 128;
   let next = wasm_push_byte(bytes, byte_value);
-  match remaining > 0 {
-    true => rec(next, remaining),
-    false => next,
+  if remaining > 0 {
+    rec(next, remaining)
+  } else {
+    next
   }
 }
 
@@ -1860,13 +1998,14 @@ fn wasm_push_repeated_byte(
   count: i32,
   value: i32
 ) -> layout.HeapArray(i32) {
-  match count > 0 {
-    true => rec(
+  if count > 0 {
+    rec(
       wasm_push_byte(bytes, value),
       count - 1,
       value
-    ),
-    false => bytes,
+    )
+  } else {
+    bytes
   }
 }
 
@@ -1883,9 +2022,21 @@ fn wasm_push_local_decls(
   bytes: layout.HeapArray(i32),
   local_count: i32
 ) -> layout.HeapArray(i32) {
-  match local_count <= 0 {
-    true => wasm_push_u32_leb(bytes, 0),
-    false => wasm_push_nonempty_local_decls(bytes, local_count),
+  if local_count <= 0 {
+    wasm_push_u32_leb(bytes, 0)
+  } else {
+    wasm_push_nonempty_local_decls(bytes, local_count)
+  }
+}
+
+fn wasm_source_code_index_in_bounds(
+  codes: layout.HeapArray(i32),
+  index: i32
+) -> bool {
+  if index >= 0 {
+    index < layout.HeapArray::len(i32, codes)
+  } else {
+    false
   }
 }
 
@@ -1895,18 +2046,19 @@ fn wasm_source_code_at(
   offset: i32
 ) -> i32 {
   let index = offset - base_offset;
-  let in_bounds = match index >= 0 {
-    true => index < layout.HeapArray::len(i32, codes),
-    false => false,
-  };
-  match in_bounds {
-    true => layout.HeapArray::get(i32, codes, index),
-    false => 0,
+  if wasm_source_code_index_in_bounds(codes, index) {
+    layout.HeapArray::get(i32, codes, index)
+  } else {
+    0
   }
 }
 
 fn wasm_small_immediate_limit() -> i32 {
   128
+}
+
+fn wasm_direct_call_arg_limit() -> i32 {
+  5
 }
 
 fn wasm_source_digit_value(code: i32) -> core.Option(i32) {
@@ -1922,9 +2074,10 @@ fn wasm_next_small_u7_decimal_total(
   digit: i32
 ) -> core.Option(i32) {
   let next_total = total * 10 + digit;
-  match next_total < wasm_small_immediate_limit() {
-    true => option.some(next_total),
-    false => option.none(),
+  if next_total < wasm_small_immediate_limit() {
+    option.some(next_total)
+  } else {
+    option.none()
   }
 }
 
@@ -1935,17 +2088,16 @@ fn wasm_small_u7_decimal_scan(
   limit: i32,
   total: i32
 ) -> core.Option(i32) {
-  match offset >= limit {
-    true => option.some(total),
-    false => match wasm_source_digit_value(
-      wasm_source_code_at(codes, base_offset, offset)
-    ) {
-      Some(digit) => match wasm_next_small_u7_decimal_total(total, digit) {
-        Some(next_total) => rec(codes, base_offset, offset + 1, limit, next_total),
-        None => option.none(),
-      },
-      None => option.none(),
-    },
+  if offset >= limit {
+    option.some(total)
+  } else {
+    do @monad(core.Option(_)) {
+      digit <- wasm_source_digit_value(
+        wasm_source_code_at(codes, base_offset, offset)
+      );
+      next_total <- wasm_next_small_u7_decimal_total(total, digit);
+      rec(codes, base_offset, offset + 1, limit, next_total)
+    }
   }
 }
 
@@ -1954,15 +2106,16 @@ fn wasm_small_u7_decimal_literal(
   base_offset: i32,
   token_span: span.Span
 ) -> core.Option(i32) {
-  match span.width(token_span) > 0 {
-    true => wasm_small_u7_decimal_scan(
+  if span.width(token_span) > 0 {
+    wasm_small_u7_decimal_scan(
       codes,
       base_offset,
       token_span.start,
       token_span.end,
       0
-    ),
-    false => option.none(),
+    )
+  } else {
+    option.none()
   }
 }
 
@@ -1976,6 +2129,25 @@ fn wasm_bool_literal_immediate(
     textlex.TextCharCode::LowerT => option.some(1),
     textlex.TextCharCode::LowerF => option.some(0),
     _ => option.none(),
+  }
+}
+
+fn wasm_scalar_literal_immediate(
+  codes: layout.HeapArray(i32),
+  base_offset: i32,
+  token_span: span.Span,
+  root_kind: i32,
+  is_standalone: bool
+) -> core.Option(i32) {
+  do @monad(core.Option(_)) {
+    option.guard(is_standalone);
+    match root_kind {
+      _ if root_kind == parser.text_expression_root_number_tag() =>
+        wasm_small_u7_decimal_literal(codes, base_offset, token_span),
+      _ if root_kind == parser.text_expression_root_bool_tag() =>
+        wasm_bool_literal_immediate(codes, base_offset, token_span),
+      _ => option.none(),
+    }
   }
 }
 
@@ -2009,24 +2181,13 @@ fn wasm_scalar_body_immediate_from_root(
     start,
     limit
   );
-  match is_standalone {
-    false => option.none(),
-    true => match root_kind == parser.text_expression_root_number_tag() {
-      true => wasm_small_u7_decimal_literal(
-        codes,
-        context_value.base_offset,
-        token_span
-      ),
-      false => match root_kind == parser.text_expression_root_bool_tag() {
-        true => wasm_bool_literal_immediate(
-          codes,
-          context_value.base_offset,
-          token_span
-        ),
-        false => option.none(),
-      },
-    },
-  }
+  wasm_scalar_literal_immediate(
+    codes,
+    context_value.base_offset,
+    token_span,
+    root_kind,
+    is_standalone
+  )
 }
 
 fn wasm_push_source_bytes(
@@ -2036,23 +2197,25 @@ fn wasm_push_source_bytes(
   limit: i32,
   bytes: layout.HeapArray(i32)
 ) -> layout.HeapArray(i32) {
-  match offset < limit {
-    true => rec(
+  if offset < limit {
+    rec(
       codes,
       base_offset,
       offset + 1,
       limit,
       wasm_push_byte(bytes, wasm_source_code_at(codes, base_offset, offset))
-    ),
-    false => bytes,
+    )
+  } else {
+    bytes
   }
 }
 
 fn wasm_u32_leb_size_scan(value: i32, size: i32) -> i32 {
   let remaining = value / 128;
-  match remaining > 0 {
-    true => rec(remaining, size + 1),
-    false => size,
+  if remaining > 0 {
+    rec(remaining, size + 1)
+  } else {
+    size
   }
 }
 
@@ -2064,9 +2227,10 @@ fn wasm_u32_leb_signature_scan(value: i32, total: i32) -> i32 {
   let byte_value = wasm_u32_leb_byte(value);
   let next_total = textmodel.signature_mix(total, byte_value);
   let remaining = value / 128;
-  match remaining > 0 {
-    true => rec(remaining, next_total),
-    false => next_total,
+  if remaining > 0 {
+    rec(remaining, next_total)
+  } else {
+    next_total
   }
 }
 
@@ -2105,25 +2269,24 @@ fn wasm_section_total_size(payload_size: i32) -> i32 {
 }
 
 fn wasm_val_type_for_abi(abi_class: i32) -> i32 {
-  match abi_class_is_handle(abi_class) {
-    true => wasm_externref_val_type(),
-    false => match abi_class_is_scalar_or_function(abi_class) {
-      true => wasm_i32_val_type(),
-      false => wasm_no_val_type(),
-    },
+  if abi_class_is_handle(abi_class) {
+    wasm_externref_val_type()
+  } else if abi_class_is_scalar_or_function(abi_class) {
+    wasm_i32_val_type()
+  } else {
+    wasm_no_val_type()
   }
 }
 
 fn wasm_body_opcode_for_abi(abi_class: i32) -> i32 {
-  match abi_class_is_scalar(abi_class) {
-    true => wasm_const_opcode(),
-    false => match abi_class_is_handle(abi_class) {
-      true => wasm_const_opcode(),
-      false => match abi_class_is_function(abi_class) {
-        true => wasm_call_opcode(),
-        false => wasm_drop_opcode(),
-      },
-    },
+  if abi_class_is_scalar(abi_class) {
+    wasm_const_opcode()
+  } else if abi_class_is_handle(abi_class) {
+    wasm_const_opcode()
+  } else if abi_class_is_function(abi_class) {
+    wasm_call_opcode()
+  } else {
+    wasm_drop_opcode()
   }
 }
 
@@ -2133,13 +2296,14 @@ fn wasm_body_immediate(
   decl: ast.Decl,
   body_abi: i32
 ) -> i32 {
-  match body_abi == parser.text_abi_class_void_tag() {
-    true => 0,
-    false => parser.text_declaration_root_head_hash(
+  if body_abi == parser.text_abi_class_void_tag() {
+    0
+  } else {
+    parser.text_declaration_root_head_hash(
       source,
       current.cursor,
       decl
-    ),
+    )
   }
 }
 
@@ -2160,15 +2324,19 @@ fn wasm_body_summary_push_instruction(
   instruction: WasmBodyInstruction
 ) -> WasmBodySummary {
   let is_first = summary.byte_size == 0;
+  let first_opcode = if is_first {
+    instruction.opcode
+  } else {
+    summary.first_opcode
+  };
+  let first_immediate = if is_first {
+    instruction.immediate
+  } else {
+    summary.first_immediate
+  };
   WasmBodySummary {
-    first_opcode: match is_first {
-      true => instruction.opcode,
-      false => summary.first_opcode,
-    },
-    first_immediate: match is_first {
-      true => instruction.immediate,
-      false => summary.first_immediate,
-    },
+    first_opcode,
+    first_immediate,
     byte_size: summary.byte_size + wasm_instruction_size(instruction.opcode),
   }
 }
@@ -2177,16 +2345,16 @@ fn wasm_body_summary_append(
   target: WasmBodySummary,
   source: WasmBodySummary
 ) -> WasmBodySummary {
-  match source.byte_size == 0 {
-    true => target,
-    false => match target.byte_size == 0 {
-      true => source,
-      false => WasmBodySummary {
-        first_opcode: target.first_opcode,
-        first_immediate: target.first_immediate,
-        byte_size: target.byte_size + source.byte_size,
-      },
-    },
+  if source.byte_size == 0 {
+    target
+  } else if target.byte_size == 0 {
+    source
+  } else {
+    WasmBodySummary {
+      first_opcode: target.first_opcode,
+      first_immediate: target.first_immediate,
+      byte_size: target.byte_size + source.byte_size,
+    }
   }
 }
 
@@ -2240,15 +2408,19 @@ fn wasm_body_plan_push_instruction(
   instruction: WasmBodyInstruction
 ) -> WasmBodyPlan {
   let is_first = vec.Vec::len(plan.instructions) == 0;
+  let first_opcode = if is_first {
+    instruction.opcode
+  } else {
+    plan.first_opcode
+  };
+  let first_immediate = if is_first {
+    instruction.immediate
+  } else {
+    plan.first_immediate
+  };
   WasmBodyPlan {
-    first_opcode: match is_first {
-      true => instruction.opcode,
-      false => plan.first_opcode,
-    },
-    first_immediate: match is_first {
-      true => instruction.immediate,
-      false => plan.first_immediate,
-    },
+    first_opcode,
+    first_immediate,
     byte_size: plan.byte_size + wasm_instruction_size(instruction.opcode),
     instructions: vec.Vec::push(
       plan.instructions,
@@ -2262,16 +2434,17 @@ fn wasm_body_plan_append_plan_at(
   source: WasmBodyPlan,
   index: i32
 ) -> WasmBodyPlan {
-  match index < vec.Vec::len(source.instructions) {
-    true => rec(
+  if index < vec.Vec::len(source.instructions) {
+    rec(
       wasm_body_plan_push_instruction(
         target,
         vec.Vec::get_t(WasmBodyInstruction, source.instructions, index)
       ),
       source,
       index + 1
-    ),
-    false => target,
+    )
+  } else {
+    target
   }
 }
 
@@ -2294,13 +2467,11 @@ fn wasm_scalar_runtime_param_body_instruction(
     source,
     current.cursor
   );
-  match param_index < param_count {
-    true => option.some(wasm_body_instruction(
-      wasm_local_get_opcode(),
-      param_index
-    )),
-    false => option.none(),
-  }
+  wasm_local_get_target_instruction(wasm_local_get_target_when(
+    param_index < param_count,
+    param_index,
+    parser.text_type_class_unknown_tag()
+  ))
 }
 
 fn wasm_scalar_local_let_body_instruction(
@@ -2320,73 +2491,40 @@ fn wasm_scalar_local_let_body_instruction(
     current.cursor
   );
   let wasm_index = param_count + local_index;
-  match local_index < local_count {
-    true => match wasm_index < wasm_small_immediate_limit() {
-      true => option.some(wasm_body_instruction(
-        wasm_local_get_opcode(),
-        wasm_index
-      )),
-      false => option.none(),
-    },
-    false => option.none(),
-  }
+  wasm_local_get_target_instruction(wasm_local_get_target_when(
+    local_index < local_count,
+    wasm_index,
+    parser.text_type_class_unknown_tag()
+  ))
 }
 
 fn wasm_scalar_identifier_body_instruction(
   source: textlex.TextTokenStream,
   current: combinator.ParseState
 ) -> core.Option(WasmBodyInstruction) {
-  match wasm_scalar_runtime_param_body_instruction(source, current) {
-    Some(value) => option.some(value),
-    None => wasm_scalar_local_let_body_instruction(source, current),
-  }
+  core.Option::append(
+    wasm_scalar_runtime_param_body_instruction(source, current),
+    wasm_scalar_local_let_body_instruction(source, current)
+  )
 }
 
 fn wasm_scalar_identifier_body_instruction_from_binding(
   context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
   binding: WasmFunctionBinding
 ) -> core.Option(WasmBodyInstruction) {
-  let source = context_value.source;
-  let target_hash = parser.text_expression_root_identifier_hash_between(
-    source,
+  wasm_local_get_target_instruction(WasmCallLowering::identifier_get_target_between(
+    wasm_call_lowering_for_binding(context_value, codes, binding),
     binding.body_start,
     binding.declaration_limit
-  );
-  let param_index = parser.text_function_runtime_param_index_for_name_hash(
-    source,
-    binding.cursor,
-    target_hash
-  );
-  match param_index < binding.runtime_param_count {
-    true => match param_index < wasm_small_immediate_limit() {
-      true => option.some(wasm_body_instruction(
-        wasm_local_get_opcode(),
-        param_index
-      )),
-      false => option.none(),
-    },
-    false => parser.text_function_local_let_index_for_name_hash(
-      source,
-      binding.cursor,
-      target_hash
-    ) \local_index -> match local_index < binding.local_count {
-      false => option.none(),
-      true => binding.runtime_param_count + local_index \wasm_index ->
-        match wasm_index < wasm_small_immediate_limit() {
-          true => option.some(wasm_body_instruction(
-            wasm_local_get_opcode(),
-            wasm_index
-          )),
-          false => option.none(),
-        },
-    },
-  }
+  ))
 }
 
 fn wasm_type_class_is_scalar(type_class: i32) -> bool {
-  match type_class == parser.text_type_class_i32_tag() {
-    true => true,
-    false => type_class == parser.text_type_class_bool_tag(),
+  if type_class == parser.text_type_class_i32_tag() {
+    true
+  } else {
+    type_class == parser.text_type_class_bool_tag()
   }
 }
 
@@ -2473,6 +2611,111 @@ fn wasm_small_scalar_local_get_plan(
   }
 }
 
+fn wasm_local_get_target(
+  index: i32,
+  type_class: i32
+) -> WasmLocalGetTarget {
+  WasmLocalGetTarget {
+    found: true,
+    index,
+    type_class,
+  }
+}
+
+fn wasm_local_get_target_when(
+  found: bool,
+  index: i32,
+  type_class: i32
+) -> WasmLocalGetTarget {
+  if found {
+    wasm_local_get_target(index, type_class)
+  } else {
+    wasm_local_get_target_missing()
+  }
+}
+
+fn wasm_local_get_target_missing() -> WasmLocalGetTarget {
+  WasmLocalGetTarget {
+    found: false,
+    index: 0,
+    type_class: parser.text_type_class_unknown_tag(),
+  }
+}
+
+fn wasm_local_get_target_instruction(
+  target: WasmLocalGetTarget
+) -> core.Option(WasmBodyInstruction) {
+  do @monad(core.Option(_)) {
+    option.guard(target.found);
+    option.guard(target.index < wasm_small_immediate_limit());
+    pure(wasm_body_instruction(wasm_local_get_opcode(), target.index))
+  }
+}
+
+fn wasm_local_get_target_plan(
+  target: WasmLocalGetTarget
+) -> core.Option(WasmBodyPlan) {
+  do @monad(core.Option(_)) {
+    option.guard(target.found);
+    wasm_small_scalar_local_get_plan(target.index, target.type_class)
+  }
+}
+
+fn WasmCallLowering::local_get_target_for_hash(
+  lowering: WasmCallLowering,
+  target_hash: i32
+) -> WasmLocalGetTarget {
+  let local_index = parser.text_function_local_let_index_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let local_type = parser.TextResolutionEnv::function_local_let_resolved_type_class_for_name_hash(
+    lowering.context_value.env.resolution,
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let wasm_index = lowering.runtime_param_count + local_index;
+  wasm_local_get_target_when(
+    local_index < lowering.local_count,
+    wasm_index,
+    local_type
+  )
+}
+
+fn WasmCallLowering::identifier_get_target_between(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> WasmLocalGetTarget {
+  let target_hash = parser.text_expression_root_identifier_hash_between(
+    lowering.context_value.source,
+    start,
+    limit
+  );
+  let param_index = parser.text_function_runtime_param_index_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  let param_type = parser.text_function_param_resolved_type_class_for_name_hash(
+    lowering.context_value.source,
+    lowering.current.cursor,
+    target_hash
+  );
+  if target_hash == 0 {
+    wasm_local_get_target_missing()
+  } else if param_index < lowering.runtime_param_count {
+    wasm_local_get_target(param_index, param_type)
+  } else {
+    WasmCallLowering::local_get_target_for_hash(
+      lowering,
+      target_hash
+    )
+  }
+}
+
 fn WasmCallLowering::number_segment_plan(
   lowering: WasmCallLowering,
   start: i32
@@ -2514,55 +2757,11 @@ fn WasmCallLowering::identifier_segment_plan(
   start: i32,
   limit: i32
 ) -> core.Option(WasmBodyPlan) {
-  let target_hash = parser.text_expression_root_identifier_hash_between(
-    lowering.context_value.source,
+  wasm_local_get_target_plan(WasmCallLowering::identifier_get_target_between(
+    lowering,
     start,
     limit
-  );
-  let param_index = parser.text_function_runtime_param_index_for_name_hash(
-    lowering.context_value.source,
-    lowering.current.cursor,
-    target_hash
-  );
-  let param_type = parser.text_function_param_resolved_type_class_for_name_hash(
-    lowering.context_value.source,
-    lowering.current.cursor,
-    target_hash
-  );
-  let is_param = param_index < lowering.runtime_param_count;
-  match target_hash == 0 {
-    true => option.none(),
-    false => match is_param {
-      false => WasmCallLowering::local_segment_plan(
-        lowering,
-        target_hash
-      ),
-      true => wasm_small_scalar_local_get_plan(param_index, param_type),
-    },
-  }
-}
-
-fn WasmCallLowering::local_segment_plan(
-  lowering: WasmCallLowering,
-  target_hash: i32
-) -> core.Option(WasmBodyPlan) {
-  let local_index = parser.text_function_local_let_index_for_name_hash(
-    lowering.context_value.source,
-    lowering.current.cursor,
-    target_hash
-  );
-  let local_type = parser.TextResolutionEnv::function_local_let_resolved_type_class_for_name_hash(
-    lowering.context_value.env.resolution,
-    lowering.context_value.source,
-    lowering.current.cursor,
-    target_hash
-  );
-  let wasm_index = lowering.runtime_param_count + local_index;
-  let is_local = local_index < lowering.local_count;
-  do @monad(core.Option(_)) {
-    option.guard(is_local);
-    wasm_small_scalar_local_get_plan(wasm_index, local_type)
-  }
+  ))
 }
 
 fn WasmCallLowering::operator_segment_plan(
@@ -2576,6 +2775,23 @@ fn WasmCallLowering::operator_segment_plan(
       parts,
       opcode
     ),
+  }
+}
+
+fn wasm_simple_segment_kind(
+  root_kind: i32,
+  root_type: i32
+) -> WasmSimpleSegmentKind {
+  match root_kind {
+    _ if root_kind == parser.text_expression_root_number_tag()
+      && root_type == parser.text_type_class_i32_tag() =>
+      WasmSimpleSegmentKind::NumberI32,
+    _ if root_kind == parser.text_expression_root_bool_tag()
+      && root_type == parser.text_type_class_bool_tag() =>
+      WasmSimpleSegmentKind::Bool,
+    _ if root_kind == parser.text_expression_root_identifier_tag() =>
+      WasmSimpleSegmentKind::Identifier,
+    _ => WasmSimpleSegmentKind::Unsupported,
   }
 }
 
@@ -2594,25 +2810,15 @@ fn WasmCallLowering::simple_segment_plan(
     start,
     limit
   );
-  match root_kind == parser.text_expression_root_number_tag() {
-    true => match root_type == parser.text_type_class_i32_tag() {
-      true => WasmCallLowering::number_segment_plan(lowering, start),
-      false => option.none(),
-    },
-    false => match root_kind == parser.text_expression_root_bool_tag() {
-      true => match root_type == parser.text_type_class_bool_tag() {
-        true => WasmCallLowering::bool_segment_plan(lowering, start),
-        false => option.none(),
-      },
-      false => match root_kind == parser.text_expression_root_identifier_tag() {
-        true => WasmCallLowering::identifier_segment_plan(
-          lowering,
-          start,
-          limit
-        ),
-        false => option.none(),
-      },
-    },
+  match wasm_simple_segment_kind(root_kind, root_type) {
+    NumberI32 => WasmCallLowering::number_segment_plan(lowering, start),
+    Bool => WasmCallLowering::bool_segment_plan(lowering, start),
+    Identifier => WasmCallLowering::identifier_segment_plan(
+      lowering,
+      start,
+      limit
+    ),
+    Unsupported => option.none(),
   }
 }
 
@@ -2666,60 +2872,23 @@ fn WasmCallLowering::segment_has_bare_call(
     && has_no_pipe_bind
 }
 
-fn WasmCallLowering::append_segment_arg(
-  lowering: WasmCallLowering,
-  plan: WasmBodyPlan,
-  start: i32,
-  limit: i32,
-  arg_index: i32
-) -> core.Option(WasmBodyPlan) {
-  let segment = WasmCallLowering::segment_arg_segment(
-    lowering,
-    start,
-    limit,
-    arg_index
-  );
-  match WasmCallLowering::arg_plan(lowering, segment) {
-    Some(arg_plan) => option.some(wasm_body_plan_append_plan(plan, arg_plan)),
-    None => option.none(),
-  }
-}
-
-fn WasmCallLowering::append_segment_args(
-  lowering: WasmCallLowering,
-  plan: WasmBodyPlan,
-  start: i32,
-  limit: i32,
-  arg_index: i32,
+fn wasm_call_target(
+  found: bool,
+  function_index: i32,
   arg_count: i32
-) -> core.Option(WasmBodyPlan) {
-  match arg_index >= arg_count {
-    true => option.some(plan),
-    false => do @monad(core.Option(_)) {
-      next_plan <- WasmCallLowering::append_segment_arg(
-        lowering,
-        plan,
-        start,
-        limit,
-        arg_index
-      );
-      WasmCallLowering::append_segment_args(
-        lowering,
-        next_plan,
-        start,
-        limit,
-        arg_index + 1,
-        arg_count
-      )
-    },
+) -> WasmCallTarget {
+  WasmCallTarget {
+    found,
+    function_index,
+    arg_count,
   }
 }
 
-fn WasmCallLowering::call_segment_plan(
+fn WasmCallLowering::call_target_between(
   lowering: WasmCallLowering,
   start: i32,
   limit: i32
-) -> core.Option(WasmBodyPlan) {
+) -> WasmCallTarget {
   let encoded_arg_count = parser.text_expression_root_call_arg_count_between(
     lowering.context_value.source,
     start,
@@ -2739,24 +2908,97 @@ fn WasmCallLowering::call_segment_plan(
     lowering.context_value.env.resolution,
     target_hash
   );
+  let has_bare_call = WasmCallLowering::segment_has_bare_call(
+    lowering,
+    start,
+    limit
+  );
+  let has_small_function_index = lookup.index < wasm_small_immediate_limit();
+  let has_expected_arg_count = lookup.runtime_param_count == arg_count;
+  let has_scalar_return = wasm_type_class_is_scalar(return_type);
+  let has_supported_arg_count = arg_count <= wasm_direct_call_arg_limit();
+  wasm_call_target(
+    has_bare_call
+      && lookup.found
+      && has_small_function_index
+      && has_expected_arg_count
+      && has_scalar_return
+      && has_supported_arg_count,
+    lookup.index,
+    arg_count
+  )
+}
+
+fn WasmCallLowering::append_segment_arg(
+  lowering: WasmCallLowering,
+  plan: WasmBodyPlan,
+  start: i32,
+  limit: i32,
+  arg_index: i32
+) -> core.Option(WasmBodyPlan) {
+  let segment = WasmCallLowering::segment_arg_segment(
+    lowering,
+    start,
+    limit,
+    arg_index
+  );
   do @monad(core.Option(_)) {
-    option.guard(WasmCallLowering::segment_has_bare_call(lowering, start, limit));
-    option.guard(lookup.found);
-    option.guard(lookup.index < wasm_small_immediate_limit());
-    option.guard(lookup.runtime_param_count == arg_count);
-    option.guard(wasm_type_class_is_scalar(return_type));
-    option.guard(arg_count <= 5);
+    arg_plan <- WasmCallLowering::arg_plan(lowering, segment);
+    pure(wasm_body_plan_append_plan(plan, arg_plan))
+  }
+}
+
+fn WasmCallLowering::append_segment_args(
+  lowering: WasmCallLowering,
+  plan: WasmBodyPlan,
+  start: i32,
+  limit: i32,
+  arg_index: i32,
+  arg_count: i32
+) -> core.Option(WasmBodyPlan) {
+  let done = arg_index >= arg_count;
+  if done {
+    option.some(plan)
+  } else {
+    do @monad(core.Option(_)) {
+      next_plan <- WasmCallLowering::append_segment_arg(
+        lowering,
+        plan,
+        start,
+        limit,
+        arg_index
+      );
+      WasmCallLowering::append_segment_args(
+        lowering,
+        next_plan,
+        start,
+        limit,
+        arg_index + 1,
+        arg_count
+      )
+    }
+  }
+}
+
+fn WasmCallLowering::call_segment_plan(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32
+) -> core.Option(WasmBodyPlan) {
+  let target = WasmCallLowering::call_target_between(lowering, start, limit);
+  do @monad(core.Option(_)) {
+    option.guard(target.found);
     args_plan <- WasmCallLowering::append_segment_args(
       lowering,
-      wasm_body_plan_empty(arg_count + 1),
+      wasm_body_plan_empty(target.arg_count + 1),
       start,
       limit,
       0,
-      arg_count
+      target.arg_count
     );
     pure(wasm_body_plan_push_instruction(
       args_plan,
-      wasm_body_instruction(wasm_call_opcode(), lookup.index)
+      wasm_body_instruction(wasm_call_opcode(), target.function_index)
     ))
   }
 }
@@ -2771,19 +3013,21 @@ fn wasm_match_first_pattern_is_bool_literal(
     start,
     limit
   );
-  match open_index >= limit {
-    true => false,
-    false => parser.text_expression_start_skip_trivia(
+  if open_index >= limit {
+    false
+  } else {
+    parser.text_expression_start_skip_trivia(
       source,
       open_index + 1,
       limit
-    ) \pattern_start -> match pattern_start >= limit {
-      true => false,
-      false => match textlex.token_at(source, pattern_start).kind {
+    ) \pattern_start -> if pattern_start >= limit {
+      false
+    } else {
+      match textlex.token_at(source, pattern_start).kind {
         BoolLiteral => true,
         _ => false,
-      },
-    },
+      }
+    }
   }
 }
 
@@ -2797,9 +3041,10 @@ fn wasm_segment_can_be_bool_branch(
     start,
     limit
   );
-  match value_start >= limit {
-    true => false,
-    false => match textlex.token_at(source, value_start).kind {
+  if value_start >= limit {
+    false
+  } else {
+    match textlex.token_at(source, value_start).kind {
       IfKw => true,
       MatchKw => wasm_match_first_pattern_is_bool_literal(
         source,
@@ -2807,7 +3052,7 @@ fn wasm_segment_can_be_bool_branch(
         limit
       ),
       _ => false,
-    },
+    }
   }
 }
 
@@ -2837,6 +3082,43 @@ fn WasmCallLowering::branch_type_from_segments(
       segments.false_value_start,
       segments.false_value_limit
     )
+  )
+}
+
+fn wasm_i32_branch_plan(
+  condition_plan: WasmBodyPlan,
+  true_plan: WasmBodyPlan,
+  false_plan: WasmBodyPlan
+) -> WasmBodyPlan {
+  wasm_body_plan_append_plan(
+    wasm_body_plan_empty(6),
+    condition_plan
+  ) \with_condition -> wasm_body_plan_push_instruction(
+    with_condition,
+    wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+  ) \with_if -> wasm_body_plan_append_plan(
+    with_if,
+    true_plan
+  ) \with_true -> wasm_body_plan_push_instruction(
+    with_true,
+    wasm_body_instruction(wasm_else_opcode(), 0)
+  ) \with_else -> wasm_body_plan_append_plan(
+    with_else,
+    false_plan
+  ) \with_false -> wasm_body_plan_push_instruction(
+    with_false,
+    wasm_body_instruction(wasm_end_opcode(), 0)
+  )
+}
+
+fn wasm_i32_branch_plan_from_bool_param(
+  true_plan: WasmBodyPlan,
+  false_plan: WasmBodyPlan
+) -> WasmBodyPlan {
+  wasm_i32_branch_plan(
+    wasm_local_get_instruction_plan(0),
+    true_plan,
+    false_plan
   )
 }
 
@@ -2875,25 +3157,7 @@ fn WasmCallLowering::branch_segment_plan(
       segments.false_value_limit,
       true
     );
-    pure(wasm_body_plan_append_plan(
-      wasm_body_plan_empty(6),
-      condition_plan
-    ) \with_condition -> wasm_body_plan_push_instruction(
-      with_condition,
-      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
-    ) \with_if -> wasm_body_plan_append_plan(
-      with_if,
-      true_plan
-    ) \with_true -> wasm_body_plan_push_instruction(
-      with_true,
-      wasm_body_instruction(wasm_else_opcode(), 0)
-    ) \with_else -> wasm_body_plan_append_plan(
-      with_else,
-      false_plan
-    ) \with_false -> wasm_body_plan_push_instruction(
-      with_false,
-      wasm_body_instruction(wasm_end_opcode(), 0)
-    ))
+    pure(wasm_i32_branch_plan(condition_plan, true_plan, false_plan))
   }
 }
 
@@ -2902,13 +3166,39 @@ fn WasmCallLowering::branch_segment_plan_if_possible(
   start: i32,
   limit: i32
 ) -> core.Option(WasmBodyPlan) {
-  match wasm_segment_can_be_bool_branch(
+  let can_branch = wasm_segment_can_be_bool_branch(
     lowering.context_value.source,
     start,
     limit
-  ) {
-    true => WasmCallLowering::branch_segment_plan(lowering, start, limit),
-    false => option.none(),
+  );
+  if can_branch {
+    WasmCallLowering::branch_segment_plan(lowering, start, limit)
+  } else {
+    option.none()
+  }
+}
+
+fn wasm_function_bool_match_body_plan(
+  lowering: WasmCallLowering,
+  segments: parser.TextBoolBranchSegments,
+  body_abi: i32
+) -> core.Option(WasmBodyPlan) {
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(body_abi));
+    option.guard(segments.found);
+    true_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.true_value_start,
+      segments.true_value_limit,
+      true
+    );
+    false_plan <- WasmCallLowering::segment_plan(
+      lowering,
+      segments.false_value_start,
+      segments.false_value_limit,
+      true
+    );
+    pure(wasm_i32_branch_plan_from_bool_param(true_plan, false_plan))
   }
 }
 
@@ -2923,46 +3213,35 @@ fn wasm_function_match_body_plan(
     source,
     current.cursor
   );
-  let segments = parser.text_function_bool_match_body_segments(
-    source,
-    current.cursor
-  );
-  let lowering = wasm_call_lowering(context_value, codes, current);
   do @monad(core.Option(_)) {
-    option.guard(abi_class_is_scalar(body_abi));
     option.guard(wasm_type_class_is_scalar(result_type));
-    option.guard(segments.found);
-    true_plan <- WasmCallLowering::segment_plan(
+    wasm_function_bool_match_body_plan(
+      wasm_call_lowering(context_value, codes, current),
+      parser.text_function_bool_match_body_segments(source, current.cursor),
+      body_abi
+    )
+  }
+}
+
+fn WasmCallLowering::non_branch_segment_kind(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  parts: parser.TextRootOperatorParts
+) -> WasmNonBranchSegmentKind {
+  if parts.found {
+    WasmNonBranchSegmentKind::Operator
+  } else {
+    let has_bare_call = WasmCallLowering::segment_has_bare_call(
       lowering,
-      segments.true_value_start,
-      segments.true_value_limit,
-      true
+      start,
+      limit
     );
-    false_plan <- WasmCallLowering::segment_plan(
-      lowering,
-      segments.false_value_start,
-      segments.false_value_limit,
-      true
-    );
-    pure(wasm_body_plan_push_instruction(
-      wasm_body_plan_empty(6),
-      wasm_body_instruction(wasm_local_get_opcode(), 0)
-    ) \with_condition -> wasm_body_plan_push_instruction(
-      with_condition,
-      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
-    ) \with_if -> wasm_body_plan_append_plan(
-      with_if,
-      true_plan
-    ) \with_true -> wasm_body_plan_push_instruction(
-      with_true,
-      wasm_body_instruction(wasm_else_opcode(), 0)
-    ) \with_else -> wasm_body_plan_append_plan(
-      with_else,
-      false_plan
-    ) \with_false -> wasm_body_plan_push_instruction(
-      with_false,
-      wasm_body_instruction(wasm_end_opcode(), 0)
-    ))
+    if has_bare_call {
+      WasmNonBranchSegmentKind::Call
+    } else {
+      WasmNonBranchSegmentKind::Simple
+    }
   }
 }
 
@@ -2972,21 +3251,45 @@ fn WasmCallLowering::non_branch_segment_plan(
   limit: i32,
   parts: parser.TextRootOperatorParts
 ) -> core.Option(WasmBodyPlan) {
-  match parts.found {
-    true => WasmCallLowering::operator_segment_plan(lowering, parts),
-    false => match WasmCallLowering::segment_has_bare_call(
+  match WasmCallLowering::non_branch_segment_kind(
+    lowering,
+    start,
+    limit,
+    parts
+  ) {
+    Operator => WasmCallLowering::operator_segment_plan(lowering, parts),
+    Call => WasmCallLowering::call_segment_plan(lowering, start, limit),
+    Simple => WasmCallLowering::simple_segment_plan(
       lowering,
       start,
       limit
-    ) {
-      true => WasmCallLowering::call_segment_plan(lowering, start, limit),
-      false => WasmCallLowering::simple_segment_plan(
-        lowering,
-        start,
-        limit
-      ),
-    },
+    ),
   }
+}
+
+fn wasm_segment_body(
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  parts: parser.TextRootOperatorParts
+) -> WasmSegmentBody {
+  WasmSegmentBody {
+    lowering,
+    start,
+    limit,
+    parts,
+  }
+}
+
+fn WasmSegmentBody::non_branch_plan(
+  body: WasmSegmentBody
+) -> core.Option(WasmBodyPlan) {
+  WasmCallLowering::non_branch_segment_plan(
+    body.lowering,
+    body.start,
+    body.limit,
+    body.parts
+  )
 }
 
 fn WasmCallLowering::segment_plan(
@@ -3000,21 +3303,19 @@ fn WasmCallLowering::segment_plan(
     start,
     limit
   );
-  match found {
-    false => option.none(),
-    true => match WasmCallLowering::branch_segment_plan_if_possible(
-      lowering,
-      start,
-      limit
-    ) {
-      Some(plan) => option.some(plan),
-      None => WasmCallLowering::non_branch_segment_plan(
+  if found {
+    let segment = wasm_segment_body(lowering, start, limit, parts);
+    core.Option::or_else_with(
+      WasmCallLowering::branch_segment_plan_if_possible(
         lowering,
         start,
-        limit,
-        parts
+        limit
       ),
-    },
+      segment,
+      WasmSegmentBody::non_branch_plan
+    )
+  } else {
+    option.none()
   }
 }
 
@@ -3061,6 +3362,15 @@ fn wasm_small_scalar_local_get_summary(
   }
 }
 
+fn wasm_local_get_target_summary(
+  target: WasmLocalGetTarget
+) -> core.Option(WasmBodySummary) {
+  do @monad(core.Option(_)) {
+    option.guard(target.found);
+    wasm_small_scalar_local_get_summary(target.index, target.type_class)
+  }
+}
+
 fn WasmCallLowering::number_segment_summary(
   lowering: WasmCallLowering,
   start: i32
@@ -3097,57 +3407,16 @@ fn WasmCallLowering::bool_segment_summary(
   )
 }
 
-fn WasmCallLowering::local_segment_summary(
-  lowering: WasmCallLowering,
-  target_hash: i32
-) -> core.Option(WasmBodySummary) {
-  let local_index = parser.text_function_local_let_index_for_name_hash(
-    lowering.context_value.source,
-    lowering.current.cursor,
-    target_hash
-  );
-  let local_type = parser.TextResolutionEnv::function_local_let_resolved_type_class_for_name_hash(
-    lowering.context_value.env.resolution,
-    lowering.context_value.source,
-    lowering.current.cursor,
-    target_hash
-  );
-  let wasm_index = lowering.runtime_param_count + local_index;
-  let is_local = local_index < lowering.local_count;
-  do @monad(core.Option(_)) {
-    option.guard(is_local);
-    wasm_small_scalar_local_get_summary(wasm_index, local_type)
-  }
-}
-
 fn WasmCallLowering::identifier_segment_summary(
   lowering: WasmCallLowering,
   start: i32,
   limit: i32
 ) -> core.Option(WasmBodySummary) {
-  let target_hash = parser.text_expression_root_identifier_hash_between(
-    lowering.context_value.source,
+  wasm_local_get_target_summary(WasmCallLowering::identifier_get_target_between(
+    lowering,
     start,
     limit
-  );
-  let param_index = parser.text_function_runtime_param_index_for_name_hash(
-    lowering.context_value.source,
-    lowering.current.cursor,
-    target_hash
-  );
-  let param_type = parser.text_function_param_resolved_type_class_for_name_hash(
-    lowering.context_value.source,
-    lowering.current.cursor,
-    target_hash
-  );
-  let is_param = param_index < lowering.runtime_param_count;
-  match target_hash == 0 {
-    true => option.none(),
-    false => match is_param {
-      false => WasmCallLowering::local_segment_summary(lowering, target_hash),
-      true => wasm_small_scalar_local_get_summary(param_index, param_type),
-    },
-  }
+  ))
 }
 
 fn WasmCallLowering::simple_segment_summary(
@@ -3165,25 +3434,15 @@ fn WasmCallLowering::simple_segment_summary(
     start,
     limit
   );
-  match root_kind == parser.text_expression_root_number_tag() {
-    true => match root_type == parser.text_type_class_i32_tag() {
-      true => WasmCallLowering::number_segment_summary(lowering, start),
-      false => option.none(),
-    },
-    false => match root_kind == parser.text_expression_root_bool_tag() {
-      true => match root_type == parser.text_type_class_bool_tag() {
-        true => WasmCallLowering::bool_segment_summary(lowering, start),
-        false => option.none(),
-      },
-      false => match root_kind == parser.text_expression_root_identifier_tag() {
-        true => WasmCallLowering::identifier_segment_summary(
-          lowering,
-          start,
-          limit
-        ),
-        false => option.none(),
-      },
-    },
+  match wasm_simple_segment_kind(root_kind, root_type) {
+    NumberI32 => WasmCallLowering::number_segment_summary(lowering, start),
+    Bool => WasmCallLowering::bool_segment_summary(lowering, start),
+    Identifier => WasmCallLowering::identifier_segment_summary(
+      lowering,
+      start,
+      limit
+    ),
+    Unsupported => option.none(),
   }
 }
 
@@ -3200,11 +3459,9 @@ fn WasmCallLowering::append_segment_arg_summary(
     limit,
     arg_index
   );
-  match WasmCallLowering::arg_summary(lowering, segment) {
-    Some(arg_summary) => option.some(
-      wasm_body_summary_append(summary, arg_summary)
-    ),
-    None => option.none(),
+  do @monad(core.Option(_)) {
+    arg_summary <- WasmCallLowering::arg_summary(lowering, segment);
+    pure(wasm_body_summary_append(summary, arg_summary))
   }
 }
 
@@ -3216,9 +3473,11 @@ fn WasmCallLowering::append_segment_args_summary(
   arg_index: i32,
   arg_count: i32
 ) -> core.Option(WasmBodySummary) {
-  match arg_index >= arg_count {
-    true => option.some(summary),
-    false => do @monad(core.Option(_)) {
+  let done = arg_index >= arg_count;
+  if done {
+    option.some(summary)
+  } else {
+    do @monad(core.Option(_)) {
       next_summary <- WasmCallLowering::append_segment_arg_summary(
         lowering,
         summary,
@@ -3234,7 +3493,7 @@ fn WasmCallLowering::append_segment_args_summary(
         arg_index + 1,
         arg_count
       )
-    },
+    }
   }
 }
 
@@ -3243,45 +3502,59 @@ fn WasmCallLowering::call_segment_summary(
   start: i32,
   limit: i32
 ) -> core.Option(WasmBodySummary) {
-  let encoded_arg_count = parser.text_expression_root_call_arg_count_between(
-    lowering.context_value.source,
-    start,
-    limit
-  );
-  let arg_count = wasm_root_call_runtime_arg_count(encoded_arg_count);
-  let target_hash = parser.text_expression_root_head_hash_between(
-    lowering.context_value.source,
-    start,
-    limit
-  );
-  let lookup = WasmSourceEnv::lookup_function(
-    lowering.context_value.env,
-    target_hash
-  );
-  let return_type = parser.TextResolutionEnv::lookup_return(
-    lowering.context_value.env.resolution,
-    target_hash
-  );
+  let target = WasmCallLowering::call_target_between(lowering, start, limit);
   do @monad(core.Option(_)) {
-    option.guard(WasmCallLowering::segment_has_bare_call(lowering, start, limit));
-    option.guard(lookup.found);
-    option.guard(lookup.index < wasm_small_immediate_limit());
-    option.guard(lookup.runtime_param_count == arg_count);
-    option.guard(wasm_type_class_is_scalar(return_type));
-    option.guard(arg_count <= 5);
+    option.guard(target.found);
     args_summary <- WasmCallLowering::append_segment_args_summary(
       lowering,
       wasm_body_summary_empty(),
       start,
       limit,
       0,
-      arg_count
+      target.arg_count
     );
     pure(wasm_body_summary_push_instruction(
       args_summary,
-      wasm_body_instruction(wasm_call_opcode(), lookup.index)
+      wasm_body_instruction(wasm_call_opcode(), target.function_index)
     ))
   }
+}
+
+fn wasm_i32_branch_summary(
+  condition_summary: WasmBodySummary,
+  true_summary: WasmBodySummary,
+  false_summary: WasmBodySummary
+) -> WasmBodySummary {
+  wasm_body_summary_append(
+    wasm_body_summary_empty(),
+    condition_summary
+  ) \with_condition -> wasm_body_summary_push_instruction(
+    with_condition,
+    wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
+  ) \with_if -> wasm_body_summary_append(
+    with_if,
+    true_summary
+  ) \with_true -> wasm_body_summary_push_instruction(
+    with_true,
+    wasm_body_instruction(wasm_else_opcode(), 0)
+  ) \with_else -> wasm_body_summary_append(
+    with_else,
+    false_summary
+  ) \with_false -> wasm_body_summary_push_instruction(
+    with_false,
+    wasm_body_instruction(wasm_end_opcode(), 0)
+  )
+}
+
+fn wasm_i32_branch_summary_from_bool_param(
+  true_summary: WasmBodySummary,
+  false_summary: WasmBodySummary
+) -> WasmBodySummary {
+  wasm_i32_branch_summary(
+    wasm_local_get_instruction_summary(0),
+    true_summary,
+    false_summary
+  )
 }
 
 fn WasmCallLowering::branch_segment_summary(
@@ -3319,24 +3592,10 @@ fn WasmCallLowering::branch_segment_summary(
       segments.false_value_limit,
       true
     );
-    pure(wasm_body_summary_append(
-      wasm_body_summary_empty(),
-      condition_summary
-    ) \with_condition -> wasm_body_summary_push_instruction(
-      with_condition,
-      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
-    ) \with_if -> wasm_body_summary_append(
-      with_if,
-      true_summary
-    ) \with_true -> wasm_body_summary_push_instruction(
-      with_true,
-      wasm_body_instruction(wasm_else_opcode(), 0)
-    ) \with_else -> wasm_body_summary_append(
-      with_else,
+    pure(wasm_i32_branch_summary(
+      condition_summary,
+      true_summary,
       false_summary
-    ) \with_false -> wasm_body_summary_push_instruction(
-      with_false,
-      wasm_body_instruction(wasm_end_opcode(), 0)
     ))
   }
 }
@@ -3346,13 +3605,42 @@ fn WasmCallLowering::branch_segment_summary_if_possible(
   start: i32,
   limit: i32
 ) -> core.Option(WasmBodySummary) {
-  match wasm_segment_can_be_bool_branch(
+  let can_branch = wasm_segment_can_be_bool_branch(
     lowering.context_value.source,
     start,
     limit
-  ) {
-    true => WasmCallLowering::branch_segment_summary(lowering, start, limit),
-    false => option.none(),
+  );
+  if can_branch {
+    WasmCallLowering::branch_segment_summary(lowering, start, limit)
+  } else {
+    option.none()
+  }
+}
+
+fn wasm_function_bool_match_body_summary(
+  lowering: WasmCallLowering,
+  segments: parser.TextBoolBranchSegments,
+  body_abi: i32
+) -> core.Option(WasmBodySummary) {
+  do @monad(core.Option(_)) {
+    option.guard(abi_class_is_scalar(body_abi));
+    option.guard(segments.found);
+    true_summary <- WasmCallLowering::segment_summary(
+      lowering,
+      segments.true_value_start,
+      segments.true_value_limit,
+      true
+    );
+    false_summary <- WasmCallLowering::segment_summary(
+      lowering,
+      segments.false_value_start,
+      segments.false_value_limit,
+      true
+    );
+    pure(wasm_i32_branch_summary_from_bool_param(
+      true_summary,
+      false_summary
+    ))
   }
 }
 
@@ -3376,21 +3664,31 @@ fn WasmCallLowering::non_branch_segment_summary(
   limit: i32,
   parts: parser.TextRootOperatorParts
 ) -> core.Option(WasmBodySummary) {
-  match parts.found {
-    true => WasmCallLowering::operator_segment_summary(lowering, parts),
-    false => match WasmCallLowering::segment_has_bare_call(
+  match WasmCallLowering::non_branch_segment_kind(
+    lowering,
+    start,
+    limit,
+    parts
+  ) {
+    Operator => WasmCallLowering::operator_segment_summary(lowering, parts),
+    Call => WasmCallLowering::call_segment_summary(lowering, start, limit),
+    Simple => WasmCallLowering::simple_segment_summary(
       lowering,
       start,
       limit
-    ) {
-      true => WasmCallLowering::call_segment_summary(lowering, start, limit),
-      false => WasmCallLowering::simple_segment_summary(
-        lowering,
-        start,
-        limit
-      ),
-    },
+    ),
   }
+}
+
+fn WasmSegmentBody::non_branch_summary(
+  body: WasmSegmentBody
+) -> core.Option(WasmBodySummary) {
+  WasmCallLowering::non_branch_segment_summary(
+    body.lowering,
+    body.start,
+    body.limit,
+    body.parts
+  )
 }
 
 fn WasmCallLowering::segment_summary(
@@ -3404,21 +3702,19 @@ fn WasmCallLowering::segment_summary(
     start,
     limit
   );
-  match found {
-    false => option.none(),
-    true => match WasmCallLowering::branch_segment_summary_if_possible(
-      lowering,
-      start,
-      limit
-    ) {
-      Some(summary) => option.some(summary),
-      None => WasmCallLowering::non_branch_segment_summary(
+  if found {
+    let segment = wasm_segment_body(lowering, start, limit, parts);
+    core.Option::or_else_with(
+      WasmCallLowering::branch_segment_summary_if_possible(
         lowering,
         start,
-        limit,
-        parts
+        limit
       ),
-    },
+      segment,
+      WasmSegmentBody::non_branch_summary
+    )
+  } else {
+    option.none()
   }
 }
 
@@ -3470,9 +3766,11 @@ fn wasm_scalar_operator_opcode_case(
   target_hash: i32,
   opcode: i32
 ) -> core.Option(i32) {
-  match operator_hash == target_hash {
-    true => option.some(opcode),
-    false => option.none(),
+  let matches = operator_hash == target_hash;
+  if matches {
+    option.some(opcode)
+  } else {
+    option.none()
   }
 }
 
@@ -3596,11 +3894,13 @@ fn wasm_semantic_scalar_body_instruction(
     decl
   );
   let is_scalar_abi = abi_class_is_scalar(body_abi);
+  let is_identifier = root_kind == parser.text_expression_root_identifier_tag();
   do @monad(core.Option(_)) {
     option.guard(is_scalar_abi);
-    match root_kind == parser.text_expression_root_identifier_tag() {
-      true => wasm_scalar_identifier_body_instruction(context_value.source, current),
-      false => do @monad(core.Option(_)) {
+    if is_identifier {
+      wasm_scalar_identifier_body_instruction(context_value.source, current)
+    } else {
+      do @monad(core.Option(_)) {
         value <- wasm_semantic_scalar_body_immediate(
           context_value,
           codes,
@@ -3609,7 +3909,7 @@ fn wasm_semantic_scalar_body_instruction(
           body_abi
         );
         pure(wasm_body_instruction(wasm_const_opcode(), value))
-      },
+      }
     }
   }
 }
@@ -3690,6 +3990,64 @@ fn wasm_scalar_operator_body_plan(
   }
 }
 
+fn WasmScalarBody::scalar_call_plan(
+  body: WasmScalarBody
+) -> core.Option(WasmBodyPlan) {
+  wasm_scalar_call_body_plan(
+    body.context_value,
+    body.codes,
+    body.current,
+    body.body_abi
+  )
+}
+
+fn WasmScalarBody::scalar_operator_plan(
+  body: WasmScalarBody
+) -> core.Option(WasmBodyPlan) {
+  wasm_scalar_operator_body_plan(
+    body.context_value,
+    body.codes,
+    body.current,
+    body.body_abi
+  )
+}
+
+fn WasmCurrentBody::scalar_base_plan(
+  body: WasmCurrentBody
+) -> core.Option(WasmBodyPlan) {
+  wasm_scalar_base_body_plan(
+    body.context_value,
+    body.codes,
+    body.current,
+    body.body_abi
+  )
+}
+
+fn WasmCurrentBody::fallback_plan(body: WasmCurrentBody) -> WasmBodyPlan {
+  wasm_single_instruction_body_plan(wasm_byte_body_instruction(
+    body.context_value,
+    body.codes,
+    body.current,
+    body.decl,
+    body.body_abi
+  ))
+}
+
+fn wasm_local_set_plan_from_segment(
+  lowering: WasmCallLowering,
+  segment: parser.TextArgumentSegment,
+  wasm_index: i32
+) -> core.Option(WasmBodyPlan) {
+  do @monad(core.Option(_)) {
+    option.guard(wasm_index < wasm_small_immediate_limit());
+    plan <- WasmCallLowering::arg_plan(lowering, segment);
+    pure(wasm_body_plan_push_instruction(
+      plan,
+      wasm_body_instruction(wasm_local_set_opcode(), wasm_index)
+    ))
+  }
+}
+
 fn wasm_scalar_local_let_initializer_plan(
   lowering: WasmCallLowering,
   local_index: i32
@@ -3700,16 +4058,7 @@ fn wasm_scalar_local_let_initializer_plan(
     local_index
   );
   let wasm_index = lowering.runtime_param_count + local_index;
-  match wasm_index < wasm_small_immediate_limit() {
-    false => option.none(),
-    true => match WasmCallLowering::arg_plan(lowering, segment) {
-      None => option.none(),
-      Some(plan) => option.some(wasm_body_plan_push_instruction(
-        plan,
-        wasm_body_instruction(wasm_local_set_opcode(), wasm_index)
-      )),
-    },
-  }
+  wasm_local_set_plan_from_segment(lowering, segment, wasm_index)
 }
 
 fn wasm_scalar_local_let_initializer_plans(
@@ -3718,9 +4067,10 @@ fn wasm_scalar_local_let_initializer_plans(
   local_index: i32,
   local_count: i32
 ) -> core.Option(WasmBodyPlan) {
-  match local_index >= local_count {
-    true => option.some(plan),
-    false => do @monad(core.Option(_)) {
+  if local_index >= local_count {
+    option.some(plan)
+  } else {
+    do @monad(core.Option(_)) {
       local_plan <- wasm_scalar_local_let_initializer_plan(
         lowering,
         local_index
@@ -3731,7 +4081,27 @@ fn wasm_scalar_local_let_initializer_plans(
         local_index + 1,
         local_count
       )
-    },
+    }
+  }
+}
+
+fn wasm_local_let_prefixed_body_plan_for_lowering(
+  lowering: WasmCallLowering,
+  body_plan: WasmBodyPlan,
+  local_count: i32
+) -> core.Option(WasmBodyPlan) {
+  if local_count <= 0 {
+    option.some(body_plan)
+  } else {
+    do @monad(core.Option(_)) {
+      local_plan <- wasm_scalar_local_let_initializer_plans(
+        lowering,
+        wasm_body_plan_empty(local_count + 1),
+        0,
+        local_count
+      );
+      pure(wasm_body_plan_append_plan(local_plan, body_plan))
+    }
   }
 }
 
@@ -3748,21 +4118,11 @@ fn wasm_scalar_local_let_prefixed_body_plan(
   );
   do @monad(core.Option(_)) {
     option.guard(abi_class_is_scalar(body_abi));
-    match local_count <= 0 {
-      true => option.some(body_plan),
-      false => do @monad(core.Option(_)) {
-        local_plan <- wasm_scalar_local_let_initializer_plans(
-          wasm_call_lowering(context_value, codes, current),
-          wasm_body_plan_empty(local_count + 1),
-          0,
-          local_count
-        );
-        pure(wasm_body_plan_append_plan(
-          local_plan,
-          body_plan
-        ))
-      },
-    }
+    wasm_local_let_prefixed_body_plan_for_lowering(
+      wasm_call_lowering(context_value, codes, current),
+      body_plan,
+      local_count
+    )
   }
 }
 
@@ -3772,28 +4132,16 @@ fn wasm_scalar_base_body_plan(
   current: combinator.ParseState,
   body_abi: i32
 ) -> core.Option(WasmBodyPlan) {
-  match wasm_scalar_expression_body_plan(
-    context_value,
-    codes,
-    current,
-    body_abi
-  ) {
-    Some(plan) => option.some(plan),
-    None => match wasm_scalar_call_body_plan(
-      context_value,
-      codes,
-      current,
-      body_abi
-    ) {
-      Some(plan) => option.some(plan),
-      None => wasm_scalar_operator_body_plan(
-        context_value,
-        codes,
-        current,
-        body_abi
-      ),
-    },
-  }
+  let body = wasm_scalar_body(context_value, codes, current, body_abi);
+  core.Option::or_else_with(
+    wasm_scalar_expression_body_plan(context_value, codes, current, body_abi),
+    body,
+    WasmScalarBody::scalar_call_plan
+  ) \with_call -> core.Option::or_else_with(
+    with_call,
+    body,
+    WasmScalarBody::scalar_operator_plan
+  )
 }
 
 fn wasm_byte_base_body_plan(
@@ -3803,31 +4151,16 @@ fn wasm_byte_base_body_plan(
   decl: ast.Decl,
   body_abi: i32
 ) -> WasmBodyPlan {
-  match wasm_function_match_body_plan(
-    context_value,
-    codes,
-    current,
-    body_abi
-  ) {
-    Some(plan) => plan,
-    None => match wasm_scalar_base_body_plan(
-      context_value,
-      codes,
-      current,
-      body_abi
-    ) {
-      Some(plan) => plan,
-      None => wasm_single_instruction_body_plan(
-        wasm_byte_body_instruction(
-          context_value,
-          codes,
-          current,
-          decl,
-          body_abi
-        )
-      ),
-    },
-  }
+  let body = wasm_current_body(context_value, codes, current, decl, body_abi);
+  core.Option::or_else_with(
+    wasm_function_match_body_plan(context_value, codes, current, body_abi),
+    body,
+    WasmCurrentBody::scalar_base_plan
+  ) \maybe_plan -> core.Option::unwrap_or_else_with(
+    maybe_plan,
+    body,
+    WasmCurrentBody::fallback_plan
+  )
 }
 
 fn wasm_byte_body_plan(
@@ -3873,9 +4206,10 @@ fn wasm_byte_body_immediate(
 }
 
 fn wasm_terminator_opcode(result_val_type: i32) -> i32 {
-  match result_val_type == wasm_no_val_type() {
-    true => wasm_drop_opcode(),
-    false => wasm_return_opcode(),
+  if result_val_type == wasm_no_val_type() {
+    wasm_drop_opcode()
+  } else {
+    wasm_return_opcode()
   }
 }
 
@@ -3886,35 +4220,37 @@ fn wasm_opcode_matches_any4(
   third: i32,
   fourth: i32
 ) -> bool {
-  match opcode == first {
-    true => true,
-    false => match opcode == second {
-      true => true,
-      false => match opcode == third {
-        true => true,
-        false => opcode == fourth,
-      },
-    },
+  if opcode == first {
+    true
+  } else if opcode == second {
+    true
+  } else if opcode == third {
+    true
+  } else {
+    opcode == fourth
   }
 }
 
 fn wasm_instruction_has_immediate(opcode: i32) -> bool {
-  match wasm_opcode_matches_any4(
+  let known_immediate = wasm_opcode_matches_any4(
     opcode,
     wasm_const_opcode(),
     wasm_local_get_opcode(),
     wasm_local_set_opcode(),
     wasm_call_opcode()
-  ) {
-    true => true,
-    false => opcode == wasm_if_opcode(),
+  );
+  if known_immediate {
+    true
+  } else {
+    opcode == wasm_if_opcode()
   }
 }
 
 fn wasm_instruction_size(opcode: i32) -> i32 {
-  match wasm_instruction_has_immediate(opcode) {
-    true => 2,
-    false => 1,
+  if wasm_instruction_has_immediate(opcode) {
+    2
+  } else {
+    1
   }
 }
 
@@ -3930,16 +4266,18 @@ fn wasm_function_body_size(
 }
 
 fn wasm_local_decl_vector_size(local_count: i32) -> i32 {
-  match local_count <= 0 {
-    true => 1,
-    false => 1 + wasm_u32_leb_size(local_count) + 1,
+  if local_count <= 0 {
+    1
+  } else {
+    1 + wasm_u32_leb_size(local_count) + 1
   }
 }
 
 fn wasm_result_arity(result_val_type: i32) -> i32 {
-  match result_val_type == wasm_no_val_type() {
-    true => 0,
-    false => 1,
+  if result_val_type == wasm_no_val_type() {
+    0
+  } else {
+    1
   }
 }
 
@@ -3992,9 +4330,10 @@ fn wasm_push_instruction(
   immediate: i32
 ) -> layout.HeapArray(i32) {
   let with_opcode = wasm_push_byte(bytes, opcode);
-  match wasm_instruction_size(opcode) > 1 {
-    true => wasm_push_byte(with_opcode, immediate),
-    false => with_opcode,
+  if wasm_instruction_size(opcode) > 1 {
+    wasm_push_byte(with_opcode, immediate)
+  } else {
+    with_opcode
   }
 }
 
@@ -4014,13 +4353,14 @@ fn wasm_append_bytes(
   source: layout.HeapArray(i32),
   index: i32
 ) -> layout.HeapArray(i32) {
-  match index < layout.HeapArray::len(i32, source) {
-    true => rec(
+  if index < layout.HeapArray::len(i32, source) {
+    rec(
       wasm_push_byte(target, layout.HeapArray::get(i32, source, index)),
       source,
       index + 1
-    ),
-    false => target,
+    )
+  } else {
+    target
   }
 }
 
@@ -4081,9 +4421,10 @@ fn wasm_push_type_payload_function(
   );
   let arity = wasm_result_arity(fact.result_val_type);
   let with_result_count = wasm_push_u32_leb(with_params, arity);
-  match arity > 0 {
-    true => wasm_push_byte(with_result_count, fact.result_val_type),
-    false => with_result_count,
+  if arity > 0 {
+    wasm_push_byte(with_result_count, fact.result_val_type)
+  } else {
+    with_result_count
   }
 }
 
@@ -4101,15 +4442,16 @@ fn wasm_push_export_payload_function(
   result: combinator.Reply(parser.DeclFrame),
   bytes: layout.HeapArray(i32)
 ) -> layout.HeapArray(i32) {
-  match is_pub_function(context_value.source, state.current, result) {
-    false => bytes,
-    true => wasm_push_export_payload_bytes(
+  if is_pub_function(context_value.source, state.current, result) {
+    wasm_push_export_payload_bytes(
       context_value,
       codes,
       state,
       result,
       bytes
-    ),
+    )
+  } else {
+    bytes
   }
 }
 
@@ -4144,8 +4486,8 @@ fn wasm_push_body_plan_at(
   plan: WasmBodyPlan,
   index: i32
 ) -> layout.HeapArray(i32) {
-  match index < vec.Vec::len(plan.instructions) {
-    true => vec.Vec::get_t(
+  if index < vec.Vec::len(plan.instructions) {
+    vec.Vec::get_t(
       WasmBodyInstruction,
       plan.instructions,
       index
@@ -4157,8 +4499,9 @@ fn wasm_push_body_plan_at(
       ),
       plan,
       index + 1
-    ),
-    false => bytes,
+    )
+  } else {
+    bytes
   }
 }
 
@@ -4241,9 +4584,8 @@ fn wasm_payload_scan(
   state: WasmBytePayloadState,
   bytes: layout.HeapArray(i32)
 ) -> layout.HeapArray(i32) {
-  match state.current.cursor < textlex.length(context_value.source) {
-    false => bytes,
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(state.current) {
+    match parser.parse_text_declaration_stream(
       state.current,
       context_value.source,
       state.function_index
@@ -4255,7 +4597,9 @@ fn wasm_payload_scan(
         wasm_payload_next_state(context_value, state, result),
         wasm_payload_next_bytes(context_value, codes, state, bytes, result)
       ),
-    },
+    }
+  } else {
+    bytes
   }
 }
 
@@ -4267,17 +4611,17 @@ fn wasm_payload_next_bytes(
   result: combinator.Reply(parser.DeclFrame)
 ) -> layout.HeapArray(i32) {
   let is_decl_function = is_function(context_value.source, state.current, result);
-  let next_bytes = match is_decl_function {
-    true => wasm_push_payload_bytes(
+  if is_decl_function {
+    wasm_push_payload_bytes(
       context_value,
       codes,
       state,
       result,
       bytes
-    ),
-    false => bytes,
-  };
-  next_bytes
+    )
+  } else {
+    bytes
+  }
 }
 
 fn wasm_payload_next_state(
@@ -4286,9 +4630,10 @@ fn wasm_payload_next_state(
   result: combinator.Reply(parser.DeclFrame)
 ) -> WasmBytePayloadState {
   let is_decl_function = is_function(context_value.source, state.current, result);
-  let next_index = match is_decl_function {
-    true => state.function_index + 1,
-    false => state.function_index,
+  let next_index = if is_decl_function {
+    state.function_index + 1
+  } else {
+    state.function_index
   };
   WasmBytePayloadState {
     kind: state.kind,
@@ -4312,9 +4657,8 @@ fn wasm_export_count_scan(
   current: combinator.ParseState,
   total: i32
 ) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
       current,
       context_value.source,
       total
@@ -4323,12 +4667,15 @@ fn wasm_export_count_scan(
       Ok(result) => rec(
         context_value,
         wasm_next_declaration_state(context_value, result),
-        match is_pub_function(context_value.source, current, result) {
-          true => total + 1,
-          false => total,
+        if is_pub_function(context_value.source, current, result) {
+          total + 1
+        } else {
+          total
         }
       ),
-    },
+    }
+  } else {
+    total
   }
 }
 
@@ -4513,9 +4860,10 @@ fn wasm_export_tag(
   current: combinator.ParseState,
   result: combinator.Reply(parser.DeclFrame)
 ) -> i32 {
-  match is_pub_function(source, current, result) {
-    true => 1,
-    false => 0,
+  if is_pub_function(source, current, result) {
+    1
+  } else {
+    0
   }
 }
 
@@ -4753,24 +5101,13 @@ fn wasm_scalar_body_immediate_from_binding(
     start,
     binding.declaration_limit
   );
-  match is_standalone {
-    false => option.none(),
-    true => match root_kind == parser.text_expression_root_number_tag() {
-      true => wasm_small_u7_decimal_literal(
-        codes,
-        context_value.base_offset,
-        token_span
-      ),
-      false => match root_kind == parser.text_expression_root_bool_tag() {
-        true => wasm_bool_literal_immediate(
-          codes,
-          context_value.base_offset,
-          token_span
-        ),
-        false => option.none(),
-      },
-    },
-  }
+  wasm_scalar_literal_immediate(
+    codes,
+    context_value.base_offset,
+    token_span,
+    root_kind,
+    is_standalone
+  )
 }
 
 fn wasm_byte_body_instruction_from_binding(
@@ -4783,36 +5120,40 @@ fn wasm_byte_body_instruction_from_binding(
     binding.body_start,
     binding.declaration_limit
   );
-  let semantic: core.Option(WasmBodyInstruction) = match abi_class_is_scalar(
+  let semantic: core.Option(WasmBodyInstruction) = if abi_class_is_scalar(
     binding.body_abi_class
   ) {
-    false => option.none(),
-    true => match root_kind == parser.text_expression_root_identifier_tag() {
-      true => wasm_scalar_identifier_body_instruction_from_binding(
+    if root_kind == parser.text_expression_root_identifier_tag() {
+      wasm_scalar_identifier_body_instruction_from_binding(
         context_value,
+        codes,
         binding
-      ),
-      false => do @monad(core.Option(_)) {
+      )
+    } else {
+      do @monad(core.Option(_)) {
         value <- wasm_scalar_body_immediate_from_binding(
           context_value,
           codes,
           binding
         );
         pure(wasm_body_instruction(wasm_const_opcode(), value))
-      },
-    },
+      }
+    }
+  } else {
+    option.none()
   };
   match semantic {
     Some(value) => value,
     None => wasm_body_instruction(
       wasm_body_opcode_for_abi(binding.body_abi_class),
-      match binding.body_abi_class == parser.text_abi_class_void_tag() {
-        true => 0,
-        false => parser.text_expression_root_head_hash_between(
+      if binding.body_abi_class == parser.text_abi_class_void_tag() {
+        0
+      } else {
+        parser.text_expression_root_head_hash_between(
           context_value.source,
           binding.body_start,
           binding.declaration_limit
-        ),
+        )
       }
     ),
   }
@@ -4823,46 +5164,16 @@ fn wasm_function_match_body_plan_from_binding(
   codes: layout.HeapArray(i32),
   binding: WasmFunctionBinding
 ) -> core.Option(WasmBodyPlan) {
-  let segments = parser.text_function_bool_match_body_segments(
-    context_value.source,
-    binding.cursor
-  );
-  let lowering = wasm_call_lowering_for_binding(context_value, codes, binding);
   do @monad(core.Option(_)) {
-    option.guard(abi_class_is_scalar(binding.body_abi_class));
     option.guard(wasm_type_class_is_scalar(binding.actual_type_class));
-    option.guard(segments.found);
-    true_plan <- WasmCallLowering::segment_plan(
-      lowering,
-      segments.true_value_start,
-      segments.true_value_limit,
-      true
-    );
-    false_plan <- WasmCallLowering::segment_plan(
-      lowering,
-      segments.false_value_start,
-      segments.false_value_limit,
-      true
-    );
-    pure(wasm_body_plan_push_instruction(
-      wasm_body_plan_empty(6),
-      wasm_body_instruction(wasm_local_get_opcode(), 0)
-    ) \with_condition -> wasm_body_plan_push_instruction(
-      with_condition,
-      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
-    ) \with_if -> wasm_body_plan_append_plan(
-      with_if,
-      true_plan
-    ) \with_true -> wasm_body_plan_push_instruction(
-      with_true,
-      wasm_body_instruction(wasm_else_opcode(), 0)
-    ) \with_else -> wasm_body_plan_append_plan(
-      with_else,
-      false_plan
-    ) \with_false -> wasm_body_plan_push_instruction(
-      with_false,
-      wasm_body_instruction(wasm_end_opcode(), 0)
-    ))
+    wasm_function_bool_match_body_plan(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      parser.text_function_bool_match_body_segments(
+        context_value.source,
+        binding.cursor
+      ),
+      binding.body_abi_class
+    )
   }
 }
 
@@ -4919,26 +5230,59 @@ fn wasm_scalar_operator_body_plan_from_binding(
   }
 }
 
+fn WasmBindingBody::scalar_call_plan(
+  body: WasmBindingBody
+) -> core.Option(WasmBodyPlan) {
+  wasm_scalar_call_body_plan_from_binding(
+    body.context_value,
+    body.codes,
+    body.binding
+  )
+}
+
+fn WasmBindingBody::scalar_operator_plan(
+  body: WasmBindingBody
+) -> core.Option(WasmBodyPlan) {
+  wasm_scalar_operator_body_plan_from_binding(
+    body.context_value,
+    body.codes,
+    body.binding
+  )
+}
+
+fn WasmBindingBody::scalar_base_plan(
+  body: WasmBindingBody
+) -> core.Option(WasmBodyPlan) {
+  wasm_scalar_base_body_plan_from_binding(
+    body.context_value,
+    body.codes,
+    body.binding
+  )
+}
+
+fn WasmBindingBody::fallback_plan(body: WasmBindingBody) -> WasmBodyPlan {
+  wasm_single_instruction_body_plan(wasm_byte_body_instruction_from_binding(
+    body.context_value,
+    body.codes,
+    body.binding
+  ))
+}
+
 fn wasm_scalar_base_body_plan_from_binding(
   context_value: WasmByteContext,
   codes: layout.HeapArray(i32),
   binding: WasmFunctionBinding
 ) -> core.Option(WasmBodyPlan) {
-  match wasm_scalar_expression_body_plan_from_binding(context_value, codes, binding) {
-    Some(plan) => option.some(plan),
-    None => match wasm_scalar_call_body_plan_from_binding(
-      context_value,
-      codes,
-      binding
-    ) {
-      Some(plan) => option.some(plan),
-      None => wasm_scalar_operator_body_plan_from_binding(
-        context_value,
-        codes,
-        binding
-      ),
-    },
-  }
+  let body = wasm_binding_body(context_value, codes, binding);
+  core.Option::or_else_with(
+    wasm_scalar_expression_body_plan_from_binding(context_value, codes, binding),
+    body,
+    WasmBindingBody::scalar_call_plan
+  ) \with_call -> core.Option::or_else_with(
+    with_call,
+    body,
+    WasmBindingBody::scalar_operator_plan
+  )
 }
 
 fn wasm_byte_base_body_plan_from_binding(
@@ -4946,19 +5290,16 @@ fn wasm_byte_base_body_plan_from_binding(
   codes: layout.HeapArray(i32),
   binding: WasmFunctionBinding
 ) -> WasmBodyPlan {
-  match wasm_function_match_body_plan_from_binding(context_value, codes, binding) {
-    Some(plan) => plan,
-    None => match wasm_scalar_base_body_plan_from_binding(
-      context_value,
-      codes,
-      binding
-    ) {
-      Some(plan) => plan,
-      None => wasm_single_instruction_body_plan(
-        wasm_byte_body_instruction_from_binding(context_value, codes, binding)
-      ),
-    },
-  }
+  let body = wasm_binding_body(context_value, codes, binding);
+  core.Option::or_else_with(
+    wasm_function_match_body_plan_from_binding(context_value, codes, binding),
+    body,
+    WasmBindingBody::scalar_base_plan
+  ) \maybe_plan -> core.Option::unwrap_or_else_with(
+    maybe_plan,
+    body,
+    WasmBindingBody::fallback_plan
+  )
 }
 
 fn wasm_scalar_local_let_prefixed_body_plan_from_binding(
@@ -4969,18 +5310,11 @@ fn wasm_scalar_local_let_prefixed_body_plan_from_binding(
 ) -> core.Option(WasmBodyPlan) {
   do @monad(core.Option(_)) {
     option.guard(abi_class_is_scalar(binding.body_abi_class));
-    match binding.local_count <= 0 {
-      true => option.some(body_plan),
-      false => do @monad(core.Option(_)) {
-        local_plan <- wasm_scalar_local_let_initializer_plans(
-          wasm_call_lowering_for_binding(context_value, codes, binding),
-          wasm_body_plan_empty(binding.local_count + 1),
-          0,
-          binding.local_count
-        );
-        pure(wasm_body_plan_append_plan(local_plan, body_plan))
-      },
-    }
+    wasm_local_let_prefixed_body_plan_for_lowering(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      body_plan,
+      binding.local_count
+    )
   }
 }
 
@@ -5010,46 +5344,16 @@ fn wasm_function_match_body_summary_from_binding(
   codes: layout.HeapArray(i32),
   binding: WasmFunctionBinding
 ) -> core.Option(WasmBodySummary) {
-  let segments = parser.text_function_bool_match_body_segments(
-    context_value.source,
-    binding.cursor
-  );
-  let lowering = wasm_call_lowering_for_binding(context_value, codes, binding);
   do @monad(core.Option(_)) {
-    option.guard(abi_class_is_scalar(binding.body_abi_class));
     option.guard(wasm_type_class_is_scalar(binding.actual_type_class));
-    option.guard(segments.found);
-    true_summary <- WasmCallLowering::segment_summary(
-      lowering,
-      segments.true_value_start,
-      segments.true_value_limit,
-      true
-    );
-    false_summary <- WasmCallLowering::segment_summary(
-      lowering,
-      segments.false_value_start,
-      segments.false_value_limit,
-      true
-    );
-    pure(wasm_body_summary_push_instruction(
-      wasm_body_summary_empty(),
-      wasm_body_instruction(wasm_local_get_opcode(), 0)
-    ) \with_condition -> wasm_body_summary_push_instruction(
-      with_condition,
-      wasm_body_instruction(wasm_if_opcode(), wasm_i32_val_type())
-    ) \with_if -> wasm_body_summary_append(
-      with_if,
-      true_summary
-    ) \with_true -> wasm_body_summary_push_instruction(
-      with_true,
-      wasm_body_instruction(wasm_else_opcode(), 0)
-    ) \with_else -> wasm_body_summary_append(
-      with_else,
-      false_summary
-    ) \with_false -> wasm_body_summary_push_instruction(
-      with_false,
-      wasm_body_instruction(wasm_end_opcode(), 0)
-    ))
+    wasm_function_bool_match_body_summary(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      parser.text_function_bool_match_body_segments(
+        context_value.source,
+        binding.cursor
+      ),
+      binding.body_abi_class
+    )
   }
 }
 
@@ -5064,27 +5368,31 @@ fn wasm_scalar_expression_body_summary_from_binding(
     binding.body_start,
     binding.declaration_limit
   );
+  let is_match_root = root_kind == parser.text_expression_root_match_tag();
   do @monad(core.Option(_)) {
     option.guard(abi_class_is_scalar(binding.body_abi_class));
-    match root_kind == parser.text_expression_root_match_tag() {
-      true => WasmCallLowering::branch_segment_summary_if_possible(
+    if is_match_root {
+      WasmCallLowering::branch_segment_summary_if_possible(
         lowering,
         binding.body_start,
         binding.declaration_limit
-      ),
-      false => match wasm_simple_root_summary_candidate(
+      )
+    } else {
+      let is_simple_candidate = wasm_simple_root_summary_candidate(
         context_value.source,
         binding.body_start,
         binding.declaration_limit,
         root_kind
-      ) {
-        true => WasmCallLowering::simple_segment_summary(
+      );
+      if is_simple_candidate {
+        WasmCallLowering::simple_segment_summary(
           lowering,
           binding.body_start,
           binding.declaration_limit
-        ),
-        false => option.none(),
-      },
+        )
+      } else {
+        option.none()
+      }
     }
   }
 }
@@ -5126,36 +5434,66 @@ fn wasm_scalar_operator_body_summary_from_binding(
   }
 }
 
+fn WasmBindingBody::scalar_call_summary(
+  body: WasmBindingBody
+) -> core.Option(WasmBodySummary) {
+  wasm_scalar_call_body_summary_from_binding(
+    body.context_value,
+    body.codes,
+    body.binding
+  )
+}
+
+fn WasmBindingBody::scalar_operator_summary(
+  body: WasmBindingBody
+) -> core.Option(WasmBodySummary) {
+  wasm_scalar_operator_body_summary_from_binding(
+    body.context_value,
+    body.codes,
+    body.binding
+  )
+}
+
+fn WasmBindingBody::scalar_base_summary(
+  body: WasmBindingBody
+) -> core.Option(WasmBodySummary) {
+  wasm_scalar_base_body_summary_from_binding(
+    body.context_value,
+    body.codes,
+    body.binding
+  )
+}
+
+fn WasmBindingBody::fallback_summary(body: WasmBindingBody) -> WasmBodySummary {
+  wasm_instruction_summary(wasm_byte_body_instruction_from_binding(
+    body.context_value,
+    body.codes,
+    body.binding
+  ))
+}
+
 fn wasm_scalar_base_body_summary_from_binding(
   context_value: WasmByteContext,
   codes: layout.HeapArray(i32),
   binding: WasmFunctionBinding
 ) -> core.Option(WasmBodySummary) {
-  match wasm_scalar_expression_body_summary_from_binding(context_value, codes, binding) {
-    Some(summary) => option.some(summary),
-    None => match wasm_scalar_call_body_summary_from_binding(
-      context_value,
-      codes,
-      binding
-    ) {
-      Some(summary) => option.some(summary),
-      None => wasm_scalar_operator_body_summary_from_binding(
-        context_value,
-        codes,
-        binding
-      ),
-    },
-  }
+  let body = wasm_binding_body(context_value, codes, binding);
+  core.Option::or_else_with(
+    wasm_scalar_expression_body_summary_from_binding(context_value, codes, binding),
+    body,
+    WasmBindingBody::scalar_call_summary
+  ) \with_call -> core.Option::or_else_with(
+    with_call,
+    body,
+    WasmBindingBody::scalar_operator_summary
+  )
 }
 
 fn wasm_simple_root_kind_can_summarize(root_kind: i32) -> bool {
-  match root_kind == parser.text_expression_root_number_tag() {
-    true => true,
-    false => match root_kind == parser.text_expression_root_bool_tag() {
-      true => true,
-      false => root_kind == parser.text_expression_root_identifier_tag(),
-    },
-  }
+  let is_number = root_kind == parser.text_expression_root_number_tag();
+  let is_bool = root_kind == parser.text_expression_root_bool_tag();
+  let is_identifier = root_kind == parser.text_expression_root_identifier_tag();
+  is_number || is_bool || is_identifier
 }
 
 fn wasm_simple_root_summary_candidate(
@@ -5164,43 +5502,39 @@ fn wasm_simple_root_summary_candidate(
   limit: i32,
   root_kind: i32
 ) -> bool {
-  match wasm_simple_root_kind_can_summarize(root_kind) {
-    false => false,
-    true => match parser.text_expression_root_call_arg_count_between(
-      source,
-      start,
-      limit
-    ) == parser.text_no_root_call_arg_count() {
-      false => false,
-      true => match parser.text_expression_root_head_selector_count_between(
-        source,
-        start,
-        limit
-      ) == 0 {
-        false => false,
-        true => match parser.text_expression_root_field_count_between(
-          source,
-          start,
-          limit
-        ) == 0 {
-          false => false,
-          true => match parser.text_expression_root_operator_count_between(
-            source,
-            start,
-            limit
-          ) == 0 {
-            false => false,
-            true => parser.text_value_pipe_bind_count_between(
-              source,
-              start,
-              limit,
-              0
-            ) == 0,
-          },
-        },
-      },
-    },
-  }
+  let can_summarize_root = wasm_simple_root_kind_can_summarize(root_kind);
+  let has_no_call_args = parser.text_expression_root_call_arg_count_between(
+    source,
+    start,
+    limit
+  ) == parser.text_no_root_call_arg_count();
+  let has_no_selectors = parser.text_expression_root_head_selector_count_between(
+    source,
+    start,
+    limit
+  ) == 0;
+  let has_no_fields = parser.text_expression_root_field_count_between(
+    source,
+    start,
+    limit
+  ) == 0;
+  let has_no_operators = parser.text_expression_root_operator_count_between(
+    source,
+    start,
+    limit
+  ) == 0;
+  let has_no_pipe_binds = parser.text_value_pipe_bind_count_between(
+    source,
+    start,
+    limit,
+    0
+  ) == 0;
+  can_summarize_root
+    && has_no_call_args
+    && has_no_selectors
+    && has_no_fields
+    && has_no_operators
+    && has_no_pipe_binds
 }
 
 fn wasm_byte_base_body_summary_from_binding(
@@ -5208,18 +5542,30 @@ fn wasm_byte_base_body_summary_from_binding(
   codes: layout.HeapArray(i32),
   binding: WasmFunctionBinding
 ) -> WasmBodySummary {
-  match wasm_function_match_body_summary_from_binding(context_value, codes, binding) {
-    Some(summary) => summary,
-    None => match wasm_scalar_base_body_summary_from_binding(
-      context_value,
-      codes,
-      binding
-    ) {
-      Some(summary) => summary,
-      None => wasm_instruction_summary(
-        wasm_byte_body_instruction_from_binding(context_value, codes, binding)
-      ),
-    },
+  let body = wasm_binding_body(context_value, codes, binding);
+  core.Option::or_else_with(
+    wasm_function_match_body_summary_from_binding(context_value, codes, binding),
+    body,
+    WasmBindingBody::scalar_base_summary
+  ) \maybe_summary -> core.Option::unwrap_or_else_with(
+    maybe_summary,
+    body,
+    WasmBindingBody::fallback_summary
+  )
+}
+
+fn wasm_local_set_summary_from_segment(
+  lowering: WasmCallLowering,
+  segment: parser.TextArgumentSegment,
+  wasm_index: i32
+) -> core.Option(WasmBodySummary) {
+  do @monad(core.Option(_)) {
+    option.guard(wasm_index < wasm_small_immediate_limit());
+    summary <- WasmCallLowering::arg_summary(lowering, segment);
+    pure(wasm_body_summary_push_instruction(
+      summary,
+      wasm_body_instruction(wasm_local_set_opcode(), wasm_index)
+    ))
   }
 }
 
@@ -5233,16 +5579,7 @@ fn wasm_scalar_local_let_initializer_summary(
     local_index
   );
   let wasm_index = lowering.runtime_param_count + local_index;
-  match wasm_index < wasm_small_immediate_limit() {
-    false => option.none(),
-    true => match WasmCallLowering::arg_summary(lowering, segment) {
-      None => option.none(),
-      Some(summary) => option.some(wasm_body_summary_push_instruction(
-        summary,
-        wasm_body_instruction(wasm_local_set_opcode(), wasm_index)
-      )),
-    },
-  }
+  wasm_local_set_summary_from_segment(lowering, segment, wasm_index)
 }
 
 fn wasm_scalar_local_let_initializer_summaries(
@@ -5251,9 +5588,10 @@ fn wasm_scalar_local_let_initializer_summaries(
   local_index: i32,
   local_count: i32
 ) -> core.Option(WasmBodySummary) {
-  match local_index >= local_count {
-    true => option.some(summary),
-    false => do @monad(core.Option(_)) {
+  if local_index >= local_count {
+    option.some(summary)
+  } else {
+    do @monad(core.Option(_)) {
       local_summary <- wasm_scalar_local_let_initializer_summary(
         lowering,
         local_index
@@ -5264,7 +5602,7 @@ fn wasm_scalar_local_let_initializer_summaries(
         local_index + 1,
         local_count
       )
-    },
+    }
   }
 }
 
@@ -5272,12 +5610,13 @@ fn wasm_local_let_summary_is_current(
   lowering: WasmCallLowering,
   scan: WasmLocalLetSummaryScan
 ) -> bool {
-  match parser.text_depth_is_top_level(scan.brace_depth, scan.paren_depth) {
-    false => false,
-    true => match textlex.token_at(lowering.context_value.source, scan.index).kind {
+  if parser.text_depth_is_top_level(scan.brace_depth, scan.paren_depth) {
+    match textlex.token_at(lowering.context_value.source, scan.index).kind {
       LetKw => true,
       _ => false,
-    },
+    }
+  } else {
+    false
   }
 }
 
@@ -5337,13 +5676,14 @@ fn wasm_local_let_summary_value_segment(
     scan.index,
     statement_end
   );
-  match equal < statement_end {
-    true => parser.text_argument_segment_present(
+  if equal < statement_end {
+    parser.text_argument_segment_present(
       lowering.context_value.source,
       equal + 1,
       statement_end
-    ),
-    false => parser.text_argument_segment_none(statement_end),
+    )
+  } else {
+    parser.text_argument_segment_none(statement_end)
   }
 }
 
@@ -5362,16 +5702,7 @@ fn wasm_local_let_initializer_summary_at_scan(
     statement_end
   );
   let wasm_index = lowering.runtime_param_count + scan.total;
-  match wasm_index < wasm_small_immediate_limit() {
-    false => option.none(),
-    true => match WasmCallLowering::arg_summary(lowering, segment) {
-      None => option.none(),
-      Some(summary) => option.some(wasm_body_summary_push_instruction(
-        summary,
-        wasm_body_instruction(wasm_local_set_opcode(), wasm_index)
-      )),
-    },
-  }
+  wasm_local_set_summary_from_segment(lowering, segment, wasm_index)
 }
 
 fn wasm_local_let_initializer_summary_scan(
@@ -5380,35 +5711,59 @@ fn wasm_local_let_initializer_summary_scan(
   scan: WasmLocalLetSummaryScan,
   local_count: i32
 ) -> core.Option(WasmBodySummary) {
-  match scan.total >= local_count {
-    true => option.some(summary),
-    false => match scan.index >= scan.limit {
-      true => option.some(summary),
-      false => match wasm_local_let_summary_is_current(lowering, scan) {
-        false => rec(
-          lowering,
-          summary,
-          wasm_local_let_summary_advance(lowering, scan),
-          local_count
-        ),
-        true => parser.text_local_let_statement_end(
-          lowering.context_value.source,
-          scan.index,
-          scan.limit
-        ) \statement_end -> do @monad(core.Option(_)) {
-          local_summary <- wasm_local_let_initializer_summary_at_scan(
-            lowering,
-            scan
-          );
-          wasm_local_let_initializer_summary_scan(
-            lowering,
-            wasm_body_summary_append(summary, local_summary),
-            wasm_local_let_summary_after_statement(scan, statement_end),
-            local_count
+  if scan.total >= local_count {
+    option.some(summary)
+  } else if scan.index >= scan.limit {
+    option.some(summary)
+  } else if wasm_local_let_summary_is_current(lowering, scan) {
+    parser.text_local_let_statement_end(
+      lowering.context_value.source,
+      scan.index,
+      scan.limit
+    ) \statement_end -> do @monad(core.Option(_)) {
+      local_summary <- wasm_local_let_initializer_summary_at_scan(
+        lowering,
+        scan
+      );
+      wasm_local_let_initializer_summary_scan(
+        lowering,
+        wasm_body_summary_append(summary, local_summary),
+        wasm_local_let_summary_after_statement(scan, statement_end),
+        local_count
+      )
+    }
+  } else {
+    rec(
+      lowering,
+      summary,
+      wasm_local_let_summary_advance(lowering, scan),
+      local_count
+    )
+  }
+}
+
+fn wasm_local_let_prefixed_body_summary_for_lowering(
+  lowering: WasmCallLowering,
+  body_summary: WasmBodySummary,
+  local_count: i32
+) -> core.Option(WasmBodySummary) {
+  if local_count <= 0 {
+    option.some(body_summary)
+  } else {
+    do @monad(core.Option(_)) {
+      local_summary <- wasm_local_let_initializer_summary_scan(
+        lowering,
+        wasm_body_summary_empty(),
+        wasm_local_let_summary_scan_from_parser(
+          parser.text_function_local_let_bounds_scan(
+            lowering.context_value.source,
+            lowering.current.cursor
           )
-        },
-      },
-    },
+        ),
+        local_count
+      );
+      pure(wasm_body_summary_append(local_summary, body_summary))
+    }
   }
 }
 
@@ -5420,28 +5775,11 @@ fn wasm_scalar_local_let_prefixed_body_summary_from_binding(
 ) -> core.Option(WasmBodySummary) {
   do @monad(core.Option(_)) {
     option.guard(abi_class_is_scalar(binding.body_abi_class));
-    match binding.local_count <= 0 {
-      true => option.some(body_summary),
-      false => do @monad(core.Option(_)) {
-        lowering <- pure(wasm_call_lowering_for_binding(
-          context_value,
-          codes,
-          binding
-        ));
-        local_summary <- wasm_local_let_initializer_summary_scan(
-          lowering,
-          wasm_body_summary_empty(),
-          wasm_local_let_summary_scan_from_parser(
-            parser.text_function_local_let_bounds_scan(
-              context_value.source,
-              binding.cursor
-            )
-          ),
-          binding.local_count
-        );
-        pure(wasm_body_summary_append(local_summary, body_summary))
-      },
-    }
+    wasm_local_let_prefixed_body_summary_for_lowering(
+      wasm_call_lowering_for_binding(context_value, codes, binding),
+      body_summary,
+      binding.local_count
+    )
   }
 }
 
@@ -5600,15 +5938,17 @@ fn wasm_section_export_payload_size(
   scan: WasmSectionScan,
   fact: WasmFunctionFact
 ) -> i32 {
-  match fact.export_tag == 1 {
-    true => scan.export_payload_size
+  let is_export = fact.export_tag == 1;
+  if is_export {
+    scan.export_payload_size
       + wasm_export_entry_size(
         text_token_width(
           source,
           parser.text_declaration_name_index(source, current.cursor, decl)
         )
-      ),
-    false => scan.export_payload_size,
+      )
+  } else {
+    scan.export_payload_size
   }
 }
 
@@ -5617,12 +5957,14 @@ fn wasm_section_export_payload_signature(
   fact: WasmFunctionFact,
   function_index: i32
 ) -> i32 {
-  match fact.export_tag == 1 {
-    true => textmodel.signature_mix(
+  let is_export = fact.export_tag == 1;
+  if is_export {
+    textmodel.signature_mix(
       scan.export_payload_signature,
       wasm_export_entry_signature(fact.name_hash, function_index)
-    ),
-    false => scan.export_payload_signature,
+    )
+  } else {
+    scan.export_payload_signature
   }
 }
 
@@ -5834,9 +6176,10 @@ fn wasm_function_lookup_next_index(
   function_index: i32,
   is_decl_function: bool
 ) -> i32 {
-  match is_decl_function {
-    true => function_index + 1,
-    false => function_index,
+  if is_decl_function {
+    function_index + 1
+  } else {
+    function_index
   }
 }
 
@@ -5846,39 +6189,42 @@ fn wasm_function_lookup_for_hash_at(
   target_hash: i32,
   function_index: i32
 ) -> WasmFunctionLookup {
-  match current.cursor < textlex.length(source) {
-    false => wasm_function_lookup_not_found(function_index),
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
       current,
       source,
       function_index
     ) {
       Err(_) => wasm_function_lookup_not_found(function_index),
-      Ok(result) => match is_function(source, current, result) {
-        false => wasm_function_lookup_for_hash_at(
-          source,
-          parser.next_text_declaration_state(result.state, source),
-          target_hash,
-          function_index
-        ),
-        true => parser.text_declaration_name_hash(
+      Ok(result) => if is_function(source, current, result) {
+        parser.text_declaration_name_hash(
           source,
           current.cursor,
           result.value.decl
-        ) \name_hash -> match name_hash == target_hash {
-          true => wasm_function_lookup_found(
+        ) \name_hash -> if name_hash == target_hash {
+          wasm_function_lookup_found(
             function_index,
             parser.text_function_runtime_param_count(source, current.cursor)
-          ),
-          false => wasm_function_lookup_for_hash_at(
+          )
+        } else {
+          wasm_function_lookup_for_hash_at(
             source,
             parser.next_text_declaration_state(result.state, source),
             target_hash,
             wasm_function_lookup_next_index(function_index, true)
-          ),
-        },
+          )
+        }
+      } else {
+        wasm_function_lookup_for_hash_at(
+          source,
+          parser.next_text_declaration_state(result.state, source),
+          target_hash,
+          function_index
+        )
       },
-    },
+    }
+  } else {
+    wasm_function_lookup_not_found(function_index)
   }
 }
 
@@ -5906,12 +6252,13 @@ fn is_pub_function(
       result.value.decl
     )
   );
-  match is_function {
-    true => match textlex.token_at(source, current.cursor).kind {
+  if is_function {
+    match textlex.token_at(source, current.cursor).kind {
       PubKw => true,
       _ => false,
-    },
-    false => false,
+    }
+  } else {
+    false
   }
 }
 
@@ -5979,9 +6326,11 @@ fn checked_local_name_hash(
   index: i32,
   equal: i32
 ) -> i32 {
-  match checked_local_is_multi_bind(context_value, index, equal) {
-    true => 0,
-    false => checked_local_identifier_hash(context_value, index + 1),
+  let is_multi_bind = checked_local_is_multi_bind(context_value, index, equal);
+  if is_multi_bind {
+    0
+  } else {
+    checked_local_identifier_hash(context_value, index + 1)
   }
 }
 
@@ -5991,13 +6340,15 @@ fn checked_local_value_root_kind(
   statement_end: i32
 ) -> i32 {
   let equal = checked_local_equal_index(context_value, index, statement_end);
-  match equal < statement_end {
-    true => parser.text_expression_root_head_kind_tag_between(
+  let has_value = equal < statement_end;
+  if has_value {
+    parser.text_expression_root_head_kind_tag_between(
       context_value.source,
       equal + 1,
       statement_end
-    ),
-    false => parser.text_expression_root_none_tag(),
+    )
+  } else {
+    parser.text_expression_root_none_tag()
   }
 }
 
@@ -6007,13 +6358,15 @@ fn checked_local_value_root_hash(
   statement_end: i32
 ) -> i32 {
   let equal = checked_local_equal_index(context_value, index, statement_end);
-  match equal < statement_end {
-    true => parser.text_expression_root_head_hash_between(
+  let has_value = equal < statement_end;
+  if has_value {
+    parser.text_expression_root_head_hash_between(
       context_value.source,
       equal + 1,
       statement_end
-    ),
-    false => 0,
+    )
+  } else {
+    0
   }
 }
 
@@ -6030,13 +6383,15 @@ fn checked_local_expected_type_class(
     0,
     textlex.punctuation_score(textlex.PunctColon)
   );
-  match colon < equal {
-    true => parser.text_annotation_resolved_type_class_tag_between(
+  let has_annotation = colon < equal;
+  if has_annotation {
+    parser.text_annotation_resolved_type_class_tag_between(
       context_value.source,
       colon + 1,
       equal
-    ),
-    false => parser.text_type_class_unknown_tag(),
+    )
+  } else {
+    parser.text_type_class_unknown_tag()
   }
 }
 
@@ -6046,13 +6401,15 @@ fn checked_local_actual_type_class(
   statement_end: i32
 ) -> i32 {
   let equal = checked_local_equal_index(context_value, index, statement_end);
-  match equal < statement_end {
-    true => parser.text_expression_root_type_class_tag_between(
+  let has_value = equal < statement_end;
+  if has_value {
+    parser.text_expression_root_type_class_tag_between(
       context_value.source,
       equal + 1,
       statement_end
-    ),
-    false => parser.text_type_class_unknown_tag(),
+    )
+  } else {
+    parser.text_type_class_unknown_tag()
   }
 }
 
@@ -6119,16 +6476,20 @@ fn checked_local_statement_end(
   context_value: FactContext,
   scan: CheckedLocalScan
 ) -> i32 {
-  match scan.index >= scan.limit {
-    true => scan.limit,
-    false => match parser.text_semicolon_boundary(
+  let done = scan.index >= scan.limit;
+  if done {
+    scan.limit
+  } else {
+    let is_boundary = parser.text_semicolon_boundary(
       context_value.source,
       scan.index,
       scan.brace_depth,
       scan.paren_depth
-    ) {
-      true => scan.index,
-      false => checked_local_statement_end(
+    );
+    if is_boundary {
+      scan.index
+    } else {
+      checked_local_statement_end(
         context_value,
         CheckedLocalScan {
           index: scan.index + 1,
@@ -6146,8 +6507,8 @@ fn checked_local_statement_end(
           total: scan.total,
           function_name_hash: scan.function_name_hash,
         }
-      ),
-    },
+      )
+    }
   }
 }
 
@@ -6167,22 +6528,26 @@ fn checked_local_top_level_next_total(
         )
       )
     ),
-    Symbol => match parser.text_type_assert_token_matches(
-      context_value.source,
-      scan.index,
-      scan.limit
-    ) {
-      true => textmodel.signature_mix(
-        scan.total,
-        checked_local_fact_signature(
-          checked_local_type_assert_fact(
-            context_value,
-            scan.function_name_hash,
-            scan.index
+    Symbol => {
+      let is_type_assert = parser.text_type_assert_token_matches(
+        context_value.source,
+        scan.index,
+        scan.limit
+      );
+      if is_type_assert {
+        textmodel.signature_mix(
+          scan.total,
+          checked_local_fact_signature(
+            checked_local_type_assert_fact(
+              context_value,
+              scan.function_name_hash,
+              scan.index
+            )
           )
         )
-      ),
-      false => scan.total,
+      } else {
+        scan.total
+      }
     },
     _ => scan.total,
   }
@@ -6192,9 +6557,14 @@ fn checked_local_next_total(
   context_value: FactContext,
   scan: CheckedLocalScan
 ) -> i32 {
-  match parser.text_depth_is_top_level(scan.brace_depth, scan.paren_depth) {
-    true => checked_local_top_level_next_total(context_value, scan),
-    false => scan.total,
+  let is_top_level = parser.text_depth_is_top_level(
+    scan.brace_depth,
+    scan.paren_depth
+  );
+  if is_top_level {
+    checked_local_top_level_next_total(context_value, scan)
+  } else {
+    scan.total
   }
 }
 
@@ -6225,16 +6595,18 @@ fn checked_local_record_scan(
   context_value: FactContext,
   scan: CheckedLocalScan
 ) -> i32 {
-  match scan.index >= scan.limit {
-    true => scan.total,
-    false => rec(
+  let done = scan.index >= scan.limit;
+  if done {
+    scan.total
+  } else {
+    rec(
       context_value,
       checked_local_next_scan(
         context_value,
         scan,
         checked_local_next_total(context_value, scan)
       )
-    ),
+    )
   }
 }
 
@@ -6289,9 +6661,14 @@ fn fact_record_scan_next_total(
   total: i32,
   result: combinator.Reply(parser.DeclFrame)
 ) -> i32 {
-  match parser.is_text_external_import_start(context_value.source, current.cursor) {
-    true => total,
-    false => match kind {
+  let is_external_import = parser.is_text_external_import_start(
+    context_value.source,
+    current.cursor
+  );
+  if is_external_import {
+    total
+  } else {
+    match kind {
       FactRecordScanKind::ScanCheckedDeclaration => textmodel.signature_mix(
         total,
         checked_decl_fact_signature(
@@ -6317,33 +6694,41 @@ fn fact_record_scan_next_total(
           checked_expr_shape_fact(context_value.source, current, result)
         )
       ),
-      FactRecordScanKind::ScanCheckedLocal => match is_function(
-        context_value.source,
-        current,
-        result
-      ) {
-        true => checked_local_function_signature(
-          context_value,
+      FactRecordScanKind::ScanCheckedLocal => {
+        let should_record = is_function(
+          context_value.source,
           current,
-          total,
           result
-        ),
-        false => total,
-      },
-      FactRecordScanKind::ScanLoweredExport => match is_pub_function(
-        context_value.source,
-        current,
-        result
-      ) {
-        true => textmodel.signature_mix(
-          total,
-          lowered_export_fact_signature(
-            lowered_export_fact(context_value.source, current, result)
+        );
+        if should_record {
+          checked_local_function_signature(
+            context_value,
+            current,
+            total,
+            result
           )
-        ),
-        false => total,
+        } else {
+          total
+        }
       },
-    },
+      FactRecordScanKind::ScanLoweredExport => {
+        let should_record = is_pub_function(
+          context_value.source,
+          current,
+          result
+        );
+        if should_record {
+          textmodel.signature_mix(
+            total,
+            lowered_export_fact_signature(
+              lowered_export_fact(context_value.source, current, result)
+            )
+          )
+        } else {
+          total
+        }
+      },
+    }
   }
 }
 
@@ -6353,9 +6738,8 @@ fn FactContext::fact_record_scan(
   current: combinator.ParseState,
   total: i32
 ) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
       current,
       context_value.source,
       total
@@ -6367,7 +6751,37 @@ fn FactContext::fact_record_scan(
         parser.next_text_declaration_state(result.state, context_value.source),
         fact_record_scan_next_total(kind, context_value, current, total, result)
       ),
-    },
+    }
+  } else {
+    total
+  }
+}
+
+fn checked_declaration_record_scan_next_total(
+  context_value: FactContext,
+  env: parser.TextResolutionEnv,
+  current: combinator.ParseState,
+  total: i32,
+  result: combinator.Reply(parser.DeclFrame)
+) -> i32 {
+  let is_external_import = parser.is_text_external_import_start(
+    context_value.source,
+    current.cursor
+  );
+  if is_external_import {
+    total
+  } else {
+    textmodel.signature_mix(
+      total,
+      checked_decl_fact_signature(
+        checked_decl_fact_with_env(
+          context_value.source,
+          current,
+          result,
+          env
+        )
+      )
+    )
   }
 }
 
@@ -6377,9 +6791,8 @@ fn FactContext::checked_declaration_record_scan(
   current: combinator.ParseState,
   total: i32
 ) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
       current,
       context_value.source,
       total
@@ -6389,25 +6802,45 @@ fn FactContext::checked_declaration_record_scan(
         context_value,
         env,
         parser.next_text_declaration_state(result.state, context_value.source),
-        match parser.is_text_external_import_start(
-          context_value.source,
-          current.cursor
-        ) {
-          true => total,
-          false => textmodel.signature_mix(
-            total,
-            checked_decl_fact_signature(
-              checked_decl_fact_with_env(
-                context_value.source,
-                current,
-                result,
-                env
-              )
-            )
-          ),
-        }
+        checked_declaration_record_scan_next_total(
+          context_value,
+          env,
+          current,
+          total,
+          result
+        )
       ),
-    },
+    }
+  } else {
+    total
+  }
+}
+
+fn checked_expression_record_scan_next_total(
+  context_value: FactContext,
+  env: parser.TextResolutionEnv,
+  current: combinator.ParseState,
+  total: i32,
+  result: combinator.Reply(parser.DeclFrame)
+) -> i32 {
+  let is_external_import = parser.is_text_external_import_start(
+    context_value.source,
+    current.cursor
+  );
+  if is_external_import {
+    total
+  } else {
+    textmodel.signature_mix(
+      total,
+      checked_expr_fact_signature(
+        checked_expr_fact_with_env(
+          context_value.source,
+          current,
+          result,
+          env
+        )
+      )
+    )
   }
 }
 
@@ -6417,9 +6850,8 @@ fn FactContext::checked_expression_record_scan(
   current: combinator.ParseState,
   total: i32
 ) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
       current,
       context_value.source,
       total
@@ -6429,25 +6861,45 @@ fn FactContext::checked_expression_record_scan(
         context_value,
         env,
         parser.next_text_declaration_state(result.state, context_value.source),
-        match parser.is_text_external_import_start(
-          context_value.source,
-          current.cursor
-        ) {
-          true => total,
-          false => textmodel.signature_mix(
-            total,
-            checked_expr_fact_signature(
-              checked_expr_fact_with_env(
-                context_value.source,
-                current,
-                result,
-                env
-              )
-            )
-          ),
-        }
+        checked_expression_record_scan_next_total(
+          context_value,
+          env,
+          current,
+          total,
+          result
+        )
       ),
-    },
+    }
+  } else {
+    total
+  }
+}
+
+fn checked_expression_shape_scan_next_total(
+  context_value: FactContext,
+  env: parser.TextResolutionEnv,
+  current: combinator.ParseState,
+  total: i32,
+  result: combinator.Reply(parser.DeclFrame)
+) -> i32 {
+  let is_external_import = parser.is_text_external_import_start(
+    context_value.source,
+    current.cursor
+  );
+  if is_external_import {
+    total
+  } else {
+    textmodel.signature_mix(
+      total,
+      checked_expr_shape_fact_signature(
+        checked_expr_shape_fact_with_env(
+          context_value.source,
+          current,
+          result,
+          env
+        )
+      )
+    )
   }
 }
 
@@ -6457,9 +6909,8 @@ fn FactContext::checked_expression_shape_scan(
   current: combinator.ParseState,
   total: i32
 ) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
       current,
       context_value.source,
       total
@@ -6469,25 +6920,17 @@ fn FactContext::checked_expression_shape_scan(
         context_value,
         env,
         parser.next_text_declaration_state(result.state, context_value.source),
-        match parser.is_text_external_import_start(
-          context_value.source,
-          current.cursor
-        ) {
-          true => total,
-          false => textmodel.signature_mix(
-            total,
-            checked_expr_shape_fact_signature(
-              checked_expr_shape_fact_with_env(
-                context_value.source,
-                current,
-                result,
-                env
-              )
-            )
-          ),
-        }
+        checked_expression_shape_scan_next_total(
+          context_value,
+          env,
+          current,
+          total,
+          result
+        )
       ),
-    },
+    }
+  } else {
+    total
   }
 }
 
@@ -6497,33 +6940,36 @@ fn WasmByteContext::wasm_function_record_scan(
   current: combinator.ParseState,
   total: i32
 ) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
+  let has_more = current.cursor < textlex.length(context_value.source);
+  if has_more {
+    match parser.parse_text_declaration_stream(
       current,
       context_value.source,
       total
     ) {
       Err(_) => total,
-      Ok(result) => rec(
-        context_value,
-        codes,
-        parser.next_text_declaration_state(result.state, context_value.source),
-        match is_function(
-          context_value.source,
-          current,
-          result
-        ) {
-          true => textmodel.signature_mix(
+      Ok(result) => {
+        let should_record = is_function(context_value.source, current, result);
+        let next_total = if should_record {
+          textmodel.signature_mix(
             total,
             wasm_function_fact_signature(
               wasm_byte_function_fact(context_value, codes, current, result)
             )
-          ),
-          false => total,
-        }
-      ),
-    },
+          )
+        } else {
+          total
+        };
+        rec(
+          context_value,
+          codes,
+          parser.next_text_declaration_state(result.state, context_value.source),
+          next_total
+        )
+      },
+    }
+  } else {
+    total
   }
 }
 
@@ -6534,24 +6980,18 @@ fn WasmByteContext::wasm_function_record_scan_with_env(
   total: i32,
   env: parser.TextResolutionEnv
 ) -> i32 {
-  match current.cursor < textlex.length(context_value.source) {
-    false => total,
-    true => match parser.parse_text_declaration_stream(
+  let has_more = current.cursor < textlex.length(context_value.source);
+  if has_more {
+    match parser.parse_text_declaration_stream(
       current,
       context_value.source,
       total
     ) {
       Err(_) => total,
-      Ok(result) => rec(
-        context_value,
-        codes,
-        parser.next_text_declaration_state(result.state, context_value.source),
-        match is_function(
-          context_value.source,
-          current,
-          result
-        ) {
-          true => textmodel.signature_mix(
+      Ok(result) => {
+        let should_record = is_function(context_value.source, current, result);
+        let next_total = if should_record {
+          textmodel.signature_mix(
             total,
             wasm_function_fact_signature(
               wasm_byte_function_fact_with_env(
@@ -6562,12 +7002,21 @@ fn WasmByteContext::wasm_function_record_scan_with_env(
                 env
               )
             )
-          ),
-          false => total,
-        },
-        env
-      ),
-    },
+          )
+        } else {
+          total
+        };
+        rec(
+          context_value,
+          codes,
+          parser.next_text_declaration_state(result.state, context_value.source),
+          next_total,
+          env
+        )
+      },
+    }
+  } else {
+    total
   }
 }
 
@@ -6578,9 +7027,9 @@ fn WasmSourceEnv::wasm_function_record_signature_loop(
   index: i32,
   total: i32
 ) -> i32 {
-  match index < layout.HeapArray::len(WasmFunctionBinding, env.functions) {
-    false => total,
-    true => layout.HeapArray::get(
+  let has_more = index < layout.HeapArray::len(WasmFunctionBinding, env.functions);
+  if has_more {
+    layout.HeapArray::get(
       WasmFunctionBinding,
       env.functions,
       index
@@ -6599,7 +7048,9 @@ fn WasmSourceEnv::wasm_function_record_signature_loop(
           )
         )
       )
-    ),
+    )
+  } else {
+    total
   }
 }
 
@@ -6622,30 +7073,37 @@ fn WasmByteContext::wasm_section_record_scan(
   current: combinator.ParseState,
   scan: WasmSectionScan
 ) -> WasmSectionScan {
-  match current.cursor < textlex.length(context_value.source) {
-    false => scan,
-    true => match parser.parse_text_declaration_stream(
+  let has_more = current.cursor < textlex.length(context_value.source);
+  if has_more {
+    match parser.parse_text_declaration_stream(
       current,
       context_value.source,
       scan.function_count
     ) {
       Err(_) => scan,
-      Ok(result) => rec(
-        context_value,
-        codes,
-        parser.next_text_declaration_state(result.state, context_value.source),
-        match is_function(context_value.source, current, result) {
-          true => wasm_section_scan_function(
+      Ok(result) => {
+        let should_record = is_function(context_value.source, current, result);
+        let next_scan = if should_record {
+          wasm_section_scan_function(
             context_value,
             codes,
             current,
             result,
             scan
-          ),
-          false => scan,
-        }
-      ),
-    },
+          )
+        } else {
+          scan
+        };
+        rec(
+          context_value,
+          codes,
+          parser.next_text_declaration_state(result.state, context_value.source),
+          next_scan
+        )
+      },
+    }
+  } else {
+    scan
   }
 }
 

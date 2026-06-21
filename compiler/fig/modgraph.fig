@@ -137,13 +137,47 @@ fn has_import_edge(
   importer_id: i32,
   import_id: i32
 ) -> bool {
-  match importer_id == import_id {
-    true => true,
-    false => graph_data.Graph::has_edge(
+  if importer_id == import_id {
+    true
+  } else {
+    graph_data.Graph::has_edge(
       graph.topology,
       importer_id,
       import_id
-    ),
+    )
+  }
+}
+
+fn import_cycle_scan_has_edge(graph: ModuleGraph, index: i32) -> bool {
+  index < graph_data.Graph::edge_count(graph.topology)
+}
+
+fn import_edge_at(graph: ModuleGraph, index: i32) -> graph_data.Edge {
+  vec.Vec::get_t(
+    graph_data.Edge,
+    graph.topology.edges,
+    index
+  )
+}
+
+fn import_edge_forms_cycle(graph: ModuleGraph, edge: graph_data.Edge) -> bool {
+  graph_data.Graph::reachable_bounded(
+    graph.topology,
+    edge.to,
+    edge.from,
+    graph_data.Graph::edge_count(graph.topology)
+  )
+}
+
+fn import_cycle_count_next_total(
+  graph: ModuleGraph,
+  edge: graph_data.Edge,
+  total: i32
+) -> i32 {
+  if import_edge_forms_cycle(graph, edge) {
+    total + 1
+  } else {
+    total
   }
 }
 
@@ -152,21 +186,15 @@ fn import_cycle_count_loop(
   index: i32,
   total: i32
 ) -> i32 {
-  match index < graph_data.Graph::edge_count(graph.topology) {
-    true => vec.Vec::get_t(
-      graph_data.Edge,
-      graph.topology.edges,
-      index
-    ) \edge -> match graph_data.Graph::reachable_bounded(
-      graph.topology,
-      edge.to,
-      edge.from,
-      graph_data.Graph::edge_count(graph.topology)
-    ) {
-      true => rec(graph, index + 1, total + 1),
-      false => rec(graph, index + 1, total),
-    },
-    false => total,
+  if import_cycle_scan_has_edge(graph, index) {
+    let edge = import_edge_at(graph, index);
+    rec(
+      graph,
+      index + 1,
+      import_cycle_count_next_total(graph, edge, total)
+    )
+  } else {
+    total
   }
 }
 

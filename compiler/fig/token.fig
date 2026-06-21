@@ -256,8 +256,9 @@ fn entry(seed: i32) -> i32 {
     normalize_generated_kind((seed % GeneratedTokenCode::LiteralType) + GeneratedTokenCode::Import),
     source_span
   );
-  token_score(token) +(match is_declaration_start(token.kind) {
-    true => 100,
-    false => 0,
-  })
+  if is_declaration_start(token.kind) {
+    token_score(token) + 100
+  } else {
+    token_score(token)
+  }
 }

@@ -1,0 +1,2082 @@
+const ast = @import("./ast.fig");
+const combinator = @import("./combinator.fig");
+const core = @import("prelude.core");
+const diagnostic = @import("./diagnostic.fig");
+const layout = @import("prelude.layout");
+const monad = @import("prelude.monad");
+const option = @import("prelude.option");
+const vec = @import("prelude.vec");
+const parser = @import("./parser.fig");
+const span = @import("./span.fig");
+const textlex = @import("./textlex.fig");
+const textmodel = @import("./textmodel.fig");
+const textsummary = @import("./textsummary.fig");
+const operators = @import("prelude.operators");
+
+type CheckedFactKind = enum(i32) {
+  CheckedDeclarationType = 1,
+  CheckedDiagnostic = 2,
+  LoweredDeclaration = 3,
+  CheckedDeclarationRecord = 4,
+  CheckedExpressionRecord = 5,
+  CheckedLocalEnvironment = 6,
+  CheckedExpressionShape = 7,
+  CheckedExpressionChildRecord = 8,
+  LoweredExportRecord = 9,
+  WasmFunctionRecord = 10,
+  WasmSectionRecord = 11,
+  WasmByteRecord = 12
+}
+
+type FactRecordScanKind = enum(i32) {
+  ScanCheckedDeclaration = 1,
+  ScanCheckedExpression = 2,
+  ScanCheckedExpressionChild = 3,
+  ScanCheckedExpressionShape = 4,
+  ScanCheckedLocal = 5,
+  ScanLoweredExport = 6
+}
+
+type WasmRecordScanKind = enum(i32) {
+  ScanWasmFunctionRecord = 1,
+  ScanWasmSectionRecord = 2,
+  ScanWasmByteRecord = 3
+}
+
+type WasmSimpleSegmentKind = enum(i32) {
+  Unsupported = 0,
+  NumberI32 = 1,
+  Bool = 2,
+  Identifier = 3
+}
+
+type WasmNonBranchSegmentKind = enum(i32) {
+  Operator = 1,
+  Call = 2,
+  Simple = 3
+}
+
+type CheckedLocalFactKind = enum(i32) {
+  LocalLet = 1,
+  LocalTypeAssert = 2
+}
+
+type FactContext = struct {
+  source: textlex.TextTokenStream,
+}
+
+const summary_resolved_declared_type_class =
+  textmodel.SummaryKind::ResolvedDeclaredTypeClassSignature;
+const summary_resolved_value_body_type_class =
+  textmodel.SummaryKind::ResolvedValueBodyTypeClassSignature;
+const summary_resolved_simple_body_type_check =
+  textmodel.SummaryKind::ResolvedSimpleBodyTypeCheckSignature;
+const summary_simple_body_type_check =
+  textmodel.SummaryKind::SimpleBodyTypeCheckSignature;
+const summary_resolved_declared_abi_class =
+  textmodel.SummaryKind::ResolvedDeclaredAbiClassSignature;
+const summary_resolved_value_body_abi_class =
+  textmodel.SummaryKind::ResolvedValueBodyAbiClassSignature;
+const summary_resolved_export_abi =
+  textmodel.SummaryKind::ResolvedExportAbiSignature;
+
+type CheckedLocalScan = struct {
+  index: i32,
+  limit: i32,
+  brace_depth: i32,
+  paren_depth: i32,
+  total: i32,
+  function_name_hash: i32,
+}
+
+type WasmLocalGetTarget = struct {
+  found: bool,
+  index: i32,
+  type_class: i32,
+}
+
+type WasmCallTarget = struct {
+  found: bool,
+  function_index: i32,
+  arg_count: i32,
+}
+
+type CheckedDeclFact = struct {
+  kind_tag: i32,
+  name_hash: i32,
+  symbol_type_class: i32,
+  symbol_payload: i32,
+  expected_type_class: i32,
+  actual_type_class: i32,
+  check_status: i32,
+  diagnostic_code: i32,
+  lowered_abi_class: i32,
+}
+
+type CheckedExprFact = struct {
+  kind_tag: i32,
+  name_hash: i32,
+  root_kind: i32,
+  root_hash: i32,
+  root_child_count: i32,
+  root_child_signature_hash: i32,
+  root_grandchild_count: i32,
+  root_grandchild_signature_hash: i32,
+  root_descendant_count: i32,
+  root_descendant_signature_hash: i32,
+  root_type_class: i32,
+  resolved_type_class: i32,
+  expected_type_class: i32,
+  check_status: i32,
+  diagnostic_code: i32,
+  lowered_value_tag: i32,
+  lowered_value_primary: i32,
+  lowered_value_secondary: i32,
+}
+
+type CheckedLocalFact = struct {
+  function_name_hash: i32,
+  local_kind_tag: i32,
+  local_name_hash: i32,
+  value_root_kind: i32,
+  value_root_hash: i32,
+  expected_type_class: i32,
+  actual_type_class: i32,
+  check_status: i32,
+  diagnostic_code: i32,
+}
+
+type CheckedExprShapeFact = struct {
+  kind_tag: i32,
+  name_hash: i32,
+  root_kind: i32,
+  root_hash: i32,
+  root_selector_count: i32,
+  root_slot_count: i32,
+  root_call_arg_count: i32,
+  root_field_count: i32,
+  root_operator_count: i32,
+  operator_count: i32,
+  operator_signature_hash: i32,
+  match_count: i32,
+  match_arm_count: i32,
+  do_count: i32,
+  do_bind_count: i32,
+  pipe_bind_count: i32,
+  call_count: i32,
+  function_match_body_count: i32,
+  name_token_count: i32,
+  name_token_signature_hash: i32,
+  literal_token_count: i32,
+  literal_token_signature_hash: i32,
+  diagnostic_code: i32,
+}
+
+type LoweredExportFact = struct {
+  name_hash: i32,
+  param_count: i32,
+  return_abi_class: i32,
+}
+
+type WasmFunctionFact = struct {
+  name_hash: i32,
+  export_tag: i32,
+  runtime_param_count: i32,
+  local_count: i32,
+  result_val_type: i32,
+  body_opcode: i32,
+  body_immediate: i32,
+  terminator_opcode: i32,
+  body_size: i32,
+  diagnostic_code: i32,
+}
+
+type WasmBodyInstruction = struct {
+  opcode: i32,
+  immediate: i32,
+}
+
+type WasmBodyPlan = struct {
+  first_opcode: i32,
+  first_immediate: i32,
+  byte_size: i32,
+  instructions: vec.Vec(WasmBodyInstruction),
+}
+
+type WasmBodySummary = struct {
+  first_opcode: i32,
+  first_immediate: i32,
+  byte_size: i32,
+}
+
+type WasmLocalLetSummaryScan = struct {
+  index: i32,
+  limit: i32,
+  brace_depth: i32,
+  paren_depth: i32,
+  total: i32,
+}
+
+type WasmFunctionLookup = struct {
+  index: i32,
+  runtime_param_count: i32,
+  found: bool,
+}
+
+fn wasm_function_lookup_missing() -> WasmFunctionLookup {
+  WasmFunctionLookup {
+    index: 0,
+    runtime_param_count: 0,
+    found: false,
+  }
+}
+
+type WasmSectionFact = struct {
+  section_id: i32,
+  item_count: i32,
+  payload_size: i32,
+  payload_signature: i32,
+  diagnostic_signature: i32,
+}
+
+type WasmByteSectionFact = struct {
+  section_id: i32,
+  payload_size: i32,
+  payload_leb_size: i32,
+  section_size: i32,
+  header_signature: i32,
+  payload_signature: i32,
+  diagnostic_signature: i32,
+}
+
+type WasmByteModuleFact = struct {
+  magic_signature: i32,
+  version_signature: i32,
+  section_count: i32,
+  byte_size: i32,
+  section_signature: i32,
+  diagnostic_signature: i32,
+}
+
+type WasmSectionScan = struct {
+  function_count: i32,
+  export_count: i32,
+  type_payload_size: i32,
+  type_payload_signature: i32,
+  function_payload_size: i32,
+  function_payload_signature: i32,
+  export_payload_size: i32,
+  export_payload_signature: i32,
+  code_payload_size: i32,
+  code_payload_signature: i32,
+  diagnostic_signature: i32,
+}
+
+type WasmFunctionBinding = struct {
+  name_hash: i32,
+  index: i32,
+  cursor: i32,
+  runtime_param_count: i32,
+  local_count: i32,
+  expected_type_class: i32,
+  actual_type_class: i32,
+  body_abi_class: i32,
+  result_val_type: i32,
+  terminator_opcode: i32,
+  diagnostic_code: i32,
+  export_tag: i32,
+  body_start: i32,
+  declaration_limit: i32,
+}
+
+type WasmFunctionLookupSlot = struct {
+  name_hash: i32,
+  index: i32,
+  runtime_param_count: i32,
+  occupied: bool,
+}
+
+type WasmSourceEnv = struct {
+  resolution: parser.TextResolutionEnv,
+  functions: layout.HeapArray(WasmFunctionBinding),
+  lookup_slots: layout.HeapArray(WasmFunctionLookupSlot),
+}
+
+type WasmByteContext = struct {
+  source: textlex.TextTokenStream,
+  base_offset: i32,
+  env: WasmSourceEnv,
+}
+
+type WasmBindingBody = struct {
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding,
+}
+
+type WasmScalarBody = struct {
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32,
+}
+
+type WasmCurrentBody = struct {
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32,
+}
+
+fn wasm_byte_context(
+  source: textlex.TextTokenStream,
+  base_offset: i32
+) -> WasmByteContext {
+  WasmByteContext {
+    source: source,
+    base_offset: base_offset,
+    env: WasmSourceEnv::from_source(source),
+  }
+}
+
+fn wasm_binding_body(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  binding: WasmFunctionBinding
+) -> WasmBindingBody {
+  WasmBindingBody {
+    context_value,
+    codes,
+    binding,
+  }
+}
+
+fn wasm_scalar_body(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  body_abi: i32
+) -> WasmScalarBody {
+  WasmScalarBody {
+    context_value,
+    codes,
+    current,
+    body_abi,
+  }
+}
+
+fn wasm_current_body(
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  decl: ast.Decl,
+  body_abi: i32
+) -> WasmCurrentBody {
+  WasmCurrentBody {
+    context_value,
+    codes,
+    current,
+    decl,
+    body_abi,
+  }
+}
+
+fn wasm_byte_context_window_state(
+  context_value: WasmByteContext
+) -> combinator.ParseState {
+  textmodel.full_window_state(context_value.source)
+}
+
+fn wasm_function_binding(
+  name_hash: i32,
+  index: i32,
+  cursor: i32,
+  runtime_param_count: i32,
+  local_count: i32,
+  expected_type_class: i32,
+  actual_type_class: i32,
+  body_abi_class: i32,
+  result_val_type: i32,
+  terminator_opcode: i32,
+  diagnostic_code: i32,
+  export_tag: i32,
+  body_start: i32,
+  declaration_limit: i32
+) -> WasmFunctionBinding {
+  WasmFunctionBinding {
+    name_hash: name_hash,
+    index: index,
+    cursor: cursor,
+    runtime_param_count: runtime_param_count,
+    local_count: local_count,
+    expected_type_class: expected_type_class,
+    actual_type_class: actual_type_class,
+    body_abi_class: body_abi_class,
+    result_val_type: result_val_type,
+    terminator_opcode: terminator_opcode,
+    diagnostic_code: diagnostic_code,
+    export_tag: export_tag,
+    body_start: body_start,
+    declaration_limit: declaration_limit,
+  }
+}
+
+fn WasmSourceEnv::empty(
+  source: textlex.TextTokenStream
+) -> WasmSourceEnv {
+  WasmSourceEnv {
+    resolution: parser.TextResolutionEnv::from_source(source),
+    functions: layout.HeapArray::empty(WasmFunctionBinding),
+    lookup_slots: layout.HeapArray::empty(WasmFunctionLookupSlot),
+  }
+}
+
+fn WasmSourceEnv::push_function(
+  env: WasmSourceEnv,
+  binding: WasmFunctionBinding
+) -> WasmSourceEnv {
+  WasmSourceEnv {
+    resolution: env.resolution,
+    functions: layout.HeapArray::push(
+      WasmFunctionBinding,
+      env.functions,
+      binding
+    ),
+    lookup_slots: env.lookup_slots,
+  }
+}
+
+fn wasm_function_binding_from_decl(
+  _env: WasmSourceEnv,
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  index: i32,
+  runtime_param_count: i32
+) -> WasmFunctionBinding {
+  let decl = result.value.decl;
+  wasm_function_binding(
+    parser.text_declaration_name_hash(source, current.cursor, decl),
+    index,
+    current.cursor,
+    runtime_param_count,
+    0,
+    parser.text_type_class_unknown_tag(),
+    parser.text_type_class_unknown_tag(),
+    parser.text_abi_class_void_tag(),
+    wasm_no_val_type(),
+    wasm_drop_opcode(),
+    0,
+    0,
+    current.cursor,
+    current.cursor
+  )
+}
+
+fn wasm_function_binding_with_details(
+  context_value: WasmByteContext,
+  binding: WasmFunctionBinding
+) -> WasmFunctionBinding {
+  let source = context_value.source;
+  let expected = parser.text_function_return_resolved_type_class_tag(
+    source,
+    binding.cursor
+  );
+  let actual = parser.TextResolutionEnv::function_body_resolved_type_class_tag(
+    context_value.env.resolution,
+    source,
+    binding.cursor
+  );
+  let body_abi = parser.text_abi_class_tag_for_type_class(actual);
+  let result_val_type = wasm_val_type_for_abi(
+    parser.text_abi_class_tag_for_type_class(expected)
+  );
+  let terminator_opcode = wasm_terminator_opcode(result_val_type);
+  wasm_function_binding(
+    binding.name_hash,
+    binding.index,
+    binding.cursor,
+    binding.runtime_param_count,
+    parser.text_function_local_let_count(source, binding.cursor),
+    expected,
+    actual,
+    body_abi,
+    result_val_type,
+    terminator_opcode,
+    checked_type_status_diagnostic_code(
+      parser.text_simple_body_type_check_status(expected, actual)
+    ),
+    parser.text_function_public_tag(source, binding.cursor),
+    parser.text_function_body_value_start_index(source, binding.cursor),
+    parser.text_declaration_end_from_index(source, binding.cursor)
+  )
+}
+
+fn WasmSourceEnv::add_decl(
+  env: WasmSourceEnv,
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  function_index: i32
+) -> WasmSourceEnv {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(source, current.cursor, decl);
+  let runtime_param_count = parser.text_function_runtime_param_count(
+    source,
+    current.cursor
+  );
+  let is_function_decl = parser.text_declaration_kind_is_function(kind_tag);
+  if is_function_decl {
+    WasmSourceEnv::push_function(
+      env,
+      wasm_function_binding_from_decl(
+        env,
+        source,
+        current,
+        result,
+        function_index,
+        runtime_param_count
+      )
+    )
+  } else {
+    env
+  }
+}
+
+fn WasmSourceEnv::next_function_index(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  function_index: i32
+) -> i32 {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(source, current.cursor, decl);
+  let is_function_decl = parser.text_declaration_kind_is_function(kind_tag);
+  if is_function_decl {
+    function_index + 1
+  } else {
+    function_index
+  }
+}
+
+fn WasmSourceEnv::from_source_loop(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  function_index: i32,
+  env: WasmSourceEnv
+) -> WasmSourceEnv {
+  if combinator.state_has_more(current) {
+    match parser.parse_text_declaration_stream(
+      current,
+      source,
+      function_index
+    ) {
+      Err(_) => env,
+      Ok(result) => rec(
+        source,
+        parser.next_text_declaration_state(result.state, source),
+        WasmSourceEnv::next_function_index(source, current, result, function_index),
+        WasmSourceEnv::add_decl(env, source, current, result, function_index)
+      ),
+    }
+  } else {
+    env
+  }
+}
+
+fn wasm_function_lookup_slot_empty() -> WasmFunctionLookupSlot {
+  WasmFunctionLookupSlot {
+    name_hash: 0,
+    index: 0,
+    runtime_param_count: 0,
+    occupied: false,
+  }
+}
+
+fn wasm_function_lookup_slot_from_binding(
+  binding: WasmFunctionBinding
+) -> WasmFunctionLookupSlot {
+  WasmFunctionLookupSlot {
+    name_hash: binding.name_hash,
+    index: binding.index,
+    runtime_param_count: binding.runtime_param_count,
+    occupied: true,
+  }
+}
+
+fn wasm_lookup_slot_count(function_count: i32) -> i32 {
+  if function_count <= 0 {
+    1
+  } else {
+    function_count * 2 + 1
+  }
+}
+
+fn wasm_lookup_slots_empty_loop(
+  slots: layout.HeapArray(WasmFunctionLookupSlot),
+  index: i32,
+  count: i32
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  if index >= count {
+    slots
+  } else {
+    rec(
+      layout.HeapArray::push(
+        WasmFunctionLookupSlot,
+        slots,
+        wasm_function_lookup_slot_empty()
+      ),
+      index + 1,
+      count
+    )
+  }
+}
+
+fn wasm_lookup_slots_empty(
+  count: i32
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  wasm_lookup_slots_empty_loop(
+    layout.HeapArray::empty(WasmFunctionLookupSlot),
+    0,
+    count
+  )
+}
+
+fn wasm_positive_mod(value: i32, modulus: i32) -> i32 {
+  let raw = value % modulus;
+  if raw < 0 {
+    raw + modulus
+  } else {
+    raw
+  }
+}
+
+fn wasm_lookup_next_slot(slot: i32, slot_count: i32) -> i32 {
+  if slot + 1 >= slot_count {
+    0
+  } else {
+    slot + 1
+  }
+}
+
+fn wasm_lookup_probe_exhausted(probes: i32, slot_count: i32) -> bool {
+  probes >= slot_count
+}
+
+fn wasm_lookup_slot_matches(
+  current: WasmFunctionLookupSlot,
+  binding: WasmFunctionBinding
+) -> bool {
+  current.name_hash == binding.name_hash
+}
+
+fn wasm_lookup_slot_replaces_binding(
+  current: WasmFunctionLookupSlot,
+  binding: WasmFunctionBinding
+) -> bool {
+  if current.occupied {
+    wasm_lookup_slot_matches(current, binding)
+  } else {
+    true
+  }
+}
+
+fn wasm_lookup_slot_insert_at(
+  slots: layout.HeapArray(WasmFunctionLookupSlot),
+  binding: WasmFunctionBinding,
+  slot: i32,
+  probes: i32
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  let slot_count = layout.HeapArray::len(WasmFunctionLookupSlot, slots);
+  if wasm_lookup_probe_exhausted(probes, slot_count) {
+    slots
+  } else {
+    layout.HeapArray::get(
+      WasmFunctionLookupSlot,
+      slots,
+      slot
+    ) \current -> if wasm_lookup_slot_replaces_binding(current, binding) {
+      layout.HeapArray::set(
+        WasmFunctionLookupSlot,
+        slots,
+        slot,
+        wasm_function_lookup_slot_from_binding(binding)
+      )
+    } else {
+      rec(
+        slots,
+        binding,
+        wasm_lookup_next_slot(slot, slot_count),
+        probes + 1
+      )
+    }
+  }
+}
+
+fn wasm_lookup_slot_insert(
+  slots: layout.HeapArray(WasmFunctionLookupSlot),
+  binding: WasmFunctionBinding
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  let slot_count = layout.HeapArray::len(WasmFunctionLookupSlot, slots);
+  wasm_lookup_slot_insert_at(
+    slots,
+    binding,
+    wasm_positive_mod(binding.name_hash, slot_count),
+    0
+  )
+}
+
+fn WasmSourceEnv::build_lookup_slots_loop(
+  env: WasmSourceEnv,
+  slots: layout.HeapArray(WasmFunctionLookupSlot),
+  index: i32
+) -> layout.HeapArray(WasmFunctionLookupSlot) {
+  if index >= layout.HeapArray::len(WasmFunctionBinding, env.functions) {
+    slots
+  } else {
+    layout.HeapArray::get(
+      WasmFunctionBinding,
+      env.functions,
+      index
+    ) \binding -> rec(
+      env,
+      wasm_lookup_slot_insert(slots, binding),
+      index + 1
+    )
+  }
+}
+
+fn WasmSourceEnv::with_lookup_slots(env: WasmSourceEnv) -> WasmSourceEnv {
+  let function_count = layout.HeapArray::len(WasmFunctionBinding, env.functions);
+  let slots = wasm_lookup_slots_empty(wasm_lookup_slot_count(function_count));
+  WasmSourceEnv {
+    resolution: env.resolution,
+    functions: env.functions,
+    lookup_slots: WasmSourceEnv::build_lookup_slots_loop(env, slots, 0),
+  }
+}
+
+fn WasmSourceEnv::from_source(source: textlex.TextTokenStream) -> WasmSourceEnv {
+  WasmSourceEnv::with_lookup_slots(
+    WasmSourceEnv::from_source_loop(
+      source,
+      textmodel.full_window_state(source),
+      0,
+      WasmSourceEnv::empty(source)
+    )
+  )
+}
+
+fn WasmSourceEnv::lookup_function_loop(
+  env: WasmSourceEnv,
+  target_hash: i32,
+  index: i32
+) -> WasmFunctionLookup {
+  if index < 0 {
+    wasm_function_lookup_missing()
+  } else {
+    layout.HeapArray::get(
+      WasmFunctionBinding,
+      env.functions,
+      index
+    ) \binding -> if binding.name_hash == target_hash {
+      WasmFunctionLookup {
+        index: binding.index,
+        runtime_param_count: binding.runtime_param_count,
+        found: true,
+      }
+    } else {
+      rec(env, target_hash, index - 1)
+    }
+  }
+}
+
+fn WasmSourceEnv::lookup_function_slot(
+  env: WasmSourceEnv,
+  target_hash: i32,
+  slot: i32,
+  probes: i32
+) -> WasmFunctionLookup {
+  let slot_count = layout.HeapArray::len(WasmFunctionLookupSlot, env.lookup_slots);
+  if wasm_lookup_probe_exhausted(probes, slot_count) {
+    wasm_function_lookup_missing()
+  } else {
+    layout.HeapArray::get(
+      WasmFunctionLookupSlot,
+      env.lookup_slots,
+      slot
+    ) \current -> if current.occupied {
+      if current.name_hash == target_hash {
+        WasmFunctionLookup {
+          index: current.index,
+          runtime_param_count: current.runtime_param_count,
+          found: true,
+        }
+      } else {
+        rec(
+          env,
+          target_hash,
+          wasm_lookup_next_slot(slot, slot_count),
+          probes + 1
+        )
+      }
+    } else {
+      wasm_function_lookup_missing()
+    }
+  }
+}
+
+fn wasm_function_lookup_has_target(target_hash: i32) -> bool {
+  target_hash != 0
+}
+
+fn wasm_lookup_slots_available(env: WasmSourceEnv) -> bool {
+  layout.HeapArray::len(WasmFunctionLookupSlot, env.lookup_slots) > 0
+}
+
+fn WasmSourceEnv::lookup_function(
+  env: WasmSourceEnv,
+  target_hash: i32
+) -> WasmFunctionLookup {
+  if wasm_function_lookup_has_target(target_hash) {
+    if wasm_lookup_slots_available(env) {
+      WasmSourceEnv::lookup_function_slot(
+        env,
+        target_hash,
+        wasm_positive_mod(
+          target_hash,
+          layout.HeapArray::len(WasmFunctionLookupSlot, env.lookup_slots)
+        ),
+        0
+      )
+    } else {
+      WasmSourceEnv::lookup_function_loop(
+        env,
+        target_hash,
+        layout.HeapArray::len(WasmFunctionBinding, env.functions) - 1
+      )
+    }
+  } else {
+    wasm_function_lookup_missing()
+  }
+}
+
+type WasmCallLowering = struct {
+  context_value: WasmByteContext,
+  codes: layout.HeapArray(i32),
+  current: combinator.ParseState,
+  runtime_param_count: i32,
+  local_count: i32,
+}
+
+type WasmSegmentBody = struct {
+  lowering: WasmCallLowering,
+  start: i32,
+  limit: i32,
+  parts: parser.TextRootOperatorParts,
+}
+
+type WasmBytePayloadKind = enum(i32) {
+  TypePayload = 1,
+  FunctionPayload = 2,
+  ExportPayload = 3,
+  CodePayload = 4
+}
+
+type WasmBytePayloadState = struct {
+  kind: WasmBytePayloadKind,
+  current: combinator.ParseState,
+  function_index: i32,
+}
+
+fn wasm_payload_state_reader(
+  kind: WasmBytePayloadKind
+) -> monad.Reader(WasmByteContext, WasmBytePayloadState) {
+  do @monad(monad.Reader(WasmByteContext, _)) {
+    current <- monad.Reader::asks(wasm_byte_context_window_state);
+    monad.Reader::pure(WasmBytePayloadState {
+      kind: kind,
+      current: current,
+      function_index: 0,
+    })
+  }
+}
+
+fn WasmByteContext::payload_state(
+  context_value: WasmByteContext,
+  kind: WasmBytePayloadKind
+) -> WasmBytePayloadState {
+  monad.Reader::run(
+    wasm_payload_state_reader(kind),
+    context_value
+  )
+}
+
+fn context(source: textlex.TextTokenStream) -> FactContext {
+  FactContext {source: source}
+}
+
+fn fact_context_source(context_value: FactContext) -> textlex.TextTokenStream {
+  context_value.source
+}
+
+fn FactContext::summary(
+  context_value: FactContext,
+  kind: textmodel.SummaryKind
+) -> i32 {
+  monad.Reader::run(fact_summary_reader(kind), context_value)
+}
+
+fn fact_context_window_state(
+  context_value: FactContext
+) -> combinator.ParseState {
+  textmodel.full_window_state(fact_context_source(context_value))
+}
+
+fn fact_pair_signature(
+  kind: CheckedFactKind,
+  first: i32,
+  second: i32
+) -> i32 {
+  let with_kind = textmodel.signature_mix(kind, first);
+  textmodel.signature_mix(with_kind, second)
+}
+
+fn fact_triple_signature(
+  kind: CheckedFactKind,
+  first: i32,
+  second: i32,
+  third: i32
+) -> i32 {
+  let with_pair = fact_pair_signature(kind, first, second);
+  textmodel.signature_mix(with_pair, third)
+}
+
+fn fact_summary_reader(kind: textmodel.SummaryKind) -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    source <- monad.Reader::asks(fact_context_source);
+    monad.Reader::pure(textsummary.run(source, kind, 0))
+  }
+}
+
+fn checked_declaration_type_signature_reader() -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    declared <- fact_summary_reader(
+      summary_resolved_declared_type_class
+    );
+    body <- fact_summary_reader(
+      summary_resolved_value_body_type_class
+    );
+    check <- fact_summary_reader(
+      summary_resolved_simple_body_type_check
+    );
+    monad.Reader::pure(
+      fact_triple_signature(
+        CheckedFactKind::CheckedDeclarationType,
+        declared,
+        body,
+        check
+      )
+    )
+  }
+}
+
+fn checked_diagnostic_signature_reader() -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    declared <- fact_summary_reader(
+      summary_simple_body_type_check
+    );
+    resolved <- fact_summary_reader(
+      summary_resolved_simple_body_type_check
+    );
+    monad.Reader::pure(
+      fact_pair_signature(
+        CheckedFactKind::CheckedDiagnostic,
+        declared,
+        resolved
+      )
+    )
+  }
+}
+
+fn lowered_declaration_signature_reader() -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    declared <- fact_summary_reader(
+      summary_resolved_declared_abi_class
+    );
+    body <- fact_summary_reader(
+      summary_resolved_value_body_abi_class
+    );
+    exports <- fact_summary_reader(
+      summary_resolved_export_abi
+    );
+    monad.Reader::pure(
+      fact_triple_signature(
+        CheckedFactKind::LoweredDeclaration,
+        declared,
+        body,
+        exports
+      )
+    )
+  }
+}
+
+fn fact_record_signature_reader(
+  kind: FactRecordScanKind
+) -> monad.Reader(FactContext, i32) {
+  do @monad(monad.Reader(FactContext, _)) {
+    context_value <- monad.Reader::ask();
+    current <- monad.Reader::asks(fact_context_window_state);
+    monad.Reader::pure(
+      FactContext::fact_record_scan(context_value, kind, current, 0)
+    )
+  }
+}
+
+fn checked_type_status_diagnostic_code(status: i32) -> i32 {
+  let is_mismatch = status == parser.text_type_check_mismatch_tag();
+  if is_mismatch {
+    diagnostic.code_score(diagnostic.CodeTypeMismatch)
+  } else {
+    0
+  }
+}
+
+fn checked_decl_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> CheckedDeclFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let name_hash = parser.text_declaration_name_hash(source, current.cursor, decl);
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let check_status = parser.text_simple_body_type_check_status(expected, actual);
+  CheckedDeclFact {
+    kind_tag: kind_tag,
+    name_hash: name_hash,
+    symbol_type_class: parser.text_declaration_resolved_type_class_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    symbol_payload: parser.text_declaration_resolved_type_class_payload(
+      source,
+      current.cursor,
+      decl
+    ),
+    expected_type_class: expected,
+    actual_type_class: actual,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+    lowered_abi_class: parser.text_declaration_resolved_abi_class_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+  }
+}
+
+fn checked_decl_fact_with_env(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  env: parser.TextResolutionEnv
+) -> CheckedDeclFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let name_hash = parser.text_declaration_name_hash(source, current.cursor, decl);
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    env,
+    source,
+    current.cursor,
+    decl
+  );
+  let check_status = parser.text_simple_body_type_check_status(expected, actual);
+  CheckedDeclFact {
+    kind_tag: kind_tag,
+    name_hash: name_hash,
+    symbol_type_class: parser.text_declaration_resolved_type_class_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    symbol_payload: parser.text_declaration_resolved_type_class_payload(
+      source,
+      current.cursor,
+      decl
+    ),
+    expected_type_class: expected,
+    actual_type_class: actual,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+    lowered_abi_class: parser.text_declaration_resolved_abi_class_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+  }
+}
+
+fn checked_decl_fact_signature(fact: CheckedDeclFact) -> i32 {
+  let with_kind = textmodel.signature_mix(
+    53,
+    fact.kind_tag
+  );
+  let with_name = textmodel.signature_mix(with_kind, fact.name_hash);
+  let with_symbol = textmodel.signature_mix(
+    with_name,
+    fact.symbol_type_class
+  );
+  let with_payload = textmodel.signature_mix(
+    with_symbol,
+    fact.symbol_payload
+  );
+  let with_expected = textmodel.signature_mix(
+    with_payload,
+    fact.expected_type_class
+  );
+  let with_actual = textmodel.signature_mix(
+    with_expected,
+    fact.actual_type_class
+  );
+  let with_status = textmodel.signature_mix(with_actual, fact.check_status);
+  let with_diagnostic = textmodel.signature_mix(
+    with_status,
+    fact.diagnostic_code
+  );
+  textmodel.signature_mix(with_diagnostic, fact.lowered_abi_class)
+}
+
+fn lowered_value_tag_for_abi(abi_class: i32) -> i32 {
+  abi_class
+}
+
+fn abi_class_is_scalar(abi_class: i32) -> bool {
+  abi_class == parser.text_abi_class_scalar_tag()
+}
+
+fn abi_class_is_handle(abi_class: i32) -> bool {
+  abi_class == parser.text_abi_class_handle_tag()
+}
+
+fn abi_class_is_function(abi_class: i32) -> bool {
+  abi_class == parser.text_abi_class_function_tag()
+}
+
+fn abi_class_is_scalar_or_function(abi_class: i32) -> bool {
+  let is_scalar = abi_class_is_scalar(abi_class);
+  if is_scalar {
+    true
+  } else {
+    abi_class_is_function(abi_class)
+  }
+}
+
+fn abi_class_is_runtime_value(abi_class: i32) -> bool {
+  let is_scalar = abi_class_is_scalar(abi_class);
+  if is_scalar {
+    true
+  } else {
+    let is_handle = abi_class_is_handle(abi_class);
+    if is_handle {
+      true
+    } else {
+      abi_class_is_function(abi_class)
+    }
+  }
+}
+
+fn lowered_value_has_primary(abi_class: i32) -> bool {
+  abi_class_is_runtime_value(abi_class)
+}
+
+fn lowered_value_primary(
+  abi_class: i32,
+  resolved_type_class: i32
+) -> i32 {
+  let has_primary = lowered_value_has_primary(abi_class);
+  if has_primary {
+    resolved_type_class
+  } else {
+    0
+  }
+}
+
+fn lowered_value_secondary() -> i32 {
+  0
+}
+
+fn checked_expr_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> CheckedExprFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let name_hash = parser.text_declaration_name_hash(source, current.cursor, decl);
+  let root_type = parser.text_declaration_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let resolved = parser.text_declaration_resolved_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let abi = parser.text_abi_class_tag_for_type_class(resolved);
+  let check_status = parser.text_simple_body_type_check_status(expected, resolved);
+  CheckedExprFact {
+    kind_tag: kind_tag,
+    name_hash: name_hash,
+    root_kind: parser.text_declaration_root_head_kind_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_hash: parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_child_count: parser.text_declaration_root_child_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_child_signature_hash: parser.text_declaration_root_child_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_grandchild_count: parser.text_declaration_root_grandchild_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_grandchild_signature_hash: parser.text_declaration_root_grandchild_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_descendant_count: parser.text_declaration_root_descendant_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_descendant_signature_hash: parser.text_declaration_root_descendant_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_type_class: root_type,
+    resolved_type_class: resolved,
+    expected_type_class: expected,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+    lowered_value_tag: lowered_value_tag_for_abi(abi),
+    lowered_value_primary: lowered_value_primary(abi, resolved),
+    lowered_value_secondary: lowered_value_secondary(),
+  }
+}
+
+fn checked_expr_fact_with_env(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  env: parser.TextResolutionEnv
+) -> CheckedExprFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let name_hash = parser.text_declaration_name_hash(source, current.cursor, decl);
+  let root_type = parser.text_declaration_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let resolved = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    env,
+    source,
+    current.cursor,
+    decl
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let abi = parser.text_abi_class_tag_for_type_class(resolved);
+  let check_status = parser.text_simple_body_type_check_status(expected, resolved);
+  CheckedExprFact {
+    kind_tag: kind_tag,
+    name_hash: name_hash,
+    root_kind: parser.text_declaration_root_head_kind_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_hash: parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_child_count: parser.text_declaration_root_child_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_child_signature_hash: parser.text_declaration_root_child_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_grandchild_count: parser.text_declaration_root_grandchild_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_grandchild_signature_hash: parser.text_declaration_root_grandchild_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_descendant_count: parser.text_declaration_root_descendant_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_descendant_signature_hash: parser.text_declaration_root_descendant_signature(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    root_type_class: root_type,
+    resolved_type_class: resolved,
+    expected_type_class: expected,
+    check_status: check_status,
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+    lowered_value_tag: lowered_value_tag_for_abi(abi),
+    lowered_value_primary: lowered_value_primary(abi, resolved),
+    lowered_value_secondary: lowered_value_secondary(),
+  }
+}
+
+fn checked_expr_fact_signature(fact: CheckedExprFact) -> i32 {
+  let with_kind = textmodel.signature_mix(59, fact.kind_tag);
+  let with_name = textmodel.signature_mix(with_kind, fact.name_hash);
+  let with_root_kind = textmodel.signature_mix(with_name, fact.root_kind);
+  let with_root_hash = textmodel.signature_mix(with_root_kind, fact.root_hash);
+  let with_child_count = textmodel.signature_mix(
+    with_root_hash,
+    fact.root_child_count
+  );
+  let with_child_signature = textmodel.signature_mix(
+    with_child_count,
+    fact.root_child_signature_hash
+  );
+  let with_grandchild_count = textmodel.signature_mix(
+    with_child_signature,
+    fact.root_grandchild_count
+  );
+  let with_grandchild_signature = textmodel.signature_mix(
+    with_grandchild_count,
+    fact.root_grandchild_signature_hash
+  );
+  let with_descendant_count = textmodel.signature_mix(
+    with_grandchild_signature,
+    fact.root_descendant_count
+  );
+  let with_descendant_signature = textmodel.signature_mix(
+    with_descendant_count,
+    fact.root_descendant_signature_hash
+  );
+  let with_root_type = textmodel.signature_mix(
+    with_descendant_signature,
+    fact.root_type_class
+  );
+  let with_resolved = textmodel.signature_mix(
+    with_root_type,
+    fact.resolved_type_class
+  );
+  let with_expected = textmodel.signature_mix(
+    with_resolved,
+    fact.expected_type_class
+  );
+  let with_status = textmodel.signature_mix(with_expected, fact.check_status);
+  let with_diagnostic = textmodel.signature_mix(
+    with_status,
+    fact.diagnostic_code
+  );
+  let with_value_tag = textmodel.signature_mix(
+    with_diagnostic,
+    fact.lowered_value_tag
+  );
+  let with_primary = textmodel.signature_mix(
+    with_value_tag,
+    fact.lowered_value_primary
+  );
+  textmodel.signature_mix(with_primary, fact.lowered_value_secondary)
+}
+
+fn checked_expr_shape_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> CheckedExprShapeFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.text_declaration_resolved_value_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let check_status = parser.text_simple_body_type_check_status(
+    expected,
+    actual
+  );
+  CheckedExprShapeFact {
+    kind_tag: kind_tag,
+    name_hash: parser.text_declaration_name_hash(source, current.cursor, decl),
+    root_kind: parser.text_declaration_root_head_kind_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_hash: parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_selector_count: parser.text_declaration_root_head_selector_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_slot_count: parser.text_declaration_root_slot_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_call_arg_count: parser.text_declaration_root_call_arg_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_field_count: parser.text_declaration_root_field_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_operator_count: parser.text_declaration_root_operator_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    operator_count: parser.text_declaration_value_operator_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    operator_signature_hash: parser.text_declaration_value_operator_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    match_count: parser.text_declaration_value_match_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    match_arm_count: parser.text_declaration_value_match_arm_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    do_count: parser.text_declaration_value_do_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    do_bind_count: parser.text_declaration_value_do_bind_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    pipe_bind_count: parser.text_declaration_value_pipe_bind_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    call_count: parser.text_declaration_value_call_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    function_match_body_count: parser.text_declaration_function_match_body_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    name_token_count: parser.text_declaration_value_shape_name_token_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    name_token_signature_hash: parser.text_declaration_value_shape_name_token_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    literal_token_count: parser.text_declaration_value_literal_token_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    literal_token_signature_hash: parser.text_declaration_value_literal_token_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn checked_expr_shape_fact_with_env(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame),
+  env: parser.TextResolutionEnv
+) -> CheckedExprShapeFact {
+  let decl = result.value.decl;
+  let kind_tag = parser.text_declaration_kind_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let expected = parser.text_declaration_resolved_expected_body_type_class_tag(
+    source,
+    current.cursor,
+    decl
+  );
+  let actual = parser.TextResolutionEnv::declaration_resolved_value_body_type_class_tag(
+    env,
+    source,
+    current.cursor,
+    decl
+  );
+  let check_status = parser.text_simple_body_type_check_status(
+    expected,
+    actual
+  );
+  CheckedExprShapeFact {
+    kind_tag: kind_tag,
+    name_hash: parser.text_declaration_name_hash(source, current.cursor, decl),
+    root_kind: parser.text_declaration_root_head_kind_tag(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_hash: parser.text_declaration_root_head_hash(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_selector_count: parser.text_declaration_root_head_selector_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_slot_count: parser.text_declaration_root_slot_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_call_arg_count: parser.text_declaration_root_call_arg_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_field_count: parser.text_declaration_root_field_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    root_operator_count: parser.text_declaration_root_operator_count(
+      source,
+      current.cursor,
+      decl
+    ),
+    operator_count: parser.text_declaration_value_operator_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    operator_signature_hash: parser.text_declaration_value_operator_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    match_count: parser.text_declaration_value_match_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    match_arm_count: parser.text_declaration_value_match_arm_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    do_count: parser.text_declaration_value_do_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    do_bind_count: parser.text_declaration_value_do_bind_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    pipe_bind_count: parser.text_declaration_value_pipe_bind_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    call_count: parser.text_declaration_value_call_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    function_match_body_count: parser.text_declaration_function_match_body_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    name_token_count: parser.text_declaration_value_shape_name_token_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    name_token_signature_hash: parser.text_declaration_value_shape_name_token_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    literal_token_count: parser.text_declaration_value_literal_token_count_delta(
+      source,
+      current.cursor,
+      decl
+    ),
+    literal_token_signature_hash: parser.text_declaration_value_literal_token_signature_delta(
+      source,
+      current.cursor,
+      decl,
+      0
+    ),
+    diagnostic_code: checked_type_status_diagnostic_code(check_status),
+  }
+}
+
+fn checked_expr_shape_fact_signature(fact: CheckedExprShapeFact) -> i32 {
+  let with_kind = textmodel.signature_mix(67, fact.kind_tag);
+  let with_name = textmodel.signature_mix(with_kind, fact.name_hash);
+  let with_root_kind = textmodel.signature_mix(with_name, fact.root_kind);
+  let with_root_hash = textmodel.signature_mix(
+    with_root_kind,
+    fact.root_hash
+  );
+  let with_root_selector = textmodel.signature_mix(
+    with_root_hash,
+    fact.root_selector_count
+  );
+  let with_root_slot = textmodel.signature_mix(
+    with_root_selector,
+    fact.root_slot_count
+  );
+  let with_root_call = textmodel.signature_mix(
+    with_root_slot,
+    fact.root_call_arg_count
+  );
+  let with_root_field = textmodel.signature_mix(
+    with_root_call,
+    fact.root_field_count
+  );
+  let with_root_operator = textmodel.signature_mix(
+    with_root_field,
+    fact.root_operator_count
+  );
+  let with_operator = textmodel.signature_mix(
+    with_root_operator,
+    fact.operator_count
+  );
+  let with_operator_signature = textmodel.signature_mix(
+    with_operator,
+    fact.operator_signature_hash
+  );
+  let with_match = textmodel.signature_mix(
+    with_operator_signature,
+    fact.match_count
+  );
+  let with_arms = textmodel.signature_mix(with_match, fact.match_arm_count);
+  let with_do = textmodel.signature_mix(with_arms, fact.do_count);
+  let with_do_bind = textmodel.signature_mix(
+    with_do,
+    fact.do_bind_count
+  );
+  let with_pipe = textmodel.signature_mix(
+    with_do_bind,
+    fact.pipe_bind_count
+  );
+  let with_call = textmodel.signature_mix(with_pipe, fact.call_count);
+  let with_function_match = textmodel.signature_mix(
+    with_call,
+    fact.function_match_body_count
+  );
+  let with_name_count = textmodel.signature_mix(
+    with_function_match,
+    fact.name_token_count
+  );
+  let with_name_signature = textmodel.signature_mix(
+    with_name_count,
+    fact.name_token_signature_hash
+  );
+  let with_literal_count = textmodel.signature_mix(
+    with_name_signature,
+    fact.literal_token_count
+  );
+  let with_literal_signature = textmodel.signature_mix(
+    with_literal_count,
+    fact.literal_token_signature_hash
+  );
+  textmodel.signature_mix(with_literal_signature, fact.diagnostic_code)
+}
+
+fn lowered_export_fact(
+  source: textlex.TextTokenStream,
+  current: combinator.ParseState,
+  result: combinator.Reply(parser.DeclFrame)
+) -> LoweredExportFact {
+  let return_type = parser.text_function_return_resolved_type_class_tag(
+    source,
+    current.cursor
+  );
+  LoweredExportFact {
+    name_hash: parser.text_declaration_name_hash(
+      source,
+      current.cursor,
+      result.value.decl
+    ),
+    param_count: ast.decl_param_count(result.value.decl),
+    return_abi_class: parser.text_abi_class_tag_for_type_class(return_type),
+  }
+}
+
+fn lowered_export_fact_signature(fact: LoweredExportFact) -> i32 {
+  let with_name = textmodel.signature_mix(71, fact.name_hash);
+  let with_params = textmodel.signature_mix(with_name, fact.param_count);
+  textmodel.signature_mix(with_params, fact.return_abi_class)
+}
+
+fn wasm_no_val_type() -> i32 {
+  64
+}
+
+fn wasm_i32_val_type() -> i32 {
+  127
+}
+
+fn wasm_externref_val_type() -> i32 {
+  111
+}
+
+fn wasm_const_opcode() -> i32 {
+  65
+}
+
+fn wasm_local_get_opcode() -> i32 {
+  32
+}
+
+fn wasm_local_set_opcode() -> i32 {
+  33
+}
+
+fn wasm_call_opcode() -> i32 {
+  16
+}
+
+fn wasm_if_opcode() -> i32 {
+  4
+}
+
+fn wasm_else_opcode() -> i32 {
+  5
+}
+
+fn wasm_end_opcode() -> i32 {
+  11
+}
+
+fn wasm_i32_eq_opcode() -> i32 {
+  70
+}
+
+fn wasm_i32_ne_opcode() -> i32 {
+  71
+}
+
+fn wasm_i32_lt_s_opcode() -> i32 {
+  72
+}
+
+fn wasm_i32_gt_s_opcode() -> i32 {
+  74
+}
+
+fn wasm_i32_le_s_opcode() -> i32 {
+  76
+}
+
+fn wasm_i32_ge_s_opcode() -> i32 {
+  78
+}
+
+fn wasm_i32_add_opcode() -> i32 {
+  106
+}
+
+fn wasm_i32_sub_opcode() -> i32 {
+  107
+}
+
+fn wasm_i32_mul_opcode() -> i32 {
+  108
+}
+
+fn wasm_i32_div_s_opcode() -> i32 {
+  109
+}
+
+fn wasm_i32_rem_s_opcode() -> i32 {
+  111
+}
+
+fn wasm_return_opcode() -> i32 {
+  15
+}
+
+fn wasm_drop_opcode() -> i32 {
+  26
+}
+
+fn wasm_type_section_id() -> i32 {
+  1
+}
+
+fn wasm_function_section_id() -> i32 {
+  3
+}
+
+fn wasm_export_section_id() -> i32 {
+  7
+}
+
+fn wasm_code_section_id() -> i32 {
+  10
+}
+
+fn wasm_module_header_size() -> i32 {
+  8
+}
+
+fn wasm_emitted_section_count() -> i32 {
+  4
+}
+
+fn wasm_u32_leb_byte(value: i32) -> i32 {
+  let payload = value % 128;
+  let remaining = value / 128;
+  if remaining > 0 {
+    payload + 128
+  } else {
+    payload
+  }
+}
+
+fn wasm_byte_value(value: i32) -> i32 {
+  let reduced = value % 256;
+  if reduced < 0 {
+    reduced + 256
+  } else {
+    reduced
+  }
+}
+
+fn wasm_byte_buffer_empty(capacity: i32) -> layout.HeapArray(i32) {
+  layout.HeapArray::new(i32, capacity)
+}
+
+fn wasm_push_byte(
+  bytes: layout.HeapArray(i32),
+  value: i32
+) -> layout.HeapArray(i32) {
+  layout.HeapArray::push(i32, bytes, wasm_byte_value(value))
+}
+
+fn wasm_push_u32_leb(
+  bytes: layout.HeapArray(i32),
+  value: i32
+) -> layout.HeapArray(i32) {
+  let byte_value = wasm_u32_leb_byte(value);
+  let remaining = value / 128;
+  let next = wasm_push_byte(bytes, byte_value);
+  if remaining > 0 {
+    rec(next, remaining)
+  } else {
+    next
+  }
+}
+
+fn wasm_push_repeated_byte(
+  bytes: layout.HeapArray(i32),
+  count: i32,
+  value: i32
+) -> layout.HeapArray(i32) {
+  if count > 0 {
+    rec(
+      wasm_push_byte(bytes, value),
+      count - 1,
+      value
+    )
+  } else {
+    bytes
+  }
+}
+
+fn wasm_push_nonempty_local_decls(
+  bytes: layout.HeapArray(i32),
+  local_count: i32
+) -> layout.HeapArray(i32) {
+  let with_group_count = wasm_push_u32_leb(bytes, 1);
+  let with_local_count = wasm_push_u32_leb(with_group_count, local_count);
+  wasm_push_byte(with_local_count, wasm_i32_val_type())
+}
+
+fn wasm_push_local_decls(
+  bytes: layout.HeapArray(i32),
+  local_count: i32
+) -> layout.HeapArray(i32) {
+  if local_count <= 0 {
+    wasm_push_u32_leb(bytes, 0)
+  } else {
+    wasm_push_nonempty_local_decls(bytes, local_count)
+  }
+}
+
+fn wasm_source_code_index_in_bounds(
+  codes: layout.HeapArray(i32),
+  index: i32
+) -> bool {
+  if index >= 0 {
+    index < layout.HeapArray::len(i32, codes)
+  } else {
+    false
+  }
+}
+
+fn wasm_source_code_at(
+  codes: layout.HeapArray(i32),
+  base_offset: i32,
+  offset: i32
+) -> i32 {
+  let index = offset - base_offset;
+  if wasm_source_code_index_in_bounds(codes, index) {
+    layout.HeapArray::get(i32, codes, index)
+  } else {
+    0
+  }
+}
+
+fn wasm_small_immediate_limit() -> i32 {
+  128
+}
+
+fn wasm_direct_call_arg_limit() -> i32 {
+  5
+}
+
+fn wasm_source_digit_value(code: i32) -> core.Option(i32) {
+  match code {
+    _ if code >= textlex.TextCharCode::Digit0 && code <= textlex.TextCharCode::Digit9 =>
+      option.some(code - textlex.TextCharCode::Digit0),
+    _ => option.none(),
+  }
+}
+
+fn wasm_next_small_u7_decimal_total(
+  total: i32,
+  digit: i32
+) -> core.Option(i32) {
+  let next_total = total * 10 + digit;
+  if next_total < wasm_small_immediate_limit() {
+    option.some(next_total)
+  } else {
+    option.none()
+  }
+}

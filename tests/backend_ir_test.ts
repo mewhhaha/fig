@@ -1712,6 +1712,35 @@ Deno.test("explicit rec tail steps lower to loops by default", async () => {
   assertEquals((instance.exports.main as CallableFunction)(), 5050);
 });
 
+Deno.test("explicit rec in monadic do continuations keeps the enclosing function target", async () => {
+  const source = `
+    const option = @import("prelude.option");
+    const core = @import("prelude.core");
+
+    fn go(a: i32, b: i32, c: i32, d: i32, e: i32) -> core.Option(i32) {
+      if c > 3 {
+        option.some(c)
+      } else {
+        do @monad(core.Option(_)) {
+          next <- option.some(c + 1);
+          rec(a, b, next, d, e)
+        }
+      }
+    }
+
+    pub fn main() -> i32 {
+      match go(0, 0, 0, 0, 0) {
+        Some(value) => value,
+        None => 0,
+      }
+    }
+  `;
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 4);
+});
+
 Deno.test("public exports inline explicit private scalar tail loops", async () => {
   const source = `
     fn sum(n: i32, acc: i32) -> i32 {
