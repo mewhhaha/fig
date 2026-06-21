@@ -1,0 +1,125 @@
+const core = @import("prelude.core");
+const span = @import("prelude.span");
+
+type fn ScanContext(input: type) -> type {
+  let ScanContext = {
+    input: input,
+    cursor: span.Cursor,
+  };
+  struct(ScanContext)
+}
+
+type fn ScanResult(value: type) -> type {
+  let ScanResult = {
+    cursor: span.Cursor,
+    value: value,
+  };
+  struct(ScanResult)
+}
+
+type fn Spanned(value: type) -> type {
+  let Spanned = {
+    span: span.Span,
+    value: value,
+  };
+  struct(Spanned)
+}
+
+type fn Scan(input: type, value: type) -> type {
+  fn(ctx: ScanContext(input)) -> ScanResult(value)
+}
+
+fn Scan::pure(value: a) -> Scan(input, a) {
+  \ctx -> ScanResult {cursor: ctx.cursor, value}
+}
+
+fn Scan::map(
+  f: fn(x: a) -> b,
+  value: Scan(input, a)
+) -> Scan(input, b) {
+  \ctx -> {
+    let current: ScanResult(a) = value(ctx);
+    ScanResult {cursor: current.cursor, value: f(current.value)}
+  }
+}
+
+fn Scan::apply(
+  value: Scan(input, fn(x: a) -> b),
+  arg: Scan(input, a)
+) -> Scan(input, b) {
+  \ctx -> {
+    let current: ScanResult(fn(x: a) -> b) = value(ctx);
+    let next: ScanResult(a) =
+      arg(ScanContext {input: ctx.input, cursor: current.cursor});
+    ScanResult {cursor: next.cursor, value: current.value(next.value)}
+  }
+}
+
+fn Scan::bind(
+  value: Scan(input, a),
+  f: fn(x: a) -> Scan(input, b)
+) -> Scan(input, b) {
+  \ctx -> {
+    let current: ScanResult(a) = value(ctx);
+    let next_scan: Scan(input, b) = f(current.value);
+    next_scan(ScanContext {input: ctx.input, cursor: current.cursor})
+  }
+}
+
+fn Scan::ask() -> Scan(input, input) {
+  \ctx -> ScanResult {cursor: ctx.cursor, value: ctx.input}
+}
+
+fn Scan::cursor() -> Scan(input, span.Cursor) {
+  \ctx -> ScanResult {cursor: ctx.cursor, value: ctx.cursor}
+}
+
+fn Scan::set_cursor(cursor: span.Cursor) -> Scan(input, core.Unit) {
+  \_ctx -> ScanResult {cursor, value: core.unit()}
+}
+
+fn Scan::advance(amount: i32) -> Scan(input, span.Cursor) {
+  \ctx -> {
+    let next: span.Cursor = span.Cursor::advance(ctx.cursor, amount);
+    ScanResult {cursor: next, value: next}
+  }
+}
+
+fn Scan::consume(amount: i32) -> Scan(input, span.Span) {
+  \ctx -> {
+    let next: span.Cursor = span.Cursor::advance(ctx.cursor, amount);
+    ScanResult {
+      cursor: next,
+      value: span.Cursor::span_to(ctx.cursor, next),
+    }
+  }
+}
+
+fn Scan::with_span(value: Scan(input, a)) -> Scan(input, Spanned(a)) {
+  \ctx -> {
+    let current: ScanResult(a) = value(ctx);
+    ScanResult {
+      cursor: current.cursor,
+      value: Spanned {
+        span: span.Cursor::span_to(ctx.cursor, current.cursor),
+        value: current.value,
+      },
+    }
+  }
+}
+
+fn Scan::run(
+  value: Scan(input, a),
+  input_value: input,
+  cursor: span.Cursor
+) -> ScanResult(a) {
+  value(ScanContext {input: input_value, cursor})
+}
+
+fn Scan::run_from_start(
+  value: Scan(input, a),
+  input_value: input,
+  limit: i32
+) -> ScanResult(a) {
+  Scan::run(value, input_value, span.Cursor::start(limit))
+}

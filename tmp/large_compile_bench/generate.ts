@@ -36,6 +36,9 @@ export async function generateLargeCompileProject(options: {
   const figFiles = scenario === "abstractions"
     ? figAbstractionProject(options.modules, kernelsPerModule)
     : figProject(options.modules, kernelsPerModule);
+  for (const file of figFiles) {
+    file.text = withFigPreludeOperators(file.text);
+  }
   const goFiles = scenario === "abstractions"
     ? goAbstractionProject(options.modules, kernelsPerModule)
     : goProject(options.modules, kernelsPerModule);
@@ -61,6 +64,11 @@ export async function generateLargeCompileProject(options: {
 async function writeFile(path: string, text: string) {
   await Deno.mkdir(new URL(".", new URL(`file://${path}`)).pathname, { recursive: true });
   await Deno.writeTextFile(path, text);
+}
+
+function withFigPreludeOperators(text: string): string {
+  const publicText = text.replace(/^fn entry\(/gm, "pub fn entry(");
+  return `const ops = @import("prelude.operators");\n${publicText}`;
 }
 
 function figProject(modules: number, kernels: number): FileOut[] {
@@ -319,7 +327,7 @@ function figFeature(moduleIndex: number, kernels: number): string {
 
 function figMain(modulePaths: string[]): string {
   const imports = modulePaths
-    .filter((path) => path !== "main.fig")
+    .filter((path) => path !== "main.fig" && path !== "types.fig")
     .map((path, index) => `const m${index} = @import("./${path}");`);
   const body = imports.map((_, index) => `  let v${index} = m${index}.entry(seed + ${index});`);
   return `${imports.join("\n")}\n\npub fn main(seed: i32) -> i32 {\n${body.join("\n")}\n  ${

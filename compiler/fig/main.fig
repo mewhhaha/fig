@@ -90,6 +90,10 @@ pub fn compile_text_token_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
   frontend.compile_text_token_signature(codes, 0)
 }
 
+pub fn compile_parse_status(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_parse_status(codes, 0)
+}
+
 pub fn compile_declaration_kind_count(
   codes: layout.HeapArray(i32),
   kind_tag: i32
@@ -351,6 +355,42 @@ pub fn compile_value_call_expression_count(codes: layout.HeapArray(i32)) -> i32 
     codes,
     0,
     textmodel.SummaryKind::ValueCallExpressions,
+    0
+  )
+}
+
+pub fn compile_value_name_token_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueNameTokenCount,
+    0
+  )
+}
+
+pub fn compile_value_name_token_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueNameTokenSignature,
+    0
+  )
+}
+
+pub fn compile_value_literal_token_count(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueLiteralTokenCount,
+    0
+  )
+}
+
+pub fn compile_value_literal_token_signature_hash(codes: layout.HeapArray(i32)) -> i32 {
+  frontend.compile_code_summary(
+    codes,
+    0,
+    textmodel.SummaryKind::ValueLiteralTokenSignature,
     0
   )
 }

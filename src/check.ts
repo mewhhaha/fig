@@ -47,6 +47,7 @@ import {
 } from "./plugins.ts";
 import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
 import { checkPluginRewrites } from "./rewrites.ts";
+import { normalizeTypeSourceForParsing } from "./type_source.ts";
 import {
   canonicalDomainKey,
   cardinality,
@@ -5210,7 +5211,9 @@ function inferRuntimeType(
   };
   if (expr.kind === "literal") {
     if (expr.inferredType) return finish(expr.inferredType);
-    if (expr.literalKind === "number") return finish("i32");
+    if (expr.literalKind === "number") {
+      return finish(numericLiteralExplicitType(expr.value) ?? "i32");
+    }
     if (expr.literalKind === "bool") return finish("bool");
     return finish(expr.inferredType);
   }
@@ -9174,7 +9177,7 @@ function inferFromValuePattern(
     return;
   }
   if (arg.kind === "var") {
-    const directFn = context.functions.get(arg.name);
+    const directFn = functionDeclForNameInMap(arg.name, context.functions);
     if (directFn) inferFnTypeArgs(rendered, directFn, types, context.consts);
     bindTypePattern(
       runtimePattern,
@@ -9199,6 +9202,29 @@ function inferFromValuePattern(
     context.types ?? [],
     context.consts,
   );
+}
+
+function functionDeclForNameInMap(
+  name: string,
+  functions: Map<string, FnDecl>,
+): FnDecl | undefined {
+  const candidates = functionLookupCandidates(name);
+  for (const candidate of candidates) {
+    const mapped = functions.get(candidate);
+    if (mapped) return mapped;
+  }
+  for (const candidate of candidates) {
+    for (const fn of functions.values()) {
+      if (importedFunctionNameMatches(fn.name, candidate)) return fn;
+    }
+  }
+  for (const candidate of candidates) {
+    if (candidate.includes(".") || candidate.includes("::")) continue;
+    for (const fn of functions.values()) {
+      if (functionTerminalMemberName(fn.name) === candidate) return fn;
+    }
+  }
+  return undefined;
 }
 
 function runtimeSpecializedType(type: string | undefined, types: TypeDecl[]): string | undefined {
@@ -9244,7 +9270,7 @@ function inferExprType(
 ): string | undefined {
   if (expr.kind === "literal") {
     if (expr.inferredType) return expr.inferredType;
-    if (expr.literalKind === "number") return "i32";
+    if (expr.literalKind === "number") return numericLiteralExplicitType(expr.value) ?? "i32";
     if (expr.literalKind === "bool") return "bool";
     if (expr.literalKind === "string" || expr.literalKind === "multiline") return "string";
     if (expr.literalKind === "char") return "char";
@@ -9288,7 +9314,7 @@ function inferExprType(
     }
     const localFn = parseExpectedFnType(env.get(expr.callee.name) ?? "");
     if (localFn) return localFn.returnType;
-    const fn = context.functions.get(expr.callee.name);
+    const fn = functionDeclForNameInMap(expr.callee.name, context.functions);
     if (!fn) return undefined;
     return inferCallReturnType(expr, fn, context, env) ?? fn.returnType;
   }
@@ -9716,6 +9742,7 @@ function collectFunctionTypeTextVars(
   staticTypeParams: Set<string>,
   consts?: Map<string, ConstValue>,
 ) {
+  annotation = normalizeTypeSourceForParsing(annotation);
   const pattern = /(?:->|:)\s*([a-z][A-Za-z0-9_]*)\b/g;
   for (const match of annotation.matchAll(pattern)) {
     const name = match[1];
@@ -9839,8 +9866,8 @@ function bindTypePattern(
   seen = new Set<string>(),
 ) {
   if (!pattern || !actual) return;
-  pattern = substituteTypeVars(pattern, types);
-  actual = substituteTypeVars(actual, types);
+  pattern = normalizeTypeSourceForParsing(substituteTypeVars(pattern, types));
+  actual = normalizeTypeSourceForParsing(substituteTypeVars(actual, types));
   const key = `${pattern}\0${actual}`;
   if (seen.has(key)) return;
   seen.add(key);
@@ -10083,12 +10110,18 @@ function substituteInferredExpr(
     return expr;
   }
   if (expr.kind === "call") {
+    const callee = substituteInferredExpr(expr.callee, types, staticNames, proofTypes, context);
+    const direct = callee.kind === "var" ? context?.functions.get(callee.name) : undefined;
     return {
       ...expr,
-      callee: substituteInferredExpr(expr.callee, types, staticNames, proofTypes, context),
-      args: expr.args.map((arg) =>
-        substituteInferredExpr(arg, types, staticNames, proofTypes, context)
-      ),
+      callee,
+      args: expr.args.map((arg, index) => {
+        const param = direct?.params[index];
+        const argContext = param?.const && param.type.trim() === "type"
+          ? substituteContextWithoutRuntimeBindings(context, [...types.keys()])
+          : context;
+        return substituteInferredExpr(arg, types, staticNames, proofTypes, argContext);
+      }),
     };
   }
   if (expr.kind === "const_fn") {
@@ -10432,7 +10465,9 @@ function specializeExpr(
       case "call": {
         context.stats && (context.stats.visitedCalls += 1);
         const callee = specializeExpr(expr.callee, context, env);
-        const direct = callee.kind === "var" ? context.functions.get(callee.name) : undefined;
+        const direct = callee.kind === "var"
+          ? constSpecializationFunctionDecl(callee.name, context)
+          : undefined;
         const args = expr.args.map((arg, index) => {
           const param = direct?.params[index];
           const rawExpected = param && !param.const ? param.type : undefined;
@@ -10600,7 +10635,7 @@ function expectedFunctionType(
   expectedType: string | undefined,
   types: TypeDecl[] = [],
 ): string | undefined {
-  const direct = expectedType?.trim();
+  const direct = normalizeTypeSourceForParsing(expectedType?.trim() ?? "");
   if (direct?.startsWith("fn(")) return direct;
   const resolved = resolveAliasType(direct, types)?.trim();
   return resolved?.startsWith("fn(") ? resolved : undefined;
@@ -10676,6 +10711,33 @@ type StaticConstArgContext =
       "addShader" | "constFnCaptures" | "diagnosticSpan" | "emitDiagnostics" | "memo"
     >
   >;
+
+function constSpecializationFunctionDecl(
+  name: string,
+  context: ConstSpecializationContext,
+): FnDecl | undefined {
+  const exact = context.functions.get(name);
+  if (exact || name.includes(".") || name.includes("::")) return exact;
+  if (!CONST_SPECIALIZATION_TERMINAL_HELPERS.has(name)) return undefined;
+  const matches = [...context.functions.values()].filter((fn) =>
+    !fn.name.includes("::") && terminalName(fn.name) === name
+  );
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) return undefined;
+  const signature = constSpecializationSignatureKey(matches[0]!);
+  return matches.every((fn) => constSpecializationSignatureKey(fn) === signature)
+    ? matches[0]
+    : undefined;
+}
+
+function constSpecializationSignatureKey(fn: FnDecl): string {
+  const params = fn.params.map((param) =>
+    `${param.const ? "const " : ""}${param.name}:${param.type}`
+  ).join(",");
+  return `${params}->${fn.returnType}`;
+}
+
+const CONST_SPECIALIZATION_TERMINAL_HELPERS = new Set(["fmap", "bind", "apply", "pure"]);
 
 function hasConstFnHelperContext(
   context: StaticConstArgContext,
@@ -12507,6 +12569,16 @@ function runtimeEnvHasName(env: Map<string, string> | undefined, name: string): 
   return Boolean(env?.has(name));
 }
 
+function substituteContextWithoutRuntimeBindings(
+  context: Parameters<typeof substituteInferredExpr>[4],
+  names: string[],
+): Parameters<typeof substituteInferredExpr>[4] {
+  if (!context || names.length === 0 || !context.runtimeEnv) return context;
+  const runtimeEnv = new Map(context.runtimeEnv);
+  for (const name of names) runtimeEnv.delete(name);
+  return { ...context, runtimeEnv };
+}
+
 function substituteContextWithRuntimeBindings(
   context: Parameters<typeof substituteInferredExpr>[4],
   names: string[],
@@ -12668,11 +12740,11 @@ function staticForItems(
 
 function staticNumber(expr: Expr, staticValues: Map<string, ConstValue>): number | undefined {
   if (expr.kind === "literal" && expr.literalKind === "number") {
-    return Number.parseInt(expr.value, 10);
+    return staticIntegerNumberLiteral(expr.value);
   }
   if (expr.kind === "var") {
     const value = staticValues.get(expr.name);
-    if (value?.kind === "number") return Number.parseInt(value.value, 10);
+    if (value?.kind === "number") return staticIntegerNumberLiteral(value.value);
   }
   if (expr.kind === "binary") {
     const left = staticNumber(expr.left, staticValues);
@@ -13054,8 +13126,9 @@ function staticConstExprValue(
       ));
     }
     if (left.kind === "number" && right.kind === "number") {
-      const l = Number.parseInt(left.value, 10);
-      const r = Number.parseInt(right.value, 10);
+      const l = staticIntegerNumberLiteral(left.value);
+      const r = staticIntegerNumberLiteral(right.value);
+      if (l === undefined || r === undefined) return finish(undefined);
       if (expr.op === "+") {
         return finish(constValueWithSpan({ kind: "number", value: String(l + r) }, expr.span));
       }
@@ -14882,7 +14955,28 @@ function runtimeValueTypeAssignable(
   const expectedRuntime = scalarDomainRuntimeType(expected);
   const actualRuntime = scalarDomainRuntimeType(actual);
   if (expectedRuntime && actualRuntime && expectedRuntime === actualRuntime) return true;
+  if (isNumericType(resolvedExpected) && isNumericType(resolvedActual)) {
+    return numericRuntimeTypesAssignable(resolvedExpected, resolvedActual);
+  }
   return true;
+}
+
+function numericRuntimeTypesAssignable(expected: string, actual: string): boolean {
+  if (expected === actual) return true;
+  const expectedLane = numericLoweringLane(expected);
+  const actualLane = numericLoweringLane(actual);
+  return expectedLane !== undefined && expectedLane === actualLane;
+}
+
+function numericLoweringLane(type: string): "i32" | "i64" | "f32" | "f64" | undefined {
+  const scalar = scalarReflection(type.trim());
+  if (!scalar) return undefined;
+  if (scalar.carrier === "f32") return "f32";
+  if (scalar.carrier === "f64") return "f64";
+  if (scalar.carrier === "i64" || scalar.carrier === "u64") return "i64";
+  const width = scalar.bitWidth;
+  if (width !== undefined && width > 32) return "i64";
+  return "i32";
 }
 
 function resolveAliasFree(type: string | undefined): string | undefined {
@@ -18679,6 +18773,7 @@ function collectTypeCalls(expr: TypeExpr): TypeExpr[] {
 }
 
 function parseAnnotationType(source: string): TypeExpr | undefined {
+  source = normalizeTypeSourceForParsing(source);
   const cached = parsedAnnotationTypeCache.get(source);
   if (cached !== undefined) {
     if (cached === false) return undefined;
@@ -20708,10 +20803,36 @@ function checkExprImpl(
           ));
         }
       }
-      if (
-        expr.literalKind === "number" && expectedType === "i32" && isUnsuffixedInteger(expr.value)
-      ) {
-        expr.inferredType = "i32";
+      if (expr.literalKind === "number") {
+        const literalType = numericLiteralExplicitType(expr.value);
+        if (literalType) {
+          expr.inferredType = literalType;
+          if (
+            expectedType &&
+            !explicitNumericLiteralTypeAssignable(
+              resolveAliasType(expectedType, types) ?? expectedType,
+              literalType,
+              types,
+            )
+          ) {
+            diagnostics.push(diagnosticAt(
+              "type.literal_mismatch",
+              `expected ${expectedType} but got ${literalType}`,
+              expr,
+            ));
+          }
+        } else {
+          const inferredType = contextualNumericLiteralType(expectedType, expr.value, types);
+          if (inferredType) {
+            expr.inferredType = inferredType;
+          } else if (expectedType && numericLiteralCanMatchType(expectedType, types)) {
+            diagnostics.push(diagnosticAt(
+              "type.literal_mismatch",
+              `literal ${expr.value} is not assignable to ${expectedType}`,
+              expr,
+            ));
+          }
+        }
       }
       return;
   }
@@ -21475,13 +21596,12 @@ function checkFixedCollectionUpdateLiteral(
 
 function staticIntegerLiteral(expr: Expr): number | undefined {
   if (expr.kind !== "literal" || expr.literalKind !== "number") return undefined;
-  if (!/^-?[0-9]+$/.test(expr.value)) return undefined;
-  return Number.parseInt(expr.value, 10);
+  return staticIntegerNumberLiteral(expr.value);
 }
 
 function literalRuntimeType(expr: Expr): string | undefined {
   if (expr.kind !== "literal") return undefined;
-  if (expr.literalKind === "number") return "i32";
+  if (expr.literalKind === "number") return numericLiteralExplicitType(expr.value) ?? "i32";
   if (expr.literalKind === "bool") return "bool";
   if (expr.literalKind === "char") return "char";
   if (expr.literalKind === "string" || expr.literalKind === "multiline") return "string";
@@ -23035,8 +23155,61 @@ function numericExpectedType(expectedType: string | undefined): string | undefin
   return scalarDomainRuntimeType(expectedType) === "i32" ? "i32" : undefined;
 }
 
+function contextualNumericLiteralType(
+  expectedType: string | undefined,
+  value: string,
+  types: TypeDecl[],
+): string | undefined {
+  if (!expectedType || numericLiteralExplicitType(value)) return undefined;
+  const resolved = resolveAliasType(expectedType, types) ?? expectedType.trim();
+  if (resolved === "count") {
+    const literal = staticIntegerNumberLiteral(value);
+    return literal !== undefined && literal >= 0 ? "i32" : undefined;
+  }
+  const scalar = scalarReflection(resolved);
+  if (!scalar) return undefined;
+  const normalized = normalizedNumberLiteralText(value);
+  const literal = Number(normalized);
+  if (!Number.isFinite(literal)) return undefined;
+  const floatTarget = scalar.carrier === "f32" || scalar.carrier === "f64";
+  if (!floatTarget && !Number.isInteger(literal)) return undefined;
+  if (!floatTarget && !isUnsuffixedInteger(normalized)) return undefined;
+  if (scalar.min !== undefined && literal < scalar.min) return undefined;
+  if (scalar.max !== undefined && literal > scalar.max) return undefined;
+  if (!scalar.signed && literal < 0) return undefined;
+  return resolved;
+}
+
+function explicitNumericLiteralTypeAssignable(
+  expectedType: string,
+  literalType: string,
+  types: TypeDecl[],
+): boolean {
+  const resolvedExpected = resolveAliasType(expectedType, types) ?? expectedType.trim();
+  if (!isNumericType(resolvedExpected)) {
+    return runtimeValueTypeAssignable(resolvedExpected, literalType, types);
+  }
+  return resolvedExpected === literalType;
+}
+
 function isUnsuffixedInteger(value: string): boolean {
-  return /^[0-9]+$/.test(value);
+  return /^-?[0-9](_?[0-9])*$/.test(value);
+}
+
+function numericLiteralExplicitType(value: string): string | undefined {
+  return value.match(/(i32|u32|i64|u64|f32|f64)$/)?.[1];
+}
+
+function normalizedNumberLiteralText(value: string): string {
+  return value.replaceAll("_", "").replace(/(i32|u32|i64|u64|f32|f64)$/, "");
+}
+
+function staticIntegerNumberLiteral(value: string): number | undefined {
+  const explicitType = numericLiteralExplicitType(value);
+  if (explicitType === "f32" || explicitType === "f64") return undefined;
+  const normalized = normalizedNumberLiteralText(value);
+  if (!/^-?[0-9]+$/.test(normalized)) return undefined;
+  return Number.parseInt(normalized, 10);
 }
 
 function isUnsignedIntegerType(type: string): boolean {

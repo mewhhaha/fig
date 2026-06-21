@@ -1,0 +1,54 @@
+const monad = @import("prelude.monad");
+
+type Fresh = struct {
+  next: i32,
+}
+
+type FreshId = struct {
+  value: i32,
+}
+
+type fn Supply(value: type) -> type {
+  monad.State(Fresh, value)
+}
+
+fn Fresh::start(first: i32) -> Fresh {
+  Fresh {next: first}
+}
+
+fn FreshId::new(value: i32) -> FreshId {
+  FreshId {value}
+}
+
+fn fresh() -> Supply(i32) {
+  \state -> {
+    value: state.next,
+    state: Fresh {next: state.next + 1},
+  }
+}
+
+fn next_id() -> Supply(FreshId) {
+  do @monad(monad.State(Fresh, _)) {
+    value <- fresh();
+    pure(FreshId::new(value))
+  }
+}
+
+fn reserve(amount: i32) -> Supply(i32) {
+  \state -> {
+    value: state.next,
+    state: Fresh {next: state.next + amount},
+  }
+}
+
+fn run(value: Supply(a), first: i32) -> monad.StateResult(Fresh, a) {
+  monad.State::run(value, Fresh::start(first))
+}
+
+fn eval(value: Supply(a), first: i32) -> a {
+  monad.State::eval(value, Fresh::start(first))
+}
+
+fn exec(value: Supply(a), first: i32) -> Fresh {
+  monad.State::exec(value, Fresh::start(first))
+}

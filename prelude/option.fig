@@ -51,10 +51,50 @@ fn core.Option::append(value: core.Option(a), fallback: core.Option(a)) -> core.
   match value { Some => value, None => fallback }
 }
 
+fn core.Option::choose(value: core.Option(a), fallback: core.Option(a)) -> core.Option(a) {
+  core.Option::append(value, fallback)
+}
+
 fn core.Option::empty() -> core.Option(a) {
   none()
 }
 
+fn core.Option::then_right(left: core.Option(a), right: core.Option(b)) -> core.Option(b) {
+  match left {
+    Some => right,
+    None => none(),
+  }
+}
+
+fn core.Option::then_left(left: core.Option(a), right: core.Option(b)) -> core.Option(a) {
+  match right {
+    Some => left,
+    None => none(),
+  }
+}
+
 fn core.Option::or_else(value: core.Option(a), const fallback: fn() -> core.Option(a)) -> core.Option(a) {
   match value { Some => value, None => fallback() }
+}
+
+fn core.Option::fold(
+  value: core.Option(a),
+  initial: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  match value {
+    Some(inner) => f(initial, inner),
+    None => initial,
+  }
+}
+
+fn core.Option::fold_map(
+  const f: fn(x: a) -> m,
+  value: core.Option(a)
+) -> m {
+  @assert(core.Monoid(m));
+  match value {
+    Some(inner) => f(inner),
+    None => m::empty(),
+  }
 }

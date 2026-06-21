@@ -597,9 +597,11 @@ Current best observed Fig semantic dependency edit: `44.367 ms` in a focused 15-
 the repeat at `45.685 ms`. Treat the current stable plateau as `~44-47 ms`, but require same-run
 comparison because environment-sensitive rechecks have shifted both Fig and Go upward in the past.
 
-Current latest isolated Fig semantic dependency edit during the stability recheck: `84.811 ms` in a
-focused 15-sample run. This latest absolute value is not a new plateau by itself because the
-same-machine Go comparison also shifted upward.
+Current latest isolated Fig semantic dependency edit after updating the temporary benchmark for
+source-defined operators: `97,727.245 ms` in a focused 3-sample run with 1 warmup. This is a
+baseline reset, not an optimization result. The row is dominated by `check_ms=97,538.881`, because
+the generated 9k project now imports the real `prelude.operators` source surface instead of relying
+on the old implicit primitive-operator model.
 
 Current best Go dependency semantic edit on the same temporary project: ~65 ms in a focused
 5-sample run after a warm no-op build. Latest same-machine recheck measured Go semantic edit at
@@ -682,6 +684,7 @@ Current best Go dependency semantic edit on the same temporary project: ~65 ms i
 | Checked-program candidate telemetry   | Keep support    | Added opt-in `checked_program_hits/misses` counters and a stale-output regression test. Focused `--cache-stats` measured Fig semantic edit `54.520 ms`, `checked_program_hits=1`, `checked_program_misses=0`; a normal no-stats run measured `49.123 ms`. | Keep as evidence for the next structural pass. The key shape survives dependency body edits, but no checked artifact is reused yet. |
 | Checked-program direct-reuse audit    | Stop for now    | A fresh 7-sample trace measured `checkPrimitiveDecls` plus `checkDotQualifiedTypeMemberSyntax` at only about `0.35-0.4 ms` per rebuild, while body-sensitive phases such as `checkTypeFunctionCasing`, `lowerProductConstructors`, and contract/type checks remain several milliseconds combined. | Do not add a direct whole-checked-program cache or a local signature-only cache. The checker needs an explicit reusable signature/type setup artifact plus current-body validation. |
 | Function-check environment-key split  | Keep support    | Added trace-only `check.checkFn.environment_key` and `check.checkFn.cache` events. A 7-sample trace measured the environment key at `0.696 ms` total, about `0.099 ms` per rebuild; repeated normal focused runs measured `73.757 ms` during a noisy run and then `49.575 ms` on repeat. | Keep the trace split, but do not cache this key. It is too small; further checker gains need to avoid per-function cache-hit restoration or split the checker artifact. |
+| Current-language benchmark repair     | Baseline reset  | Updated the temporary generator to import `prelude.operators`, expose generated `entry` functions, skip the type-only module in root `main`, and let the runner resolve repo prelude modules. `deno task bench:large-compile -- --mode=session_leaf_semantic_edit --samples 3 --warmup 1` measured `97,727.245 ms`; phase split: import `100.491 ms`, check `97,538.881 ms`, backend `69.396 ms`, Wasm encode `14.803 ms`. | Treat older `~50-70 ms` Fig rows as not comparable after source-defined operators became mandatory in generated source. Next speed work should attack repeated generic operator/prelude checking or introduce a reusable checked prelude/operator artifact before local micro-tuning. |
 
 Go comparison on the same temporary project:
 

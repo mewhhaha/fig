@@ -1,0 +1,96 @@
+const operators = @import("prelude.operators");
+
+type Span = struct {
+  start: i32,
+  end: i32,
+}
+
+fn Span::new(start: i32, end: i32) -> Span {
+  Span {start, end}
+}
+
+fn Span::empty_at(index: i32) -> Span {
+  Span {start: index, end: index}
+}
+
+fn Span::len(span: Span) -> i32 {
+  span.end - span.start
+}
+
+fn Span::is_empty(span: Span) -> bool {
+  span.start == span.end
+}
+
+fn Span::contains(span: Span, index: i32) -> bool {
+  match span.start <= index {
+    true => index < span.end,
+    false => false,
+  }
+}
+
+fn Span::contains_span(outer: Span, inner: Span) -> bool {
+  match outer.start <= inner.start {
+    true => inner.end <= outer.end,
+    false => false,
+  }
+}
+
+fn Span::intersects(left: Span, right: Span) -> bool {
+  match left.start < right.end {
+    true => right.start < left.end,
+    false => false,
+  }
+}
+
+fn Span::merge(left: Span, right: Span) -> Span {
+  let start = match left.start < right.start {
+    true => left.start,
+    false => right.start,
+  };
+  let end = match left.end > right.end {
+    true => left.end,
+    false => right.end,
+  };
+  Span {start, end}
+}
+
+fn Span::shift(span: Span, delta: i32) -> Span {
+  Span {start: span.start + delta, end: span.end + delta}
+}
+
+type Cursor = struct {
+  index: i32,
+  limit: i32,
+}
+
+fn Cursor::new(index: i32, limit: i32) -> Cursor {
+  Cursor {index, limit}
+}
+
+fn Cursor::start(limit: i32) -> Cursor {
+  Cursor {index: 0, limit}
+}
+
+fn Cursor::at_end(cursor: Cursor) -> bool {
+  cursor.index >= cursor.limit
+}
+
+fn Cursor::remaining(cursor: Cursor) -> i32 {
+  match cursor.index >= cursor.limit {
+    true => 0,
+    false => cursor.limit - cursor.index,
+  }
+}
+
+fn Cursor::advance(cursor: Cursor, amount: i32) -> Cursor {
+  let next = cursor.index + amount;
+  let index = match next > cursor.limit {
+    true => cursor.limit,
+    false => next,
+  };
+  Cursor {index, limit: cursor.limit}
+}
+
+fn Cursor::span_to(cursor: Cursor, next: Cursor) -> Span {
+  Span {start: cursor.index, end: next.index}
+}

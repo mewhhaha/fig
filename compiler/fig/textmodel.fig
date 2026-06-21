@@ -55,7 +55,11 @@ type SummaryKind = enum(i32) {
   FunctionAttachedDeclarations = 48,
   FunctionAttachedSignature = 49,
   OperatorDeclarations = 50,
-  OperatorSignature = 51
+  OperatorSignature = 51,
+  ValueNameTokenCount = 52,
+  ValueNameTokenSignature = 53,
+  ValueLiteralTokenCount = 54,
+  ValueLiteralTokenSignature = 55
 }
 
 type ImportResolutionMode = enum(i32) {

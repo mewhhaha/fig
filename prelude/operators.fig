@@ -360,6 +360,20 @@ fn op_append(a: t, b: t) -> t {
 
 infixr 55 (<>) = op_append;
 
+type fn OpChoice(t: type fn(a: type) -> type) -> type {
+  let Expected = fn(left: t(a), right: t(a)) -> t(a);
+  @require(@type_has_member(t, #choose), "operator <|> requires choose");
+  @require(@type_member_type(t, #choose) == Expected, "operator <|> choose has wrong type");
+  t
+}
+
+fn op_choice(left: t(a), right: t(a)) -> t(a) {
+  @assert(OpChoice(t));
+  t::choose(left, right)
+}
+
+infixr 15 (<|>) = op_choice;
+
 type fn OpApply(t: type fn(a: type) -> type) -> type {
   let Expected = fn(v: t(fn(x: a) -> b), x: t(a)) -> t(b);
   @require(@type_has_member(t, #apply), "operator <*> requires apply");
@@ -386,6 +400,34 @@ fn op_apply_flipped(
 }
 
 infixl 65 (<**>) = op_apply_flipped;
+
+type fn OpThenRight(t: type fn(a: type) -> type) -> type {
+  let Expected = fn(left: t(a), right: t(b)) -> t(b);
+  @require(@type_has_member(t, #then_right), "operator *> requires then_right");
+  @require(@type_member_type(t, #then_right) == Expected, "operator *> then_right has wrong type");
+  t
+}
+
+fn op_then_right(left: t(a), right: t(b)) -> t(b) {
+  @assert(OpThenRight(t));
+  t::then_right(left, right)
+}
+
+infixl 65 (*>) = op_then_right;
+
+type fn OpThenLeft(t: type fn(a: type) -> type) -> type {
+  let Expected = fn(left: t(a), right: t(b)) -> t(a);
+  @require(@type_has_member(t, #then_left), "operator <* requires then_left");
+  @require(@type_member_type(t, #then_left) == Expected, "operator <* then_left has wrong type");
+  t
+}
+
+fn op_then_left(left: t(a), right: t(b)) -> t(a) {
+  @assert(OpThenLeft(t));
+  t::then_left(left, right)
+}
+
+infixl 65 (<*) = op_then_left;
 
 type fn OpMap(t: type fn(a: type) -> type) -> type {
   let Expected = fn(const f: fn(x: a) -> b, v: t(a)) -> t(b);

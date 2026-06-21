@@ -1,0 +1,216 @@
+const core = @import("prelude.core");
+const list = @import("prelude.list");
+const option = @import("prelude.option");
+const validation = @import("prelude.validation");
+const vec = @import("prelude.vec");
+
+type fn TraversableOption(t: type fn(a: type) -> type) -> type {
+  let Traverse = fn(
+    const f: fn(x: a) -> core.Option(b),
+    value: t(a)
+  ) -> core.Option(t(b));
+  @require(
+    @type_has_member(t, #traverse_option),
+    "TraversableOption requires traverse_option"
+  );
+  @require(
+    @type_member_type(t, #traverse_option) == Traverse,
+    "TraversableOption.traverse_option has wrong type"
+  );
+  t
+}
+
+fn traverse_option(
+  value: t(a),
+  const f: fn(x: a) -> core.Option(b)
+) -> core.Option(t(b)) {
+  @assert(TraversableOption(t));
+  t::traverse_option(f, value)
+}
+
+fn option_identity(value: core.Option(a)) -> core.Option(a) {
+  value
+}
+
+fn sequence_option(value: t(core.Option(a))) -> core.Option(t(a)) {
+  @assert(TraversableOption(t));
+  t::traverse_option(option_identity, value)
+}
+
+type fn TraversableValidation(t: type fn(a: type) -> type) -> type {
+  let Traverse = fn(
+    const f: fn(x: a) -> validation.Validation(e, b),
+    value: t(a)
+  ) -> validation.Validation(e, t(b));
+  @require(
+    @type_has_member(t, #traverse_validation),
+    "TraversableValidation requires traverse_validation"
+  );
+  @require(
+    @type_member_type(t, #traverse_validation) == Traverse,
+    "TraversableValidation.traverse_validation has wrong type"
+  );
+  t
+}
+
+fn traverse_validation(
+  value: t(a),
+  const f: fn(x: a) -> validation.Validation(e, b)
+) -> validation.Validation(e, t(b)) {
+  @assert(TraversableValidation(t));
+  t::traverse_validation(f, value)
+}
+
+fn validation_identity(
+  value: validation.Validation(e, a)
+) -> validation.Validation(e, a) {
+  value
+}
+
+fn sequence_validation(
+  value: t(validation.Validation(e, a))
+) -> validation.Validation(e, t(a)) {
+  @assert(TraversableValidation(t));
+  t::traverse_validation(validation_identity, value)
+}
+
+fn core.Option::traverse_option(
+  const f: fn(x: a) -> core.Option(b),
+  value: core.Option(a)
+) -> core.Option(core.Option(b)) {
+  match value {
+    Some(inner) => core.Option::map(option.some, f(inner)),
+    None => option.some(None),
+  }
+}
+
+fn core.Option::traverse_validation(
+  const f: fn(x: a) -> validation.Validation(e, b),
+  value: core.Option(a)
+) -> validation.Validation(e, core.Option(b)) {
+  match value {
+    Some(inner) => validation.Validation::map(option.some, f(inner)),
+    None => validation.valid(None),
+  }
+}
+
+fn list.List::traverse_option(
+  const f: fn(x: a) -> core.Option(b),
+  xs: list.List(a)
+) -> core.Option(list.List(b)) {
+  list.List::traverse_option_loop(f, xs, list.List::empty())
+}
+
+fn list.List::traverse_option_loop(
+  const f: fn(x: a) -> core.Option(b),
+  xs: list.List(a),
+  out: list.List(b)
+) -> core.Option(list.List(b)) {
+  match list.List::head(xs) {
+    Some(value) => match f(value) {
+      Some(next) => list.List::traverse_option_loop(
+        f,
+        list.List::tail(xs),
+        list.List::cons(next, out)
+      ),
+      None => None,
+    },
+    None => option.some(list.List::reverse(out)),
+  }
+}
+
+fn list.List::traverse_validation(
+  const f: fn(x: a) -> validation.Validation(e, b),
+  xs: list.List(a)
+) -> validation.Validation(e, list.List(b)) {
+  list.List::traverse_validation_loop(f, xs, list.List::empty())
+}
+
+fn list.List::traverse_validation_loop(
+  const f: fn(x: a) -> validation.Validation(e, b),
+  xs: list.List(a),
+  out: list.List(b)
+) -> validation.Validation(e, list.List(b)) {
+  match list.List::head(xs) {
+    Some(value) => match f(value) {
+      Valid(next) => list.List::traverse_validation_loop(
+        f,
+        list.List::tail(xs),
+        list.List::cons(next, out)
+      ),
+      Invalid(error) => match list.List::traverse_validation_loop(
+        f,
+        list.List::tail(xs),
+        out
+      ) {
+        Valid => validation.invalid(error),
+        Invalid(rest) => core.append(error, rest)
+          \combined -> validation.invalid(combined),
+      },
+    },
+    None => validation.valid(list.List::reverse(out)),
+  }
+}
+
+fn vec.Vec::traverse_option(
+  const f: fn(x: a) -> core.Option(b),
+  xs: vec.Vec(a)
+) -> core.Option(vec.Vec(b)) {
+  vec.Vec::traverse_option_loop(f, xs, 0, vec.Vec::new(b, vec.Vec::len(xs)))
+}
+
+fn vec.Vec::traverse_option_loop(
+  const f: fn(x: a) -> core.Option(b),
+  xs: vec.Vec(a),
+  index: i32,
+  out: vec.Vec(b)
+) -> core.Option(vec.Vec(b)) {
+  match index < vec.Vec::len(xs) {
+    true => match f(vec.Vec::get_t(a, xs, index)) {
+      Some(next) => vec.Vec::traverse_option_loop(
+        f,
+        xs,
+        index + 1,
+        vec.Vec::push(out, next)
+      ),
+      None => None,
+    },
+    false => option.some(out),
+  }
+}
+
+fn vec.Vec::traverse_validation(
+  const f: fn(x: a) -> validation.Validation(e, b),
+  xs: vec.Vec(a)
+) -> validation.Validation(e, vec.Vec(b)) {
+  vec.Vec::traverse_validation_loop(f, xs, 0, vec.Vec::new(b, vec.Vec::len(xs)))
+}
+
+fn vec.Vec::traverse_validation_loop(
+  const f: fn(x: a) -> validation.Validation(e, b),
+  xs: vec.Vec(a),
+  index: i32,
+  out: vec.Vec(b)
+) -> validation.Validation(e, vec.Vec(b)) {
+  match index < vec.Vec::len(xs) {
+    true => match f(vec.Vec::get_t(a, xs, index)) {
+      Valid(next) => vec.Vec::traverse_validation_loop(
+        f,
+        xs,
+        index + 1,
+        vec.Vec::push(out, next)
+      ),
+      Invalid(error) => match vec.Vec::traverse_validation_loop(
+        f,
+        xs,
+        index + 1,
+        out
+      ) {
+        Valid => validation.invalid(error),
+        Invalid(rest) => core.append(error, rest)
+          \combined -> validation.invalid(combined),
+      },
+    },
+    false => validation.valid(out),
+  }
+}

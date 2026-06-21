@@ -1,0 +1,83 @@
+const core = @import("prelude.core");
+const result = @import("prelude.result");
+
+type fn Validation(error: type, value: type) -> union {
+  let Valid = {value: value};
+  let Invalid = {error: error};
+  union(Valid, Invalid)
+}
+
+fn valid(value: a) -> Validation(e, a) {
+  Valid(value)
+}
+
+fn invalid(error: e) -> Validation(e, a) {
+  Invalid(error)
+}
+
+fn Validation::is_valid(value: Validation(e, a)) -> bool {
+  match value { Valid => true, Invalid => false }
+}
+
+fn Validation::is_invalid(value: Validation(e, a)) -> bool {
+  match value { Valid => false, Invalid => true }
+}
+
+fn Validation::unwrap_or(value: Validation(e, a), fallback: a) -> a {
+  match value { Valid(inner) => inner, Invalid => fallback }
+}
+
+fn Validation::map(
+  const f: fn(x: a) -> b,
+  value: Validation(e, a)
+) -> Validation(e, b) {
+  match value {
+    Valid(inner) => valid(f(inner)),
+    Invalid(error) => invalid(error),
+  }
+}
+
+fn Validation::map_error(
+  const f: fn(x: e) -> f,
+  value: Validation(e, a)
+) -> Validation(f, a) {
+  match value {
+    Valid(inner) => valid(inner),
+    Invalid(error) => invalid(f(error)),
+  }
+}
+
+fn Validation::pure(value: a) -> Validation(e, a) {
+  valid(value)
+}
+
+fn Validation::apply(
+  value: Validation(e, fn(x: a) -> b),
+  arg: Validation(e, a)
+) -> Validation(e, b) {
+  @assert(core.Semigroup(e));
+  match value {
+    Valid(f) => match arg {
+      Valid(inner) => valid(f(inner)),
+      Invalid(error) => invalid(error),
+    },
+    Invalid(left) => match arg {
+      Valid => invalid(left),
+      Invalid(right) => invalid(e::append(left, right)),
+    },
+  }
+}
+
+fn Validation::to_result(value: Validation(e, a)) -> core.Result(a, e) {
+  match value {
+    Valid(inner) => result.ok(inner),
+    Invalid(error) => result.err(error),
+  }
+}
+
+fn Validation::from_result(value: core.Result(a, e)) -> Validation(e, a) {
+  match value {
+    Ok(inner) => valid(inner),
+    Err(error) => invalid(error),
+  }
+}

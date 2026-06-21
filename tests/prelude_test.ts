@@ -238,6 +238,439 @@ Deno.test("effect prelude reports missing effect proofs", async () => {
   );
 });
 
+Deno.test("validation prelude accumulates independent errors", async () => {
+  const source = `
+    const validation = @import("prelude.validation");
+
+    type ErrorBag = struct {count: i32, first: i32}
+
+    fn ErrorBag::append(left: ErrorBag, right: ErrorBag) -> ErrorBag {
+      ErrorBag {count: left.count + right.count, first: left.first}
+    }
+
+    fn add(left: i32, right: i32) -> i32 {
+      left + right
+    }
+
+    fn inc(value: i32) -> i32 {
+      value + 1
+    }
+
+    fn independent_valid() -> validation.Validation(ErrorBag, i32) {
+      do @applicative(validation.Validation(ErrorBag, _)) {
+        left <- validation.valid(10);
+        right <- validation.valid(20);
+        pure(add(left, right))
+      }
+    }
+
+    fn independent_invalid() -> validation.Validation(ErrorBag, i32) {
+      let f: validation.Validation(ErrorBag, fn(x: i32) -> i32) =
+        validation.invalid(ErrorBag {count: 1, first: 7});
+      let value: validation.Validation(ErrorBag, i32) =
+        validation.invalid(ErrorBag {count: 2, first: 11});
+      validation.Validation::apply(f, value)
+    }
+
+    fn round_trip() -> validation.Validation(ErrorBag, i32) {
+      validation.Validation::from_result(
+        validation.Validation::to_result(validation.valid(5))
+      )
+    }
+
+    pub fn main() -> i32 {
+      let valid_score = match independent_valid() {
+        Valid(value) => value,
+        Invalid => 0,
+      };
+      let invalid_score = match independent_invalid() {
+        Valid => 0,
+        Invalid(error) => error.count * 10 + error.first,
+      };
+      let round_trip_score = match round_trip() {
+        Valid(value) => value,
+        Invalid => 0,
+      };
+      let mapped = validation.Validation::map(inc, validation.valid(8));
+      let mapped_score = validation.Validation::unwrap_or(mapped, 0);
+      valid_score + invalid_score + round_trip_score + mapped_score
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 81);
+});
+
+Deno.test("span prelude models source spans and cursors", async () => {
+  const source = `
+    const span = @import("prelude.span");
+
+    fn bool_score(value: bool, score: i32) -> i32 {
+      match value { true => score, false => 0 }
+    }
+
+    pub fn main() -> i32 {
+      let left = span.Span::new(2, 8);
+      let right = span.Span::new(5, 12);
+      let merged = span.Span::merge(left, right);
+      let shifted = span.Span::shift(merged, 3);
+      let cursor = span.Cursor::start(20);
+      let next = span.Cursor::advance(cursor, 7);
+      let end = span.Cursor::advance(next, 99);
+      let window = span.Cursor::span_to(cursor, next);
+
+      span.Span::len(merged)
+        + shifted.start
+        + shifted.end
+        + span.Cursor::remaining(cursor)
+        + span.Cursor::remaining(next)
+        + span.Span::len(window)
+        + end.index
+        + bool_score(span.Span::contains(left, 5), 1)
+        + bool_score(span.Span::contains(left, 8), 2)
+        + bool_score(span.Span::intersects(left, right), 4)
+        + bool_score(span.Span::contains_span(merged, left), 8)
+        + bool_score(span.Cursor::at_end(end), 16)
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 119);
+});
+
+Deno.test("writer pass and scan prelude abstractions compose with do notation", async () => {
+  const source = `
+    const passes = @import("prelude.pass");
+    const scan = @import("prelude.scan");
+    const span = @import("prelude.span");
+    const writer = @import("prelude.writer");
+
+    type Log = struct {count: i32, total: i32}
+
+    fn Log::empty() -> Log {
+      Log {count: 0, total: 0}
+    }
+
+    fn Log::append(left: Log, right: Log) -> Log {
+      Log {count: left.count + right.count, total: left.total + right.total}
+    }
+
+    type Env = struct {bias: i32}
+    type Store = struct {tick: i32}
+    type Source = struct {stride: i32}
+
+    fn writer_step(value: i32) -> writer.Writer(Log, i32) {
+      do @monad(writer.Writer(Log, _)) {
+        writer.Writer::tell(Log {count: 1, total: value});
+        pure(value + 3)
+      }
+    }
+
+    fn writer_program() -> writer.Writer(Log, i32) {
+      do @monad(writer.Writer(Log, _)) {
+        writer.Writer::tell(Log {count: 1, total: 2});
+        value <- writer_step(4);
+        writer.Writer::tell(Log {count: 1, total: 6});
+        pure(value * 2)
+      }
+    }
+
+    fn bump(store: Store) -> Store {
+      Store {tick: store.tick + 1}
+    }
+
+    fn store_score(store: Store) -> i32 {
+      store.tick * 10
+    }
+
+    fn ask_env() -> passes.Pass(Env, Store, Log, Env) {
+      passes.Pass::ask()
+    }
+
+    fn get_store() -> passes.Pass(Env, Store, Log, Store) {
+      passes.Pass::get()
+    }
+
+    fn gets_store_score() -> passes.Pass(Env, Store, Log, i32) {
+      passes.Pass::gets(store_score)
+    }
+
+    fn pass_program() -> passes.Pass(Env, Store, Log, i32) {
+      do @monad(passes.Pass(Env, Store, Log, _)) {
+        env <- ask_env();
+        start <- get_store();
+        passes.Pass::tell(Log {count: 1, total: env.bias});
+        passes.Pass::modify(bump);
+        later <- gets_store_score();
+        pure(env.bias + start.tick + later)
+      }
+    }
+
+    fn scan_source() -> scan.Scan(Source, Source) {
+      scan.Scan::ask()
+    }
+
+    fn scan_cursor() -> scan.Scan(Source, span.Cursor) {
+      scan.Scan::cursor()
+    }
+
+    fn scanner() -> scan.Scan(Source, i32) {
+      do @monad(scan.Scan(Source, _)) {
+        source <- scan_source();
+        first <- scan.Scan::consume(3);
+        scan.Scan::advance(source.stride);
+        cursor <- scan_cursor();
+        pure(span.Span::len(first) + cursor.index)
+      }
+    }
+
+    fn spanned_scanner() -> scan.Scan(Source, scan.Spanned(i32)) {
+      scan.Scan::with_span(scanner())
+    }
+
+    pub fn main() -> i32 {
+      let written = writer_program();
+      let pass_result = passes.Pass::run(
+        pass_program(),
+        Env {bias: 5},
+        Store {tick: 2}
+      );
+      let scan_result = scan.Scan::run_from_start(
+        spanned_scanner(),
+        Source {stride: 4},
+        20
+      );
+
+      written.value
+        + written.log.count
+        + written.log.total
+        + pass_result.value
+        + pass_result.state.tick
+        + pass_result.log.total
+        + scan_result.value.value
+        + span.Span::len(scan_result.value.span)
+        + scan_result.cursor.index
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 98);
+});
+
+Deno.test("diagnostics prelude stores string payloads", async () => {
+  const source = `
+    const diagnostics = @import("prelude.diagnostics");
+    const span = @import("prelude.span");
+
+    pub fn main() -> i32 {
+      let source_span = span.Span::new(1, 2);
+      let warning = diagnostics.warning(source_span, "W", "warn");
+      diagnostics.Diagnostics::single(warning).warnings
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 1);
+});
+
+Deno.test("functional abstraction prelude covers choice traversal diagnostics scope fresh recursion", async () => {
+  const source = `
+    const alternative = @import("prelude.alternative");
+    const core = @import("prelude.core");
+    const diagnostics = @import("prelude.diagnostics");
+    const foldable = @import("prelude.foldable");
+    const fresh = @import("prelude.fresh");
+    const list = @import("prelude.list");
+    const monad = @import("prelude.monad");
+    const option = @import("prelude.option");
+    const pass = @import("prelude.pass");
+    const recursion = @import("prelude.recursion");
+    const scope = @import("prelude.scope");
+    const span = @import("prelude.span");
+    const std = @import("prelude.std");
+    const traversable = @import("prelude.traversable");
+    const validation = @import("prelude.validation");
+    const vec = @import("prelude.vec");
+
+    type Sum = struct {value: i32}
+
+    fn Sum::empty() -> Sum {
+      Sum {value: 0}
+    }
+
+    fn Sum::append(left: Sum, right: Sum) -> Sum {
+      Sum {value: left.value + right.value}
+    }
+
+    type ErrorBag = struct {count: i32, total: i32}
+
+    fn ErrorBag::append(left: ErrorBag, right: ErrorBag) -> ErrorBag {
+      ErrorBag {count: left.count + right.count, total: left.total + right.total}
+    }
+
+    type Env = struct {bias: i32}
+    type Store = struct {tick: i32}
+    type Count = struct {current: i32, total: i32}
+
+    fn to_sum(value: i32) -> Sum {
+      Sum {value}
+    }
+
+    fn sum_step(acc: i32, value: i32) -> i32 {
+      acc + value
+    }
+
+    fn positive_plus_one(value: i32) -> core.Option(i32) {
+      match value > 0 {
+        true => option.some(value + 1),
+        false => None,
+      }
+    }
+
+    fn reject_zero(value: i32) -> validation.Validation(ErrorBag, i32) {
+      match value == 0 {
+        true => validation.invalid(ErrorBag {count: 1, total: 10}),
+        false => validation.valid(value * 2),
+      }
+    }
+
+    fn fresh_program() -> fresh.Supply(i32) {
+      do @monad(monad.State(fresh.Fresh, _)) {
+        first <- fresh.fresh();
+        reserved <- fresh.reserve(3);
+        last <- fresh.fresh();
+        pure(first + reserved + last)
+      }
+    }
+
+    fn count_step(value: Count) -> recursion.Step(Count, i32) {
+      match value.current <= 0 {
+        true => recursion.done(value.total),
+        false => recursion.more(Count {
+          current: value.current - 1,
+          total: value.total + value.current,
+        }),
+      }
+    }
+
+    fn option_score(value: core.Option(i32)) -> i32 {
+      match value {
+        Some(inner) => inner,
+        None => 0,
+      }
+    }
+
+    fn optional_score(value: core.Option(core.Option(i32))) -> i32 {
+      match value {
+        Some(inner) => option_score(inner),
+        None => 0,
+      }
+    }
+
+    fn list_score(value: core.Option(list.List(i32))) -> i32 {
+      match value {
+        Some(items) => foldable.fold(items, 0, sum_step),
+        None => 0,
+      }
+    }
+
+    fn validation_score(value: validation.Validation(ErrorBag, vec.Vec(i32))) -> i32 {
+      match value {
+        Valid(items) => vec.Vec::fold(items, 0, sum_step),
+        Invalid(error) => error.count * 100 + error.total,
+      }
+    }
+
+    fn scope_score(value: core.Option(i32)) -> i32 {
+      match value {
+        Some(inner) => inner,
+        None => 0,
+      }
+    }
+
+    pub fn main() -> i32 {
+      let empty_choice: core.Option(i32) = option.none();
+      let chosen = empty_choice <|> option.some(9);
+      let sequenced_right = option.some(1) *> option.some(4);
+      let sequenced_left = option.some(7) <* option.some(8);
+      let guarded: core.Option(core.Unit) = alternative.guard(true);
+      let optional_value = alternative.optional(option.some(6));
+
+      let xs = list.List::cons(1, list.List::cons(2, list.List::cons(3, list.List::empty())));
+      let folded = foldable.fold(xs, 0, sum_step);
+      let mapped_sum = foldable.fold_map(xs, to_sum);
+      let traversed_list = traversable.traverse_option(xs, positive_plus_one);
+
+      let empty_vec: vec.Vec(i32) = vec.Vec::empty();
+      let bad_vec = vec.Vec::push(vec.Vec::push(vec.Vec::push(empty_vec, 0), 2), 0);
+      let traversed_validation = traversable.traverse_validation(bad_vec, reject_zero);
+
+      let source_span = span.Span::new(2, 5);
+      let warning = diagnostics.warning(source_span, "W", "warn");
+      let failure = diagnostics.error(source_span, "E", "error");
+      let bag = diagnostics.Diagnostics::append(
+        diagnostics.Diagnostics::single(warning),
+        diagnostics.Diagnostics::single(failure)
+      );
+      let written = diagnostics.emit(warning);
+      let pass_result = pass.Pass::run(
+        diagnostics.tell(failure),
+        Env {bias: 1},
+        Store {tick: 2}
+      );
+      let required = diagnostics.require(false, failure);
+
+      let fresh_result = fresh.run(fresh_program(), 10);
+
+      let root: scope.Scope(i32) = scope.Scope::empty();
+      let scoped = scope.Scope::define(
+        scope.Scope::define(scope.Scope::enter(scope.Scope::define(root, 1, 10)), 1, 20),
+        2,
+        30
+      );
+
+      let looped = recursion.loop(Count {current: 4, total: 0}, count_step);
+      let guarded_score = match guarded { Some => 1, None => 0 };
+      let required_score = match required { Valid => 0, Invalid(diags) => diags.errors };
+
+      option_score(chosen)
+        + option_score(sequenced_right)
+        + option_score(sequenced_left)
+        + optional_score(optional_value)
+        + guarded_score
+        + folded
+        + mapped_sum.value
+        + list_score(traversed_list)
+        + validation_score(traversed_validation)
+        + diagnostics.Diagnostics::len(bag)
+        + bag.errors
+        + bag.warnings
+        + written.log.warnings
+        + pass_result.log.errors
+        + required_score
+        + fresh_result.value
+        + fresh_result.state.next
+        + scope_score(scope.Scope::lookup(scoped, 1))
+        + scope_score(scope.Scope::lookup(scoped, 2))
+        + scope.Scope::depth(scoped)
+        + looped
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 387);
+});
+
 Deno.test("static array prelude checks map zip_with and fold", async () => {
   const source = await Deno.readTextFile("examples/prelude_array_static.fig");
   const checked = await checkSource(source, { resolveModule });
@@ -576,7 +1009,7 @@ Deno.test("prelude std exposes common operators for custom types", async () => {
         decl.body.expr.callee.kind === "var"
         ? decl.body.expr.callee.name
         : ""
-  );
+    );
   assertEquals(callees, [
     "ops_op_add__Point",
     "ops_op_eql__Point",
@@ -1287,12 +1720,13 @@ Deno.test("prelude scalar exposes generic numeric helpers", async () => {
       0
     }
 
-    pub fn main(x: i32, y: u3) -> i32 {
+    pub fn main(x: i32, y: i32) -> i32 {
       let signed = scalar.signum(x) + scalar.abs(x);
       let bounded = scalar.clamp(signed, 0, 9);
       let unsigned = scalar.signum(y) + scalar.square(y);
+      let narrow: u3 = 2;
       let z: u17 = 3;
-      let proof = require_number(z);
+      let proof = require_number(z) + require_number(narrow);
       let in_range = scalar.between(bounded, 0, 9);
       scalar.select(in_range, bounded + unsigned + proof, 0)
     }
@@ -1389,6 +1823,14 @@ Deno.test("prelude std exposes result option and static contracts", async () => 
 
     fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
       Box {value: f(v.value)}
+    }
+
+    fn Box::pure(value: a) -> Box(a) {
+      Box {value}
+    }
+
+    fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
+      Box {value: v.value(x.value)}
     }
 
     fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
@@ -1523,8 +1965,7 @@ Deno.test("prelude std rejects incomplete monoid implementations", async () => {
 });
 
 Deno.test("prelude std helpers support user functor applicative and monad types", async () => {
-  await checkSource(
-    `
+  const source = `
     const merge = @import("prelude.std");
 
     type fn Box(a: type) -> type {
@@ -1532,13 +1973,21 @@ Deno.test("prelude std helpers support user functor applicative and monad types"
       struct(Box)
     }
 
-    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
-      Box {value: f(v.value)}
-    }
+	    fn Box::map(const f: fn(x: a) -> b, v: Box(a)) -> Box(b) {
+	      Box {value: f(v.value)}
+	    }
 
-    fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
-      f(v.value)
-    }
+	    fn Box::pure(value: a) -> Box(a) {
+	      Box {value}
+	    }
+
+	    fn Box::apply(v: Box(fn(x: a) -> b), x: Box(a)) -> Box(b) {
+	      Box {value: v.value(x.value)}
+	    }
+
+	    fn Box::bind(v: Box(a), const f: fn(x: a) -> Box(b)) -> Box(b) {
+	      f(v.value)
+	    }
 
     fn inc(x: i32) -> i32 { x + 1 }
     fn wrap(x: i32) -> Box(i32) { Box {value: x + 10} }
@@ -1546,9 +1995,11 @@ Deno.test("prelude std helpers support user functor applicative and monad types"
     pub fn main() -> i32 {
       bind(fmap(Box {value: 1}, inc), wrap).value
     }
-    `,
-    { resolveModule },
+  `;
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule })),
   );
+  assertEquals((instance.exports.main as CallableFunction)(), 12);
 });
 
 Deno.test("prelude std exposes option as functor applicative monad and semigroup", async () => {

@@ -157,6 +157,43 @@ fn Tree::fold_preorder(
   )
 }
 
+fn Tree::fold(
+  tree: Tree(a),
+  acc: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  Tree::fold_preorder(tree, acc, f)
+}
+
+fn Tree::fold_map(
+  const f: fn(x: a) -> m,
+  tree: Tree(a)
+) -> m {
+  @assert(core.Monoid(m));
+  let empty_value: m = m::empty();
+  Tree::fold_map_at(f, tree.nodes, tree.root, empty_value)
+}
+
+fn Tree::fold_map_at(
+  const f: fn(x: a) -> m,
+  nodes: layout.HeapArray(TreeNode(a)),
+  index: i32,
+  acc: m
+) -> m {
+  @assert(core.Semigroup(m));
+  match index < 0 {
+    true => acc,
+    false => layout.HeapArray::get(
+      TreeNode(a),
+      nodes,
+      index
+    )
+      \node -> m::append(acc, f(node.value))
+      \with_value -> Tree::fold_map_at(f, nodes, node.left, with_value)
+      \with_left -> Tree::fold_map_at(f, nodes, node.right, with_left),
+  }
+}
+
 fn Tree::fold_preorder_at(
   nodes: layout.HeapArray(TreeNode(a)),
   index: i32,

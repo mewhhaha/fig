@@ -1,0 +1,20 @@
+type fn Step(state: type, result: type) -> union {
+  let Done = {value: result};
+  let Continue = {state: state};
+  union(Done, Continue)
+}
+
+fn done(value: result) -> Step(state, result) {
+  Done(value)
+}
+
+fn more(state: state) -> Step(state, result) {
+  Continue(state)
+}
+
+fn loop(state: state, const step: fn(x: state) -> Step(state, result)) -> result {
+  match step(state) {
+    Done(value) => value,
+    Continue(next) => loop(next, step),
+  }
+}

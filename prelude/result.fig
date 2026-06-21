@@ -2,11 +2,11 @@ const core = @import("prelude.core");
 const operators = @import("prelude.operators");
 
 fn ok(value: a) -> core.Result(a, e) {
-  value
+  Ok(value)
 }
 
 fn err(error: e) -> core.Result(a, e) {
-  error
+  Err(error)
 }
 
 fn core.Result::is_ok(value: core.Result(a, e)) -> bool {

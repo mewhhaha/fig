@@ -1,0 +1,211 @@
+const core = @import("prelude.core");
+
+type fn PassContext(env: type, state: type) -> type {
+  let PassContext = {
+    env: env,
+    state: state,
+  };
+  struct(PassContext)
+}
+
+type fn PassResult(state: type, log: type, value: type) -> type {
+  let PassResult = {
+    state: state,
+    log: log,
+    value: value,
+  };
+  struct(PassResult)
+}
+
+type fn Pass(
+  env: type,
+  state: type,
+  log: type,
+  value: type
+) -> type {
+  fn(ctx: PassContext(env, state)) -> PassResult(
+    state,
+    log,
+    value
+  )
+}
+
+fn Pass::pure(value: a) -> Pass(env, state, log, a) {
+  \ctx -> {
+    let empty_log: log = core.empty();
+    PassResult {state: ctx.state, log: empty_log, value}
+  }
+}
+
+fn Pass::map(
+  f: fn(x: a) -> b,
+  value: Pass(env, state, log, a)
+) -> Pass(env, state, log, b) {
+  \ctx -> {
+    let current: PassResult(state, log, a) = value(ctx);
+    PassResult {
+      state: current.state,
+      log: current.log,
+      value: f(current.value),
+    }
+  }
+}
+
+fn Pass::apply(
+  value: Pass(env, state, log, fn(x: a) -> b),
+  arg: Pass(env, state, log, a)
+) -> Pass(env, state, log, b) {
+  \ctx -> {
+    let current: PassResult(state, log, fn(x: a) -> b) = value(ctx);
+    let next_context: PassContext(env, state) = PassContext {
+      env: ctx.env,
+      state: current.state,
+    };
+    let next: PassResult(state, log, a) = arg(next_context);
+    let next_log: log = core.append(
+      current.log,
+      next.log
+    );
+    PassResult {
+      state: next.state,
+      log: next_log,
+      value: current.value(next.value),
+    }
+  }
+}
+
+fn Pass::bind(
+  value: Pass(env, state, log, a),
+  f: fn(x: a) -> Pass(env, state, log, b)
+) -> Pass(env, state, log, b) {
+  \ctx -> {
+    let current: PassResult(state, log, a) = value(ctx);
+    let next_pass: Pass(env, state, log, b) = f(current.value);
+    let next_context: PassContext(env, state) = PassContext {
+      env: ctx.env,
+      state: current.state,
+    };
+    let next: PassResult(state, log, b) = next_pass(next_context);
+    let next_log: log = core.append(
+      current.log,
+      next.log
+    );
+    PassResult {
+      state: next.state,
+      log: next_log,
+      value: next.value,
+    }
+  }
+}
+
+fn Pass::ask() -> Pass(env, state, log, env) {
+  \ctx -> {
+    let empty_log: log = core.empty();
+    PassResult {state: ctx.state, log: empty_log, value: ctx.env}
+  }
+}
+
+fn Pass::asks(f: fn(x: env) -> a) -> Pass(
+  env,
+  state,
+  log,
+  a
+) {
+  \ctx -> {
+    let empty_log: log = core.empty();
+    PassResult {state: ctx.state, log: empty_log, value: f(ctx.env)}
+  }
+}
+
+fn Pass::get() -> Pass(env, state, log, state) {
+  \ctx -> {
+    let empty_log: log = core.empty();
+    PassResult {state: ctx.state, log: empty_log, value: ctx.state}
+  }
+}
+
+fn Pass::gets(f: fn(x: state) -> a) -> Pass(
+  env,
+  state,
+  log,
+  a
+) {
+  \ctx -> {
+    let empty_log: log = core.empty();
+    PassResult {state: ctx.state, log: empty_log, value: f(ctx.state)}
+  }
+}
+
+fn Pass::put(next: state) -> Pass(
+  env,
+  state,
+  log,
+  core.Unit
+) {
+  \_ctx -> {
+    let empty_log: log = core.empty();
+    PassResult {state: next, log: empty_log, value: core.unit()}
+  }
+}
+
+fn Pass::modify(f: fn(x: state) -> state) -> Pass(
+  env,
+  state,
+  log,
+  core.Unit
+) {
+  \ctx -> {
+    let empty_log: log = core.empty();
+    PassResult {state: f(ctx.state), log: empty_log, value: core.unit()}
+  }
+}
+
+fn Pass::tell(entry: log) -> Pass(
+  env,
+  state,
+  log,
+  core.Unit
+) {
+  \ctx -> PassResult {state: ctx.state, log: entry, value: core.unit()}
+}
+
+fn Pass::emit(entry: log) -> Pass(
+  env,
+  state,
+  log,
+  core.Unit
+) {
+  Pass::tell(entry)
+}
+
+fn Pass::run(
+  value: Pass(env, state, log, a),
+  env_value: env,
+  state_value: state
+) -> PassResult(state, log, a) {
+  value(PassContext {env: env_value, state: state_value})
+}
+
+fn Pass::eval(
+  value: Pass(env, state, log, a),
+  env_value: env,
+  state_value: state
+) -> a {
+  Pass::run(value, env_value, state_value).value
+}
+
+fn Pass::exec(
+  value: Pass(env, state, log, a),
+  env_value: env,
+  state_value: state
+) -> state {
+  Pass::run(value, env_value, state_value).state
+}
+
+fn Pass::log(
+  value: Pass(env, state, log, a),
+  env_value: env,
+  state_value: state
+) -> log {
+  Pass::run(value, env_value, state_value).log
+}

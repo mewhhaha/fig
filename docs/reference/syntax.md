@@ -346,8 +346,10 @@ Literal forms are:
 1u32
 1i64
 1u64
+1_000
 1.0f32
 1.0f64
+1_000.5f64
 true
 false
 'x'
@@ -355,7 +357,8 @@ false
 #Some
 ```
 
-Fenced text literals use triple backticks and are useful for shader source.
+Decimal number literals may use `_` between digits. Fenced text literals use triple backticks and
+are useful for shader source.
 
 Number, character, string, and `#Tag` literals can also be used as exact literal types in
 annotations and type functions.

@@ -1,0 +1,69 @@
+const core = @import("prelude.core");
+const function = @import("prelude.function");
+const option = @import("prelude.option");
+
+type fn Alternative(t: type fn(a: type) -> type) -> type {
+  let Empty = fn() -> t(a);
+  let Choose = fn(left: t(a), right: t(a)) -> t(a);
+  function.Applicative(t);
+  @require(
+    @type_has_member(t, #empty),
+    "Alternative requires empty"
+  );
+  @require(
+    @type_has_member(t, #choose),
+    "Alternative requires choose"
+  );
+  @require(
+    @type_member_type(t, #empty) == Empty,
+    "Alternative.empty has wrong type"
+  );
+  @require(
+    @type_member_type(t, #choose) == Choose,
+    "Alternative.choose has wrong type"
+  );
+  t
+}
+
+fn empty() -> t(a) {
+  @assert(Alternative(t));
+  t::empty()
+}
+
+fn choose(left: t(a), right: t(a)) -> t(a) {
+  @assert(Alternative(t));
+  t::choose(left, right)
+}
+
+fn guard(condition: bool) -> t(core.Unit) {
+  @assert(Alternative(t));
+  @assert(function.Applicative(t));
+  match condition {
+    true => t::pure(core.unit()),
+    false => t::empty(),
+  }
+}
+
+fn optional(value: t(a)) -> t(core.Option(a)) {
+  @assert(Alternative(t));
+  @assert(function.Applicative(t));
+  let present: t(core.Option(a)) = t::map(option.some, value);
+  let absent: t(core.Option(a)) = t::pure(None);
+  t::choose(present, absent)
+}
+
+fn when(condition: bool, action: t(core.Unit)) -> t(core.Unit) {
+  @assert(Alternative(t));
+  match condition {
+    true => action,
+    false => t::empty(),
+  }
+}
+
+fn unless(condition: bool, action: t(core.Unit)) -> t(core.Unit) {
+  @assert(Alternative(t));
+  match condition {
+    true => t::empty(),
+    false => action,
+  }
+}

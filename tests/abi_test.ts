@@ -12,16 +12,12 @@ import {
   parseFigAbiManifest,
   wasmFromSource as wasmFromSourceRaw,
 } from "../src/mod.ts";
-import {
-  resolveProjectModule as resolveModule,
-  withOperatorPrelude,
-} from "./operator_prelude.ts";
+import { resolveProjectModule as resolveModule, withOperatorPrelude } from "./operator_prelude.ts";
 
-const wasmFromSource = (source: string, options: CompileSourceOptions = {}) =>
-  {
-    const prepared = withOperatorPrelude(source, options);
-    return wasmFromSourceRaw(prepared.source, prepared.options);
-  };
+const wasmFromSource = (source: string, options: CompileSourceOptions = {}) => {
+  const prepared = withOperatorPrelude(source, options);
+  return wasmFromSourceRaw(prepared.source, prepared.options);
+};
 function compileArtifactsFromSource(
   source: string,
   options?: CompileArtifactsOptions & { includeWat?: true },
@@ -197,6 +193,41 @@ Deno.test("stable memory ABI round-trips nested string actions through buffers",
   const raw = (fig.instance.exports.main as CallableFunction)(0, input);
 
   assertEquals(decodeFigValue(fig.abi, fig.instance, "io(string)", raw), "fig!");
+});
+
+Deno.test("runtime string literals lower into stable buffer handles", async () => {
+  const source = `
+    type Diagnostic = struct {code: string, message: string}
+    pub fn main() -> Diagnostic {
+      Diagnostic {code: "W", message: "warn"}
+    }
+  `;
+
+  const fig = await instantiateFig(await wasmFromSource(source));
+  const host = createFigHost(fig.abi, fig.instance);
+
+  assertEquals(host.call("main"), { code: "W", message: "warn" });
+});
+
+Deno.test("runtime literals lower escaped strings chars and scalar lanes", async () => {
+  const source = `
+    type Text = struct {value: string}
+
+    pub fn text() -> Text { Text {value: "line\\n\\u03bb"} }
+    pub fn narrow() -> i32 { 1_000 }
+    pub fn wide() -> i64 { 1_000i64 }
+    pub fn real() -> f64 { 1_000.5f64 }
+    pub fn escaped_char() -> char { '\\n' }
+  `;
+
+  const fig = await instantiateFig(await wasmFromSource(source));
+  const host = createFigHost(fig.abi, fig.instance);
+
+  assertEquals(host.call("text"), "line\n\u03bb");
+  assertEquals(host.call("narrow"), 1000);
+  assertEquals(host.call("wide"), 1000n);
+  assertEquals(host.call("real"), 1000.5);
+  assertEquals(host.call("escaped_char"), 10);
 });
 
 Deno.test("stable memory ABI wraps compound host imports", async () => {

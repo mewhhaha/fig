@@ -3,8 +3,21 @@ const operators = @import("prelude.operators");
 
 type SymbolId = i32
 
+type TypeAnnotationLiteralKind = enum(i32) {
+  Unknown = 0,
+  Bool = 1,
+  Number = 2,
+  String = 3,
+  Char = 4,
+  Multiline = 5,
+  Tag = 6,
+}
+
 type TypeAnnotation = union {
-  MissingType, NamedType(name: SymbolId), AppliedType(
+  MissingType, NamedType(name: SymbolId), LiteralType(
+    kind: TypeAnnotationLiteralKind,
+    value_hash: SymbolId
+  ), AppliedType(
     constructor: SymbolId,
     arg: SymbolId
   )
@@ -63,6 +76,13 @@ fn missing_type() -> TypeAnnotation {
 
 fn named_type(name: SymbolId) -> TypeAnnotation {
   NamedType(name)
+}
+
+fn literal_type(
+  kind: TypeAnnotationLiteralKind,
+  value_hash: SymbolId
+) -> TypeAnnotation {
+  LiteralType(kind, value_hash)
 }
 
 fn applied_type(constructor: SymbolId, arg: SymbolId) -> TypeAnnotation {
@@ -219,12 +239,14 @@ fn expr_third(value: Expr) -> i32 match {
 fn type_annotation_score(value: TypeAnnotation) -> i32 match {
   MissingType => 0,
   NamedType(name) => name,
+  LiteralType(kind, value_hash) => kind + value_hash,
   AppliedType(constructor, arg) => constructor + arg + 7,
 }
 
 fn type_annotation_name(value: TypeAnnotation) -> SymbolId match {
   MissingType => 0,
   NamedType(name) => name,
+  LiteralType(_, value_hash) => value_hash,
   AppliedType(constructor, _) => constructor,
 }
 

@@ -7,7 +7,7 @@ import type {
 export const OPERATOR_PRELUDE_IMPORT = 'const __ops = @import("prelude.operators");\n';
 
 const OPERATOR_TOKENS =
-  /(?:[A-Za-z0-9_\]\)]|true|false)\s+(?:\+|-|\*|\/|%|==|!=|<=|>=|<|>|&&|\|\||\^\^|<>|<\*>|<\*\*>|<\$>|<&>|>>=|=<<|>=>|<=<)\s+(?:[A-Za-z0-9_({[]|true|false|-)/;
+  /(?:[A-Za-z0-9_\]\)]|true|false)\s+(?:\+|-|\*|\/|%|==|!=|<=|>=|<|>|&&|\|\||\^\^|<>|<\|>|<\*>|<\*|\*>|<\*\*>|<\$>|<&>|>>=|=<<|>=>|<=<)\s+(?:[A-Za-z0-9_({[]|true|false|-)/;
 
 export const resolveProjectModule = async (moduleName: string) => {
   try {

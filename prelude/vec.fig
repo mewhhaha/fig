@@ -68,6 +68,10 @@ fn Vec::append(xs: Vec(a), ys: Vec(a)) -> Vec(a) {
   Vec::append_loop(xs, ys, 0)
 }
 
+fn Vec::choose(xs: Vec(a), ys: Vec(a)) -> Vec(a) {
+  Vec::append(xs, ys)
+}
+
 fn Vec::append_loop(
   out: Vec(a),
   ys: Vec(a),
@@ -80,6 +84,29 @@ fn Vec::append_loop(
       index + 1
     ),
     false => out,
+  }
+}
+
+fn Vec::fold_map(
+  const f: fn(x: a) -> m,
+  xs: Vec(a)
+) -> m {
+  @assert(core.Monoid(m));
+  let empty_value: m = m::empty();
+  Vec::fold_map_loop(f, xs, 0, empty_value)
+}
+
+fn Vec::fold_map_loop(
+  const f: fn(x: a) -> m,
+  xs: Vec(a),
+  index: i32,
+  acc: m
+) -> m {
+  @assert(core.Semigroup(m));
+  match index < Vec::len(xs) {
+    true => m::append(acc, f(Vec::get_t(a, xs, index)))
+      \next -> Vec::fold_map_loop(f, xs, index + 1, next),
+    false => acc,
   }
 }
 

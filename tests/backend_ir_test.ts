@@ -3,6 +3,7 @@ import {
   assertEquals,
   assertMatch,
   assertRejects,
+  assertThrows,
   assertStringIncludes,
 } from "jsr:@std/assert@1";
 import {
@@ -130,6 +131,30 @@ function rawBooleanBinaryProgram(op: string): Program {
   };
 }
 
+function rawRuntimeConstFnProgram(): Program {
+  return {
+    imports: [],
+    declarations: [{
+      kind: "fn",
+      public: true,
+      name: "main",
+      params: [],
+      returnType: "i32",
+      effects: [],
+      body: {
+        kind: "block",
+        statements: [],
+        expr: {
+          kind: "const_fn",
+          params: ["x"],
+          body: { kind: "var", name: "x" },
+          allowCaptures: true,
+        },
+      },
+    }],
+  };
+}
+
 function hasCustomSection(bytes: Uint8Array, name: string): boolean {
   let offset = 8;
   while (offset < bytes.length) {
@@ -245,6 +270,10 @@ function readUleb(bytes: Uint8Array, offset: number): { value: number; offset: n
   return { value, offset };
 }
 
+function slowCompilerSourceTest(name: string, fn: () => Promise<void> | void) {
+  Deno.test({ name: `[slow] ${name}`, ignore: !Deno.args.includes("--run-slow"), fn });
+}
+
 Deno.test("backend lowers raw checked boolean binary operators", () => {
   const cases = [
     { op: "&&", expected: 0 },
@@ -256,6 +285,14 @@ Deno.test("backend lowers raw checked boolean binary operators", () => {
     const instance = new WebAssembly.Instance(new WebAssembly.Module(wasm));
     assertEquals((instance.exports.main as CallableFunction)(), item.expected);
   }
+});
+
+Deno.test("backend rejects unconverted runtime const fn literals", () => {
+  assertThrows(
+    () => emitWasm(rawRuntimeConstFnProgram()),
+    Error,
+    "backend cannot lower const fn literal as a runtime value",
+  );
 });
 
 Deno.test("WAT and wasm share lowered import signatures", async () => {
@@ -336,7 +373,7 @@ Deno.test("release inliner keeps caller names free inside substituted arguments"
   assertEquals((instance.exports.main as CallableFunction)(), 7);
 });
 
-Deno.test("release scalar inliner preserves compiler reader summaries", async () => {
+slowCompilerSourceTest("release scalar inliner preserves compiler reader summaries", async () => {
   const source = `
     const layout = @import("prelude.layout");
     const textlex = @import("compiler.fig.textlex");
@@ -373,7 +410,7 @@ Deno.test("release scalar inliner preserves compiler reader summaries", async ()
   }
 });
 
-Deno.test("Fig compiler summaries include destructured source imports", async () => {
+slowCompilerSourceTest("Fig compiler summaries include destructured source imports", async () => {
   const source = `
     const layout = @import("prelude.layout");
     const textlex = @import("compiler.fig.textlex");
@@ -1791,6 +1828,148 @@ Deno.test("transparent Reader loop lowers through function encoding without indi
     new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "release" })),
   );
   assertEquals((instance.exports.main as CallableFunction)(1, 1000), 3001);
+});
+
+Deno.test("Reader do continuations specialize through split qualified return types", async () => {
+  const source = `
+    const monad = @import("prelude.monad");
+
+    type Env = struct { value: i32 }
+
+    fn env_value(env: Env) -> i32 { env.value }
+
+    fn ask_value() -> monad
+      .Reader(Env, i32) {
+      do @monad(monad.Reader(Env, _)) {
+        x <- monad.Reader::asks(env_value);
+        pure(x + 1)
+      }
+    }
+
+    pub fn main() -> i32 {
+      monad.Reader::run(ask_value(), Env {value: 7})
+    }
+  `;
+
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(await wasmFromSource(source, { resolveModule, optMode: "debug" })),
+  );
+  assertEquals((instance.exports.main as CallableFunction)(), 8);
+});
+
+Deno.test("split qualified types preserve heap array layout in backend returns", async () => {
+  const source = `
+    const monad = @import("prelude.monad");
+    const layout = @import("prelude.layout");
+
+    type Env = struct {
+      xs: layout.HeapArray(i32),
+    }
+
+    fn env_xs(env: Env) -> layout
+      .HeapArray(i32) {
+      env.xs
+    }
+
+    fn ask_xs() -> monad.Reader(Env, layout
+      .HeapArray(i32)) {
+      monad.Reader::asks(env_xs)
+    }
+
+    pub fn main(xs: layout.HeapArray(i32)) -> i32 {
+      let env = Env {xs};
+      layout.HeapArray::len(i32, monad.Reader::run(ask_xs(), env))
+    }
+  `;
+
+  const artifact = await compileArtifactsFromSource(source, { resolveModule, includeWat: false });
+  const fig = await instantiateFig(artifact.wasm);
+  const host = createFigHost(fig.abi, fig.instance);
+  assertEquals(host.call("main", [1, 2, 3]), 3);
+});
+
+Deno.test("Reader bind preserves sum results from aliased function values", async () => {
+  const source = `
+    const monad = @import("prelude.monad");
+    const layout = @import("prelude.layout");
+
+    type TokenStream = struct {
+      codes: layout.HeapArray(i32),
+      count: i32,
+    }
+
+    type Decl = union {
+      Fn(params: i32), Let, Const
+    }
+
+    type Env = struct {
+      source: TokenStream,
+      index: i32,
+      decl: Decl,
+    }
+
+    type Mode = enum(i32) {
+      Declarations = 1,
+      FunctionParams = 2,
+    }
+
+    fn env_source(value: Env) -> TokenStream { value.source }
+    fn env_index(value: Env) -> i32 { value.index }
+    fn env_decl(value: Env) -> Decl { value.decl }
+
+    fn decl_param_count(value: Decl) -> i32 match {
+      Fn(params), => params,
+      Let, => 0,
+      Const, => 0,
+    }
+
+    fn is_fn(source: TokenStream, index: i32) -> bool {
+      index < source.count
+    }
+
+    fn function_param_count_reader() -> monad.Reader(Env, i32) {
+      do @monad(monad.Reader(Env, _)) {
+        source <- monad.Reader::asks(env_source);
+        index <- monad.Reader::asks(env_index);
+        decl <- monad.Reader::asks(env_decl);
+        pure(match is_fn(source, index) {
+          true => decl_param_count(decl),
+          false => 0,
+        })
+      }
+    }
+
+    fn summary_delta_reader(mode: Mode) -> monad.Reader(Env, i32) {
+      do @monad(monad.Reader(Env, _)) {
+        match mode {
+          Mode::Declarations => pure(1),
+          Mode::FunctionParams => function_param_count_reader(),
+          _ => pure(0),
+        }
+      }
+    }
+
+    fn total_reader(mode: Mode, total: i32) -> monad.Reader(Env, i32) {
+      do @monad(monad.Reader(Env, _)) {
+        delta <- summary_delta_reader(mode);
+        pure(total + delta)
+      }
+    }
+
+    pub fn main(codes: layout.HeapArray(i32)) -> i32 {
+      let source = TokenStream {
+        codes,
+        count: layout.HeapArray::len(i32, codes),
+      };
+      let env = Env {source, index: 0, decl: Fn(3)};
+      monad.Reader::run(total_reader(Mode::FunctionParams, 10), env)
+    }
+  `;
+
+  const artifact = await compileArtifactsFromSource(source, { resolveModule, includeWat: false });
+  const fig = await instantiateFig(artifact.wasm);
+  const host = createFigHost(fig.abi, fig.instance);
+  assertEquals(host.call("main", [1, 2, 3]), 13);
 });
 
 Deno.test("transparent State loop lowers through function encoding without indirect calls", async () => {

@@ -115,6 +115,42 @@ fn TextSource::text_token_signature(input: TextSource) -> i32 {
   textlex.stream_token_signature_hash(input.stream)
 }
 
+fn parse_status_loop(
+  source: textlex.TextTokenStream,
+  seed: i32,
+  current: combinator.ParseState,
+  count: i32
+) -> i32 {
+  match current.cursor < textlex.length(source) {
+    false => 0,
+    true => match parser.parse_text_declaration_stream(
+      current,
+      source,
+      seed + count
+    ) {
+      Ok(result) => rec(
+        source,
+        seed,
+        parser.next_text_declaration_state(result.state, source),
+        count + 1
+      ),
+      Err(_) => 1,
+    },
+  }
+}
+
+fn TextSource::parse_status(input: TextSource) -> i32 {
+  match diagnostic.count(input.stream.diagnostics) > 0 {
+    true => 1,
+    false => parse_status_loop(
+      input.stream,
+      input.seed,
+      combinator.state(0, textlex.length(input.stream)),
+      0
+    ),
+  }
+}
+
 fn TextSource::checked_declaration_type_signature(input: TextSource) -> i32 {
   textfacts.checked_declaration_type_signature(input.stream)
 }
@@ -449,6 +485,13 @@ fn compile_text_token_signature(
   seed: i32
 ) -> i32 {
   TextSource::text_token_signature(TextSource::from_codes(codes, seed))
+}
+
+fn compile_parse_status(
+  codes: layout.HeapArray(i32),
+  seed: i32
+) -> i32 {
+  TextSource::parse_status(TextSource::from_codes(codes, seed))
 }
 
 fn compile_checked_declaration_type_signature(

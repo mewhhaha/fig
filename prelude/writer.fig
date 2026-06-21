@@ -1,0 +1,75 @@
+const core = @import("prelude.core");
+
+type fn Writer(log: type, value: type) -> type {
+  let Writer = {
+    log: log,
+    value: value,
+  };
+  struct(Writer)
+}
+
+type fn WriterListen(log: type, value: type) -> type {
+  let WriterListen = {
+    value: value,
+    log: log,
+  };
+  struct(WriterListen)
+}
+
+fn Writer::run(value: Writer(log, a)) -> Writer(log, a) {
+  value
+}
+
+fn Writer::tell(entry: log) -> Writer(log, core.Unit) {
+  Writer {log: entry, value: core.unit()}
+}
+
+fn Writer::map(
+  f: fn(x: a) -> b,
+  value: Writer(log, a)
+) -> Writer(log, b) {
+  Writer {log: value.log, value: f(value.value)}
+}
+
+fn Writer::pure(value: a) -> Writer(log, a) {
+  let empty_log: log = core.empty();
+  Writer {log: empty_log, value}
+}
+
+fn Writer::apply(
+  value: Writer(log, fn(x: a) -> b),
+  arg: Writer(log, a)
+) -> Writer(log, b) {
+  let next_log: log = core.append(value.log, arg.log);
+  Writer {
+    log: next_log,
+    value: value.value(arg.value),
+  }
+}
+
+fn Writer::bind(
+  value: Writer(log, a),
+  f: fn(x: a) -> Writer(log, b)
+) -> Writer(log, b) {
+  let next: Writer(log, b) = f(value.value);
+  let next_log: log = core.append(value.log, next.log);
+  Writer {
+    log: next_log,
+    value: next.value,
+  }
+}
+
+fn Writer::listen(value: Writer(log, a)) -> Writer(log, WriterListen(log, a)) {
+  Writer {
+    log: value.log,
+    value: WriterListen {value: value.value, log: value.log},
+  }
+}
+
+fn Writer::value(value: Writer(log, a)) -> a {
+  value.value
+}
+
+fn Writer::log(value: Writer(log, a)) -> log {
+  value.log
+}

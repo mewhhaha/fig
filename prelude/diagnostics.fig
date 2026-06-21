@@ -1,0 +1,137 @@
+const core = @import("prelude.core");
+const list = @import("prelude.list");
+const pass = @import("prelude.pass");
+const span = @import("prelude.span");
+const validation = @import("prelude.validation");
+const writer = @import("prelude.writer");
+
+type Severity = enum(i32) {
+  Info = 1,
+  Warning = 2,
+  Error = 3,
+}
+
+type Diagnostic = struct {
+  severity: Severity,
+  span: span.Span,
+  code: string,
+  message: string,
+}
+
+type Diagnostics = struct {
+  items: list.List(Diagnostic),
+  errors: i32,
+  warnings: i32,
+}
+
+type fn Check(value: type) -> type {
+  validation.Validation(Diagnostics, value)
+}
+
+type fn DiagnosticWriter(value: type) -> type {
+  writer.Writer(Diagnostics, value)
+}
+
+type fn DiagnosticPass(env: type, state: type, value: type) -> type {
+  pass.Pass(env, state, Diagnostics, value)
+}
+
+fn Diagnostic::new(
+  severity: Severity,
+  source_span: span.Span,
+  code: string,
+  message: string
+) -> Diagnostic {
+  Diagnostic {severity, span: source_span, code, message}
+}
+
+fn info(source_span: span.Span, code: string, message: string) -> Diagnostic {
+  Diagnostic::new(Severity::Info, source_span, code, message)
+}
+
+fn warning(source_span: span.Span, code: string, message: string) -> Diagnostic {
+  Diagnostic::new(Severity::Warning, source_span, code, message)
+}
+
+fn error(source_span: span.Span, code: string, message: string) -> Diagnostic {
+  Diagnostic::new(Severity::Error, source_span, code, message)
+}
+
+fn Diagnostics::empty() -> Diagnostics {
+  Diagnostics {
+    items: list.List::empty(),
+    errors: 0,
+    warnings: 0,
+  }
+}
+
+fn Diagnostics::single(diagnostic: Diagnostic) -> Diagnostics {
+  Diagnostics {
+    items: list.List::singleton(diagnostic),
+    errors: match diagnostic.severity {
+      Error => 1,
+      Warning => 0,
+      Info => 0,
+    },
+    warnings: match diagnostic.severity {
+      Error => 0,
+      Warning => 1,
+      Info => 0,
+    },
+  }
+}
+
+fn Diagnostics::append(left: Diagnostics, right: Diagnostics) -> Diagnostics {
+  Diagnostics {
+    items: list.List::append(left.items, right.items),
+    errors: left.errors + right.errors,
+    warnings: left.warnings + right.warnings,
+  }
+}
+
+fn Diagnostics::len(value: Diagnostics) -> i32 {
+  list.List::len(value.items)
+}
+
+fn Diagnostics::has_errors(value: Diagnostics) -> bool {
+  value.errors > 0
+}
+
+fn Diagnostics::has_warnings(value: Diagnostics) -> bool {
+  value.warnings > 0
+}
+
+fn ok(value: a) -> Check(a) {
+  validation.valid(value)
+}
+
+fn fail(diagnostic: Diagnostic) -> Check(a) {
+  validation.invalid(Diagnostics::single(diagnostic))
+}
+
+fn require(condition: bool, diagnostic: Diagnostic) -> Check(core.Unit) {
+  match condition {
+    true => ok(core.unit()),
+    false => fail(diagnostic),
+  }
+}
+
+fn emit(diagnostic: Diagnostic) -> DiagnosticWriter(core.Unit) {
+  writer.Writer::tell(Diagnostics::single(diagnostic))
+}
+
+fn tell(diagnostic: Diagnostic) -> DiagnosticPass(env, state, core.Unit) {
+  pass.Pass::tell(Diagnostics::single(diagnostic))
+}
+
+fn note(source_span: span.Span, code: string, message: string) -> DiagnosticWriter(core.Unit) {
+  emit(info(source_span, code, message))
+}
+
+fn warn(source_span: span.Span, code: string, message: string) -> DiagnosticWriter(core.Unit) {
+  emit(warning(source_span, code, message))
+}
+
+fn report_error(source_span: span.Span, code: string, message: string) -> DiagnosticWriter(core.Unit) {
+  emit(error(source_span, code, message))
+}

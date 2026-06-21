@@ -1,6 +1,6 @@
 token CountRepeat = /[0-9]+\*/ ;
 token CollectionOpen = /#\[/ ;
-token Number = /[0-9]+(\.[0-9]+)?(i32|u32|i64|u64|f32|f64)?/ ;
+token Number = /[0-9](_?[0-9])*(\.[0-9](_?[0-9])*)?(i32|u32|i64|u64|f32|f64)?/ ;
 token Char = /'([^'\\]|\\.)'/ ;
 token String = /"([^"\\]|\\.)*"/ ;
 token LiteralType = /#([a-z_][a-z0-9_]*|[A-Z][A-Za-z0-9]*)/ ;

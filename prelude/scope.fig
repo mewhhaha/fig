@@ -1,0 +1,120 @@
+const core = @import("prelude.core");
+const list = @import("prelude.list");
+const map = @import("prelude.map");
+const option = @import("prelude.option");
+const order = @import("prelude.order");
+
+type fn Frame(value: type) -> type {
+  map.Map(i32, value)
+}
+
+type fn Scope(value: type) -> type {
+  let Scope = {
+    frames: list.List(Frame(value)),
+  };
+  struct(Scope)
+}
+
+fn Scope::empty() -> Scope(value) {
+  Scope {
+    frames: list.List::singleton(map.Map::empty(i32, value)),
+  }
+}
+
+fn Scope::enter(scope: Scope(value)) -> Scope(value) {
+  Scope {
+    frames: list.List::cons(map.Map::empty(i32, value), scope.frames),
+  }
+}
+
+fn Scope::exit(scope: Scope(value)) -> Scope(value) {
+  Scope {frames: list.List::tail(scope.frames)}
+}
+
+fn Scope::depth(scope: Scope(value)) -> i32 {
+  list.List::len(scope.frames)
+}
+
+fn Scope::define(scope: Scope(value), key: i32, value: value) -> Scope(value) {
+  match list.List::head(scope.frames) {
+    Some(frame) => Scope {
+      frames: list.List::cons(
+        map.Map::insert(i32, value, frame, key, value, order.compare_i32),
+        list.List::tail(scope.frames)
+      ),
+    },
+    None => Scope::define(Scope::empty(), key, value),
+  }
+}
+
+fn Scope::define_global(scope: Scope(value), key: i32, value: value) -> Scope(value) {
+  Scope {
+    frames: Scope::define_global_frames(scope.frames, key, value),
+  }
+}
+
+fn Scope::define_global_frames(
+  frames: list.List(Frame(value)),
+  key: i32,
+  value: value
+) -> list.List(Frame(value)) {
+  match list.List::head(frames) {
+    Some(frame) => match list.List::is_empty(list.List::tail(frames)) {
+      true => list.List::singleton(
+        map.Map::insert(i32, value, frame, key, value, order.compare_i32)
+      ),
+      false => list.List::cons(
+        frame,
+        Scope::define_global_frames(list.List::tail(frames), key, value)
+      ),
+    },
+    None => list.List::singleton(
+      map.Map::insert(
+        i32,
+        value,
+        map.Map::empty(i32, value),
+        key,
+        value,
+        order.compare_i32
+      )
+    ),
+  }
+}
+
+fn Scope::lookup(scope: Scope(value), key: i32) -> core.Option(value) {
+  Scope::lookup_frames(scope.frames, key)
+}
+
+fn Scope::lookup_local(scope: Scope(value), key: i32) -> core.Option(value) {
+  match list.List::head(scope.frames) {
+    Some(frame) => map.Map::get(i32, value, frame, key, order.compare_i32),
+    None => None,
+  }
+}
+
+fn Scope::lookup_frames(
+  frames: list.List(Frame(value)),
+  key: i32
+) -> core.Option(value) {
+  match list.List::head(frames) {
+    Some(frame) => match map.Map::get(i32, value, frame, key, order.compare_i32) {
+      Some(found) => option.some(found),
+      None => Scope::lookup_frames(list.List::tail(frames), key),
+    },
+    None => None,
+  }
+}
+
+fn Scope::contains(scope: Scope(value), key: i32) -> bool {
+  match Scope::lookup(scope, key) {
+    Some => true,
+    None => false,
+  }
+}
+
+fn Scope::contains_local(scope: Scope(value), key: i32) -> bool {
+  match Scope::lookup_local(scope, key) {
+    Some => true,
+    None => false,
+  }
+}

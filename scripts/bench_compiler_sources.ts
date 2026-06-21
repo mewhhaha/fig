@@ -8,7 +8,8 @@ import {
 } from "../src/mod.ts";
 import { candidateModulePaths } from "../src/lsp/modules.ts";
 import { parse } from "../src/parser.ts";
-import { tokenize, type Token as SourceToken } from "../src/tokenize.ts";
+import { type Token as SourceToken, tokenize } from "../src/tokenize.ts";
+import { parse as parseSyntax } from "../generated/baba-workbench/parser.ts";
 import type {
   Expr,
   OperatorDecl,
@@ -38,10 +39,13 @@ const samples = numberArg("--samples", 5);
 const warmup = nonNegativeNumberArg("--warmup", 1);
 const figRunIters = numberArg("--fig-run-iters", 1);
 const figWasmOpt = optModeArg("--fig-wasm-opt", "debug");
-const figSourceFilters = stringListArg("--fig-source");
+const figSourceFilterArgs = stringListArg("--fig-source");
+const figSourceGroupArgs = stringListArg("--fig-source-group");
 const figImportSourceFilters = stringListArg("--fig-import-source");
-const figDirectCheckFilters = stringListArg("--fig-direct-check");
-const figSourceCheckFilters = stringListArg("--fig-source-check");
+const figDirectCheckFilterArgs = stringListArg("--fig-direct-check");
+const figDirectCheckGroupArgs = stringListArg("--fig-direct-check-group");
+const figSourceCheckFilterArgs = stringListArg("--fig-source-check");
+const figSourceCheckGroupArgs = stringListArg("--fig-source-check-group");
 const figDebugPrefixCheckFilters = stringListArg("--fig-debug-prefix-check");
 const figDebugDirectPrefixCheckFilters = stringListArg("--fig-debug-direct-prefix-check");
 const figExtraSourcePaths = stringListArg("--fig-extra-source");
@@ -49,13 +53,347 @@ const figSkipDirectImports = Deno.args.includes("--fig-skip-direct-imports");
 const figSkipSourceChecks = Deno.args.includes("--fig-skip-source-checks");
 const progress = Deno.args.includes("--progress");
 const selectedRuntimes = runtimeArgs();
+const figCompilerCoreSources = [
+  "compiler/fig/span.fig",
+  "compiler/fig/token.fig",
+  "compiler/fig/diagnostic.fig",
+  "compiler/fig/combinator.fig",
+  "compiler/fig/textmodel.fig",
+];
+const figCompilerTextSources = [
+  "compiler/fig/lexer.fig",
+  "compiler/fig/stream.fig",
+  "compiler/fig/textlex.fig",
+  "compiler/fig/textparser.fig",
+  "compiler/fig/textgrammar.fig",
+  "compiler/fig/textfacts.fig",
+  "compiler/fig/textsummary.fig",
+  "compiler/fig/textimportsummary.fig",
+];
+const figCompilerFrontendSources = [
+  "compiler/fig/ast.fig",
+  "compiler/fig/source.fig",
+  "compiler/fig/parser.fig",
+  "compiler/fig/frontend.fig",
+];
+const figCompilerAnalysisSources = [
+  "compiler/fig/declgraph.fig",
+  "compiler/fig/modgraph.fig",
+  "compiler/fig/resolver.fig",
+  "compiler/fig/checker.fig",
+  "compiler/fig/incremental.fig",
+];
+const figCompilerBackendSources = [
+  "compiler/fig/lowering.fig",
+  "compiler/fig/artifact.fig",
+  "compiler/fig/wasm.fig",
+  "compiler/fig/main.fig",
+];
+const figCompilerAllSources = [
+  ...figCompilerCoreSources,
+  ...figCompilerTextSources,
+  ...figCompilerFrontendSources,
+  ...figCompilerAnalysisSources,
+  ...figCompilerBackendSources,
+];
+const figCompilerNoParserSources = [
+  ...figCompilerCoreSources,
+  ...figCompilerTextSources,
+  "compiler/fig/ast.fig",
+  "compiler/fig/source.fig",
+  "compiler/fig/frontend.fig",
+  ...figCompilerAnalysisSources,
+  ...figCompilerBackendSources,
+];
+const figPreludeSources = [
+  "prelude/function.fig",
+  "prelude/optic.fig",
+  "prelude/fixed.fig",
+  "prelude/operators.fig",
+  "prelude/fixed_build.fig",
+  "prelude/effect.fig",
+  "prelude/num.fig",
+  "prelude/core.fig",
+  "prelude/nonempty.fig",
+  "prelude/bool.fig",
+  "prelude/monad.fig",
+  "prelude/array_static.fig",
+  "prelude/map.fig",
+  "prelude/list.fig",
+  "prelude/layout.fig",
+  "prelude/graph.fig",
+  "prelude/geometry2d.fig",
+  "prelude/schedule.fig",
+  "prelude/scalar.fig",
+  "prelude/result.fig",
+  "prelude/queue.fig",
+  "prelude/range.fig",
+  "prelude/order.fig",
+  "prelude/option.fig",
+  "prelude/zipper.fig",
+  "prelude/vec.fig",
+  "prelude/derive.fig",
+  "prelude/tuple.fig",
+  "prelude/tree.fig",
+  "prelude/std.fig",
+  "prelude/set.fig",
+];
+const figWebSources = [
+  "web/canvas.fig",
+  "web/audio.fig",
+  "web/asset.fig",
+];
+const figEngineSources = [
+  "engine/ecs.fig",
+];
+const figExampleSources = [
+  "examples/zig_static_matrix_schedule.fig",
+  "examples/zig_comptime_record_layout.fig",
+  "examples/value_reuse.fig",
+  "examples/type_fn_memory.fig",
+  "examples/typeclasses.fig",
+  "examples/prelude_typeclasses.fig",
+  "examples/prelude_std.fig",
+  "examples/prelude_state_counter.fig",
+  "examples/prelude_reader_state_common.fig",
+  "examples/prelude_reader_config.fig",
+  "examples/prelude_perf_pipeline.fig",
+  "examples/prelude_functional.fig",
+  "examples/prelude_effect_state.fig",
+  "examples/prelude_effect_reader.fig",
+  "examples/prelude_effect_ecs_do.fig",
+  "examples/prelude_effect_debug.fig",
+  "examples/prelude_deep_iter_pipeline.fig",
+  "examples/prelude_array_static.fig",
+  "examples/perf_schedule_dsl.fig",
+  "examples/perf_matmul_simd.fig",
+  "examples/perf_matmul_scalar.fig",
+  "examples/perf_matmul_mem_simd.fig",
+  "examples/perf_fannkuch_redux.fig",
+  "examples/perf_arrays.fig",
+  "examples/perf_array_dsl.fig",
+  "examples/hello.fig",
+  "examples/haskell_validation_pipeline.fig",
+  "examples/haskell_reader_state_program.fig",
+  "examples/engine_playground.fig",
+  "examples/effects.fig",
+  "examples/arithmetic.fig",
+  "examples/all_features.fig",
+];
+const figLanguageGoodFixtureSources = [
+  "tests/fixtures/language/good/literal_types.fig",
+  "tests/fixtures/language/good/numeric_enums.fig",
+  "tests/fixtures/language/good/function_match_bodies_patterns.fig",
+  "tests/fixtures/language/good/tuples_collections.fig",
+  "tests/fixtures/language/good/io_values_destructure.fig",
+  "tests/fixtures/language/good/declarations_imports_io.fig",
+  "tests/fixtures/language/good/wgsl_helpers.fig",
+  "tests/fixtures/language/good/type_functions_result_kinds.fig",
+  "tests/fixtures/language/good/static_reflection_builtins.fig",
+  "tests/fixtures/language/good/operators.fig",
+  "tests/fixtures/language/good/imports_slots_members.fig",
+  "tests/fixtures/language/good/shape_product_union.fig",
+  "tests/fixtures/language/good/shape_builtins.fig",
+  "tests/fixtures/language/good/backend_intrinsics.fig",
+];
+const figLanguageBadFixtureSources = [
+  "tests/fixtures/language/bad/unknown_shape_slot.fig",
+  "tests/fixtures/language/bad/type_reflection_missing_variant.fig",
+  "tests/fixtures/language/bad/type_function_result_kind_mismatch.fig",
+  "tests/fixtures/language/bad/shape_builtin_bad_arg.fig",
+  "tests/fixtures/language/bad/operator_missing_member.fig",
+  "tests/fixtures/language/bad/backend_intrinsic_unknown.fig",
+  "tests/fixtures/language/bad/unsupported_ownership_move_after_pass.fig",
+  "tests/fixtures/language/bad/external_io_missing.fig",
+  "tests/fixtures/language/bad/wgsl_bad_source.fig",
+  "tests/fixtures/language/bad/enum_member_dot.fig",
+  "tests/fixtures/language/bad/function_match_body_non_exhaustive.fig",
+  "tests/fixtures/language/bad/external_function_boundary.fig",
+];
+const figLanguageFixtureSources = [
+  ...figLanguageGoodFixtureSources,
+  ...figLanguageBadFixtureSources,
+];
+const figPublicSurfaceSources = [
+  ...figPreludeSources,
+  ...figWebSources,
+  ...figEngineSources,
+  ...figExampleSources,
+  ...figLanguageGoodFixtureSources,
+];
+const figSourceGroups = [
+  {
+    name: "compiler-core",
+    filters: figCompilerCoreSources,
+  },
+  {
+    name: "compiler-text",
+    filters: figCompilerTextSources,
+  },
+  {
+    name: "compiler-frontend",
+    filters: figCompilerFrontendSources,
+  },
+  {
+    name: "compiler-analysis",
+    filters: figCompilerAnalysisSources,
+  },
+  {
+    name: "compiler-backend",
+    filters: figCompilerBackendSources,
+  },
+  {
+    name: "compiler-no-parser",
+    filters: figCompilerNoParserSources,
+  },
+  {
+    name: "compiler-all",
+    filters: figCompilerAllSources,
+  },
+  {
+    name: "prelude",
+    filters: figPreludeSources,
+  },
+  {
+    name: "web",
+    filters: figWebSources,
+  },
+  {
+    name: "engine",
+    filters: figEngineSources,
+  },
+  {
+    name: "examples",
+    filters: figExampleSources,
+  },
+  {
+    name: "language-good",
+    filters: figLanguageGoodFixtureSources,
+  },
+  {
+    name: "language-bad",
+    filters: figLanguageBadFixtureSources,
+  },
+  {
+    name: "language-fixtures",
+    filters: figLanguageFixtureSources,
+  },
+  {
+    name: "public-surface",
+    filters: figPublicSurfaceSources,
+  },
+];
+const figSourceFilters = expandFigSourceFilters(figSourceFilterArgs, figSourceGroupArgs);
+const figDirectCheckFilterNames = [
+  "type_environment",
+  "resolved_declared_type_class",
+  "resolved_declared_abi_class",
+  "resolved_value_body_type_class",
+  "resolved_value_body_abi_class",
+  "resolved_simple_body_type_check",
+  "resolved_symbol_environment",
+  "resolved_export_abi",
+  "resolution_record",
+];
+const figDirectCheckGroups = [
+  {
+    name: "environment",
+    filters: [
+      "type_environment",
+    ],
+  },
+  {
+    name: "declared",
+    filters: [
+      "resolved_declared_type_class",
+      "resolved_declared_abi_class",
+    ],
+  },
+  {
+    name: "value_body",
+    filters: [
+      "resolved_value_body_type_class",
+      "resolved_value_body_abi_class",
+    ],
+  },
+  {
+    name: "symbols",
+    filters: [
+      "resolved_simple_body_type_check",
+      "resolved_symbol_environment",
+      "resolved_export_abi",
+    ],
+  },
+  {
+    name: "records",
+    filters: [
+      "resolution_record",
+    ],
+  },
+  {
+    name: "resolved",
+    filters: [
+      "resolved_declared_type_class",
+      "resolved_declared_abi_class",
+      "resolved_value_body_type_class",
+      "resolved_value_body_abi_class",
+      "resolved_simple_body_type_check",
+      "resolved_symbol_environment",
+      "resolved_export_abi",
+    ],
+  },
+  {
+    name: "all",
+    filters: figDirectCheckFilterNames,
+  },
+];
+const figDirectCheckFilters = expandFigDirectCheckFilters(
+  figDirectCheckFilterArgs,
+  figDirectCheckGroupArgs,
+);
 const figSourceCheckFilterNames = [
+  "parse_status",
   "source_import_edge_signature",
   "source_import_graph_diagnostic_signature",
   "text_token_signature",
+  "declaration_count",
+  "declaration_kind_count",
+  "function_param_count",
+  "type_param_count",
+  "type_result_kind_count",
+  "type_sugar_statement_count",
+  "type_enum_declaration_count",
+  "type_enum_variant_count",
+  "type_enum_signature",
+  "declaration_signature",
+  "function_param_signature",
+  "type_param_signature",
+  "function_param_type_signature",
+  "function_return_signature",
+  "function_attached_declaration_count",
+  "function_attached_signature",
+  "value_annotation_signature",
   "declaration_dependency_signature",
   "declaration_dependency_diagnostic_signature",
   "function_body_signature",
+  "type_body_signature",
+  "function_local_let_count",
+  "function_local_type_assert_count",
+  "value_match_expression_count",
+  "function_match_body_count",
+  "value_do_expression_count",
+  "value_do_bind_count",
+  "value_match_arm_count",
+  "value_pipe_bind_count",
+  "value_operator_expression_count",
+  "value_operator_signature",
+  "operator_declaration_count",
+  "operator_signature",
+  "value_call_expression_count",
+  "value_name_token_count",
+  "value_name_token_signature",
+  "value_literal_token_count",
+  "value_literal_token_signature",
   "declared_type_class",
   "declared_abi_class",
   "symbol_environment",
@@ -85,6 +423,164 @@ const figSourceCheckFilterNames = [
   "wasm_byte_record",
   "wasm_byte_buffer",
 ];
+const figSourceCheckGroups = [
+  {
+    name: "syntax",
+    filters: [
+      "parse_status",
+    ],
+  },
+  {
+    name: "parse",
+    filters: [
+      "source_import_edge_signature",
+      "source_import_graph_diagnostic_signature",
+      "text_token_signature",
+      "declaration_count",
+      "declaration_kind_count",
+      "function_param_count",
+      "type_param_count",
+      "type_result_kind_count",
+      "type_sugar_statement_count",
+      "type_enum_declaration_count",
+      "type_enum_variant_count",
+      "type_enum_signature",
+      "declaration_signature",
+      "function_param_signature",
+      "type_param_signature",
+      "function_param_type_signature",
+      "function_return_signature",
+      "function_attached_declaration_count",
+      "function_attached_signature",
+      "value_annotation_signature",
+    ],
+  },
+  {
+    name: "body",
+    filters: [
+      "function_body_signature",
+      "type_body_signature",
+      "function_local_let_count",
+      "function_local_type_assert_count",
+      "value_match_expression_count",
+      "function_match_body_count",
+      "value_do_expression_count",
+      "value_do_bind_count",
+      "value_match_arm_count",
+      "value_pipe_bind_count",
+      "value_operator_expression_count",
+      "value_operator_signature",
+      "operator_declaration_count",
+      "operator_signature",
+      "value_call_expression_count",
+      "value_name_token_count",
+      "value_name_token_signature",
+      "value_literal_token_count",
+      "value_literal_token_signature",
+    ],
+  },
+  {
+    name: "semantic",
+    filters: [
+      "declaration_dependency_signature",
+      "declaration_dependency_diagnostic_signature",
+      "declared_type_class",
+      "value_body_type_class",
+      "resolved_value_body_type_class",
+      "resolved_declared_type_class",
+      "checked_diagnostic",
+    ],
+  },
+  {
+    name: "abi",
+    filters: [
+      "declared_abi_class",
+      "symbol_environment",
+      "export_abi",
+      "value_body_abi_class",
+      "resolved_value_body_abi_class",
+      "simple_body_type_check",
+      "named_type_environment",
+      "resolved_declared_abi_class",
+      "resolved_symbol_environment",
+      "resolved_export_abi",
+      "resolved_simple_body_type_check",
+    ],
+  },
+  {
+    name: "lowered_declarations",
+    filters: [
+      "checked_declaration_type",
+      "lowered_declaration",
+      "checked_declaration_record",
+    ],
+  },
+  {
+    name: "checked_expression_records",
+    filters: [
+      "checked_expression_record",
+      "checked_expression_child_record",
+      "checked_local_environment",
+      "checked_expression_shape",
+    ],
+  },
+  {
+    name: "wasm_records",
+    filters: [
+      "lowered_export_record",
+      "wasm_function_record",
+      "wasm_section_record",
+      "wasm_byte_record",
+    ],
+  },
+  {
+    name: "lowered_records",
+    filters: [
+      "checked_declaration_type",
+      "lowered_declaration",
+      "checked_declaration_record",
+      "checked_expression_record",
+      "checked_expression_child_record",
+      "checked_local_environment",
+      "checked_expression_shape",
+      "lowered_export_record",
+      "wasm_function_record",
+      "wasm_section_record",
+      "wasm_byte_record",
+    ],
+  },
+  {
+    name: "wasm_bytes",
+    filters: [
+      "wasm_byte_buffer",
+    ],
+  },
+  {
+    name: "lowered",
+    filters: [
+      "checked_declaration_type",
+      "lowered_declaration",
+      "checked_declaration_record",
+      "checked_expression_record",
+      "checked_expression_child_record",
+      "checked_local_environment",
+      "checked_expression_shape",
+      "lowered_export_record",
+      "wasm_function_record",
+      "wasm_section_record",
+      "wasm_byte_record",
+      "wasm_byte_buffer",
+    ],
+  },
+  {
+    name: "all",
+    filters: figSourceCheckFilterNames,
+  },
+];
+const figSourceCheckFilters = expandFigSourceCheckFilters(
+  figSourceCheckFilterArgs,
+  figSourceCheckGroupArgs,
+);
 const figDebugPrefixCheckFilterNames = [
   "resolved_value_body_type_class",
   "function_body_signature",
@@ -101,6 +597,7 @@ const figDebugDirectPrefixCheckFilterNames = [
 const runRoot = await Deno.makeTempDir({ prefix: "fig-compiler-source-bench-" });
 const rows: Row[] = [];
 let figWasmSink = 0;
+validateFigDirectCheckFilters();
 validateFigSourceCheckFilters();
 validateFigDebugPrefixCheckFilters();
 validateFigDebugDirectPrefixCheckFilters();
@@ -170,11 +667,21 @@ type FigCompilerInput = {
   operatorDeclarationCount: number;
   operatorSignatureHash: number;
   valueCallExpressionCount: number;
+  valueNameTokenCount: number;
+  valueNameTokenSignatureHash: number;
+  valueLiteralTokenCount: number;
+  valueLiteralTokenSignatureHash: number;
   sourceImportEdgeSignatureHash: number;
   sourceImportGraphDiagnosticSignatureHash: number;
   declarationDependencySignatureHash: number;
   declarationDependencyDiagnosticSignatureHash: number;
   directImportTypeEnvironmentInputs: FigDirectImportTypeEnvironmentInput[];
+};
+
+type FigCompilerRawInput = {
+  sourceId: string;
+  codes: number[];
+  parseStatus: number;
 };
 
 type FigDirectImportTypeEnvironmentInput = {
@@ -386,6 +893,7 @@ for (const [sourceId, source] of figExtraSources) {
   figSources.set(sourceId, source);
 }
 await readFigSources(`${root}/prelude`, figSources);
+await readSelectedFigSources(figSourceFilters, figSources);
 const figCompilerBenchmarkSources = filteredFigCompilerSources();
 const figRoot = `${root}/compiler/fig/main.fig`;
 const goRoot = `${root}/compiler/go`;
@@ -502,6 +1010,23 @@ function assertFigSourceNumberCheck(
   );
 }
 
+function assertFigParseStatusCheck(
+  host: ReturnType<typeof createFigHost>,
+  input: FigCompilerRawInput,
+): void {
+  if (!shouldRunFigSourceCheck("parse_status")) {
+    return;
+  }
+  const actual = Number(host.call("compile_parse_status", input.codes));
+  if (actual === input.parseStatus) {
+    return;
+  }
+  throw new Error(
+    `compiled Fig compiler produced parse status ${actual} for ${input.sourceId}; ` +
+      `JS parser produced ${input.parseStatus}`,
+  );
+}
+
 function assertFigSourceByteBufferCheck(
   host: ReturnType<typeof createFigHost>,
   input: FigCompilerInput,
@@ -564,6 +1089,24 @@ async function compiledFigSourceRunner(
     }
     return result;
   };
+  const rawSources = figCompilerRawInputs();
+  if (!figSkipSourceChecks && shouldRunFigSourceCheck("parse_status")) {
+    for (const input of rawSources) {
+      assertFigParseStatusCheck(host, input);
+    }
+  }
+  if (!needsParsedFigInputs()) {
+    return async (index: number) => {
+      let total = 0;
+      for (let offset = 0; offset < figRunIters; offset++) {
+        for (const input of rawSources) {
+          total = (total + Number(host.call("compile_codes", input.codes)) + index + offset) | 0;
+        }
+      }
+      figWasmSink = (figWasmSink ^ total) | 0;
+      await Promise.resolve();
+    };
+  }
   const encodedSources = await figCompilerInputs();
   if (figDebugPrefixCheckFilters.length > 0) {
     for (const input of encodedSources) {
@@ -574,226 +1117,228 @@ async function compiledFigSourceRunner(
     if (progress) {
       console.error(`[fig-input] ${input.sourceId}`);
     }
-    if (!figSkipDirectImports) for (const importInput of input.directImportTypeEnvironmentInputs) {
-      if (!figDirectImportMatches(importInput)) {
-        continue;
-      }
-      if (progress) {
-        console.error(`[fig-import] ${importInput.sourceId} -> ${importInput.importSourceId}`);
-      }
-      if (figDebugDirectPrefixCheckFilters.length > 0) {
-        await runFigDebugDirectPrefixChecks(host, importInput);
-      }
-      if (shouldUseFigDirectResolutionRecordOnly()) {
-        const actualDirectImportResolutionRecordSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolution_record_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const directImportResolutionRecordSignatureMatches =
-          actualDirectImportResolutionRecordSignatureHash ===
-            importInput.resolutionRecordSignatureHash;
-        if (!directImportResolutionRecordSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolution-record ` +
-              `signature hash ${actualDirectImportResolutionRecordSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.resolutionRecordSignatureHash}`,
-          );
+    if (!figSkipDirectImports) {
+      for (const importInput of input.directImportTypeEnvironmentInputs) {
+        if (!figDirectImportMatches(importInput)) {
+          continue;
         }
-        continue;
-      }
-      if (shouldRunFigDirectCheck("type_environment")) {
-        const actualDirectImportTypeEnvironmentSignatureHash = Number(
-          host.call(
-            "compile_direct_import_type_environment_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const directImportTypeEnvironmentSignatureMatches =
-          actualDirectImportTypeEnvironmentSignatureHash === importInput.signatureHash;
-        if (!directImportTypeEnvironmentSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import type-environment signature hash ` +
-              `${actualDirectImportTypeEnvironmentSignatureHash} for ${importInput.sourceId} ` +
-              `importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.signatureHash}`,
-          );
+        if (progress) {
+          console.error(`[fig-import] ${importInput.sourceId} -> ${importInput.importSourceId}`);
         }
-      }
-      if (shouldRunFigDirectCheck("resolved_declared_type_class")) {
-        const actualQualifiedResolvedDeclaredTypeClassSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolved_declared_type_class_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const qualifiedResolvedDeclaredTypeClassSignatureMatches =
-          actualQualifiedResolvedDeclaredTypeClassSignatureHash ===
-            importInput.qualifiedResolvedDeclaredTypeClassSignatureHash;
-        if (!qualifiedResolvedDeclaredTypeClassSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolved declared ` +
-              `type-class signature hash ${actualQualifiedResolvedDeclaredTypeClassSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.qualifiedResolvedDeclaredTypeClassSignatureHash}`,
-          );
+        if (figDebugDirectPrefixCheckFilters.length > 0) {
+          await runFigDebugDirectPrefixChecks(host, importInput);
         }
-      }
-      if (shouldRunFigDirectCheck("resolved_declared_abi_class")) {
-        const actualQualifiedResolvedDeclaredAbiClassSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolved_declared_abi_class_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const qualifiedResolvedDeclaredAbiClassSignatureMatches =
-          actualQualifiedResolvedDeclaredAbiClassSignatureHash ===
-            importInput.qualifiedResolvedDeclaredAbiClassSignatureHash;
-        if (!qualifiedResolvedDeclaredAbiClassSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolved declared ` +
-              `ABI-class signature hash ${actualQualifiedResolvedDeclaredAbiClassSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.qualifiedResolvedDeclaredAbiClassSignatureHash}`,
+        if (shouldUseFigDirectResolutionRecordOnly()) {
+          const actualDirectImportResolutionRecordSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolution_record_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
           );
+          const directImportResolutionRecordSignatureMatches =
+            actualDirectImportResolutionRecordSignatureHash ===
+              importInput.resolutionRecordSignatureHash;
+          if (!directImportResolutionRecordSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolution-record ` +
+                `signature hash ${actualDirectImportResolutionRecordSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.resolutionRecordSignatureHash}`,
+            );
+          }
+          continue;
         }
-      }
-      if (shouldRunFigDirectCheck("resolved_value_body_type_class")) {
-        const actualQualifiedResolvedValueBodyTypeClassSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolved_value_body_type_class_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const qualifiedResolvedValueBodyTypeClassSignatureMatches =
-          actualQualifiedResolvedValueBodyTypeClassSignatureHash ===
-            importInput.qualifiedResolvedValueBodyTypeClassSignatureHash;
-        if (!qualifiedResolvedValueBodyTypeClassSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolved value-body ` +
-              `type-class signature hash ${actualQualifiedResolvedValueBodyTypeClassSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.qualifiedResolvedValueBodyTypeClassSignatureHash}`,
+        if (shouldRunFigDirectCheck("type_environment")) {
+          const actualDirectImportTypeEnvironmentSignatureHash = Number(
+            host.call(
+              "compile_direct_import_type_environment_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
           );
+          const directImportTypeEnvironmentSignatureMatches =
+            actualDirectImportTypeEnvironmentSignatureHash === importInput.signatureHash;
+          if (!directImportTypeEnvironmentSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import type-environment signature hash ` +
+                `${actualDirectImportTypeEnvironmentSignatureHash} for ${importInput.sourceId} ` +
+                `importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.signatureHash}`,
+            );
+          }
         }
-      }
-      if (shouldRunFigDirectCheck("resolved_value_body_abi_class")) {
-        const actualQualifiedResolvedValueBodyAbiClassSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolved_value_body_abi_class_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const qualifiedResolvedValueBodyAbiClassSignatureMatches =
-          actualQualifiedResolvedValueBodyAbiClassSignatureHash ===
-            importInput.qualifiedResolvedValueBodyAbiClassSignatureHash;
-        if (!qualifiedResolvedValueBodyAbiClassSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolved value-body ` +
-              `ABI-class signature hash ${actualQualifiedResolvedValueBodyAbiClassSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.qualifiedResolvedValueBodyAbiClassSignatureHash}`,
+        if (shouldRunFigDirectCheck("resolved_declared_type_class")) {
+          const actualQualifiedResolvedDeclaredTypeClassSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolved_declared_type_class_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
           );
+          const qualifiedResolvedDeclaredTypeClassSignatureMatches =
+            actualQualifiedResolvedDeclaredTypeClassSignatureHash ===
+              importInput.qualifiedResolvedDeclaredTypeClassSignatureHash;
+          if (!qualifiedResolvedDeclaredTypeClassSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolved declared ` +
+                `type-class signature hash ${actualQualifiedResolvedDeclaredTypeClassSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.qualifiedResolvedDeclaredTypeClassSignatureHash}`,
+            );
+          }
         }
-      }
-      if (shouldRunFigDirectCheck("resolved_simple_body_type_check")) {
-        const actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolved_simple_body_type_check_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const qualifiedResolvedSimpleBodyTypeCheckSignatureMatches =
-          actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash ===
-            importInput.qualifiedResolvedSimpleBodyTypeCheckSignatureHash;
-        if (!qualifiedResolvedSimpleBodyTypeCheckSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolved simple body ` +
-              `type-check signature hash ` +
-              `${actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.qualifiedResolvedSimpleBodyTypeCheckSignatureHash}`,
+        if (shouldRunFigDirectCheck("resolved_declared_abi_class")) {
+          const actualQualifiedResolvedDeclaredAbiClassSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolved_declared_abi_class_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
           );
+          const qualifiedResolvedDeclaredAbiClassSignatureMatches =
+            actualQualifiedResolvedDeclaredAbiClassSignatureHash ===
+              importInput.qualifiedResolvedDeclaredAbiClassSignatureHash;
+          if (!qualifiedResolvedDeclaredAbiClassSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolved declared ` +
+                `ABI-class signature hash ${actualQualifiedResolvedDeclaredAbiClassSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.qualifiedResolvedDeclaredAbiClassSignatureHash}`,
+            );
+          }
         }
-      }
-      if (shouldRunFigDirectCheck("resolved_symbol_environment")) {
-        const actualQualifiedResolvedSymbolEnvironmentSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolved_symbol_environment_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const qualifiedResolvedSymbolEnvironmentSignatureMatches =
-          actualQualifiedResolvedSymbolEnvironmentSignatureHash ===
-            importInput.qualifiedResolvedSymbolEnvironmentSignatureHash;
-        if (!qualifiedResolvedSymbolEnvironmentSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolved symbol ` +
-              `environment signature hash ` +
-              `${actualQualifiedResolvedSymbolEnvironmentSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.qualifiedResolvedSymbolEnvironmentSignatureHash}`,
+        if (shouldRunFigDirectCheck("resolved_value_body_type_class")) {
+          const actualQualifiedResolvedValueBodyTypeClassSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolved_value_body_type_class_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
           );
+          const qualifiedResolvedValueBodyTypeClassSignatureMatches =
+            actualQualifiedResolvedValueBodyTypeClassSignatureHash ===
+              importInput.qualifiedResolvedValueBodyTypeClassSignatureHash;
+          if (!qualifiedResolvedValueBodyTypeClassSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolved value-body ` +
+                `type-class signature hash ${actualQualifiedResolvedValueBodyTypeClassSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.qualifiedResolvedValueBodyTypeClassSignatureHash}`,
+            );
+          }
         }
-      }
-      if (shouldRunFigDirectCheck("resolved_export_abi")) {
-        const actualQualifiedResolvedExportAbiSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolved_export_abi_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const qualifiedResolvedExportAbiSignatureMatches =
-          actualQualifiedResolvedExportAbiSignatureHash ===
-            importInput.qualifiedResolvedExportAbiSignatureHash;
-        if (!qualifiedResolvedExportAbiSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolved export ` +
-              `ABI signature hash ${actualQualifiedResolvedExportAbiSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.qualifiedResolvedExportAbiSignatureHash}`,
+        if (shouldRunFigDirectCheck("resolved_value_body_abi_class")) {
+          const actualQualifiedResolvedValueBodyAbiClassSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolved_value_body_abi_class_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
           );
+          const qualifiedResolvedValueBodyAbiClassSignatureMatches =
+            actualQualifiedResolvedValueBodyAbiClassSignatureHash ===
+              importInput.qualifiedResolvedValueBodyAbiClassSignatureHash;
+          if (!qualifiedResolvedValueBodyAbiClassSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolved value-body ` +
+                `ABI-class signature hash ${actualQualifiedResolvedValueBodyAbiClassSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.qualifiedResolvedValueBodyAbiClassSignatureHash}`,
+            );
+          }
         }
-      }
-      if (shouldRunFigDirectCheck("resolution_record")) {
-        const actualDirectImportResolutionRecordSignatureHash = Number(
-          host.call(
-            "compile_direct_import_resolution_record_signature_hash",
-            importInput.sourceCodes,
-            importInput.importCodes,
-            importInput.moduleHash,
-          ),
-        );
-        const directImportResolutionRecordSignatureMatches =
-          actualDirectImportResolutionRecordSignatureHash ===
-            importInput.resolutionRecordSignatureHash;
-        if (!directImportResolutionRecordSignatureMatches) {
-          throw new Error(
-            `compiled Fig compiler produced direct import resolution-record ` +
-              `signature hash ${actualDirectImportResolutionRecordSignatureHash} ` +
-              `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
-              `JS parser produced ${importInput.resolutionRecordSignatureHash}`,
+        if (shouldRunFigDirectCheck("resolved_simple_body_type_check")) {
+          const actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolved_simple_body_type_check_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
           );
+          const qualifiedResolvedSimpleBodyTypeCheckSignatureMatches =
+            actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash ===
+              importInput.qualifiedResolvedSimpleBodyTypeCheckSignatureHash;
+          if (!qualifiedResolvedSimpleBodyTypeCheckSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolved simple body ` +
+                `type-check signature hash ` +
+                `${actualQualifiedResolvedSimpleBodyTypeCheckSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.qualifiedResolvedSimpleBodyTypeCheckSignatureHash}`,
+            );
+          }
+        }
+        if (shouldRunFigDirectCheck("resolved_symbol_environment")) {
+          const actualQualifiedResolvedSymbolEnvironmentSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolved_symbol_environment_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
+          );
+          const qualifiedResolvedSymbolEnvironmentSignatureMatches =
+            actualQualifiedResolvedSymbolEnvironmentSignatureHash ===
+              importInput.qualifiedResolvedSymbolEnvironmentSignatureHash;
+          if (!qualifiedResolvedSymbolEnvironmentSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolved symbol ` +
+                `environment signature hash ` +
+                `${actualQualifiedResolvedSymbolEnvironmentSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.qualifiedResolvedSymbolEnvironmentSignatureHash}`,
+            );
+          }
+        }
+        if (shouldRunFigDirectCheck("resolved_export_abi")) {
+          const actualQualifiedResolvedExportAbiSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolved_export_abi_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
+          );
+          const qualifiedResolvedExportAbiSignatureMatches =
+            actualQualifiedResolvedExportAbiSignatureHash ===
+              importInput.qualifiedResolvedExportAbiSignatureHash;
+          if (!qualifiedResolvedExportAbiSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolved export ` +
+                `ABI signature hash ${actualQualifiedResolvedExportAbiSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.qualifiedResolvedExportAbiSignatureHash}`,
+            );
+          }
+        }
+        if (shouldRunFigDirectCheck("resolution_record")) {
+          const actualDirectImportResolutionRecordSignatureHash = Number(
+            host.call(
+              "compile_direct_import_resolution_record_signature_hash",
+              importInput.sourceCodes,
+              importInput.importCodes,
+              importInput.moduleHash,
+            ),
+          );
+          const directImportResolutionRecordSignatureMatches =
+            actualDirectImportResolutionRecordSignatureHash ===
+              importInput.resolutionRecordSignatureHash;
+          if (!directImportResolutionRecordSignatureMatches) {
+            throw new Error(
+              `compiled Fig compiler produced direct import resolution-record ` +
+                `signature hash ${actualDirectImportResolutionRecordSignatureHash} ` +
+                `for ${importInput.sourceId} importing ${importInput.importSourceId}; ` +
+                `JS parser produced ${importInput.resolutionRecordSignatureHash}`,
+            );
+          }
         }
       }
     }
@@ -828,6 +1373,157 @@ async function compiledFigSourceRunner(
       assertFigSourceNumberCheck(
         host,
         input,
+        "declaration_count",
+        "compile_code_count",
+        input.declarationCount,
+        "declaration count",
+      );
+      if (shouldRunFigSourceCheck("declaration_kind_count")) {
+        for (const check of declarationKindChecks) {
+          const actualKindCount = Number(
+            host.call("compile_declaration_kind_count", input.codes, check.tag),
+          );
+          const expectedKindCount = input.declarationKindCounts[check.key];
+          if (actualKindCount === expectedKindCount) {
+            continue;
+          }
+          throw new Error(
+            `compiled Fig compiler parsed ${actualKindCount} ${check.label} ` +
+              `in ${input.sourceId}; JS parser parsed ${expectedKindCount}`,
+          );
+        }
+      }
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_param_count",
+        "compile_function_param_count",
+        input.functionParamCount,
+        "function parameter count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "type_param_count",
+        "compile_type_param_count",
+        input.typeParamCount,
+        "type parameter count",
+      );
+      if (shouldRunFigSourceCheck("type_result_kind_count")) {
+        for (const check of typeResultKindChecks) {
+          const actualResultKindCount = Number(
+            host.call("compile_type_result_kind_count", input.codes, check.tag),
+          );
+          const expectedResultKindCount = input.typeResultKindCounts[check.key];
+          if (actualResultKindCount === expectedResultKindCount) {
+            continue;
+          }
+          throw new Error(
+            `compiled Fig compiler counted ${actualResultKindCount} ${check.label} ` +
+              `type result kinds in ${input.sourceId}; ` +
+              `JS parser counted ${expectedResultKindCount}`,
+          );
+        }
+      }
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "type_sugar_statement_count",
+        "compile_type_sugar_statement_count",
+        input.typeSugarStatementCount,
+        "type-sugar lowered statement count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "type_enum_declaration_count",
+        "compile_type_enum_declaration_count",
+        input.typeEnumDeclarationCount,
+        "enum type declaration count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "type_enum_variant_count",
+        "compile_type_enum_variant_count",
+        input.typeEnumVariantCount,
+        "enum variant count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "type_enum_signature",
+        "compile_type_enum_signature_hash",
+        input.typeEnumSignatureHash,
+        "enum type signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "declaration_signature",
+        "compile_declaration_signature_hash",
+        input.declarationSignatureHash,
+        "declaration signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_param_signature",
+        "compile_function_param_signature_hash",
+        input.functionParamSignatureHash,
+        "function parameter signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "type_param_signature",
+        "compile_type_param_signature_hash",
+        input.typeParamSignatureHash,
+        "type parameter signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_param_type_signature",
+        "compile_function_param_type_signature_hash",
+        input.functionParamTypeSignatureHash,
+        "function parameter type signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_return_signature",
+        "compile_function_return_signature_hash",
+        input.functionReturnSignatureHash,
+        "function return signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_attached_declaration_count",
+        "compile_function_attached_declaration_count",
+        input.functionAttachedDeclarationCount,
+        "attached function declaration count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_attached_signature",
+        "compile_function_attached_signature_hash",
+        input.functionAttachedSignatureHash,
+        "attached function signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_annotation_signature",
+        "compile_value_annotation_signature_hash",
+        input.valueAnnotationSignatureHash,
+        "value annotation signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
         "declaration_dependency_signature",
         "compile_declaration_dependency_signature_hash",
         input.declarationDependencySignatureHash,
@@ -848,6 +1544,150 @@ async function compiledFigSourceRunner(
         "compile_function_body_signature_hash",
         input.functionBodySignatureHash,
         "function body signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "type_body_signature",
+        "compile_type_body_signature_hash",
+        input.typeBodySignatureHash,
+        "type body signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_local_let_count",
+        "compile_function_local_let_count",
+        input.functionLocalLetCount,
+        "function local let count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_local_type_assert_count",
+        "compile_function_local_type_assert_count",
+        input.functionLocalTypeAssertCount,
+        "function local type assertion count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_match_expression_count",
+        "compile_value_match_expression_count",
+        input.valueMatchExpressionCount,
+        "value match expression count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "function_match_body_count",
+        "compile_function_match_body_count",
+        input.functionMatchBodyCount,
+        "function match body count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_do_expression_count",
+        "compile_value_do_expression_count",
+        input.valueDoExpressionCount,
+        "value do expression count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_do_bind_count",
+        "compile_value_do_bind_count",
+        input.valueDoBindCount,
+        "value do bind count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_match_arm_count",
+        "compile_value_match_arm_count",
+        input.valueMatchArmCount,
+        "value match arm count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_pipe_bind_count",
+        "compile_value_pipe_bind_count",
+        input.valuePipeBindCount,
+        "value pipe-bind count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_operator_expression_count",
+        "compile_value_operator_expression_count",
+        input.valueOperatorExpressionCount,
+        "value operator link count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_operator_signature",
+        "compile_value_operator_signature_hash",
+        input.valueOperatorSignatureHash,
+        "value operator signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "operator_declaration_count",
+        "compile_operator_declaration_count",
+        input.operatorDeclarationCount,
+        "operator declaration count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "operator_signature",
+        "compile_operator_signature_hash",
+        input.operatorSignatureHash,
+        "operator declaration signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_call_expression_count",
+        "compile_value_call_expression_count",
+        input.valueCallExpressionCount,
+        "value call expression count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_name_token_count",
+        "compile_value_name_token_count",
+        input.valueNameTokenCount,
+        "value name token count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_name_token_signature",
+        "compile_value_name_token_signature_hash",
+        input.valueNameTokenSignatureHash,
+        "value name token signature hash",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_literal_token_count",
+        "compile_value_literal_token_count",
+        input.valueLiteralTokenCount,
+        "value literal token count",
+      );
+      assertFigSourceNumberCheck(
+        host,
+        input,
+        "value_literal_token_signature",
+        "compile_value_literal_token_signature_hash",
+        input.valueLiteralTokenSignatureHash,
+        "value literal token signature hash",
       );
       assertFigSourceNumberCheck(
         host,
@@ -1096,8 +1936,7 @@ async function compiledFigSourceRunner(
     const actualTextTokenSignatureHash = Number(
       host.call("compile_text_token_signature_hash", input.codes),
     );
-    const textTokenSignatureMatches =
-      actualTextTokenSignatureHash === input.textTokenSignatureHash;
+    const textTokenSignatureMatches = actualTextTokenSignatureHash === input.textTokenSignatureHash;
     if (!textTokenSignatureMatches) {
       throw new Error(
         `compiled Fig compiler produced text-token signature hash ` +
@@ -1209,8 +2048,7 @@ async function compiledFigSourceRunner(
     const actualTypeEnumVariantCount = Number(
       host.call("compile_type_enum_variant_count", input.codes),
     );
-    const typeEnumVariantCountMatches =
-      actualTypeEnumVariantCount === input.typeEnumVariantCount;
+    const typeEnumVariantCountMatches = actualTypeEnumVariantCount === input.typeEnumVariantCount;
     if (!typeEnumVariantCountMatches) {
       throw new Error(
         `compiled Fig compiler counted ${actualTypeEnumVariantCount} ` +
@@ -1221,8 +2059,7 @@ async function compiledFigSourceRunner(
     const actualTypeEnumSignatureHash = Number(
       host.call("compile_type_enum_signature_hash", input.codes),
     );
-    const typeEnumSignatureMatches =
-      actualTypeEnumSignatureHash === input.typeEnumSignatureHash;
+    const typeEnumSignatureMatches = actualTypeEnumSignatureHash === input.typeEnumSignatureHash;
     if (!typeEnumSignatureMatches) {
       throw new Error(
         `compiled Fig compiler produced enum type signature hash ` +
@@ -1366,7 +2203,7 @@ async function compiledFigSourceRunner(
     if (!functionLocalTypeAssertCountMatches) {
       throw new Error(
         `compiled Fig compiler counted ${actualFunctionLocalTypeAssertCount} top-level ` +
-        `function local type assertion statements in ${input.sourceId}; ` +
+          `function local type assertion statements in ${input.sourceId}; ` +
           `JS parser counted ${input.functionLocalTypeAssertCount}`,
       );
     }
@@ -1420,8 +2257,7 @@ async function compiledFigSourceRunner(
     const actualValueMatchArmCount = Number(
       host.call("compile_value_match_arm_count", input.codes),
     );
-    const valueMatchArmCountMatches =
-      actualValueMatchArmCount === input.valueMatchArmCount;
+    const valueMatchArmCountMatches = actualValueMatchArmCount === input.valueMatchArmCount;
     if (!valueMatchArmCountMatches) {
       throw new Error(
         `compiled Fig compiler counted ${actualValueMatchArmCount} ` +
@@ -1432,8 +2268,7 @@ async function compiledFigSourceRunner(
     const actualValuePipeBindCount = Number(
       host.call("compile_value_pipe_bind_count", input.codes),
     );
-    const valuePipeBindCountMatches =
-      actualValuePipeBindCount === input.valuePipeBindCount;
+    const valuePipeBindCountMatches = actualValuePipeBindCount === input.valuePipeBindCount;
     if (!valuePipeBindCountMatches) {
       throw new Error(
         `compiled Fig compiler counted ${actualValuePipeBindCount} ` +
@@ -1540,8 +2375,7 @@ async function compiledFigSourceRunner(
     const actualExportAbiSignatureHash = Number(
       host.call("compile_export_abi_signature_hash", input.codes),
     );
-    const exportAbiSignatureMatches =
-      actualExportAbiSignatureHash === input.exportAbiSignatureHash;
+    const exportAbiSignatureMatches = actualExportAbiSignatureHash === input.exportAbiSignatureHash;
     if (!exportAbiSignatureMatches) {
       throw new Error(
         `compiled Fig compiler produced export ABI signature hash ` +
@@ -1632,7 +2466,7 @@ async function compiledFigSourceRunner(
       throw new Error(
         `compiled Fig compiler produced resolved declared type-class signature hash ` +
           `${actualResolvedDeclaredTypeClassSignatureHash} for ${input.sourceId}; ` +
-        `JS parser produced ${input.resolvedDeclaredTypeClassSignatureHash}`,
+          `JS parser produced ${input.resolvedDeclaredTypeClassSignatureHash}`,
       );
     }
     const actualResolvedDeclaredAbiClassSignatureHash = Number(
@@ -1723,9 +2557,8 @@ async function compiledFigSourceRunner(
     const actualCheckedDeclarationRecordSignatureHash = Number(
       host.call("compile_checked_declaration_record_signature_hash", input.codes),
     );
-    const checkedDeclarationRecordSignatureMatches =
-      actualCheckedDeclarationRecordSignatureHash ===
-        input.checkedDeclarationRecordSignatureHash;
+    const checkedDeclarationRecordSignatureMatches = actualCheckedDeclarationRecordSignatureHash ===
+      input.checkedDeclarationRecordSignatureHash;
     if (!checkedDeclarationRecordSignatureMatches) {
       throw new Error(
         `compiled Fig compiler produced checked declaration record signature hash ` +
@@ -1736,9 +2569,8 @@ async function compiledFigSourceRunner(
     const actualCheckedExpressionRecordSignatureHash = Number(
       host.call("compile_checked_expression_record_signature_hash", input.codes),
     );
-    const checkedExpressionRecordSignatureMatches =
-      actualCheckedExpressionRecordSignatureHash ===
-        input.checkedExpressionRecordSignatureHash;
+    const checkedExpressionRecordSignatureMatches = actualCheckedExpressionRecordSignatureHash ===
+      input.checkedExpressionRecordSignatureHash;
     if (!checkedExpressionRecordSignatureMatches) {
       throw new Error(
         `compiled Fig compiler produced checked expression record signature hash ` +
@@ -1762,9 +2594,8 @@ async function compiledFigSourceRunner(
     const actualCheckedLocalEnvironmentSignatureHash = Number(
       host.call("compile_checked_local_environment_signature_hash", input.codes),
     );
-    const checkedLocalEnvironmentSignatureMatches =
-      actualCheckedLocalEnvironmentSignatureHash ===
-        input.checkedLocalEnvironmentSignatureHash;
+    const checkedLocalEnvironmentSignatureMatches = actualCheckedLocalEnvironmentSignatureHash ===
+      input.checkedLocalEnvironmentSignatureHash;
     if (!checkedLocalEnvironmentSignatureMatches) {
       throw new Error(
         `compiled Fig compiler produced checked local-environment signature hash ` +
@@ -1775,9 +2606,8 @@ async function compiledFigSourceRunner(
     const actualCheckedExpressionShapeSignatureHash = Number(
       host.call("compile_checked_expression_shape_signature_hash", input.codes),
     );
-    const checkedExpressionShapeSignatureMatches =
-      actualCheckedExpressionShapeSignatureHash ===
-        input.checkedExpressionShapeSignatureHash;
+    const checkedExpressionShapeSignatureMatches = actualCheckedExpressionShapeSignatureHash ===
+      input.checkedExpressionShapeSignatureHash;
     if (!checkedExpressionShapeSignatureMatches) {
       throw new Error(
         `compiled Fig compiler produced checked expression-shape signature hash ` +
@@ -1788,9 +2618,8 @@ async function compiledFigSourceRunner(
     const actualLoweredExportRecordSignatureHash = Number(
       host.call("compile_lowered_export_record_signature_hash", input.codes),
     );
-    const loweredExportRecordSignatureMatches =
-      actualLoweredExportRecordSignatureHash ===
-        input.loweredExportRecordSignatureHash;
+    const loweredExportRecordSignatureMatches = actualLoweredExportRecordSignatureHash ===
+      input.loweredExportRecordSignatureHash;
     if (!loweredExportRecordSignatureMatches) {
       throw new Error(
         `compiled Fig compiler produced lowered export-record signature hash ` +
@@ -2477,10 +3306,12 @@ async function directResolvedValueBodyTypeClassPrefixMismatch(
   for (const [name, typeClass] of programNamedTypeEnvironment(prefixProgram)) {
     combinedEnvironment.set(name, typeClass);
   }
-  for (const [name, typeClass] of qualifiedImportTypeEnvironment(
-    input.alias,
-    importedEnvironment,
-  )) {
+  for (
+    const [name, typeClass] of qualifiedImportTypeEnvironment(
+      input.alias,
+      importedEnvironment,
+    )
+  ) {
     combinedEnvironment.set(name, typeClass);
   }
   const expected = programResolvedValueBodyTypeClassSignatureHash(
@@ -2565,10 +3396,12 @@ async function directResolvedDeclaredTypeClassPrefixMismatch(
   for (const [name, typeClass] of programNamedTypeEnvironment(prefixProgram)) {
     combinedEnvironment.set(name, typeClass);
   }
-  for (const [name, typeClass] of qualifiedImportTypeEnvironment(
-    input.alias,
-    importedEnvironment,
-  )) {
+  for (
+    const [name, typeClass] of qualifiedImportTypeEnvironment(
+      input.alias,
+      importedEnvironment,
+    )
+  ) {
     combinedEnvironment.set(name, typeClass);
   }
   const expected = programResolvedDeclaredTypeClassSignatureHash(
@@ -2587,6 +3420,26 @@ async function directResolvedDeclaredTypeClassPrefixMismatch(
     return undefined;
   }
   return { actual, expected };
+}
+
+function needsParsedFigInputs(): boolean {
+  if (!figSkipDirectImports) {
+    return true;
+  }
+  if (figDebugPrefixCheckFilters.length > 0) {
+    return true;
+  }
+  if (!figSkipSourceChecks && figSourceCheckFilters.length === 0) {
+    return true;
+  }
+  if (!figSkipSourceChecks) {
+    for (const filter of figSourceCheckFilters) {
+      if (filter !== "parse_status") {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 async function figCompilerInputs(): Promise<FigCompilerInput[]> {
@@ -2723,9 +3576,14 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
       operatorDeclarationCount: programOperatorDeclarationCount(program),
       operatorSignatureHash: programOperatorSignatureHash(program),
       valueCallExpressionCount: programValueCallExpressionCount(program),
+      valueNameTokenCount: programValueNameTokenCount(program, tokens),
+      valueNameTokenSignatureHash: programValueNameTokenSignatureHash(program, tokens),
+      valueLiteralTokenCount: programValueLiteralTokenCount(program, tokens),
+      valueLiteralTokenSignatureHash: programValueLiteralTokenSignatureHash(program, tokens),
       sourceImportEdgeSignatureHash: programSourceImportEdgeSignatureHash(program),
-      sourceImportGraphDiagnosticSignatureHash:
-        programSourceImportGraphDiagnosticSignatureHash(program),
+      sourceImportGraphDiagnosticSignatureHash: programSourceImportGraphDiagnosticSignatureHash(
+        program,
+      ),
       declarationDependencySignatureHash: programDeclarationDependencySignatureHash(program),
       declarationDependencyDiagnosticSignatureHash:
         programDeclarationDependencyDiagnosticSignatureHash(program),
@@ -2738,6 +3596,26 @@ async function figCompilerInputs(): Promise<FigCompilerInput[]> {
     });
   }
   return inputs;
+}
+
+function figCompilerRawInputs(): FigCompilerRawInput[] {
+  const inputs: FigCompilerRawInput[] = [];
+  for (const [sourceId, source] of figCompilerBenchmarkSources) {
+    inputs.push({
+      sourceId,
+      codes: sourceCodes(source),
+      parseStatus: sourceParseStatus(source),
+    });
+  }
+  return inputs;
+}
+
+function sourceParseStatus(source: string): number {
+  const result = parseSyntax(source);
+  if (result.ok && result.tree) {
+    return 0;
+  }
+  return 1;
 }
 
 function filteredFigCompilerSources(): Map<string, string> {
@@ -2779,6 +3657,15 @@ function shouldRunFigDirectCheck(name: string): boolean {
   return false;
 }
 
+function validateFigDirectCheckFilters(): void {
+  for (const filter of figDirectCheckFilters) {
+    if (figDirectCheckFilterKnown(filter)) {
+      continue;
+    }
+    throw new Error(`unknown --fig-direct-check=${filter}`);
+  }
+}
+
 function validateFigSourceCheckFilters(): void {
   for (const filter of figSourceCheckFilters) {
     if (figSourceCheckFilterKnown(filter)) {
@@ -2806,6 +3693,94 @@ function validateFigDebugDirectPrefixCheckFilters(): void {
   }
 }
 
+function expandFigSourceFilters(filters: string[], groups: string[]): string[] {
+  const expanded: string[] = [];
+  for (const filter of filters) {
+    expanded.push(filter);
+  }
+  for (const groupName of groups) {
+    const group = figSourceGroup(groupName);
+    if (group === undefined) {
+      throw new Error(`unknown --fig-source-group=${groupName}`);
+    }
+    for (const filter of group.filters) {
+      expanded.push(filter);
+    }
+  }
+  return uniqueStringList(expanded);
+}
+
+function figSourceGroup(
+  name: string,
+): { name: string; filters: readonly string[] } | undefined {
+  for (const group of figSourceGroups) {
+    if (group.name === name) {
+      return group;
+    }
+  }
+  return undefined;
+}
+
+function expandFigDirectCheckFilters(filters: string[], groups: string[]): string[] {
+  const expanded: string[] = [];
+  for (const filter of filters) {
+    expanded.push(filter);
+  }
+  for (const groupName of groups) {
+    const group = figDirectCheckGroup(groupName);
+    if (group === undefined) {
+      throw new Error(`unknown --fig-direct-check-group=${groupName}`);
+    }
+    for (const filter of group.filters) {
+      expanded.push(filter);
+    }
+  }
+  return uniqueStringList(expanded);
+}
+
+function figDirectCheckGroup(
+  name: string,
+): { name: string; filters: readonly string[] } | undefined {
+  for (const group of figDirectCheckGroups) {
+    if (group.name === name) {
+      return group;
+    }
+  }
+  return undefined;
+}
+
+function expandFigSourceCheckFilters(filters: string[], groups: string[]): string[] {
+  const expanded: string[] = [];
+  for (const filter of filters) {
+    expanded.push(filter);
+  }
+  for (const groupName of groups) {
+    const group = figSourceCheckGroup(groupName);
+    if (group === undefined) {
+      throw new Error(`unknown --fig-source-check-group=${groupName}`);
+    }
+    for (const filter of group.filters) {
+      expanded.push(filter);
+    }
+  }
+  return uniqueStringList(expanded);
+}
+
+function figSourceCheckGroup(
+  name: string,
+): { name: string; filters: readonly string[] } | undefined {
+  for (const group of figSourceCheckGroups) {
+    if (group.name === name) {
+      return group;
+    }
+  }
+  return undefined;
+}
+
+function figDirectCheckFilterKnown(filter: string): boolean {
+  return stringListContains(figDirectCheckFilterNames, filter);
+}
+
 function figSourceCheckFilterKnown(filter: string): boolean {
   return stringListContains(figSourceCheckFilterNames, filter);
 }
@@ -2825,6 +3800,17 @@ function stringListContains(values: readonly string[], target: string): boolean 
     }
   }
   return false;
+}
+
+function uniqueStringList(values: readonly string[]): string[] {
+  const unique: string[] = [];
+  for (const value of values) {
+    if (stringListContains(unique, value)) {
+      continue;
+    }
+    unique.push(value);
+  }
+  return unique;
 }
 
 function shouldRunFigSourceCheck(name: string): boolean {
@@ -3592,8 +4578,10 @@ async function programDirectImportTypeEnvironmentInputs(
       programResolvedSimpleBodyTypeCheckSignatureHash(program, combinedEnvironment);
     const qualifiedResolvedSymbolEnvironmentSignatureHash =
       programResolvedSymbolEnvironmentSignatureHash(program, combinedEnvironment);
-    const qualifiedResolvedExportAbiSignatureHash =
-      programResolvedExportAbiSignatureHash(program, combinedEnvironment);
+    const qualifiedResolvedExportAbiSignatureHash = programResolvedExportAbiSignatureHash(
+      program,
+      combinedEnvironment,
+    );
     inputs.push({
       sourceId,
       importSourceId,
@@ -3933,8 +4921,7 @@ function programWasmFunctionRecordSignatureHash(
   const symbolEnvironment = programResolvedSymbolTypeEnvironment(program, environment);
   const functionReturnEnvironment = programFunctionReturnTypeEnvironment(program, environment);
   const functionIndexEnvironment = programFunctionIndexEnvironment(program);
-  const functionRuntimeParamCountEnvironment =
-    programFunctionRuntimeParamCountEnvironment(program);
+  const functionRuntimeParamCountEnvironment = programFunctionRuntimeParamCountEnvironment(program);
   for (const decl of program.declarations) {
     if (decl.kind !== "fn") {
       continue;
@@ -4052,8 +5039,7 @@ function programWasmFunctionByteFacts(
   const symbolEnvironment = programResolvedSymbolTypeEnvironment(program, environment);
   const functionReturnEnvironment = programFunctionReturnTypeEnvironment(program, environment);
   const functionIndexEnvironment = programFunctionIndexEnvironment(program);
-  const functionRuntimeParamCountEnvironment =
-    programFunctionRuntimeParamCountEnvironment(program);
+  const functionRuntimeParamCountEnvironment = programFunctionRuntimeParamCountEnvironment(program);
   for (const decl of program.declarations) {
     if (decl.kind !== "fn") continue;
     const expected = declarationResolvedExpectedBodyTypeClassTag(decl, environment);
@@ -4240,8 +5226,7 @@ function programWasmSectionScan(
   const symbolEnvironment = programResolvedSymbolTypeEnvironment(program, environment);
   const functionReturnEnvironment = programFunctionReturnTypeEnvironment(program, environment);
   const functionIndexEnvironment = programFunctionIndexEnvironment(program);
-  const functionRuntimeParamCountEnvironment =
-    programFunctionRuntimeParamCountEnvironment(program);
+  const functionRuntimeParamCountEnvironment = programFunctionRuntimeParamCountEnvironment(program);
   for (const decl of program.declarations) {
     if (decl.kind !== "fn") {
       continue;
@@ -5110,7 +6095,10 @@ function functionParamTypeEnvironment(
 ): Map<string, number> {
   const environment = new Map<string, number>();
   for (const param of params) {
-    environment.set(paramSignatureName(param), typeClassFromAnnotation(param.type, typeEnvironment));
+    environment.set(
+      paramSignatureName(param),
+      typeClassFromAnnotation(param.type, typeEnvironment),
+    );
   }
   return environment;
 }
@@ -6052,7 +7040,9 @@ type SimpleScalarOperatorExpr = {
   right: Expr;
 };
 
-function expressionSimpleScalarOperator(expr: Expr | undefined): SimpleScalarOperatorExpr | undefined {
+function expressionSimpleScalarOperator(
+  expr: Expr | undefined,
+): SimpleScalarOperatorExpr | undefined {
   const root = expressionTypeRoot(expr);
   if (root === undefined) {
     return undefined;
@@ -6366,7 +7356,7 @@ function splitTopLevelLiteralUnion(source: string): string[] {
       }
       continue;
     }
-    if (char === "\"" || char === "'") {
+    if (char === '"' || char === "'") {
       quote = char;
       continue;
     }
@@ -6394,7 +7384,7 @@ function typeClassFromSingleLiteralAnnotation(type: string): number {
   if (type === "true" || type === "false") {
     return typeClassBoolTag();
   }
-  if (type.startsWith("\"") && type.endsWith("\"")) {
+  if (type.startsWith('"') && type.endsWith('"')) {
     return typeClassI32Tag();
   }
   if (type.startsWith("'") && type.endsWith("'")) {
@@ -6406,7 +7396,10 @@ function typeClassFromSingleLiteralAnnotation(type: string): number {
   return typeClassUnknownTag();
 }
 
-function typeClassFromAnnotation(type: string | undefined, environment?: Map<string, number>): number {
+function typeClassFromAnnotation(
+  type: string | undefined,
+  environment?: Map<string, number>,
+): number {
   if (type === undefined) {
     return typeClassUnknownTag();
   }
@@ -6430,8 +7423,7 @@ function typeClassFromAnnotation(type: string | undefined, environment?: Map<str
     lookupName = normalized.slice(0, appliedIndex);
   }
   const namedTypeClass = environment?.get(lookupName);
-  const hasResolvedNamedType =
-    namedTypeClass !== undefined &&
+  const hasResolvedNamedType = namedTypeClass !== undefined &&
     namedTypeClass !== typeClassUnknownTag() &&
     namedTypeClass !== typeClassTypeValueTag();
   if (hasResolvedNamedType) {
@@ -8096,7 +9088,9 @@ function programFunctionLocalLetCount(program: Program): number {
   return total;
 }
 
-function declarationFunctionLocalLetCount(decl: Extract<Program["declarations"][number], { kind: "fn" }>): number {
+function declarationFunctionLocalLetCount(
+  decl: Extract<Program["declarations"][number], { kind: "fn" }>,
+): number {
   let total = 0;
   for (const statement of decl.body.statements) {
     if (statement.kind === "let" || statement.kind === "destructure_let") {
@@ -8290,6 +9284,62 @@ function programValueCallExpressionCount(program: Program): number {
     }
     if (decl.kind === "let" || decl.kind === "const") {
       total += expressionCallCount(decl.value);
+    }
+  }
+  return total;
+}
+
+function programValueNameTokenCount(program: Program, tokens: SourceToken[]): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      total += expressionNameTokenCount(tokens, decl.body.span);
+      continue;
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      total += expressionNameTokenCount(tokens, decl.value.span);
+    }
+  }
+  return total;
+}
+
+function programValueNameTokenSignatureHash(program: Program, tokens: SourceToken[]): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      total = expressionNameTokenSignatureHash(tokens, decl.body.span, total);
+      continue;
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      total = expressionNameTokenSignatureHash(tokens, decl.value.span, total);
+    }
+  }
+  return total;
+}
+
+function programValueLiteralTokenCount(program: Program, tokens: SourceToken[]): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      total += expressionLiteralTokenCount(tokens, decl.body.span);
+      continue;
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      total += expressionLiteralTokenCount(tokens, decl.value.span);
+    }
+  }
+  return total;
+}
+
+function programValueLiteralTokenSignatureHash(program: Program, tokens: SourceToken[]): number {
+  let total = 0;
+  for (const decl of program.declarations) {
+    if (decl.kind === "fn") {
+      total = expressionLiteralTokenSignatureHash(tokens, decl.body.span, total);
+      continue;
+    }
+    if (decl.kind === "let" || decl.kind === "const") {
+      total = expressionLiteralTokenSignatureHash(tokens, decl.value.span, total);
     }
   }
   return total;
@@ -8913,11 +9963,12 @@ function expressionNameTokenCount(
 function expressionNameTokenSignatureHash(
   tokens: SourceToken[],
   span: { start: number; end: number } | undefined,
+  initial = 0,
 ): number {
   if (span === undefined) {
-    return 0;
+    return initial;
   }
-  let total = 0;
+  let total = initial;
   for (const token of tokens) {
     if (token.span.start < span.start) {
       continue;
@@ -8961,11 +10012,12 @@ function expressionLiteralTokenCount(
 function expressionLiteralTokenSignatureHash(
   tokens: SourceToken[],
   span: { start: number; end: number } | undefined,
+  initial = 0,
 ): number {
   if (span === undefined) {
-    return 0;
+    return initial;
   }
-  let total = 0;
+  let total = initial;
   for (const token of tokens) {
     if (token.span.start < span.start) {
       continue;
@@ -9609,6 +10661,16 @@ async function resolveModule(
   for (const path of candidateModulePaths(importer, moduleName)) {
     const text = figSources.get(path);
     if (text !== undefined) return { text, sourceId: path };
+    try {
+      const fileText = await Deno.readTextFile(path);
+      figSources.set(path, fileText);
+      return { text: fileText, sourceId: path };
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) {
+        continue;
+      }
+      throw error;
+    }
   }
   return undefined;
 }
@@ -9630,6 +10692,29 @@ async function readFigSources(dir: string, sources: Map<string, string>): Promis
     }
     if (entry.isFile && entry.name.endsWith(".fig")) {
       sources.set(path, await Deno.readTextFile(path));
+    }
+  }
+}
+
+async function readSelectedFigSources(
+  filters: readonly string[],
+  sources: Map<string, string>,
+): Promise<void> {
+  for (const filter of filters) {
+    const sourceId = normalizedFigSourceFilter(filter);
+    if (sources.has(sourceId)) {
+      continue;
+    }
+    if (!sourceId.endsWith(".fig")) {
+      continue;
+    }
+    try {
+      sources.set(sourceId, await Deno.readTextFile(sourceId));
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) {
+        continue;
+      }
+      throw error;
     }
   }
 }

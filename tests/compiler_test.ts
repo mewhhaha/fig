@@ -70,7 +70,7 @@ const resolveOperatorPreludeModule = (moduleName: string) => {
 
 const OPERATOR_PRELUDE_IMPORT = 'const __ops = @import("prelude.operators");\n';
 const OPERATOR_TOKENS =
-  /(?:[A-Za-z0-9_\]\)]|true|false)\s+(?:\+|-|\*|\/|%|==|!=|<=|>=|<|>|&&|\|\||\^\^|<>|<\*>|<\*\*>|<\$>|<&>|>>=|=<<|>=>|<=<)\s+(?:[A-Za-z0-9_({[]|true|false|-)/;
+  /(?:[A-Za-z0-9_\]\)]|true|false)\s+(?:\+|-|\*|\/|%|==|!=|<=|>=|<|>|&&|\|\||\^\^|<>|<\|>|<\*>|<\*|\*>|<\*\*>|<\$>|<&>|>>=|=<<|>=>|<=<)\s+(?:[A-Za-z0-9_({[]|true|false|-)/;
 
 function sourceHasOperatorPrelude(source: string): boolean {
   return /@import\(\s*"prelude\.(?:operators|std)"\s*\)/.test(source);
@@ -3813,7 +3813,7 @@ Deno.test("tokenizes through Baba generated lexer", () => {
     pub fn main() -> i32 {
       let text = \`\`\`hello
 world\`\`\`;
-      #Tag 42 "ok" 'x' true zip + ..
+      #Tag 42 1_000 1_000i64 1_000.5f64 "ok" 'x' true zip + ..
       if else do struct union i32 i64 u32 u64 f32 f64 _
     }
   `);
@@ -3835,6 +3835,9 @@ world\`\`\`;
       ["symbol", ";"],
       ["literalType", "#Tag"],
       ["number", "42"],
+      ["number", "1_000"],
+      ["number", "1_000i64"],
+      ["number", "1_000.5f64"],
       ["string", '"ok"'],
       ["char", "'x'"],
       ["bool", "true"],
@@ -3856,6 +3859,53 @@ world\`\`\`;
       ["symbol", "}"],
     ],
   );
+});
+
+Deno.test("numeric literal suffixes and separators typecheck and lower", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+        pub fn narrow() -> i32 { 1_000 }
+        pub fn narrow_lane() -> u3 { 7 }
+        pub fn wide_context() -> i64 { 1_000 }
+        pub fn wide() -> i64 { 1_000i64 }
+        pub fn real() -> f64 { 1_000.5f64 }
+      `),
+    ),
+  );
+
+  assertEquals((instance.exports.narrow as CallableFunction)(), 1000);
+  assertEquals((instance.exports.narrow_lane as CallableFunction)(), 7);
+  assertEquals((instance.exports.wide_context as CallableFunction)(), 1000n);
+  assertEquals((instance.exports.wide as CallableFunction)(), 1000n);
+  assertEquals((instance.exports.real as CallableFunction)(), 1000.5);
+
+  await assertThrowsCompile(
+    `pub fn bad() -> i32 { 42i64 }`,
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    `pub fn bad() -> u3 { 8 }`,
+    "type.literal_mismatch",
+  );
+  await assertThrowsCompile(
+    `pub fn bad() -> u3 { 7u32 }`,
+    "type.literal_mismatch",
+  );
+});
+
+Deno.test("const type args use inferred type namespace despite runtime name collision", async () => {
+  const instance = new WebAssembly.Instance(
+    new WebAssembly.Module(
+      await wasmFromSource(`
+        fn erase(const t: type, x: t) -> t { x }
+        fn wrap(value: value) -> value { erase(value, value) }
+        pub fn main() -> i32 { wrap(10) }
+      `),
+    ),
+  );
+
+  assertEquals((instance.exports.main as CallableFunction)(), 10);
 });
 
 Deno.test("rejects public functions without return signatures", async () => {

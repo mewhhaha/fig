@@ -78,6 +78,10 @@ fn Queue::append(xs: Queue(a), ys: Queue(a)) -> Queue(a) {
   Queue::append_loop(xs, ys, 0)
 }
 
+fn Queue::choose(xs: Queue(a), ys: Queue(a)) -> Queue(a) {
+  Queue::append(xs, ys)
+}
+
 fn Queue::append_loop(
   out: Queue(a),
   ys: Queue(a),
@@ -90,6 +94,29 @@ fn Queue::append_loop(
       index + 1
     ),
     false => out,
+  }
+}
+
+fn Queue::fold_map(
+  const f: fn(x: a) -> m,
+  xs: Queue(a)
+) -> m {
+  @assert(core.Monoid(m));
+  let empty_value: m = m::empty();
+  Queue::fold_map_loop(f, xs, 0, empty_value)
+}
+
+fn Queue::fold_map_loop(
+  const f: fn(x: a) -> m,
+  xs: Queue(a),
+  index: i32,
+  acc: m
+) -> m {
+  @assert(core.Semigroup(m));
+  match index < Queue::len(xs) {
+    true => m::append(acc, f(Queue::get(xs, index)))
+      \next -> Queue::fold_map_loop(f, xs, index + 1, next),
+    false => acc,
   }
 }
 

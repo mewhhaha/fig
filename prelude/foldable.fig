@@ -1,0 +1,53 @@
+const core = @import("prelude.core");
+
+type fn Foldable(t: type fn(a: type) -> type) -> type {
+  let Fold = fn(value: t(a), initial: b, const f: fn(acc: b, x: a) -> b) -> b;
+  let FoldMap = fn(const f: fn(x: a) -> m, value: t(a)) -> m;
+  @require(
+    @type_has_member(t, #fold),
+    "Foldable requires fold"
+  );
+  @require(
+    @type_has_member(t, #fold_map),
+    "Foldable requires fold_map"
+  );
+  @require(
+    @type_member_type(t, #fold) == Fold,
+    "Foldable.fold has wrong type"
+  );
+  @require(
+    @type_member_type(t, #fold_map) == FoldMap,
+    "Foldable.fold_map has wrong type"
+  );
+  t
+}
+
+fn fold(
+  value: t(a),
+  initial: b,
+  const f: fn(acc: b, x: a) -> b
+) -> b {
+  @assert(Foldable(t));
+  t::fold(value, initial, f)
+}
+
+fn fold_map(
+  value: t(a),
+  const f: fn(x: a) -> m
+) -> m {
+  @assert(Foldable(t));
+  t::fold_map(f, value)
+}
+
+fn count_step(acc: i32, _value: a) -> i32 {
+  acc + 1
+}
+
+fn length(value: t(a)) -> i32 {
+  @assert(Foldable(t));
+  t::fold(value, 0, count_step)
+}
+
+fn is_empty(value: t(a)) -> bool {
+  length(value) == 0
+}

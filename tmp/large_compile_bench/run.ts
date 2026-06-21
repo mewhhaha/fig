@@ -198,6 +198,7 @@ const project = await generateLargeCompileProject({
 await Deno.mkdir(`${runRoot}/out`, { recursive: true });
 
 const figSources = await readFigSources(project.figDir);
+const staticFigSources = new Map<string, string>();
 const rootSource = figSources.get(project.rootFig)!;
 const leafSource = figSources.get(project.leafFig)!;
 const goCache = `${runRoot}/.gocache`;
@@ -411,8 +412,23 @@ async function resolveModule(
   for (const path of candidateModulePaths(importer, moduleName)) {
     const text = figSources.get(path);
     if (text !== undefined) return { text, sourceId: path };
+    const staticText = await readStaticFigSource(path);
+    if (staticText !== undefined) return { text: staticText, sourceId: path };
   }
   return undefined;
+}
+
+async function readStaticFigSource(path: string): Promise<string | undefined> {
+  const cached = staticFigSources.get(path);
+  if (cached !== undefined) return cached;
+  try {
+    const text = await Deno.readTextFile(path);
+    staticFigSources.set(path, text);
+    return text;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
 }
 
 async function benchFig(run: (index: number) => Promise<FigSample>): Promise<FigSample[]> {

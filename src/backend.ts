@@ -35,6 +35,7 @@ import {
   createCompilerPluginRegistry,
 } from "./plugins.ts";
 import { type CompileTraceSink, traceInstant, traceSync } from "./trace.ts";
+import { normalizeTypeSourceForParsing } from "./type_source.ts";
 import {
   type I32Range,
   parseRefinedI32Type,
@@ -854,7 +855,12 @@ export function lowerProgramToBackendArtifact(
         functionCallsHeapArrayIntrinsic(fn, ctx.functions, options.backendCache)
       ),
   );
-  const needsAbiMemory = traceSync(
+  const needsBufferRuntime = traceSync(
+    options.compileTrace,
+    "backend.cleanup.needs_buffer_runtime",
+    () => backendFunctions.some((fn) => instrsCallFunction(fn.body, "fig_alloc_buffer")),
+  );
+  const needsStableMemoryAbi = traceSync(
     options.compileTrace,
     "backend.cleanup.needs_abi_memory",
     () =>
@@ -867,15 +873,15 @@ export function lowerProgramToBackendArtifact(
     options.compileTrace,
     "backend.cleanup.memories",
     () =>
-      needsAbiMemory
+      needsStableMemoryAbi
         ? ensureAbiMemories(backendMemories(
           needsBranchMemory,
-          needsScratchMemory,
+          needsScratchMemory || needsBufferRuntime,
           true,
         ))
         : backendMemories(
           needsBranchMemory,
-          needsScratchMemory,
+          needsScratchMemory || needsBufferRuntime,
           needsHeapMemory,
         ),
   );
@@ -893,7 +899,7 @@ export function lowerProgramToBackendArtifact(
   const abiFunctions = traceSync(
     options.compileTrace,
     "backend.cleanup.abi_runtime_functions",
-    () => memoryAbiRuntimeFunctions(ctx.layouts, functions, imports),
+    () => memoryAbiRuntimeFunctions(ctx.layouts, functions, imports, needsBufferRuntime),
   );
   const backendImports = traceSync(
     options.compileTrace,
@@ -1217,11 +1223,14 @@ function memoryAbiRuntimeFunctions(
   _layouts: LayoutEnv,
   functions: FnDecl[],
   imports: FnDecl[],
+  needsBufferRuntime = false,
 ): BackendFunction[] {
   const needsAbi =
     functions.some((fn) => isCurrentModulePublic(fn) && functionNeedsMemoryAbi(fn, _layouts)) ||
     imports.some((fn) => functionNeedsMemoryAbi(fn, _layouts));
-  if (!needsAbi) return [];
+  if (!needsAbi) {
+    return needsBufferRuntime ? [figAllocBufferFunction()] : [];
+  }
   return [
     figAbiVersionFunction(),
     figAllocObjectFunction(),
@@ -7684,7 +7693,7 @@ function lowerExpr(
     case "do":
       throw new Error("backend cannot lower do expression before desugaring");
     case "literal":
-      return lowerLiteral(expr, ctx, expectedType);
+      return lowerLiteral(expr, ctx, locals, expectedType);
     case "var": {
       const deferred = ctx.fixedArrayTransformerAliases?.get(expr.name);
       if (deferred) return lowerExpr(deferred, ctx, locals, expectedType);
@@ -7697,11 +7706,11 @@ function lowerExpr(
       return lowerVar(expr.name, ctx, locals, expectedType);
     }
     case "const_fn":
-      return flattenType(expectedType, ctx.layouts).map((slot): Instr => ({
-        op: "const",
-        type: slot.wat,
-        value: 0,
-      }));
+      throw new Error(
+        `backend cannot lower const fn literal as a runtime value${
+          expectedType ? ` for expected type ${expectedType}` : ""
+        }; closure synthesis should have converted it before lowering`,
+      );
     case "profile":
       return lowerProfileExpr(expr, ctx, locals, expectedType);
     case "call": {
@@ -9950,8 +9959,8 @@ function constFold(expr: Expr, ctx?: LowerContext, seen = new Set<string>()): Ex
   if (left.literalKind !== "number" || right.literalKind !== "number") {
     return foldedBinary;
   }
-  const a = Number.parseInt(left.value, 10);
-  const b = Number.parseInt(right.value, 10);
+  const a = numberLiteralRuntimeValue(left, left.inferredType);
+  const b = numberLiteralRuntimeValue(right, right.inferredType);
   if (!Number.isFinite(a) || !Number.isFinite(b)) return expr;
   const value = foldBinary(expr.op, a, b);
   if (value === undefined) return expr;
@@ -10019,6 +10028,7 @@ function patternMatchesLiteral(
 function lowerLiteral(
   expr: Extract<Expr, { kind: "literal" }>,
   ctx: LowerContext,
+  locals: Set<string>,
   expectedType?: string,
 ): Instr[] {
   if (expectedType && (expr.literalKind === "number" || expr.literalKind === "bool")) {
@@ -10026,7 +10036,7 @@ function lowerLiteral(
     if (flattened.length > 1) {
       const value = expr.literalKind === "bool"
         ? expr.value === "true" ? 1 : 0
-        : Number.parseInt(expr.value, 10);
+        : numberLiteralRuntimeValue(expr, expectedType);
       return flattened.map((slot) => ({ op: "const", type: slot.wat, value }));
     }
   }
@@ -10037,10 +10047,11 @@ function lowerLiteral(
     return [{ op: "const", type: "i32", value: expr.value === "true" ? 1 : 0 }];
   }
   if (expr.literalKind === "number") {
+    const runtimeType = numberLiteralRuntimeType(expr, expectedType, ctx);
     return [{
       op: "const",
-      type: watType(expr.inferredType),
-      value: Number.parseInt(expr.value, 10),
+      type: watType(runtimeType),
+      value: numberLiteralRuntimeValue(expr, runtimeType),
     }];
   }
   if (expr.literalKind === "char") {
@@ -10049,7 +10060,97 @@ function lowerLiteral(
   if (expr.literalKind === "literalType") {
     return [{ op: "const", type: "i32", value: literalExprRuntimeValue(expr) ?? 0 }];
   }
+  if (expr.literalKind === "string" || expr.literalKind === "multiline") {
+    return lowerStringLiteral(expr, ctx, locals);
+  }
   throw new Error(`backend does not support ${expr.literalKind} literals yet`);
+}
+
+function numberLiteralRuntimeType(
+  expr: Extract<Expr, { kind: "literal" }>,
+  expectedType: string | undefined,
+  ctx: LowerContext,
+): string {
+  const explicitType = numericLiteralExplicitType(expr.value);
+  if (explicitType) return explicitType;
+  const resolvedExpected = resolveAlias(expectedType, ctx.layouts) ?? expectedType;
+  if (resolvedExpected && isNumberLikeRuntimeType(resolvedExpected)) return resolvedExpected;
+  if (expr.inferredType && isNumberLikeRuntimeType(expr.inferredType)) return expr.inferredType;
+  return "i32";
+}
+
+function isNumberLikeRuntimeType(type: string): boolean {
+  const trimmed = type.trim();
+  if (parseRefinedI32Type(trimmed)) return true;
+  if (unsignedBitWidth(trimmed) !== undefined) return true;
+  return ["i32", "u32", "i64", "u64", "f32", "f64"].includes(trimmed);
+}
+
+function numberLiteralRuntimeValue(
+  expr: Extract<Expr, { kind: "literal" }>,
+  runtimeType: string | undefined,
+): number {
+  const value = Number(normalizedNumberLiteralText(expr.value));
+  if (runtimeType === "f32" || runtimeType === "f64") return value;
+  return Math.trunc(value);
+}
+
+function normalizedNumberLiteralText(source: string): string {
+  const text = source.replaceAll("_", "");
+  return text.replace(/(i32|u32|i64|u64|f32|f64)$/, "");
+}
+
+function numericLiteralExplicitType(source: string): string | undefined {
+  return source.match(/(i32|u32|i64|u64|f32|f64)$/)?.[1];
+}
+
+function lowerStringLiteral(
+  expr: Extract<Expr, { kind: "literal" }>,
+  ctx: LowerContext,
+  locals: Set<string>,
+): Instr[] {
+  const value = stringLiteralRuntimeValue(expr);
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.length === 0) return [{ op: "const", type: "i32", value: 0 }];
+  const ptr = `__string_literal${ctx.tempIndex++}`;
+  ctx.tempLocals.push({ name: ptr, type: "i32" });
+  locals.add(ptr);
+  return [
+    { op: "const", type: "i32", value: bytes.length },
+    { op: "call", name: "fig_alloc_buffer" },
+    { op: "local.set", name: ptr },
+    ...stringLiteralStores(ptr, bytes),
+    { op: "local.get", name: ptr },
+  ];
+}
+
+function stringLiteralRuntimeValue(
+  expr: Extract<Expr, { kind: "literal" }>,
+): string {
+  if (expr.literalKind === "multiline") return expr.value;
+  return decodeStringLiteralValue(expr.value);
+}
+
+function stringLiteralStores(ptr: string, bytes: Uint8Array): Instr[] {
+  const stores: Instr[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 4) {
+    let word = 0;
+    for (let lane = 0; lane < 4; lane++) {
+      word |= (bytes[offset + lane] ?? 0) << (lane * 8);
+    }
+    stores.push(
+      { op: "local.get", name: ptr },
+      { op: "const", type: "i32", value: signedI32Const(word) },
+      {
+        op: "store",
+        type: "i32",
+        align: 1,
+        offset: ABI_OBJECT_HEADER_SIZE + offset,
+        memory: "fig_buffers",
+      },
+    );
+  }
+  return stores;
 }
 
 function lowerIndex(
@@ -13020,8 +13121,11 @@ function binaryOpIsNonTrapping(expr: Extract<Expr, { kind: "binary" }>): boolean
 
 function staticIntegerLiteral(expr: Expr): number | undefined {
   if (expr.kind !== "literal" || expr.literalKind !== "number") return undefined;
-  if (!/^-?[0-9]+$/.test(expr.value)) return undefined;
-  return Number.parseInt(expr.value, 10);
+  const explicitType = numericLiteralExplicitType(expr.value);
+  if (explicitType === "f32" || explicitType === "f64") return undefined;
+  const normalized = normalizedNumberLiteralText(expr.value);
+  if (!/^-?[0-9]+$/.test(normalized)) return undefined;
+  return Number.parseInt(normalized, 10);
 }
 
 function maskValue(value: Instr[], wat: ValueType, width: number): Instr[] {
@@ -13631,8 +13735,8 @@ function literalPatternMatches(
     if (!literalPatternMatches(pattern.pattern, literal)) return false;
     const domain = parseRefinedI32Type(pattern.type);
     if (!domain || literal.literalKind !== "number") return true;
-    const value = Number.parseInt(literal.value, 10);
-    if (!Number.isFinite(value)) return false;
+    const value = staticIntegerLiteral(literal);
+    if (value === undefined || !Number.isFinite(value)) return false;
     return scalarFactsContainsLiteral(scalarFactsFromDomain(domain), value);
   }
   if (pattern.kind === "as") return literalPatternMatches(pattern.pattern, literal);
@@ -14369,11 +14473,13 @@ function lowerClosureCall(
   }
   const key = closureSignatureKey(signature);
   ctx.closureDispatcherSignatures?.set(key, signature);
+  const loweredCallee = lowerExpr(expr.callee, ctx, locals, calleeType);
+  const loweredArgs = expr.args.flatMap((arg, index) =>
+    lowerExpr(arg, ctx, locals, signature.params[index]?.type)
+  );
   return [
-    ...lowerExpr(expr.callee, ctx, locals, calleeType),
-    ...expr.args.flatMap((arg, index) =>
-      lowerExpr(arg, ctx, locals, signature.params[index]?.type)
-    ),
+    ...loweredCallee,
+    ...loweredArgs,
     { op: "call", name: closureDispatcherName(key) },
   ];
 }
@@ -16147,6 +16253,14 @@ function appendEncodedInstr(
 ) {
   switch (instr.op) {
     case "const":
+      if (instr.type === "f32") {
+        bytes.push(0x43, ...float32Bytes(instr.value));
+        return;
+      }
+      if (instr.type === "f64") {
+        bytes.push(0x44, ...float64Bytes(instr.value));
+        return;
+      }
       if (instr.type === "i64") bytes.push(0x42);
       else bytes.push(0x41);
       bytes.push(...sleb(instr.value));
@@ -17582,7 +17696,8 @@ function isLane4I32(type: string | undefined, layouts: LayoutEnv): boolean {
 }
 
 function watType(type: string | Param | undefined): ValueType {
-  const source = typeof type === "string" || type === undefined ? type : type.type;
+  const rawSource = typeof type === "string" || type === undefined ? type : type.type;
+  const source = rawSource === undefined ? undefined : normalizeTypeSourceForParsing(rawSource);
   if (parseRefinedI32Type(source)) return "i32";
   if (literalTypeMembers(source)) return "i32";
   if (source === "i64" || source === "u64" || (unsignedBitWidth(source ?? "") ?? 0) > 32) {
@@ -17658,7 +17773,9 @@ function decodeStringLiteralValue(source: string): string {
 
 function literalRuntimeValue(member: LiteralTypeMember): number {
   if (member.kind === "bool") return member.value === "true" ? 1 : 0;
-  if (member.kind === "number") return Number.parseInt(member.value, 10);
+  if (member.kind === "number") {
+    return Number.parseInt(normalizedNumberLiteralText(member.value), 10);
+  }
   if (member.kind === "char") return member.value.codePointAt(0) ?? 0;
   return wgslShaderId(`${member.kind}:${member.value}`);
 }
@@ -17748,7 +17865,8 @@ function createLayoutEnv(program: Program): LayoutEnv {
       );
     }
     if (value.kind === "literal" && value.literalKind === "number") {
-      constNumbers.set(decl.name, Number.parseInt(value.value, 10));
+      const numeric = staticIntegerLiteral(value);
+      if (numeric !== undefined) constNumbers.set(decl.name, numeric);
     }
   }
   const constFunctionFields = new Map<string, string>();
@@ -18217,7 +18335,7 @@ function resolveAlias(type: string | undefined, layouts: LayoutEnv): string | un
 }
 
 function stripBorrowType(type: string | undefined): string | undefined {
-  let current = type?.trim();
+  let current = type === undefined ? undefined : normalizeTypeSourceForParsing(type).trim();
   while (current?.startsWith("&")) current = unwrapPrefixedType(current, "&");
   return current;
 }
@@ -18362,13 +18480,15 @@ function exprTypeWithLocals(expr: Expr, ctx: LowerContext): string | undefined {
       const known = backendFunctionByName(expr.callee.name, ctx)?.returnType;
       if (known) return specializeCallReturnType(expr, known, ctx) ?? known;
       const calleeType = varType(expr.callee.name, ctx);
-      const parsed = parseBackendFnSignature(calleeType);
+      const resolvedCalleeType = resolveAlias(calleeType, ctx.layouts) ?? calleeType;
+      const parsed = parseBackendFnSignature(resolvedCalleeType);
       if (parsed) return parsed.returnType;
       const sumType = sumConstructorCallType(expr, ctx);
       if (sumType) return sumType;
     } else {
       const calleeType = exprTypeWithLocals(expr.callee, ctx);
-      const parsed = parseBackendFnSignature(calleeType);
+      const resolvedCalleeType = resolveAlias(calleeType, ctx.layouts) ?? calleeType;
+      const parsed = parseBackendFnSignature(resolvedCalleeType);
       if (parsed) return parsed.returnType;
     }
   }
@@ -18623,7 +18743,7 @@ function substituteRuntimeTypeBindings(
 }
 
 function parseRuntimeTypeCall(source: string): { name: string; args: string[] } | undefined {
-  const trimmed = source.trim();
+  const trimmed = normalizeTypeSourceForParsing(source).trim();
   const name = typeName(trimmed);
   const args = typeCallArgs(trimmed, name);
   return args === undefined ? undefined : { name, args: splitTypeArgs(args) };
@@ -18632,7 +18752,7 @@ function parseRuntimeTypeCall(source: string): { name: string; args: string[] } 
 function parseBackendFnSignature(
   source: string | undefined,
 ): { params: { name?: string; type: string }[]; returnType: string } | undefined {
-  const trimmed = source?.trim();
+  const trimmed = source === undefined ? undefined : normalizeTypeSourceForParsing(source).trim();
   if (!trimmed?.startsWith("fn(")) return undefined;
   const open = trimmed.indexOf("(");
   let depth = 0;
@@ -18712,10 +18832,13 @@ function storageLaneWidth(width: number): number {
 }
 
 function typeName(type: string): string {
+  type = normalizeTypeSourceForParsing(type);
   return type.match(/^([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)/)?.[1] ?? type;
 }
 
 function typeCallArgs(type: string, baseName: string): string | undefined {
+  type = normalizeTypeSourceForParsing(type);
+  baseName = normalizeTypeSourceForParsing(baseName);
   const prefix = `${typeName(type)}(`;
   if (!type.startsWith(prefix) || !typeName(type).endsWith(baseName) || !type.endsWith(")")) {
     return undefined;
@@ -18743,6 +18866,7 @@ function trailingTypeCallArg(type: string): string | undefined {
 }
 
 function splitTypeArgs(source: string): string[] {
+  source = normalizeTypeSourceForParsing(source);
   const args: string[] = [];
   let depth = 0;
   let start = 0;
@@ -19485,4 +19609,16 @@ function sleb(value: number): number[] {
     out.push(byte);
   }
   return out;
+}
+
+function float32Bytes(value: number): number[] {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setFloat32(0, value, true);
+  return [...bytes];
+}
+
+function float64Bytes(value: number): number[] {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setFloat64(0, value, true);
+  return [...bytes];
 }
